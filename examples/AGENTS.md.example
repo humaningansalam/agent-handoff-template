@@ -1,0 +1,8 @@
+# Agent Workflow
+Always start by reading `SESSION_HANDOFF.md` and `docs/TASK.md`.
+Read `docs/PRD.md` only when architectural context is needed.
+
+Before finishing:
+- Run verification commands.
+- Update `docs/TASK.md`.
+- Overwrite `SESSION_HANDOFF.md` with current state, verification status, and explicit next action.

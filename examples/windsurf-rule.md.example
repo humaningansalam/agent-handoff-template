@@ -1,0 +1,7 @@
+Always start your workflow by reading `SESSION_HANDOFF.md` and `docs/TASK.md`.
+Never assume the project state.
+
+When your task is done, you MUST:
+1. Run verification commands.
+2. Update `docs/TASK.md`.
+3. Overwrite `SESSION_HANDOFF.md` with the current state, strict Pass/Fail verification results, and the explicit next action.
