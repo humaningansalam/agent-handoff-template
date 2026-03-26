@@ -1,29 +1,121 @@
-# 🔄 Agent Handoff Template
+# Agent Task Handoff Template
 
-A portable, file-based shared memory baseline for coding agents (Claude Code, Cursor, Windsurf, etc.).
+A practical repository template for AI-agent execution that is **task-centered**, not session-centered.
 
-## 🚀 Why this template?
-When working in a multi-agent environment (e.g., moving between a terminal-based agent and an editor-based agent), context loss is inevitable.
+## Why Task-Centered (Not Session-Centered)
 
-This repository provides a **lightweight shared memory structure**. By using a standardized markdown handoff protocol, you can reduce context bloat, preserve architectural decisions, and ensure a deterministic workflow across different AI tools.
+Session-level global handoff files become stale quickly and split context across multiple places.
 
-## 📦 Architecture (3-Layer Concept)
+This template uses task files as the handoff unit. Each task contains its own execution state and `## Handoff`, so the next agent can continue immediately without searching for a separate session note.
 
-**Layer 1: Core Portable Memory (Root & `docs/`)**
-The source of truth. Tool-agnostic markdown files tracking state, tasks, and rules.
-- `SESSION_HANDOFF.md`: Active state and verification results.
-- `docs/TASK.md`: Global progress checklist.
-- `docs/PRD.md`: Long-term architectural rules.
-- `docs/archive/`: Cold storage for completed contexts.
+## Lightweight Layered Structure
 
-**Layer 2: Thin Adapters (`examples/`)**
-Tool-specific instructions that bridge your AI to the Core Memory.
-- See the `examples/` folder for `.mdc` rules, `CLAUDE.md`, or `AGENTS.md` templates.
+The structure is layered for clarity, but intentionally minimal.
 
-**Layer 3: Generic SOPs (`.agent/workflows/`)**
-Standard Operating Procedures (SOPs) for complex or risky tasks (e.g., DB migrations). Agents read these before executing specific actions.
+### Core Always-Read Docs
 
-## 🛠️ Getting Started
-1. Copy `SESSION_HANDOFF.md`, `docs/`, and `.agent/` into your project root.
-2. Check the `examples/` folder for your specific AI tool. Copy the relevant adapter file to your project root (e.g., rename `cursor-rule.mdc.example` to `.cursor/rules/handoff.mdc`).
-3. Agents will now automatically read the handoff files, verify their work, and update the state before exiting.
+- `AGENTS.md`: canonical operating rules
+- `docs/TASKS.md`: repo-wide task board
+- `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`: assigned task execution unit
+
+### Shared Context Docs
+
+- `docs/PRD.md`: goals, scope, constraints, architecture overview, important decisions
+
+### Conditional Workflows
+
+- `docs/workflows/*.md`: active SOPs for risky/repetitive work; add only when needed
+- Workflow docs may be created/updated by humans or agents
+- Add a workflow only when it is reusable, high-risk, or repeatedly needed
+- Do not create workflows for one-off task notes; keep one-off instructions in task files
+
+### Archive
+
+- `docs/archive/tasks/`: completed task file originals
+
+### Tool Adapters
+
+- `CLAUDE.md`
+- `.cursor/rules/00-agent-os.mdc`
+
+### Reference Examples
+
+- `examples/`: reference-only examples; not active work
+
+## Live vs Example Locations
+
+- `docs/tasks/` contains active task files.
+- `docs/workflows/` contains active project workflows.
+- `examples/` contains reference-only examples and should not be treated as active work.
+
+## Repository Tree
+
+```text
+.
+├── LICENSE
+├── README.md
+├── AGENTS.md
+├── CLAUDE.md
+├── .cursor
+│   └── rules
+│       └── 00-agent-os.mdc
+├── docs
+│   ├── PRD.md
+│   ├── TASKS.md
+│   ├── tasks
+│   │   └── TEMPLATE.md
+│   ├── workflows
+│   │   └── README.md
+│   └── archive
+│       ├── README.md
+│       └── tasks
+│           └── .gitkeep
+└── examples
+    ├── tasks
+    │   └── TASK.example.md
+    └── workflows
+        └── db-migration.example.md
+```
+
+## Quick Start
+
+1. Read `AGENTS.md`.
+2. Read `docs/TASKS.md`.
+3. If no active task exists, create one from `docs/tasks/TEMPLATE.md`.
+4. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
+5. Add the task to `docs/TASKS.md`.
+6. Start work.
+7. Keep `## Handoff` updated.
+8. On completion, move the task file to `docs/archive/tasks/`.
+
+## Task Lifecycle
+
+1. Create/update task file in `docs/tasks/`.
+2. Use `T-YYYYMMDDHHMMSSZ--slug.md` naming for live tasks (UTC).
+3. Track board status in `docs/TASKS.md` (`todo` -> `doing` -> `done`, or `blocked`).
+4. Keep task frontmatter as local metadata and keep it synchronized.
+5. When `status` or `owner` changes, update both `docs/TASKS.md` and the task frontmatter in the same edit/commit.
+6. Execute and verify work in the task file.
+7. Keep `## Handoff` current for the next agent.
+8. When complete, move task file to `docs/archive/tasks/`.
+
+## Archive Rules
+
+- Archive keeps original completed task files.
+- Do not write additional archive summaries.
+- Keep original naming (`T-YYYYMMDDHHMMSSZ--slug.md`).
+
+## Handoff Model
+
+Handoff is embedded in each task file under `## Handoff` with four required fields:
+
+- Next exact step
+- First file to open
+- First command to run
+- Done when
+
+## Parallel Work Policy
+
+Parallel work is optional, not default.
+
+Use parallel execution only when tasks are independent, do not edit the same file/interface boundary, and can be isolated by branch/worktree.

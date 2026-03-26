@@ -1,9 +1,15 @@
-# 🗑️ Archive (Context Hygiene)
+# Archive
 
-> **Purpose:** Keep the AI's context window clean and save tokens.
+Archive is for preserving completed task file originals.
 
-When a major feature is fully completed, or an architectural document becomes outdated, **DO NOT delete it**. Move it to this `archive/` folder.
+## Rules
 
-**Why?**
-1. **Token Savings:** Active agents won't read these files by default, saving context window space.
-2. **Historical Context:** If an agent ever needs to know *why* a past decision was made, it can still search and retrieve files from this directory.
+- Move completed task files to `docs/archive/tasks/`.
+- Keep original filename format, e.g. `T-YYYYMMDDHHMMSSZ--slug.md`.
+- Do not create separate archive summaries.
+- Do not create `summary.md`, `final.md`, or `handoff.md`.
+
+## Notes
+
+- Source of truth for closed work is the archived task file itself.
+- Keep `docs/TASKS.md` aligned with task completion status.
