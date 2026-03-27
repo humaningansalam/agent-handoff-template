@@ -8,8 +8,7 @@ Start here, in order:
 
 If no active task exists:
 
-- Pick a `todo` item from `docs/TASKS.md`, or
-- Create a task from `docs/tasks/TEMPLATE.md` and add it to the board before implementation.
+- Follow task selection and creation rules in `AGENTS.md`.
 
 Read only when needed:
 

@@ -9,5 +9,4 @@ alwaysApply: true
 2) Then read `docs/TASKS.md`.
 3) Then read the assigned/active task file in `docs/tasks/`.
 4) Read `docs/PRD.md` and `docs/workflows/*` only when needed.
-
-If no active task exists: pick a `todo` item from `docs/TASKS.md`, or create a new task from `docs/tasks/TEMPLATE.md` and add it to the board before implementation.
+5) If no active task exists, follow task selection and creation rules in `AGENTS.md`.

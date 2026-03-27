@@ -18,7 +18,9 @@ Canonical operating rules for this repository.
 If there is no active/assigned task:
 
 - Choose a `todo` item from `docs/TASKS.md`, or
-- Create a new task from `docs/tasks/TEMPLATE.md` and add a board row before implementation.
+- Start a new task immediately by creating `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+  from `docs/tasks/TEMPLATE.md` and adding it to the Board, or
+- Promote an item from `## Backlog` if the work was previously captured there.
 
 ## Task File Rules
 
