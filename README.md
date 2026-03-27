@@ -15,7 +15,7 @@ The structure is layered for clarity, but intentionally minimal.
 ### Core Always-Read Docs
 
 - `AGENTS.md`: canonical operating rules
-- `docs/TASKS.md`: repo-wide task board
+- `docs/TASKS.md`: repo-wide task board and optional backlog
 - `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`: assigned task execution unit
 
 ### Shared Context Docs
@@ -47,6 +47,22 @@ The structure is layered for clarity, but intentionally minimal.
 - `docs/tasks/` contains active task files.
 - `docs/workflows/` contains active project workflows.
 - `examples/` contains reference-only examples and should not be treated as active work.
+
+## Backlog
+
+`docs/TASKS.md` may include a `## Backlog` section for planned work that does not have a task file yet.
+
+When work actually starts, create `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+from `docs/tasks/TEMPLATE.md` and add it to the Board.
+
+## Documentation Language
+
+Generated repository documents (task files, plans, walkthroughs) default to Korean.
+
+Keep code, filenames, commands, identifiers, API names, logs, and quoted external text
+in their original language.
+
+See `AGENTS.md` for the canonical rule.
 
 ## Repository Tree
 
@@ -81,7 +97,7 @@ The structure is layered for clarity, but intentionally minimal.
 
 1. Read `AGENTS.md`.
 2. Read `docs/TASKS.md`.
-3. If no active task exists, create one from `docs/tasks/TEMPLATE.md`.
+3. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `docs/tasks/TEMPLATE.md`.
 4. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
 5. Add the task to `docs/TASKS.md`.
 6. Start work.

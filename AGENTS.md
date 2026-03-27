@@ -32,6 +32,12 @@ If there is no active/assigned task:
 - Keep task files practical and execution-oriented.
 - Prefer one task file per independently shippable unit.
 
+## Documentation Language Policy
+
+- Write generated repository documents (task files, plans, walkthroughs) in Korean by default.
+- Do not translate code, filenames, commands, identifiers, API names, logs, or quoted external text.
+- Override only if a task explicitly requires another language.
+
 ## Handoff Rules (`## Handoff` inside each task)
 
 - Handoff is embedded in the task file, not in a separate session file.
