@@ -24,9 +24,10 @@ If there is no active/assigned task:
 
 ## Task File Rules
 
-- Each active task is a single file under `docs/tasks/`.
+- Each live task is a single file under `docs/tasks/`.
 - Task filename convention: `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
 - `docs/TASKS.md` is the repo-wide task board.
+- Board rows are for live tasks with task files; planned items without a task file belong in `## Backlog`.
 - Task frontmatter is local task metadata.
 - When `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
 - Keep task files practical and execution-oriented.
