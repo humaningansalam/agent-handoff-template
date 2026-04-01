@@ -11,7 +11,7 @@ created: YYYY-MM-DD
 
 ## Context Docs
 
-- `docs/PRD.md`
+- `project/PRD.md`
 
 ## Goal
 
@@ -61,7 +61,7 @@ Bad example:
 
 Good example:
 - Next exact step: Update task status in board from `doing` to `done`.
-- First file to open: `docs/TASKS.md`
-- First command to run: `rg "T-20260326084215Z" docs/TASKS.md`
-- Done when: Board row for `T-20260326084215Z` is `done` and task file moved to `docs/archive/tasks/T-20260326084215Z--repo-cleanup.md`.
+- First file to open: `project/TASKS.md`
+- First command to run: `rg "T-20260326084215Z" project/TASKS.md`
+- Done when: Board row for `T-20260326084215Z` is `done` and task file moved to `project/archive/tasks/T-20260326084215Z--repo-cleanup.md`.
 -->

@@ -1,6 +1,6 @@
 # Workflows
 
-`docs/workflows/` contains active project workflows only.
+`project/workflows/` contains active project workflows only.
 
 `examples/workflows/` contains reference-only examples.
 

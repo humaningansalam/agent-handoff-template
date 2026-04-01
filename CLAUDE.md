@@ -3,8 +3,8 @@
 Start here, in order:
 
 1. Read `AGENTS.md`.
-2. Read `docs/TASKS.md`.
-3. Read the active/assigned task file in `docs/tasks/`.
+2. Read `project/TASKS.md`.
+3. Read the active/assigned task file in `project/tasks/`.
 
 If no active task exists:
 
@@ -12,5 +12,5 @@ If no active task exists:
 
 Read only when needed:
 
-- `docs/PRD.md` for broader product context, constraints, and decisions
-- `docs/workflows/*` for task-specific SOPs
+- `project/PRD.md` for broader product context, constraints, and decisions
+- `project/workflows/*` for task-specific SOPs

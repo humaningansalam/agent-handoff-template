@@ -29,7 +29,7 @@ Use this as a reusable SOP when schema changes are high-risk or repeatedly neede
 
 ## Task File Record Requirements
 
-In `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`, record:
+In `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`, record:
 
 - migration command(s) executed
 - verification command(s) and outcomes

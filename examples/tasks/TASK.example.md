@@ -11,7 +11,7 @@ created: 2026-03-26
 
 ## Context Docs
 
-- `docs/PRD.md`
+- `project/PRD.md`
 
 ## Goal
 

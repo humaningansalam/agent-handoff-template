@@ -10,24 +10,24 @@ Canonical operating rules for this repository.
 ## Read Order (Always Follow)
 
 1. `AGENTS.md`
-2. `docs/TASKS.md`
-3. Assigned task file in `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+2. `project/TASKS.md`
+3. Assigned task file in `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
 4. Read only the docs listed in the active task's `## Context Docs`.
-5. By default, product context lives in `docs/PRD.md`.
-6. `docs/workflows/*.md` only when the task explicitly maps to that workflow
+5. By default, product context lives in `project/PRD.md`.
+6. `project/workflows/*.md` only when the task explicitly maps to that workflow
 
 If there is no active/assigned task:
 
-- Choose a `todo` item from `docs/TASKS.md`, or
-- Start a new task immediately by creating `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-  from `docs/tasks/TEMPLATE.md` and adding it to the Board, or
+- Choose a `todo` item from `project/TASKS.md`, or
+- Start a new task immediately by creating `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+  from `project/tasks/TEMPLATE.md` and adding it to the Board, or
 - Promote an item from `## Backlog` if the work was previously captured there.
 
 ## Task File Rules
 
-- Each live task is a single file under `docs/tasks/`.
+- Each live task is a single file under `project/tasks/`.
 - Task filename convention: `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-- `docs/TASKS.md` is the repo-wide task board.
+- `project/TASKS.md` is the repo-wide task board.
 - Board rows are for live tasks with task files; planned items without a task file belong in `## Backlog`.
 - Task frontmatter is local task metadata.
 - When `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
@@ -53,10 +53,10 @@ If there is no active/assigned task:
 
 ## Archive Rules
 
-- When a task is completed, move the original task file to `docs/archive/tasks/`.
+- When a task is completed, move the original task file to `project/archive/tasks/`.
 - Do not rewrite it into a separate summary document.
 - Preserve original filename: `T-YYYYMMDDHHMMSSZ--slug.md`.
-- Keep `docs/TASKS.md` in sync with archive moves.
+- Keep `project/TASKS.md` in sync with archive moves.
 
 ## Parallel Work Policy
 

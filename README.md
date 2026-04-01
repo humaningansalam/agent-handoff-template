@@ -15,24 +15,25 @@ The structure is layered for clarity, but intentionally minimal.
 ### Core Always-Read Docs
 
 - `AGENTS.md`: canonical operating rules
-- `docs/TASKS.md`: repo-wide task board and optional backlog
-- `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`: assigned task execution unit
+- `project/TASKS.md`: repo-wide task board and optional backlog
+- `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`: assigned task execution unit
 
 ### Shared Context Docs
 
-- `docs/PRD.md`: single-file product context by default
+- `project/PRD.md`: single-file product context by default
 - `examples/prd/`: optional split-PRD reference pattern for larger projects
+- `docs/`: reserved for external/shareable documentation
 
 ### Conditional Workflows
 
-- `docs/workflows/*.md`: active SOPs for risky/repetitive work; add only when needed
+- `project/workflows/*.md`: active SOPs for risky/repetitive work; add only when needed
 - Workflow docs may be created/updated by humans or agents
 - Add a workflow only when it is reusable, high-risk, or repeatedly needed
 - Do not create workflows for one-off task notes; keep one-off instructions in task files
 
 ### Archive
 
-- `docs/archive/tasks/`: completed task file originals
+- `project/archive/tasks/`: completed task file originals
 
 ### Tool Adapters
 
@@ -45,17 +46,18 @@ The structure is layered for clarity, but intentionally minimal.
 
 ## Live vs Example Locations
 
-- `docs/tasks/` contains active task files.
-- `docs/workflows/` contains active project workflows.
+- `project/tasks/` contains active task files.
+- `project/workflows/` contains active project workflows.
+- `docs/` is reserved for external/shareable docs.
 - `examples/` contains reference-only examples and should not be treated as active work.
-- `examples/prd/` contains an optional split-PRD pattern for projects that outgrow a single `docs/PRD.md`.
+- `examples/prd/` contains an optional split-PRD pattern for projects that outgrow a single `project/PRD.md`.
 
 ## Backlog
 
-`docs/TASKS.md` may include a `## Backlog` section for planned work that does not have a task file yet.
+`project/TASKS.md` may include a `## Backlog` section for planned work that does not have a task file yet.
 
-When work actually starts, create `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-from `docs/tasks/TEMPLATE.md` and add it to the Board.
+When work actually starts, create `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+from `project/tasks/TEMPLATE.md` and add it to the Board.
 
 ## Documentation Language
 
@@ -78,6 +80,7 @@ See `AGENTS.md` for the canonical rule.
 │   └── rules
 │       └── 00-agent-os.mdc
 ├── docs
+├── project
 │   ├── PRD.md
 │   ├── TASKS.md
 │   ├── tasks
@@ -91,8 +94,8 @@ See `AGENTS.md` for the canonical rule.
 └── examples
     ├── tasks
     │   └── TASK.example.md
-    └── workflows
-        └── db-migration.example.md
+    ├── workflows
+    │   └── db-migration.example.md
     └── prd
         ├── README.md
         ├── PRD.index.example.md
@@ -106,25 +109,25 @@ See `AGENTS.md` for the canonical rule.
 ## Quick Start
 
 1. Read `AGENTS.md`.
-2. Read `docs/TASKS.md`.
+2. Read `project/TASKS.md`.
 3. In the task file, list only the minimum needed docs under `## Context Docs`.
-4. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `docs/tasks/TEMPLATE.md`.
+4. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `project/tasks/TEMPLATE.md`.
 5. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-6. Add the task to `docs/TASKS.md`.
+6. Add the task to `project/TASKS.md`.
 7. Start work.
 8. Keep `## Handoff` updated.
-9. On completion, move the task file to `docs/archive/tasks/`.
+9. On completion, move the task file to `project/archive/tasks/`.
 
 ## Task Lifecycle
 
-1. Create/update task file in `docs/tasks/`.
+1. Create/update task file in `project/tasks/`.
 2. Use `T-YYYYMMDDHHMMSSZ--slug.md` naming for live tasks (UTC).
-3. Track board status in `docs/TASKS.md` (`todo` -> `doing` -> `done`, or `blocked`).
+3. Track board status in `project/TASKS.md` (`todo` -> `doing` -> `done`, or `blocked`).
 4. Keep task frontmatter as local metadata and keep it synchronized.
-5. When `status` or `owner` changes, update both `docs/TASKS.md` and the task frontmatter in the same edit/commit.
+5. When `status` or `owner` changes, update both `project/TASKS.md` and the task frontmatter in the same edit/commit.
 6. Execute and verify work in the task file.
 7. Keep `## Handoff` current for the next agent.
-8. When complete, move task file to `docs/archive/tasks/`.
+8. When complete, move task file to `project/archive/tasks/`.
 
 ## Archive Rules
 
