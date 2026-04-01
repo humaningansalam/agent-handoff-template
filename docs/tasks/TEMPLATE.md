@@ -9,6 +9,10 @@ created: YYYY-MM-DD
 
 # T-YYYYMMDDHHMMSSZ - Title
 
+## Context Docs
+
+- `docs/PRD.md`
+
 ## Goal
 
 State the outcome in one clear sentence.

@@ -12,8 +12,9 @@ Canonical operating rules for this repository.
 1. `AGENTS.md`
 2. `docs/TASKS.md`
 3. Assigned task file in `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-4. `docs/PRD.md` only when product context/constraints/decisions are needed
-5. `docs/workflows/*.md` only when the task explicitly maps to that workflow
+4. Read only the docs listed in the active task's `## Context Docs`.
+5. By default, product context lives in `docs/PRD.md`.
+6. `docs/workflows/*.md` only when the task explicitly maps to that workflow
 
 If there is no active/assigned task:
 

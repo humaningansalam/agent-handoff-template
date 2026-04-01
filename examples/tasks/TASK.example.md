@@ -9,6 +9,10 @@ created: 2026-03-26
 
 # T-20260326084215Z - Repository cleanup follow-up (example)
 
+## Context Docs
+
+- `docs/PRD.md`
+
 ## Goal
 
 Demonstrate a concrete in-progress task file with embedded handoff.

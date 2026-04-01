@@ -20,7 +20,8 @@ The structure is layered for clarity, but intentionally minimal.
 
 ### Shared Context Docs
 
-- `docs/PRD.md`: goals, scope, constraints, architecture overview, important decisions
+- `docs/PRD.md`: single-file product context by default
+- `examples/prd/`: optional split-PRD reference pattern for larger projects
 
 ### Conditional Workflows
 
@@ -47,6 +48,7 @@ The structure is layered for clarity, but intentionally minimal.
 - `docs/tasks/` contains active task files.
 - `docs/workflows/` contains active project workflows.
 - `examples/` contains reference-only examples and should not be treated as active work.
+- `examples/prd/` contains an optional split-PRD pattern for projects that outgrow a single `docs/PRD.md`.
 
 ## Backlog
 
@@ -91,18 +93,27 @@ See `AGENTS.md` for the canonical rule.
     │   └── TASK.example.md
     └── workflows
         └── db-migration.example.md
+    └── prd
+        ├── README.md
+        ├── PRD.index.example.md
+        ├── product.example.md
+        ├── policies.example.md
+        ├── architecture.example.md
+        ├── runtime.example.md
+        └── contracts.example.md
 ```
 
 ## Quick Start
 
 1. Read `AGENTS.md`.
 2. Read `docs/TASKS.md`.
-3. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `docs/tasks/TEMPLATE.md`.
-4. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-5. Add the task to `docs/TASKS.md`.
-6. Start work.
-7. Keep `## Handoff` updated.
-8. On completion, move the task file to `docs/archive/tasks/`.
+3. In the task file, list only the minimum needed docs under `## Context Docs`.
+4. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `docs/tasks/TEMPLATE.md`.
+5. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
+6. Add the task to `docs/TASKS.md`.
+7. Start work.
+8. Keep `## Handoff` updated.
+9. On completion, move the task file to `docs/archive/tasks/`.
 
 ## Task Lifecycle
 
