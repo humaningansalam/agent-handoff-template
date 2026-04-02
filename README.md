@@ -118,18 +118,18 @@ See `AGENTS.md` for the canonical rule.
 6. Add the task to `project/BOARD.md`.
 7. Start work.
 8. Keep `## Handoff` updated.
-9. On completion, move the task file to `project/archive/tasks/`.
+9. On completion, move the task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
 
 ## Task Lifecycle
 
 1. Create/update task file in `project/tasks/`.
 2. Use `T-YYYYMMDDHHMMSSZ--slug.md` naming for live tasks (UTC).
-3. Track board status in `project/BOARD.md` (`todo` -> `doing` -> `done`, or `blocked`).
+3. Track live task status in `project/BOARD.md` (`todo` -> `doing` -> `blocked`, with `done` used only as the completion step before archive/removal).
 4. Keep task frontmatter as local metadata and keep it synchronized.
-5. When `status` or `owner` changes, update both `project/BOARD.md` and the task frontmatter in the same edit/commit.
+5. For live tasks, when `status` or `owner` changes, update both `project/BOARD.md` and the task frontmatter in the same edit/commit.
 6. Execute and verify work in the task file.
 7. Keep `## Handoff` current for the next agent.
-8. When complete, move task file to `project/archive/tasks/`.
+8. When complete, move the task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
 
 ## Archive Rules
 

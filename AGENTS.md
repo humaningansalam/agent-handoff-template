@@ -29,8 +29,9 @@ If there is no active/assigned task:
 - Task filename convention: `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
 - `project/BOARD.md` is the repo-wide task board.
 - Board rows are for live tasks with task files; planned items without a task file belong in `## Backlog`.
+- Completed tasks should be archived and removed from `project/BOARD.md`.
 - Task frontmatter is local task metadata.
-- When `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
+- For live tasks, when `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
 - Keep task files practical and execution-oriented.
 - Prefer one task file per independently shippable unit.
 - The `branch` field is optional metadata; use it only if the task is tracked in a branch or worktree.
@@ -54,10 +55,9 @@ If there is no active/assigned task:
 
 ## Archive Rules
 
-- When a task is completed, move the original task file to `project/archive/tasks/`.
+- When a task is completed, move the original task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
 - Do not rewrite it into a separate summary document.
 - Preserve original filename: `T-YYYYMMDDHHMMSSZ--slug.md`.
-- Keep `project/BOARD.md` in sync with archive moves.
 
 ## Parallel Work Policy
 

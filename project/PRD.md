@@ -45,8 +45,8 @@ Task files are the execution and handoff unit.
 ## Important Decisions
 
 - Session handoff is embedded in task files under `## Handoff`.
-- `project/BOARD.md` is the repository-wide board; task frontmatter is local metadata.
-- Status/owner changes must update both board and task file together.
+- `project/BOARD.md` is the repository-wide live task board; archived tasks are removed from it and preserved under `project/archive/tasks/`.
+- For live tasks, status/owner changes must update both board and task file together.
 - Parallel work is optional and not default.
 - Examples are reference-only and not active work.
 - Do not use global session status files.

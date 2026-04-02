@@ -70,8 +70,8 @@ Bad example:
 - Done when: looks good
 
 Good example:
-- Next exact step: Update task status in board from `doing` to `done`.
+- Next exact step: Archive the completed task and remove its row from the board.
 - First file to open: `project/BOARD.md`
 - First command to run: `rg "T-20260326084215Z" project/BOARD.md`
-- Done when: Board row for `T-20260326084215Z` is `done` and task file moved to `project/archive/tasks/T-20260326084215Z--repo-cleanup.md`.
+- Done when: Row for `T-20260326084215Z` is removed from `project/BOARD.md` and task file is moved to `project/archive/tasks/T-20260326084215Z--repo-cleanup.md`.
 -->

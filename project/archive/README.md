@@ -12,4 +12,4 @@ Archive is for preserving completed task file originals.
 ## Notes
 
 - Source of truth for closed work is the archived task file itself.
-- Keep `project/BOARD.md` aligned with task completion status.
+- When a completed task is archived, remove its row from `project/BOARD.md`.
