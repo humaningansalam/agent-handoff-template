@@ -7,16 +7,18 @@ Repository-wide task board. Keep this file lightweight.
 - `todo`: not started
 - `doing`: actively in progress
 - `blocked`: cannot proceed due to dependency/decision
-- `done`: completed and ready to archive/remove from the board
+- `done`: completed and ready to be removed from the board
 
 No active tasks yet. Create a task from `project/tasks/TEMPLATE.md` to begin.
 Use live task filenames in the format `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-Only live tasks belong in the Board below; archive completed tasks and remove their rows.
+Only live board rows belong below; remove completed rows from the Board.
+Standalone completed tasks move to `project/archive/tasks/` immediately.
+Completed child tasks may remain in `project/tasks/` until their parent task is completed.
 
 ## Board
 
-| ID | Title | Status | Owner | Task File |
-| --- | --- | --- | --- | --- |
+| Title | Status | Owner | Task File |
+| --- | --- | --- | --- |
 
 
 ## Backlog

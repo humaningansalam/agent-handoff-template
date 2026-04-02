@@ -45,8 +45,10 @@ Task files are the execution and handoff unit.
 ## Important Decisions
 
 - Session handoff is embedded in task files under `## Handoff`.
-- `project/BOARD.md` is the repository-wide live task board; archived tasks are removed from it and preserved under `project/archive/tasks/`.
-- For live tasks, status/owner changes must update both board and task file together.
+- `project/BOARD.md` is the repository-wide live task board; completed rows are removed from it, and archived tasks are preserved under `project/archive/tasks/`.
+- Larger work may use a parent task as the shared context and integration hub for narrower child tasks.
+- For live board rows, status/owner changes must update both board and task file together.
+- Completed child tasks may stay in `project/tasks/` until their parent task is completed, so they can be reopened without restoring from archive.
 - Parallel work is optional and not default.
 - Examples are reference-only and not active work.
 - Do not use global session status files.

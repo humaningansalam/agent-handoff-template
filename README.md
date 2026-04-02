@@ -48,8 +48,8 @@ The structure is layered for clarity, but intentionally minimal.
 
 ## Live vs Example Locations
 
-- `project/tasks/` contains active task files.
-- `project/workflows/` contains active project workflows.
+- `project/tasks/` contains live task files, parent tasks, and completed child tasks that remain reopenable until their parent task is completed.
+- `project/workflows/` contains active project workflows and their shared templates/indexes.
 - `docs/` is reserved for external/shareable docs.
 - `examples/` contains reference-only examples and should not be treated as active work.
 - `examples/prd/` contains an optional split-PRD pattern for projects that outgrow a single `project/PRD.md`.
@@ -59,7 +59,8 @@ The structure is layered for clarity, but intentionally minimal.
 `project/BOARD.md` may include a `## Backlog` section for planned work that does not have a task file yet.
 
 When work actually starts, create `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-from `project/tasks/TEMPLATE.md` and add it to the Board.
+from `project/tasks/TEMPLATE.md` (or `project/tasks/PARENT_TEMPLATE.md` for coordinating parent tasks)
+and add it to the Board.
 
 ## Documentation Language
 
@@ -86,9 +87,12 @@ See `AGENTS.md` for the canonical rule.
 │   ├── PRD.md
 │   ├── BOARD.md
 │   ├── tasks
-│   │   └── TEMPLATE.md
+│   │   ├── TEMPLATE.md
+│   │   └── PARENT_TEMPLATE.md
 │   ├── workflows
-│   │   └── README.md
+│   │   ├── INDEX.md
+│   │   ├── README.md
+│   │   └── TEMPLATE.md
 │   └── archive
 │       ├── README.md
 │       └── tasks
@@ -114,22 +118,23 @@ See `AGENTS.md` for the canonical rule.
 2. Read `project/BOARD.md`.
 3. In the task file, list only the minimum needed docs under `## Context Docs`.
 4. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `project/tasks/TEMPLATE.md`.
+   Use `project/tasks/PARENT_TEMPLATE.md` only for larger work that needs coordination across multiple narrower child tasks.
 5. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
 6. Add the task to `project/BOARD.md`.
 7. Start work.
 8. Keep `## Handoff` updated.
-9. On completion, move the task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
+9. On completion, archive standalone tasks immediately; for child tasks, remove the board row and keep the file in `project/tasks/` until the parent task completes.
 
 ## Task Lifecycle
 
 1. Create/update task file in `project/tasks/`.
 2. Use `T-YYYYMMDDHHMMSSZ--slug.md` naming for live tasks (UTC).
-3. Track live task status in `project/BOARD.md` (`todo` -> `doing` -> `blocked`, with `done` used only as the completion step before archive/removal).
+3. Track live task status in `project/BOARD.md` (`todo` -> `doing` -> `blocked` -> `done`, with completed rows removed from the board).
 4. Keep task frontmatter as local metadata and keep it synchronized.
-5. For live tasks, when `status` or `owner` changes, update both `project/BOARD.md` and the task frontmatter in the same edit/commit.
+5. For live board rows, when `status` or `owner` changes, update both `project/BOARD.md` and the task frontmatter in the same edit/commit.
 6. Execute and verify work in the task file.
 7. Keep `## Handoff` current for the next agent.
-8. When complete, move the task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
+8. Archive standalone tasks when complete; completed child tasks leave the board but may stay in `project/tasks/` until the parent task is complete.
 
 ## Archive Rules
 

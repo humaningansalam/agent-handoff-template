@@ -5,6 +5,9 @@ status: doing
 owner: agent
 branch: chore/T-20260326084215Z-repo-cleanup-example
 created: 2026-03-26
+area: docs
+parent: ""
+depends_on: []
 ---
 
 # T-20260326084215Z - Repository cleanup follow-up (example)

@@ -8,6 +8,8 @@ branch: ""
 created: YYYY-MM-DD
 # optional: frontend | backend | infra | docs | ops
 area: ""
+# optional: parent task ID for child tasks
+parent: ""
 # optional: prerequisite task IDs
 depends_on: []
 ---
@@ -70,8 +72,14 @@ Bad example:
 - Done when: looks good
 
 Good example:
-- Next exact step: Archive the completed task and remove its row from the board.
+- Next exact step: Update the task status and verification notes after running the targeted test.
 - First file to open: `project/BOARD.md`
-- First command to run: `rg "T-20260326084215Z" project/BOARD.md`
-- Done when: Row for `T-20260326084215Z` is removed from `project/BOARD.md` and task file is moved to `project/archive/tasks/T-20260326084215Z--repo-cleanup.md`.
+- First command to run: `rg "T-20260326084215Z" project/BOARD.md project/tasks/`
+- Done when: The task row and task file both reflect the latest verified state and the next agent can continue without guessing.
+
+Parent-task note:
+- If this task becomes a parent/coordinating task, add sections such as
+  `## Open Child Tasks`, `## Completed Child Tasks`,
+  `## Shared Interfaces / Decisions`, and `## Integration Done When`
+  only when needed.
 -->

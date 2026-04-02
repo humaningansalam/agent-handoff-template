@@ -20,7 +20,7 @@ If there is no active/assigned task:
 
 - Choose a `todo` item from `project/BOARD.md`, or
 - Start a new task immediately by creating `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-  from `project/tasks/TEMPLATE.md` and adding it to the Board, or
+  from `project/tasks/TEMPLATE.md` (or `project/tasks/PARENT_TEMPLATE.md` for coordinating parent tasks) and adding it to the Board, or
 - Promote an item from `## Backlog` if the work was previously captured there.
 
 ## Task File Rules
@@ -28,12 +28,19 @@ If there is no active/assigned task:
 - Each live task is a single file under `project/tasks/`.
 - Task filename convention: `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
 - `project/BOARD.md` is the repo-wide task board.
-- Board rows are for live tasks with task files; planned items without a task file belong in `## Backlog`.
-- Completed tasks should be archived and removed from `project/BOARD.md`.
+- Board rows are for live work with task files; planned items without a task file belong in `## Backlog`.
+- Remove completed rows from `project/BOARD.md` to keep the board live-only.
+- Standalone completed tasks move to `project/archive/tasks/` immediately.
+- Completed child tasks may stay in `project/tasks/` until their parent task is completed, so they can be reopened without restoring from archive.
+- Parent tasks act as coordination and integration hubs for related child tasks.
 - Task frontmatter is local task metadata.
-- For live tasks, when `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
+- For live board rows, when `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
 - Keep task files practical and execution-oriented.
-- Prefer one task file per independently shippable unit.
+- Prefer one task file per independently shippable unit unless a larger item needs a parent/child split.
+- Use `project/tasks/PARENT_TEMPLATE.md` only when the work needs coordination across multiple narrower tasks.
+- Prefer a parent task when the work spans 3+ surfaces or components, needs separate child tracking, requires shared interface/decision coordination, or depends on final integration across child tasks.
+- Otherwise, use the standard `project/tasks/TEMPLATE.md`.
+- The optional `parent` field links a child task to its parent task ID.
 - The `branch` field is optional metadata; use it only if the task is tracked in a branch or worktree.
 
 ## Documentation Language Policy
@@ -55,9 +62,11 @@ If there is no active/assigned task:
 
 ## Archive Rules
 
-- When a task is completed, move the original task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
-- Do not rewrite it into a separate summary document.
-- Preserve original filename: `T-YYYYMMDDHHMMSSZ--slug.md`.
+- When a standalone task is completed, move the original task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
+- When a child task is completed, remove its row from `project/BOARD.md`; keep its file in `project/tasks/` until the parent task is completed.
+- When a parent task is completed, move the parent task and any remaining child task files to `project/archive/tasks/`.
+- Do not rewrite archived tasks into separate summary documents.
+- Preserve original filenames: `T-YYYYMMDDHHMMSSZ--slug.md`.
 
 ## Parallel Work Policy
 
