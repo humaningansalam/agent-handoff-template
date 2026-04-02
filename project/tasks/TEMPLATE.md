@@ -3,8 +3,13 @@ id: T-YYYYMMDDHHMMSSZ
 title: Replace with task title
 status: todo
 owner: unassigned
-branch: ""  # optional: record branch/worktree if used
+# optional: record branch/worktree if used
+branch: ""
 created: YYYY-MM-DD
+# optional: frontend | backend | infra | docs | ops
+area: ""
+# optional: prerequisite task IDs
+depends_on: []
 ---
 
 # T-YYYYMMDDHHMMSSZ - Title
