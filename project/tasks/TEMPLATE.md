@@ -3,13 +3,11 @@ id: T-YYYYMMDDHHMMSSZ
 title: Replace with task title
 status: todo
 owner: unassigned
-branch: chore/T-YYYYMMDDHHMMSSZ-short-slug
+branch: ""  # optional: record branch/worktree if used
 created: YYYY-MM-DD
 ---
 
 # T-YYYYMMDDHHMMSSZ - Title
-
-## Context Docs
 
 ## Context Docs
 

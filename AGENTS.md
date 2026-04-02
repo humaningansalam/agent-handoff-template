@@ -33,6 +33,7 @@ If there is no active/assigned task:
 - When `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
 - Keep task files practical and execution-oriented.
 - Prefer one task file per independently shippable unit.
+- The `branch` field is optional metadata; use it only if the task is tracked in a branch or worktree.
 
 ## Documentation Language Policy
 

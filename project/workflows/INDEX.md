@@ -31,25 +31,15 @@ Do not use timestamps for workflow filenames.
 
 ## Category Rule
 
-Prefer these categories as the workflow list grows:
+If the workflow list grows, group workflows by procedure type, not by team ownership.
 
+Preferred categories:
 - Core Workflows
 - Data / Migration Workflows
 - Delivery / Release Workflows
 - Incident / Recovery Workflows
 - Quality / Review Workflows
 - Deprecated / Archived Workflows
-
-Use categories for the type of procedure, not for team names or ownership.
-
-Use tags for domain/team/stack labels such as:
-- `frontend`
-- `backend`
-- `infra`
-- `api`
-- `db`
-
-Add a new category only when at least 3 workflows do not fit well under the existing categories.
 
 ## Active Workflows
 
