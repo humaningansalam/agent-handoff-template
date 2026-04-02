@@ -11,7 +11,14 @@ created: YYYY-MM-DD
 
 ## Context Docs
 
+## Context Docs
+
+<!-- List only the minimum context docs needed for this task. -->
 - `project/PRD.md`
+
+<!-- Add exact workflow files only when relevant. Example:
+- `project/workflows/db-migration.md`
+-->
 
 ## Goal
 

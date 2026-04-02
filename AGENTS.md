@@ -14,7 +14,7 @@ Canonical operating rules for this repository.
 3. Assigned task file in `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
 4. Read only the docs listed in the active task's `## Context Docs`.
 5. By default, product context lives in `project/PRD.md`.
-6. `project/workflows/*.md` only when the task explicitly maps to that workflow
+6. Check `project/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply, then read only the matching workflow file(s).
 
 If there is no active/assigned task:
 

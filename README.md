@@ -30,6 +30,8 @@ The structure is layered for clarity, but intentionally minimal.
 - Workflow docs may be created/updated by humans or agents
 - Add a workflow only when it is reusable, high-risk, or repeatedly needed
 - Do not create workflows for one-off task notes; keep one-off instructions in task files
+- `project/workflows/INDEX.md`: workflow discovery index
+- `project/workflows/TEMPLATE.md`: reusable workflow template
 
 ### Archive
 

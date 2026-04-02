@@ -1,13 +1,6 @@
 # Workflows
 
-`project/workflows/` contains active project workflows only.
+This folder contains reusable workflows for risky, repeated, or order-sensitive procedures.
 
-`examples/workflows/` contains reference-only examples.
-
-Both humans and agents may create or update workflow docs.
-
-Add a workflow only when it is reusable, high-risk, or repeatedly needed.
-
-Do not create workflow docs for one-off task-local notes.
-
-Keep one-off task-local instructions inside the task file.
+Start with `INDEX.md` to decide whether a workflow applies.
+Use `TEMPLATE.md` when creating a new workflow.
