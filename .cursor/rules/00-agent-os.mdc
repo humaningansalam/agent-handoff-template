@@ -6,7 +6,7 @@ alwaysApply: true
 ---
 
 1) Read root `AGENTS.md` first.
-2) Then read `project/TASKS.md`.
+2) Then read `project/BOARD.md`.
 3) Then read the assigned/active task file in `project/tasks/`.
 4) Read `project/PRD.md` and `project/workflows/*` only when needed.
 5) If no active task exists, follow task selection and creation rules in `AGENTS.md`.

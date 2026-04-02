@@ -35,7 +35,7 @@ Out of scope (for this template version):
 Primary operating flow:
 
 1. Read `AGENTS.md`
-2. Read `project/TASKS.md`
+2. Read `project/BOARD.md`
 3. Read assigned `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
 4. Read `project/PRD.md` only when broader context is needed
 5. Read `project/workflows/*.md` only when a task explicitly depends on that workflow
@@ -45,7 +45,7 @@ Task files are the execution and handoff unit.
 ## Important Decisions
 
 - Session handoff is embedded in task files under `## Handoff`.
-- `project/TASKS.md` is the repository-wide board; task frontmatter is local metadata.
+- `project/BOARD.md` is the repository-wide board; task frontmatter is local metadata.
 - Status/owner changes must update both board and task file together.
 - Parallel work is optional and not default.
 - Examples are reference-only and not active work.

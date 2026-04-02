@@ -15,7 +15,7 @@ The structure is layered for clarity, but intentionally minimal.
 ### Core Always-Read Docs
 
 - `AGENTS.md`: canonical operating rules
-- `project/TASKS.md`: repo-wide task board and optional backlog
+- `project/BOARD.md`: repo-wide task board and optional backlog
 - `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`: assigned task execution unit
 
 ### Shared Context Docs
@@ -56,7 +56,7 @@ The structure is layered for clarity, but intentionally minimal.
 
 ## Backlog
 
-`project/TASKS.md` may include a `## Backlog` section for planned work that does not have a task file yet.
+`project/BOARD.md` may include a `## Backlog` section for planned work that does not have a task file yet.
 
 When work actually starts, create `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
 from `project/tasks/TEMPLATE.md` and add it to the Board.
@@ -84,7 +84,7 @@ See `AGENTS.md` for the canonical rule.
 ├── docs
 ├── project
 │   ├── PRD.md
-│   ├── TASKS.md
+│   ├── BOARD.md
 │   ├── tasks
 │   │   └── TEMPLATE.md
 │   ├── workflows
@@ -111,11 +111,11 @@ See `AGENTS.md` for the canonical rule.
 ## Quick Start
 
 1. Read `AGENTS.md`.
-2. Read `project/TASKS.md`.
+2. Read `project/BOARD.md`.
 3. In the task file, list only the minimum needed docs under `## Context Docs`.
 4. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `project/tasks/TEMPLATE.md`.
 5. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-6. Add the task to `project/TASKS.md`.
+6. Add the task to `project/BOARD.md`.
 7. Start work.
 8. Keep `## Handoff` updated.
 9. On completion, move the task file to `project/archive/tasks/`.
@@ -124,9 +124,9 @@ See `AGENTS.md` for the canonical rule.
 
 1. Create/update task file in `project/tasks/`.
 2. Use `T-YYYYMMDDHHMMSSZ--slug.md` naming for live tasks (UTC).
-3. Track board status in `project/TASKS.md` (`todo` -> `doing` -> `done`, or `blocked`).
+3. Track board status in `project/BOARD.md` (`todo` -> `doing` -> `done`, or `blocked`).
 4. Keep task frontmatter as local metadata and keep it synchronized.
-5. When `status` or `owner` changes, update both `project/TASKS.md` and the task frontmatter in the same edit/commit.
+5. When `status` or `owner` changes, update both `project/BOARD.md` and the task frontmatter in the same edit/commit.
 6. Execute and verify work in the task file.
 7. Keep `## Handoff` current for the next agent.
 8. When complete, move task file to `project/archive/tasks/`.

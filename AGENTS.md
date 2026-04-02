@@ -10,7 +10,7 @@ Canonical operating rules for this repository.
 ## Read Order (Always Follow)
 
 1. `AGENTS.md`
-2. `project/TASKS.md`
+2. `project/BOARD.md`
 3. Assigned task file in `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
 4. Read only the docs listed in the active task's `## Context Docs`.
 5. By default, product context lives in `project/PRD.md`.
@@ -18,7 +18,7 @@ Canonical operating rules for this repository.
 
 If there is no active/assigned task:
 
-- Choose a `todo` item from `project/TASKS.md`, or
+- Choose a `todo` item from `project/BOARD.md`, or
 - Start a new task immediately by creating `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
   from `project/tasks/TEMPLATE.md` and adding it to the Board, or
 - Promote an item from `## Backlog` if the work was previously captured there.
@@ -27,7 +27,7 @@ If there is no active/assigned task:
 
 - Each live task is a single file under `project/tasks/`.
 - Task filename convention: `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-- `project/TASKS.md` is the repo-wide task board.
+- `project/BOARD.md` is the repo-wide task board.
 - Board rows are for live tasks with task files; planned items without a task file belong in `## Backlog`.
 - Task frontmatter is local task metadata.
 - When `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
@@ -57,7 +57,7 @@ If there is no active/assigned task:
 - When a task is completed, move the original task file to `project/archive/tasks/`.
 - Do not rewrite it into a separate summary document.
 - Preserve original filename: `T-YYYYMMDDHHMMSSZ--slug.md`.
-- Keep `project/TASKS.md` in sync with archive moves.
+- Keep `project/BOARD.md` in sync with archive moves.
 
 ## Parallel Work Policy
 

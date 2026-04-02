@@ -3,7 +3,7 @@
 Start here, in order:
 
 1. Read `AGENTS.md`.
-2. Read `project/TASKS.md`.
+2. Read `project/BOARD.md`.
 3. Read the active/assigned task file in `project/tasks/`.
 
 If no active task exists:

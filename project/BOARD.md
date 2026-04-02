@@ -1,4 +1,4 @@
-# TASKS
+# BOARD
 
 Repository-wide task board. Keep this file lightweight.
 

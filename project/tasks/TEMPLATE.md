@@ -66,7 +66,7 @@ Bad example:
 
 Good example:
 - Next exact step: Update task status in board from `doing` to `done`.
-- First file to open: `project/TASKS.md`
-- First command to run: `rg "T-20260326084215Z" project/TASKS.md`
+- First file to open: `project/BOARD.md`
+- First command to run: `rg "T-20260326084215Z" project/BOARD.md`
 - Done when: Board row for `T-20260326084215Z` is `done` and task file moved to `project/archive/tasks/T-20260326084215Z--repo-cleanup.md`.
 -->
