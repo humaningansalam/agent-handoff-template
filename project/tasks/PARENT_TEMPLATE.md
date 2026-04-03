@@ -63,7 +63,8 @@ State the cross-cutting outcome in one clear sentence.
 
 ## Execution Log
 
-- YYYY-MM-DD: started task
+<!-- Append only at meaningful checkpoints. Keep each entry to 1–2 concise lines. -->
+- YYYY-MM-DD HH:MM TZ: task created
 
 ## Verification
 

@@ -60,6 +60,15 @@ If there is no active/assigned task:
   - **First command to run**
   - **Done when**
 
+## Execution Log Rules (`## Execution Log` inside each task)
+
+- Use `## Execution Log` for short restart/recovery checkpoints.
+- Append only after meaningful state changes (implementation, verification, blocker, or decision).
+- Do not log every read, command, retry, or exploration step.
+- Keep each entry to 1–2 concise lines.
+- `## Execution Log` is append-only; `## Handoff` should remain the latest restart snapshot.
+- Before stopping, make sure the latest `## Execution Log` entry and `## Handoff` are aligned.
+
 ## Archive Rules
 
 - When a standalone task is completed, move the original task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
