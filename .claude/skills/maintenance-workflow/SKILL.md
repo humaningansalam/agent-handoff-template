@@ -1,0 +1,84 @@
+---
+name: maintenance-workflow
+description: Repo 수준 maintenance harness 전용 `/maintenance-workflow` 직접 호출 진입점.
+argument-hint: "[focus]"
+disable-model-invocation: true
+allowed-tools:
+  - Agent(maintenance-cartographer)
+  - Agent(maintenance-planner)
+  - Agent(maintenance-plan-critic)
+  - Agent(maintenance-implementer)
+  - Agent(maintenance-evaluator)
+  - Agent(maintenance-skeptic)
+  - Read
+  - Write
+  - Bash(uv run python -m tools.agent_harness.safe_artifact_writer write *)
+  - Bash(uv run pytest *)
+disallowed-tools:
+  - Skill
+  - TaskCreate
+  - TaskUpdate
+  - TaskList
+---
+
+# /maintenance-workflow
+
+## 범위
+이 workflow는 repo 수준 유지보수에만 사용한다. 대상은 문서, rules, skills, agents, hooks, tools, tests, templates, harness contract다.
+
+`projects/**`, project-local runtime 작업, 생성된 wiki 산출물, secret, deployment, database, MCP/Notion write, live external mutation은 범위 밖이다.
+
+## 오케스트레이션
+Claude Code 대화형 native-loop에서 실행한다. 중단되면 같은 세션을 `/r`로 resume하고, 중간 phase에서 새로 시작하거나 수동으로 건너뛰지 않는다.
+
+상위 Claude Code loop가 phase agent를 호출한다. Python 도구는 deterministic checker/gate/state helper일 뿐이며 agent loop를 직접 구동하지 않는다.
+
+phase helper CLI를 workflow driver처럼 직접 호출하지 않는다. phase 전환과 pass eligibility는 hook/checker가 structured evidence와 metadata를 보고 갱신한다. `current-run-state.json`의 `pass_eligibility.calculated.eligible`가 `true`이면 추가 evaluate/decide 명령 없이 최종 첫 줄로 `pass`를 출력한다.
+
+다른 Skill은 로드하지 않는다. 검증/디버깅/리뷰 루틴도 이 workflow의 phase agent, evidence artifact, hook/checker state 안에서만 처리한다.
+
+## Phase 순서
+1. Intake 및 bounded authority read
+2. 문제 범위가 불명확하면 `maintenance-cartographer`, 명확한 단일 문서/텍스트 변경이면 곧바로 `maintenance-planner`
+3. `maintenance-planner`가 affected surfaces와 AC ids를 safe writer metadata로 기록
+4. Checker가 affected surfaces로 profile을 계산하고 다음 필수 단계를 state에 반영
+5. `TINY_DOC`: `awaiting-human-approval` -> approval freeze -> `maintenance-implementer` -> top-level host verification + `--kind execution-review --verification-passed true|false` -> checker-gated decision
+6. `STANDARD`: `maintenance-plan-critic` -> `awaiting-human-approval` -> approval freeze -> `maintenance-implementer` -> `maintenance-evaluator` -> checker-gated decision
+7. `CRITICAL_HARNESS`: `STANDARD` 흐름 뒤 `maintenance-skeptic`까지 완료한 다음 checker-gated decision
+
+## Evidence Artifact
+각 worker 이후 `ops/agent-harness/evidence/*.json` 아래에 대응 evidence artifact를 즉시 남긴다. 아직 생성되지 않은 evidence artifact를 먼저 읽지 않는다. Evidence artifact는 safe writer로만 기록한다. `Write/Edit/MultiEdit`로 `ops/agent-harness/**`를 직접 쓰지 않는다.
+
+다음 worker를 호출하기 전에 방금 완료된 worker의 safe writer JSON evidence를 반드시 먼저 기록한다. Checker가 요구하지 않는 profile 단계는 호출하지 않는다. `maintenance-evaluator`를 호출하기 전에는 `--kind execution`, `maintenance-skeptic`을 호출하기 전에는 `--kind execution-review` artifact가 존재해야 한다.
+
+`uv run python -m tools.agent_harness.safe_artifact_writer write --kind <cartography|plan|plan-review|execution|execution-review|skeptic-review> --workflow-id <active workflow_id> --candidate-id <id-if-required> --active-candidate-id <id> --queued-candidate-id <id> --queue-policy <auto-continuation|human-decision> --status <passed|failed> --summary "short factual evidence" --blocking-finding "optional blocker"`
+
+`--workflow-id`는 `ops/agent-harness/current-run-state.json` 또는 active session marker의 `workflow_id`와 같아야 한다. 임의 사람이 만든 id를 쓰지 않는다. `--kind plan`은 승인 freeze용 structured metadata를 함께 써야 하므로 `--affected-surface <path>`와 `--acceptance-criteria-id <AC-id>`를 하나 이상 반복 전달한다.
+
+`--kind plan-review`는 phase gate metadata를 함께 써야 하므로 `--approval-ready true|false`를 전달한다. Plan/FML/approval readiness를 artifact 본문에서 추정하지 않는다.
+
+`schema_version`, `worker`, `evidence_kind`는 safe writer가 `--kind`에서 자동 생성한다. Agent는 JSON literal을 만들지 않는다. `$(cat <<EOF ...)`, heredoc, pipe, redirect, command substitution, stdin은 절대 사용하지 않는다. worker 상세 output은 transcript에 남긴다.
+
+Evidence paths: `evidence/cartography.json`, `evidence/plan.json`, `evidence/plan-review.json`, `evidence/execution.json`, `evidence/execution-review.json`, `evidence/skeptic-review.json`.
+
+`current-run-state.json`은 직접 쓰지 않는다. hook/checker가 JSON evidence와 metadata에서 state와 run-scoped canonical artifact를 생성한다. heredoc, redirection, `tee`, 임의 Python snippet, phase helper command는 artifact persistence에 쓰지 않는다.
+
+## Gate 규칙
+- Cartography를 실행한 경우 reviewable cartography 전에는 active candidate를 정하지 않는다.
+- Cartography queue가 있으면 user-facing 승인 대기 메시지에 후보군 요약, active candidate, queued/deferred candidates, queue_policy를 명시한다.
+- queued candidate가 없으면 user-facing 출력에서 queue policy를 `none` 또는 terminal로 표시한다. `auto-continuation`/`human-decision`은 실제 queued candidate가 있을 때만 표시한다.
+- `queue_policy: auto-continuation`은 같은 문제 shard라 pass 후 다음 plan으로 내부 진행할 수 있고, `human-decision`은 별도 추천이라 남은 후보를 보여주고 닫는다.
+- Checker는 plan/approval의 affected surfaces를 보고 `TINY_DOC`, `STANDARD`, `CRITICAL_HARNESS`를 결정한다. `TINY_DOC`면 plan-review/evaluator/skeptic agent를 호출하지 않고 승인/구현/top-level host verification으로 전이한다.
+- `STANDARD`/`CRITICAL_HARNESS`에서는 plan review safe writer가 `--approval-ready true` metadata를 기록하기 전에는 `awaiting-human-approval`을 반환하지 않는다.
+- Plan review가 `--approval-ready false`로 기록되면 즉시 `maintenance-planner`를 다시 호출한다. planner가 완료되기 전에는 `--kind plan`을 다시 쓰지 않는다. 그 다음에만 revised plan을 safe writer로 기록하고 `maintenance-plan-critic`을 다시 호출한다.
+- Reviewed plan을 사용자에게 보여주고 다음 turn에서 명시 승인을 받기 전에는 구현하지 않는다.
+- Approval freeze는 reviewed plan, affected surfaces, AC ids를 hash로 고정한다. scope 또는 AC identity가 바뀌면 재승인이 필요하다.
+- 구현 edit은 approved affected surfaces 안에만 허용된다.
+- Agent output은 evidence view일 뿐 final decision이나 gate input이 아니다. Gate input은 structured metadata/state다.
+- `pass`는 checker-calculated eligibility와 profile별 필수 evidence, blocking finding 없음이 모두 필요하다.
+- Skeptic 이후 `pass_eligibility.calculated.blocked_by`가 `tests_not_passed`만 남으면 checker agent를 찾지 말고 허용된 targeted verification을 실행한 뒤 execution-review safe writer에 `--verification-passed true|false` metadata를 기록한다.
+- Checker가 이미 pass-eligible이면 추가 phase helper/evaluate/decide 시도를 하지 않는다.
+- Active candidate가 pass된 뒤 남은 queued candidate는 `auto-continuation`일 때만 자동 plan phase에 진입한다. `human-decision`이면 pass report에서 남은 후보를 표시하고 닫는다.
+
+## 사용자 표시 Decision
+최종 사용자-facing status는 `awaiting-human-approval`, `pass`, `needs-human-decision`, `stop`, `fail`만 사용한다.
