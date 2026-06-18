@@ -15,7 +15,7 @@ class TestMaintenanceScopeGuardContract:
         return set(str(matcher).split("|")) if matcher else set()
 
     def test_maintenance_scope_guard_is_wired_before_general_capture(self):
-        settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        settings = json.loads((ROOT / ".claude" / "settings.maintenance.json").read_text(encoding="utf-8"))
         pretool_commands = [entry["hooks"][0]["command"] for entry in settings["hooks"]["PreToolUse"]]
         permission_allow = settings["permissions"]["allow"]
         expansion_commands = [
@@ -173,7 +173,7 @@ class TestMaintenanceScopeGuardContract:
         assert decision["permissionDecision"] == "deny"
         assert "must not invoke other skills" in decision["permissionDecisionReason"]
 
-    def test_maintenance_scope_guard_blocks_projects_read(self, tmp_path, monkeypatch):
+    def test_maintenance_scope_guard_blocks_product_repo_read(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
         from tools.hooks.maintenance.scope import write_marker
 
@@ -189,7 +189,7 @@ class TestMaintenanceScopeGuardContract:
                         "hook_event_name": "PreToolUse",
                         "tool_name": "Read",
                         "session_id": session_id,
-                        "tool_input": {"file_path": str(tmp_path / "projects" / "demo" / "context" / "state.md")},
+                        "tool_input": {"file_path": str(tmp_path / "repo" / "secret.txt")},
                     }
                 )
             ),
@@ -201,7 +201,7 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "projects/**" in decision["permissionDecisionReason"]
+        assert "repo/**" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_blocks_direct_artifact_write(self, tmp_path, monkeypatch):
@@ -1441,6 +1441,37 @@ def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
     assert "unparseable Bash" in decision["permissionDecisionReason"]
 
 
+def test_maintenance_scope_guard_denies_parseable_bash_repo_reference(tmp_path, monkeypatch):
+    from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+    from tools.hooks.maintenance.scope import write_marker
+
+    session_id = "maintenance-parseable-repo-bash"
+    write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow docs")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "session_id": session_id,
+                    "tool_input": {"command": "cat repo/secret.txt"},
+                }
+            )
+        ),
+    )
+    captured = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", captured)
+
+    enforce_maintenance_scope.main()
+
+    decision = json.loads(captured.getvalue())["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "repo/**" in decision["permissionDecisionReason"]
+
+
 def test_maintenance_scope_guard_denies_safe_writer_content_payload_flags(tmp_path, monkeypatch):
     from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
     from tools.hooks.maintenance.scope import write_marker
@@ -1473,3 +1504,67 @@ def test_maintenance_scope_guard_denies_safe_writer_content_payload_flags(tmp_pa
     decision = json.loads(captured.getvalue())["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
     assert "content payload flags" in decision["permissionDecisionReason"]
+
+
+def _ready_worker(worker: str) -> dict:
+    return {
+        "required": True,
+        "invoked": True,
+        "worker": worker,
+        "evidence_kind": "structured-json",
+        "status": "passed",
+        "blocking_findings": [],
+        "artifact_path": f"ops/agent-harness/evidence/{worker}.json",
+        "artifact_sha256": "abc123",
+        "schema_version": 1,
+        "evidence": "verified",
+        "structured_evidence_valid": True,
+    }
+
+
+def test_checker_does_not_trust_stale_state_pass_eligibility_without_verification(tmp_path):
+    from tools.agent_harness.checker import _calculated_pass_eligibility
+
+    state = {
+        "pass_eligibility": {
+            "tests_passed": True,
+            "evaluation_pass_candidate": True,
+            "calculated": {"tests_passed": True, "evaluation_pass_candidate": True},
+        },
+        "approval_gate": {"status": "approved-frozen", "freeze": {"approval_hash": "h", "affected_surfaces": ["docs/a.md"]}},
+        "changed_files": ["docs/a.md"],
+    }
+    evidence_paths = {
+        "ops/agent-harness/evidence/plan.json",
+        "ops/agent-harness/evidence/execution.json",
+        "ops/agent-harness/evidence/execution-review.json",
+    }
+    worker_status = {worker: _ready_worker(worker) for worker in ("maintenance-planner", "maintenance-implementer")}
+
+    calculated = _calculated_pass_eligibility(tmp_path, state, evidence_paths, worker_status, [])
+
+    assert calculated["eligible"] is False
+    assert calculated["tests_passed"] is False
+    assert "tests_not_passed" in calculated["blocked_by"]
+
+
+def test_checker_blocks_empty_changed_files_even_when_approval_surface_exists(tmp_path):
+    from tools.agent_harness.checker import _changed_files_within_approval
+
+    state = {
+        "approval_gate": {"status": "approved-frozen", "freeze": {"approval_hash": "h", "affected_surfaces": ["docs/a.md"]}},
+        "changed_files": [],
+    }
+
+    assert _changed_files_within_approval(state) is False
+
+
+def test_maintenance_tests_are_full_gated_surface():
+    from tools.agent_harness.checker import _workflow_profile_path
+
+    state = {
+        "approval_gate": {"freeze": {"affected_surfaces": ["tests/maintenance/test_scope_guard.py"]}},
+        "failure_mode_ledger": {"severity": "P3"},
+    }
+
+    assert _workflow_profile_path(ROOT, state) == "CRITICAL_HARNESS"

@@ -26,7 +26,7 @@ approved frozen plan을 가장 작은 안전한 diff로 적용한다. state, app
 ## 하지 말 것
 - approved surfaces 밖 edit
 - state checkpoint 또는 approval freeze record 수정
-- `projects/**` 또는 external state 접근
+- `repo/**` 또는 external state 접근
 - evaluation 또는 final pass 선언
 
 ## 출력

@@ -1,0 +1,147 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Agent(maintenance-cartographer)",
+      "Agent(maintenance-planner)",
+      "Agent(maintenance-plan-critic)",
+      "Agent(maintenance-implementer)",
+      "Agent(maintenance-evaluator)",
+      "Agent(maintenance-skeptic)",
+      "Bash(uv run python -m tools.agent_harness.safe_artifact_writer write *)",
+      "Bash(uv run pytest *)",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/mark_active.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_scope.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_final_report.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/run_prompt_context.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_start.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_tool_event.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_trace.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce_subagent_final_report.sh\")",
+      "Write(/ops/agent-harness/**)",
+      "Edit(/ops/agent-harness/**)",
+      "MultiEdit(/ops/agent-harness/**)",
+      "Write(ops/agent-harness/**)",
+      "Edit(ops/agent-harness/**)",
+      "MultiEdit(ops/agent-harness/**)"
+    ],
+    "deny": [
+      "Read(/repo/**)",
+      "Read(repo/**)",
+      "Edit(/repo/**)",
+      "Edit(repo/**)",
+      "Write(/repo/**)",
+      "Write(repo/**)",
+      "MultiEdit(/repo/**)",
+      "MultiEdit(repo/**)",
+      "Bash(rm *)",
+      "Bash(sudo *)",
+      "Bash(curl * | *)",
+      "Bash(wget * | *)",
+      "Skill"
+    ]
+  },
+  "hooks": {
+    "UserPromptExpansion": [
+      {
+        "matcher": "maintenance-workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/mark_active.sh\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/mark_active.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/run_prompt_context.sh\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Skill|Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_scope.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Skill|Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_tool_event.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|Skill|Read|Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_tool_event.sh\""
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Skill|Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_scope.sh\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_start.sh\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_trace.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce_subagent_final_report.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_final_report.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

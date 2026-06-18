@@ -1,158 +1,81 @@
-# Agent Task Handoff Template
+# Agent Workspace Control Plane
 
-A practical repository template for AI-agent execution that is **task-centered**, not session-centered.
+A repo-aware control substrate for Claude Code, Codex, Cursor, and other coding agents.
 
-## Why Task-Centered (Not Session-Centered)
+This is not an autonomous agent runtime. It provides deterministic task state, repo boundaries, handoff continuity, and metadata gates for external agents.
 
-Session-level global handoff files become stale quickly and split context across multiple places.
+## What this is
 
-This template uses task files as the handoff unit. Each task contains its own execution state and `## Handoff`, so the next agent can continue immediately without searching for a separate session note.
+This workspace separates:
 
-## Lightweight Layered Structure
+- workspace operations in the root repo
+- actual product code in `repo/`
+- task state in `docs/tasks/*.md`
+- shared operating rules in `AGENTS.md`
+- sparse file-level metadata in `repo/.repometa`
 
-The structure is layered for clarity, but intentionally minimal.
+Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, and verification gates.
 
-### Core Always-Read Docs
+## Compared with adjacent tools
 
-- `AGENTS.md`: canonical operating rules
-- `project/BOARD.md`: repo-wide task board and optional backlog
-- `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`: assigned task execution unit
+| Tool type | Focus | This project differs by |
+|---|---|---|
+| Markdown task managers | Tasks and Kanban | Adds repo separation, finish gates, and `.repometa` checks |
+| Spec-driven tools | Spec -> plan -> tasks | Starts after task intent exists; preserves execution state and verification |
+| Claude/Codex agents | Autonomous coding loop | Provides the workspace/state substrate they operate against |
+| Claude plugins/hooks | Tool-specific enforcement | Core contract stays tool-agnostic through `AGENTS.md` |
+| Knowledge/memory systems | Long-term agent knowledge | Future llmwiki should promote stable knowledge from task evidence |
 
-### Shared Context Docs
+## Use this when
 
-- `project/PRD.md`: single-file product context by default
-- `examples/prd/`: optional split-PRD reference pattern for larger projects
-- `docs/`: reserved for external/shareable documentation
+- handoff quality matters more than chat/session history
+- you want task files to be the execution unit
+- you need a private workspace repo and a separate product code repo
+- multiple agent tools may operate in the same workspace
+- you want MCP, Graph, or llmwiki layers to sit on a stable workspace contract later
 
-### Conditional Workflows
+## 60-second start
 
-- `project/workflows/*.md`: active SOPs for risky/repetitive work; add only when needed
-- Workflow docs may be created/updated by humans or agents
-- Add a workflow only when it is reusable, high-risk, or repeatedly needed
-- Do not create workflows for one-off task notes; keep one-off instructions in task files
-- `project/workflows/INDEX.md`: workflow discovery index
-- `project/workflows/TEMPLATE.md`: reusable workflow template
+1. Read `AGENTS.md`
+2. Open `docs/BOARD.md`
+3. Open the live task file
+4. Continue from `## Handoff`
 
-### Archive
-
-- `project/archive/tasks/`: completed task file originals
-
-### Tool Adapters
-
-- `CLAUDE.md`
-- `.cursor/rules/00-agent-os.mdc`
-
-### Reference Examples
-
-- `examples/`: reference-only examples; not active work
-
-## Live vs Example Locations
-
-- `project/tasks/` contains live task files, parent tasks, and completed child tasks that remain reopenable until their parent task is completed.
-- `project/workflows/` contains active project workflows and their shared templates/indexes.
-- `docs/` is reserved for external/shareable docs.
-- `examples/` contains reference-only examples and should not be treated as active work.
-- `examples/prd/` contains an optional split-PRD pattern for projects that outgrow a single `project/PRD.md`.
-
-## Backlog
-
-`project/BOARD.md` may include a `## Backlog` section for planned work that does not have a task file yet.
-
-When work actually starts, create `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-from `project/tasks/TEMPLATE.md` (or `project/tasks/PARENT_TEMPLATE.md` for coordinating parent tasks)
-and add it to the Board.
-
-## Documentation Language
-
-Generated repository documents (task files, plans, walkthroughs) default to Korean.
-
-Keep code, filenames, commands, identifiers, API names, logs, and quoted external text
-in their original language.
-
-See `AGENTS.md` for the canonical rule.
-
-## Repository Tree
+## Minimal structure
 
 ```text
 .
-├── LICENSE
-├── README.md
-├── AGENTS.md
-├── CLAUDE.md
-├── .cursor
-│   └── rules
-│       └── 00-agent-os.mdc
-├── docs
-├── project
-│   ├── PRD.md
-│   ├── BOARD.md
-│   ├── tasks
-│   │   ├── TEMPLATE.md
-│   │   └── PARENT_TEMPLATE.md
-│   ├── workflows
-│   │   ├── INDEX.md
-│   │   ├── README.md
-│   │   └── TEMPLATE.md
-│   └── archive
-│       ├── README.md
-│       └── tasks
-│           └── .gitkeep
-└── examples
-    ├── tasks
-    │   └── TASK.example.md
-    ├── workflows
-    │   └── db-migration.example.md
-    └── prd
-        ├── README.md
-        ├── PRD.index.example.md
-        ├── product.example.md
-        ├── policies.example.md
-        ├── architecture.example.md
-        ├── runtime.example.md
-        └── contracts.example.md
+|-- AGENTS.md
+|-- README.md
+|-- scripts/
+|-- docs/
+|   |-- README.md
+|   |-- BOARD.md
+|   |-- tasks/
+|   |-- workflows/
+|   |-- contracts/
+|   |-- adr/
+|   `-- archive/
+`-- repo/
 ```
 
-## Quick Start
+## Document map
 
-1. Read `AGENTS.md`.
-2. Read `project/BOARD.md`.
-3. In the task file, list only the minimum needed docs under `## Context Docs`.
-4. If no active task exists, choose a `todo`, promote a backlog item, or create a new task from `project/tasks/TEMPLATE.md`.
-   Use `project/tasks/PARENT_TEMPLATE.md` only for larger work that needs coordination across multiple narrower child tasks.
-5. Name task file as `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-6. Add the task to `project/BOARD.md`.
-7. Start work.
-8. Keep `## Handoff` updated.
-9. On completion, archive standalone tasks immediately; for child tasks, remove the board row and keep the file in `project/tasks/` until the parent task completes.
+- **Operating contract**: `AGENTS.md`
+- **Task system guide**: `docs/README.md`
+- **JSON output contract**: `docs/contracts/repoctl-json-contract.md`
+- **repoctl module boundaries**: `docs/contracts/repoctl-module-boundaries.md`
+- **Repo metadata identity ADR**: `docs/adr/repometa-identity-v0.md`
+- **Field-test workflow**: `docs/workflows/v0-foundation-field-test.md`
+- **Repo metadata rules**: `docs/workflows/repo-metadata.md`
+- **Optional project context**: `docs/PRD.md`
 
-## Task Lifecycle
+## Notes
 
-1. Create/update task file in `project/tasks/`.
-2. Use `T-YYYYMMDDHHMMSSZ--slug.md` naming for live tasks (UTC).
-3. Track live task status in `project/BOARD.md` (`todo` -> `doing` -> `blocked` -> `done`, with completed rows removed from the board).
-4. Keep task frontmatter as local metadata and keep it synchronized.
-5. For live board rows, when `status` or `owner` changes, update both `project/BOARD.md` and the task frontmatter in the same edit/commit.
-6. Execute and verify work in the task file.
-7. Keep `## Handoff` current for the next agent.
-8. Archive standalone tasks when complete; completed child tasks leave the board but may stay in `project/tasks/` until the parent task is complete.
-
-## Archive Rules
-
-- Archive keeps original completed task files.
-- Do not write additional archive summaries.
-- Keep original naming (`T-YYYYMMDDHHMMSSZ--slug.md`).
-
-## Handoff Model
-
-Handoff is embedded in each task file under `## Handoff` with four required fields:
-
-- Next exact step
-- First file to open
-- First command to run
-- Done when
-
-## Parallel Work Policy
-
-Parallel work is optional, not default.
-
-Use parallel execution only when tasks are independent, do not edit the same file/interface boundary, and can be isolated by branch/worktree.
+- `repo/` is the actual code repository.
+- `docs/BOARD.md` is a live-task registry, not a status dashboard.
+- Task state lives in task frontmatter, not in the board.
+- Backlog items are raw planning blocks; agents read them and pass explicit task fields rather than relying on repoctl to parse intent.
+- `.repometa` provides file-level discovery and changed-file metadata gates; `repoctl index code` extracts read-only technical facts, and neither is a generated graph.
+- Future MCP should be transport over repoctl contracts, not a second mutation path.
+- Future Graph and llmwiki layers should derive from task evidence, `.repometa`, and index facts without replacing their authority.

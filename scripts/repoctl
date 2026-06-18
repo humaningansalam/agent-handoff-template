@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT/.uv-cache}"
+if [[ -n "${VIRTUAL_ENV:-}" && "${VIRTUAL_ENV:-}" != "$ROOT/.venv" ]]; then
+  unset VIRTUAL_ENV
+fi
+if command -v uv >/dev/null 2>&1; then
+  exec uv run --directory "$ROOT" python -m tools.repoctl "$@"
+fi
+PYTHON_BIN="${PYTHON:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "repoctl requires uv or python3 on PATH" >&2
+  exit 127
+fi
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON_BIN" -m tools.repoctl "$@"

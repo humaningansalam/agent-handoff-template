@@ -15,5 +15,5 @@ MAINTENANCE_PROFILE = WorkflowProfile(
     name="maintenance",
     trigger="/maintenance-workflow",
     artifacts_root="ops/agent-harness",
-    denied_surfaces=("projects/**", "live external mutation"),
+    denied_surfaces=("repo/**", "live external mutation"),
 )

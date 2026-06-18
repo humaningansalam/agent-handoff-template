@@ -1,0 +1,74 @@
+name: Release repoctl control plane
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Extract release version
+        id: version
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          MANIFEST_VERSION=$(python -c "import json; print(json.load(open('repoctl-upgrade-manifest.json'))['version'])")
+          test "$VERSION" = "$MANIFEST_VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release tag
+        id: existing
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify repoctl tests
+        if: steps.existing.outputs.exists == 'false'
+        run: uv run pytest -q tests/repoctl
+
+      - name: Verify workspace contracts
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          ./scripts/repoctl check --json
+          ./scripts/repoctl meta check --json
+
+      - name: Build release artifact
+        if: steps.existing.outputs.exists == 'false'
+        run: uv run python -m tools.repoctl.release dist
+
+      - name: Create release tag
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}" "${GITHUB_SHA}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        if: steps.existing.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*.tar.gz
+          generate_release_notes: true

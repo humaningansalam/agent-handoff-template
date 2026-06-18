@@ -451,9 +451,10 @@ class MaintenanceHarness:
     REQUIRED_PASS_ARTIFACT_PATHS: tuple[str, ...] = (STATE_ARTIFACT_PATH, *REQUIRED_EVIDENCE_ARTIFACT_PATHS)
     FULL_GATED_SURFACE_PATTERNS: ClassVar[tuple[str, ...]] = (
         ".claude/hooks/**",
-        ".claude/settings.json",
+        ".claude/settings.maintenance.json",
         "tools/hooks/**",
         "tools/agent_harness/**",
+        "tests/maintenance/**",
         "tests/research_ops/test_hook_permission_contracts.py",
         "tests/maintenance/test_runner_contract.py",
     )
@@ -1302,6 +1303,8 @@ class MaintenanceHarness:
 
     def _scope_ok(self) -> bool:
         if self.approval_freeze is None or not self.approval_freeze.affected_surfaces:
+            return False
+        if not self.changed_files:
             return False
         return all(self._path_in_approved_surfaces(path, self.approval_freeze.affected_surfaces) for path in self.changed_files)
 

@@ -26,7 +26,7 @@ disallowed-tools:
 ## 범위
 이 workflow는 repo 수준 유지보수에만 사용한다. 대상은 문서, rules, skills, agents, hooks, tools, tests, templates, harness contract다.
 
-`projects/**`, project-local runtime 작업, 생성된 wiki 산출물, secret, deployment, database, MCP/Notion write, live external mutation은 범위 밖이다.
+`repo/**`, product repo runtime 작업, 생성된 wiki 산출물, secret, deployment, database, MCP/Notion write, live external mutation은 범위 밖이다.
 
 ## 오케스트레이션
 Claude Code 대화형 native-loop에서 실행한다. 중단되면 같은 세션을 `/r`로 resume하고, 중간 phase에서 새로 시작하거나 수동으로 건너뛰지 않는다.

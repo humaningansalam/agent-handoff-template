@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / ".claude/skills/maintenance-workflow/SKILL.md"
 CONTRACT = ROOT / "docs" / "MAINTENANCE_HARNESS_CONTRACT.md"
 AGENT_DIR = ROOT / ".claude" / "agents"
-SETTINGS = ROOT / ".claude" / "settings.json"
+SETTINGS = ROOT / ".claude" / "settings.maintenance.json"
+DEFAULT_SETTINGS = ROOT / ".claude" / "settings.json"
 
 
 def text(path: Path) -> str:
@@ -122,6 +123,15 @@ def test_contract_hook_manifest_mentions_configured_hook_events() -> None:
     }
     for event in configured_events:
         assert f"`{event}`" in contract
+
+
+def test_default_claude_settings_load_maintenance_hooks() -> None:
+    settings = json.loads(DEFAULT_SETTINGS.read_text(encoding="utf-8"))
+    hooks = settings.get("hooks", {})
+    for event in ("UserPromptSubmit", "PreToolUse", "SubagentStop", "Stop"):
+        assert event in hooks
+    assert "maintenance/enforce_scope.sh" in json.dumps(hooks)
+    assert "maintenance/enforce_final_report.sh" in json.dumps(hooks)
 
 
 def test_safe_writer_documented_flags_are_structured_argparse_flags() -> None:

@@ -26,7 +26,7 @@ color: orange
 ## 하지 말 것
 - 파일 edit
 - missing evidence 또는 stale artifact 승인
-- `projects/**` 또는 external state 접근
+- `repo/**` 또는 external state 접근
 - checker-calculated gate 밖에서 final pass 선언
 
 ## 출력

@@ -1,95 +1,120 @@
 # AGENTS.md
 
-Canonical operating rules for this repository.
+Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md`, `.agents/rules/`, `.cursor/rules/`, `.codex/`) must defer here.
 
-## Default Operating Mode
+## Workspace Contract
 
-- Default mode is **single-agent + single active task**.
-- Do not assume parallel execution unless explicitly planned and safe.
+- Root is the private workspace repo for agent operations, tasks, PRD, workflows, and repoctl tooling.
+- `repo/` is the product code repo. It must have its own `.git`; root `.gitignore` must ignore `/repo/`.
+- Code work defaults to `repo/`; root `tools/`, root `tests/`, and `scripts/` are workspace/repoctl surfaces only.
+- Ambiguous product requests such as “add search”, “fix list”, or “improve the CLI” belong in `repo/` unless repoctl/workspace tooling is explicitly named.
+- Submodules are not used.
 
-## Read Order (Always Follow)
+## Read Order
 
 1. `AGENTS.md`
-2. `project/BOARD.md`
-3. Assigned task file in `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-4. Read only the docs listed in the active task's `## Context Docs`.
-5. By default, product context lives in `project/PRD.md`.
-6. Check `project/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply, then read only the matching workflow file(s).
+2. `docs/BOARD.md`
+3. Assigned task file in `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+4. Parent task file, if the task frontmatter `parent` is non-empty
+5. Only the docs listed in the task `## Context Docs`
+6. `docs/PRD.md` when shared project context is needed
+7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
-If there is no active/assigned task:
+If no active task is assigned:
 
-- Choose a `todo` item from `project/BOARD.md`, or
-- Start a new task immediately by creating `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-  from `project/tasks/TEMPLATE.md` (or `project/tasks/PARENT_TEMPLATE.md` for coordinating parent tasks) and adding it to the Board, or
-- Promote an item from `## Backlog` if the work was previously captured there.
+- Resume a live task from `docs/BOARD.md` if one exists.
+- For product work under `repo/`, create a live task with `./scripts/repoctl task create ...`.
+- For read-only questions/status checks, do not create a task.
+- Use a parent task only for coordination across multiple independently verifiable child tasks.
 
-## Task File Rules
+Scope matrix:
 
-- Each live task is a single file under `project/tasks/`.
-- Task filename convention: `T-YYYYMMDDHHMMSSZ--slug.md` (UTC).
-- `project/BOARD.md` is the repo-wide task board.
-- Board rows are for live work with task files; planned items without a task file belong in `## Backlog`.
-- Remove completed rows from `project/BOARD.md` to keep the board live-only.
-- Standalone completed tasks move to `project/archive/tasks/` immediately.
-- Completed child tasks may stay in `project/tasks/` until their parent task is completed, so they can be reopened without restoring from archive.
-- Parent tasks act as coordination and integration hubs for related child tasks.
-- Task frontmatter is local task metadata.
-- For live board rows, when `status` or `owner` changes, update both the board row and the task file in the same edit/commit.
-- Keep task files practical and execution-oriented.
-- Prefer one task file per independently shippable unit unless a larger item needs a parent/child split.
-- Use `project/tasks/PARENT_TEMPLATE.md` only when the work needs coordination across multiple narrower tasks.
-- Prefer a parent task when the work spans 3+ surfaces or components, needs separate child tracking, requires shared interface/decision coordination, or depends on final integration across child tasks.
-- Otherwise, use the standard `project/tasks/TEMPLATE.md`.
-- The optional `parent` field links a child task to its parent task ID.
-- The `branch` field is optional metadata; use it only if the task is tracked in a branch or worktree.
+| Request scope | Task? | Boundary |
+|---|---:|---|
+| Product changes under `repo/` | Yes | `task start` -> edit/verify -> `task finish` |
+| Backlog item promoted for implementation | Yes | `backlog show` -> explicit `task create --backlog-id` |
+| Workspace control-plane changes (`tools/repoctl`, `scripts/repoctl`, task/workflow contracts) | Yes | Use a root/workspace task for audit and handoff |
+| Minor root notes or one-off docs cleanup | No | Write directly when no handoff trail is useful |
+| Read-only questions or inspections | No | Report findings without Board mutation |
 
-## Documentation Language Policy
+## Backlog
 
-- Write generated repository documents (task files, plans, walkthroughs) in Korean by default.
-- Do not translate code, filenames, commands, identifiers, API names, logs, or quoted external text.
-- Override only if a task explicitly requires another language.
+- Backlog is for deferred ideas or planned work that should not be executed yet; work requested for now uses a task.
+- Manage Backlog only through `./scripts/repoctl backlog add/list/show/remove`.
+- To promote a Backlog item, `list` and `show` it first, read enough repo context, then run `./scripts/repoctl task create --backlog-id BL-...` with explicit `--slug`, `--area`, `--repo-ref`, and title.
+- `repoctl` must not parse Backlog or PRD prose into task scope, files, validation, area, repo metadata, or annotations.
 
-## Handoff Rules (`## Handoff` inside each task)
+## Task Rules
 
-- Handoff is embedded in the task file, not in a separate session file.
-- Every task file must include a `## Handoff` section.
-- `## Handoff` must let the next agent start in ~30 seconds.
-- Required fields:
-  - **Next exact step**
-  - **First file to open**
-  - **First command to run**
-  - **Done when**
+- Live tasks live under `docs/tasks/`; standalone done/canceled tasks move to `docs/archive/tasks/`.
+- Filenames use `T-YYYYMMDDHHMMSSZ--english-kebab-slug.md`; non-ASCII titles require explicit `--slug`.
+- Frontmatter `status` accepts only `todo`, `doing`, `blocked`, `done`, `canceled`.
+- Task frontmatter is authoritative. Board rows are a live registry only; do not update Board rows for owner/status changes.
+- Parent-child authority: child `parent` frontmatter is source of truth; parent child lists are convenience summaries.
+- `owner` and `depends_on` are informational metadata, not locks/enforcement.
+- Worker agents must not set lifecycle-managed fields such as `status: done`; use `repoctl task finish`.
 
-## Execution Log Rules (`## Execution Log` inside each task)
+## repoctl Boundary
 
-- Use `## Execution Log` for short restart/recovery checkpoints.
-- Append only after meaningful state changes (implementation, verification, blocker, or decision).
-- Do not log every read, command, retry, or exploration step.
-- Keep each entry to 1–2 concise lines.
-- `## Execution Log` is append-only; `## Handoff` should remain the latest restart snapshot.
-- Before stopping, make sure the latest `## Execution Log` entry and `## Handoff` are aligned.
+- `repoctl` is the canonical mutation boundary for Board, Backlog, task creation, task lifecycle, archive transitions, and `.repometa` validation.
+- Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
+- Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
+- Use `./scripts/repoctl task show T-... --json` to inspect a task and `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
+- Finish tasks with a verification artifact outside `repo/`: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
+- If `## Verification` is already complete, `./scripts/repoctl task finish T-... --use-task-verification --json` may reuse it.
+- Use `./scripts/repoctl task block T-... --verification-file /tmp/T-...-blocker.md --json` when acceptance fails but work should remain live.
 
-## Archive Rules
+## Working Commands
 
-- When a standalone task is completed, move the original task file to `project/archive/tasks/` and remove its row from `project/BOARD.md`.
-- When a child task is completed, remove its row from `project/BOARD.md`; keep its file in `project/tasks/` until the parent task is completed.
-- When a parent task is completed, move the parent task and any remaining child task files to `project/archive/tasks/`.
-- Do not rewrite archived tasks into separate summary documents.
-- Preserve original filenames: `T-YYYYMMDDHHMMSSZ--slug.md`.
+- Code search: `cd repo && rg ...`
+- Code Git: `cd repo && git ...`
+- Docker: `cd repo && docker compose ...`
+- Root checks: `./scripts/repoctl check --json`
+- Changed metadata gate: `./scripts/repoctl meta check --changed --json`
+- Status fallback: `rg "^status:" docs/tasks/T-*.md` and `cat docs/BOARD.md`
 
-## Parallel Work Policy
+Root-level automation under `scripts/` must resolve the workspace root from the script location, not `git rev-parse`, because `repo/` is a separate repository.
 
-Parallel work is **not** the default.
+## Task Sections
 
-Parallel work is allowed only if all conditions are satisfied:
+- Every task must include `## Handoff`; it should let the next agent restart in about 30 seconds.
+- Handoff fields: **Next exact step**, **First file to open**, **First command to run**, **Done when**.
+- `## Execution Log` is append-only, short, and uses real UTC timestamps. Prefer `repoctl task log append` over hand-written timestamps.
+- `## Verification` records commands, evidence, and results. Worker inability to run a gate is evidence, not final verification; final gates are the manager/Codex responsibility.
+- Keep `## Handoff` aligned with the latest meaningful execution log before stopping.
 
-- No simultaneous edits to the same file/interface boundary
-- Each task can be completed and verified independently
-- Branch/worktree isolation is feasible per task
+## Archive/Reopen
 
-## Workflow Creation Policy
+- Standalone done/canceled tasks are archived immediately and removed from Board.
+- Done/canceled child tasks leave Board but may remain in `docs/tasks/` until the parent archives.
+- Parent tasks archive only after live children are done, canceled, or re-parented.
+- Reopen by restoring/moving the task to `docs/tasks/`, setting `status` to `todo` or `doing`, re-adding Board row, and updating Handoff/Execution Log.
 
-- Both humans and agents may create or update workflow docs.
-- Add a workflow only when it is reusable, high-risk, or repeatedly needed.
-- Do not create workflows for one-off task-local notes.
-- Keep one-off task-local instructions inside the task file.
+## Documentation Language
+
+- Public templates in this repository are English.
+- Live task files, execution logs, and project-specific workflow docs in adopting workspaces may use the team language, e.g. Korean when `docs/repoctl.json` sets `document_language: "ko"`.
+- Keep code, filenames, commands, identifiers, API names, logs, external quotes, and `.repometa` field keys/values in English.
+
+## Workflows
+
+- Create/update workflow docs only for reusable, high-risk, or repeated procedures.
+- Keep one-off task-local instructions in the task file.
+- Task isolation is required for parallel work: no shared files, generated boundaries, or interface boundaries without coordination.
+
+## repo/ Metadata
+
+- `repo/.repometa/*` is the canonical sparse file-level metadata store for `repo/`; inline `@meta` or source-file metadata frontmatter is forbidden residue.
+- Full schema and operations live in `docs/workflows/repo-metadata.md`.
+- Use `repoctl meta ...`; do not directly edit `.repometa` in normal work.
+- `repoctl meta query` and `repoctl meta suggest` are read-only discovery hints. Inspect files directly before choosing scope.
+- Repo-scoped live tasks should fill `## Discovery` with candidate query, reviewed files, and chosen files; `repoctl check` warns when this evidence is missing.
+- When a task changes `repo/`, `repoctl task finish` runs the changed-file metadata gate. If `repo/` exists but its git repository is missing/unusable, finish blocks.
+- If a task started with pre-existing dirty `repo/` state, finish separates baseline dirty files from task-new changes; pre-existing dirty state is not task scope.
+
+## Adapter Policy
+
+- `AGENTS.md` is the shared contract and single source of truth.
+- Adapter files are thin shims and must not duplicate or contradict these rules.
+- Generated agent files under `.claude/agents/` or `.codex/agents/` come from `ai/roles/`; update role sources and re-render instead of editing generated outputs.
+- Reusable skills live in `.agents/skills/` as canonical source and mirror only when required by a tool.

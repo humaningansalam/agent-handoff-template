@@ -374,17 +374,12 @@ def _calculated_pass_eligibility(
     worker_status: dict[str, dict[str, bool]],
     state_blockers: list[str],
 ) -> dict[str, Any]:
-    existing = state.get("pass_eligibility") if isinstance(state.get("pass_eligibility"), dict) else {}
-    calculated_existing = existing.get("calculated") if isinstance(existing.get("calculated"), dict) else {}
-    tests_passed = bool(existing.get("tests_passed") or calculated_existing.get("tests_passed")) or _execution_review_records_verification(root, evidence_paths)
     verification_passed = _execution_review_records_verification(root, evidence_paths)
+    tests_passed = verification_passed
     profile_path = _workflow_profile_path(root, state)
     tiny_doc = profile_path == "TINY_DOC"
     pass_candidate = bool(
-        existing.get("evaluation_pass_candidate")
-        or calculated_existing.get("evaluation_pass_candidate")
-        or state.get("pass_candidate")
-        or (tiny_doc and _worker_ready(worker_status.get("maintenance-implementer", {})))
+        (tiny_doc and verification_passed and _worker_ready(worker_status.get("maintenance-implementer", {})))
         or (verification_passed and _worker_ready(worker_status.get("maintenance-evaluator", {})))
     )
     return calculate_pass_eligibility(
@@ -426,6 +421,8 @@ def _changed_files_within_approval(state: dict[str, Any]) -> bool:
     freeze = approval_gate.get("freeze") if isinstance(approval_gate.get("freeze"), dict) else {}
     surfaces = tuple(str(path) for path in freeze.get("affected_surfaces", []) if str(path).strip()) if isinstance(freeze.get("affected_surfaces"), list) else ()
     if not surfaces:
+        return False
+    if not changed_files:
         return False
     return all(MaintenanceHarness._path_in_approved_surfaces(path, surfaces) for path in changed_files)
 

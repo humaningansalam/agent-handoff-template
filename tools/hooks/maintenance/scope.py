@@ -60,7 +60,7 @@ def write_marker_record(root: Path, *, session_id: str, workflow_id: str, prompt
         "started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "operation": MAINTENANCE_OPERATION,
         "command": "/maintenance-workflow",
-        "scope_guard": "projects/** denied by maintenance scope hook",
+        "scope_guard": "repo/** denied by maintenance scope hook",
         "prompt_excerpt": prompt.strip()[:240],
     }
     write_json_atomic_under_root(marker_path(root, session_id), marker, root)
@@ -95,12 +95,12 @@ def relative_to_root(root: Path, raw_path: str) -> str | None:
         return None
 
 
-def is_projects_path(root: Path, raw_path: str) -> bool:
+def is_product_repo_path(root: Path, raw_path: str) -> bool:
     rel = relative_to_root(root, raw_path)
     if rel is None:
         return False
     parts = Path(rel).parts
-    return bool(parts) and parts[0] == "projects"
+    return bool(parts) and parts[0] == "repo"
 
 
 def is_maintenance_artifact_path(root: Path, raw_path: str) -> bool:

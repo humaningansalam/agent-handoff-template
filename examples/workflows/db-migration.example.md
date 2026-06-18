@@ -60,7 +60,7 @@ or repeated often enough to benefit from a reusable SOP.
 
 ## Notes
 
-In `project/tasks/T-YYYYMMDDHHMMSSZ--slug.md`, record:
+In `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`, record:
 
 - migration command(s) executed
 - verification command(s) and outcomes

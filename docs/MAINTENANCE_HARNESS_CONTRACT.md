@@ -51,11 +51,11 @@ Checker code, not an agent, classifies profile from affected surfaces and severi
 
 허용되는 repo maintenance surface:
 - root docs 및 repo contracts
-- `.claude/rules/**`, `.claude/skills/**`, `.claude/agents/**`, `.claude/hooks/**`, `.claude/settings.json`
+- `.claude/rules/**`, `.claude/skills/**`, `.claude/agents/**`, `.claude/hooks/**`, `.claude/settings.maintenance.json`
 - `tools/**`, `tests/**`, `templates/**`
 
 금지되는 surface:
-- `projects/**`
+- `repo/**`
 - project-local runtime 작업
 - 생성된 wiki output
 - secret, deployment, database, MCP/Notion write, live external mutation
@@ -88,7 +88,7 @@ Scope gate는 요청된 edit가 Project collaboration인지 repo maintenance인�
 - Human-readable reports are view only. route, approval, queue, candidate, pass status는 structured metadata와 checker-generated state만으로 결정한다.
 
 ## Permission 규칙
-- Top-level workflow는 repo context read와 harness evidence artifact write만 수행한다.
+- Top-level workflow는 root maintenance context read와 harness evidence artifact write만 수행하며, product `repo/**` read/write는 maintenance scope에서 차단된다.
 - Top-level workflow는 generic task-management tool이나 nested skill을 사용하지 않는다.
 - Bash heredoc, Python snippet, redirection, `tee`, shell filesystem mutation은 maintenance artifact persistence로 인정하지 않는다.
 - Artifact persistence는 bounded writer의 argparse에 존재하는 structured flags만 허용한다. Common flags include `--kind`, `--status`, `--summary`, and `--workflow-id`; plan metadata uses `--candidate-id`, `--affected-surface`, and `--acceptance-criteria-id`; review metadata uses `--approval-ready true|false` or `--verification-passed true|false`. Content payload flags, encoded content, file-path payloads, and markdown/prose literals are not evidence.
@@ -116,7 +116,7 @@ PRD의 `AC-001`-`AC-005`는 product acceptance 기준이다. 이 계약은 그 A
 
 - `AC-001` Scope authority: requested edit를 Project collaboration 또는 explicit repo maintenance scope로 분리하고, slash command execution을 별도 runtime phase로 취급하는지 확인한다.
 - `AC-002` Instruction authority: `CLAUDE.md`, PRD, Operations Contract, Maintenance Harness Contract의 authority split을 유지하는지 확인한다.
-- `AC-003` Maintenance harness boundary: approved affected surfaces, changed-file containment, `projects/**`와 generated output 차단, live external mutation 금지로 확인한다.
+- `AC-003` Maintenance harness boundary: approved affected surfaces, changed-file containment, `repo/**`와 generated output 차단, live external mutation 금지로 확인한다.
 - `AC-004` Artifact/state lineage: bounded JSON evidence artifact, run-scoped canonical artifact, trace view, checker-generated state, approval freeze hash로 확인한다.
 - `AC-005` Acceptance verification: profile별 필수 evidence, mandatory FML mapping/direct evidence, checker-calculated pass eligibility로 확인한다.
 

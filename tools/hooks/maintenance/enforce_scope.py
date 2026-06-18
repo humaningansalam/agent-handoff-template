@@ -7,7 +7,7 @@ from typing import Any
 
 from tools.hooks.hook_failures import record_hook_failure
 from tools.agent_harness.retry_policy import retry_agent_start_block_reason, retry_target
-from tools.hooks.maintenance.scope import active_marker_for_session, is_maintenance_artifact_path, is_projects_path, json_dumps, relative_to_root, workspace_root
+from tools.hooks.maintenance.scope import active_marker_for_session, is_maintenance_artifact_path, is_product_repo_path, json_dumps, relative_to_root, workspace_root
 from tools.hooks.maintenance.trace import record_event
 from tools.hooks.tool_input_normalization import UNSAFE_PARSE_ERROR, split_bash_command
 from tools.runtime.json_io import read_json_object
@@ -76,8 +76,14 @@ def _tool_paths(tool_input: dict[str, Any]) -> tuple[str, ...]:
 
 def _blocked_reference(root: Path, tool_name: str, tool_input: dict[str, Any]) -> str:
     for raw_path in _tool_paths(tool_input):
-        if is_projects_path(root, raw_path):
+        if is_product_repo_path(root, raw_path):
             return raw_path
+    if tool_name == "Bash":
+        for part in split_bash_command(tool_input):
+            if part == UNSAFE_PARSE_ERROR:
+                continue
+            if is_product_repo_path(root, part):
+                return part
     return ""
 
 
@@ -211,7 +217,7 @@ def _repo_mutation_before_approval(root: Path, tool_name: str, tool_input: dict[
     if tool_name not in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
         return ""
     for raw_path in _tool_paths(tool_input):
-        if is_maintenance_artifact_path(root, raw_path) or is_projects_path(root, raw_path):
+        if is_maintenance_artifact_path(root, raw_path) or is_product_repo_path(root, raw_path):
             continue
         path = Path(raw_path)
         absolute = path if path.is_absolute() else root / path
@@ -230,7 +236,7 @@ def _relative_repo_mutation_paths(root: Path, tool_name: str, tool_input: dict[s
         return ()
     paths: list[tuple[str, str]] = []
     for raw_path in _tool_paths(tool_input):
-        if is_maintenance_artifact_path(root, raw_path) or is_projects_path(root, raw_path):
+        if is_maintenance_artifact_path(root, raw_path) or is_product_repo_path(root, raw_path):
             continue
         path = Path(raw_path)
         absolute = path if path.is_absolute() else root / path
@@ -313,8 +319,8 @@ def main() -> None:
                 return
         blocked = _blocked_reference(root, tool_name, tool_input)
         if blocked:
-            record_event(root, marker, payload, event="scope-guard-deny", phase="guard", guard="deny", result="projects/** blocked")
-            _emit_deny(hook_event_name, "maintenance scope guard blocks projects/** access")
+            record_event(root, marker, payload, event="scope-guard-deny", phase="guard", guard="deny", result="repo/** blocked")
+            _emit_deny(hook_event_name, "maintenance scope guard blocks repo/** access")
             return
         stale_run_read = _stale_run_artifact_read(root, str(marker.get("workflow_id") or ""), tool_name, tool_input)
         if stale_run_read:

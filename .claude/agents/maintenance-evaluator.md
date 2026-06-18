@@ -30,7 +30,7 @@ color: purple
 - 파일 edit
 - implementer self-report를 authoritative proof로 취급
 - dirty worktree 전체 변경을 승인 candidate scope violation으로 판정
-- `projects/**` 또는 external state 접근
+- `repo/**` 또는 external state 접근
 - final pass 선언
 
 ## 출력

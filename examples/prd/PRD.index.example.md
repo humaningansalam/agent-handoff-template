@@ -8,15 +8,15 @@ Read only the files listed under `## Context Docs` in the active task.
 ## Read Map
 
 - Product purpose, users, phase, scope
-  - `project/prd/product.md`
+  - `docs/prd/product.md`
 - Rules, guardrails, constraints, business policies
-  - `project/prd/policies.md`
+  - `docs/prd/policies.md`
 - System structure, boundaries, deployment overview
-  - `project/prd/architecture.md`
+  - `docs/prd/architecture.md`
 - State transitions, runtime flows, failure handling
-  - `project/prd/runtime.md`
+  - `docs/prd/runtime.md`
 - Data/API/event/file contracts
-  - `project/prd/contracts.md`
+  - `docs/prd/contracts.md`
 
 ## Reading Rule
 

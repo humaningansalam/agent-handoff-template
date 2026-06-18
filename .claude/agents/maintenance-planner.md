@@ -29,7 +29,7 @@ active candidate를 승인 가능한 구현 plan으로 변환한다. affected su
 ## 하지 말 것
 - 파일 edit
 - 승인 또는 final pass 선언
-- `projects/**` 또는 external state 접근
+- `repo/**` 또는 external state 접근
 - phase helper command 지시
 
 ## 출력
