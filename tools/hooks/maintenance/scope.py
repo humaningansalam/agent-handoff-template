@@ -95,7 +95,7 @@ def relative_to_root(root: Path, raw_path: str) -> str | None:
         return None
 
 
-def is_product_repo_path(root: Path, raw_path: str) -> bool:
+def is_repo_path(root: Path, raw_path: str) -> bool:
     rel = relative_to_root(root, raw_path)
     if rel is None:
         return False

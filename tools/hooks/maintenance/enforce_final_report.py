@@ -63,17 +63,21 @@ def final_report_block_reason(root: Path, payload: dict[str, Any]) -> str | None
     pass_eligibility = state.get("pass_eligibility") if isinstance(state.get("pass_eligibility"), dict) else {}
     calculated = pass_eligibility.get("calculated") if isinstance(pass_eligibility.get("calculated"), dict) else {}
 
+    next_action = _next_action_hint(state)
     if not first_line:
-        return "maintenance final report는 첫 줄에 user-facing decision(pass | awaiting-human-approval | needs-human-decision | stop | fail)이 필요합니다. 중간 phase면 다음 required phase를 계속 진행하세요."
+        return (
+            "maintenance final report는 첫 줄에 user-facing decision(pass | awaiting-human-approval | "
+            "needs-human-decision | stop | fail)이 필요합니다. " + next_action
+        )
     retry_block = retry_decision_block_reason(state, first_line)
     if retry_block:
         return retry_block
     if first_line == "pass" and calculated.get("eligible") is not True:
-        return "maintenance final report가 pass를 주장하지만 runner pass_eligibility가 false라 차단되었습니다."
+        return "maintenance final report가 pass를 주장하지만 runner pass_eligibility가 false라 차단되었습니다. " + next_action
     if first_line == "awaiting-human-approval" and phase != "awaiting_human_approval":
         return "maintenance final report가 awaiting-human-approval을 주장하지만 runner state phase가 일치하지 않아 차단되었습니다."
     if first_line == "fail" and phase not in {"failed", "skeptic_reviewed"}:
-        return "maintenance final report가 중간 phase에서 fail을 주장해 차단되었습니다. internal retry/phase continuation이 필요합니다."
+        return "maintenance final report가 중간 phase에서 fail을 주장해 차단되었습니다. " + next_action
     if first_line == "stop" and _only_tests_not_passed_blocker(calculated):
         return (
             "maintenance final report가 tests_not_passed만 남은 상태에서 stop을 주장했습니다. "
@@ -81,8 +85,38 @@ def final_report_block_reason(root: Path, payload: dict[str, Any]) -> str | None
             "`--verification-passed true|false`를 기록하고 checker state를 갱신하세요."
         )
     if first_line == "stop" and phase not in {"decided", "skeptic_reviewed"}:
-        return "maintenance final report가 중간 phase에서 stop을 주장해 차단되었습니다. internal retry/phase continuation이 필요합니다."
+        return "maintenance final report가 중간 phase에서 stop을 주장해 차단되었습니다. " + next_action
     return None
+
+
+def _next_action_hint(state: dict[str, Any]) -> str:
+    pass_eligibility = state.get("pass_eligibility") if isinstance(state.get("pass_eligibility"), dict) else {}
+    calculated = pass_eligibility.get("calculated") if isinstance(pass_eligibility.get("calculated"), dict) else {}
+    if calculated.get("eligible") is True:
+        return "checker is pass-eligible; emit final first line `pass` without calling more workers."
+    cursor = pass_eligibility.get("route_cursor") if isinstance(pass_eligibility.get("route_cursor"), dict) else {}
+    next_worker = str(cursor.get("next_required_worker") or "").strip()
+    remaining = cursor.get("remaining_required_artifacts") if isinstance(cursor.get("remaining_required_artifacts"), list) else []
+    next_artifact = str(remaining[0]) if remaining else ""
+    changed_files = state.get("changed_files") if isinstance(state.get("changed_files"), list) else []
+    if next_worker == "maintenance-implementer" and next_artifact.endswith("evidence/execution.json") and changed_files:
+        return (
+            "Approved implementation changes are already recorded; do not call maintenance-implementer again. "
+            "Persist `--kind execution --status passed` evidence only with "
+            "`uv run python -m tools.agent_harness.safe_artifact_writer write ...`; "
+            "do not use direct `python`, script paths, `PYTHONPATH=...`, `rg`, or `git` as evidence commands."
+        )
+    if next_worker:
+        artifact_hint = f" and produce `{next_artifact}`" if next_artifact else ""
+        return (
+            f"Continue with exactly `{next_worker}`{artifact_hint}; do not rerun completed workers or call route-outside agents. "
+            "Persist evidence only with `uv run python -m tools.agent_harness.safe_artifact_writer write ...`; "
+            "do not use direct `python`, script paths, `PYTHONPATH=...`, `rg`, or `git` as evidence commands."
+        )
+    blockers = calculated.get("blocked_by") if isinstance(calculated.get("blocked_by"), list) else []
+    if blockers:
+        return "Resolve checker blockers before final response: " + ", ".join(str(blocker) for blocker in blockers)
+    return "Continue via the checker route cursor and structured safe-writer evidence before final response."
 
 
 def _active_state_requires_final_gate(state: dict[str, Any]) -> bool:

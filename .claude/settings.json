@@ -1,31 +1,36 @@
 {
   "permissions": {
     "allow": [
-      "Read"
+      "Read",
+      "Agent(maintenance-cartographer)",
+      "Agent(maintenance-planner)",
+      "Agent(maintenance-plan-critic)",
+      "Agent(maintenance-implementer)",
+      "Agent(maintenance-evaluator)",
+      "Agent(maintenance-skeptic)",
+      "Bash(uv run python -m tools.agent_harness.safe_artifact_writer write *)",
+      "Bash(uv run pytest *)",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/mark_active.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_scope.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/enforce_final_report.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/run_prompt_context.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_start.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_tool_event.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_trace.sh\")",
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce_subagent_final_report.sh\")"
     ],
     "deny": [
-      "Edit(tools/**)",
-      "Write(tools/**)",
-      "MultiEdit(tools/**)",
-      "Edit(/tools/**)",
-      "Write(/tools/**)",
-      "MultiEdit(/tools/**)",
-      "Edit(tests/**)",
-      "Write(tests/**)",
-      "MultiEdit(tests/**)",
-      "Edit(/tests/**)",
-      "Write(/tests/**)",
-      "MultiEdit(/tests/**)",
-      "Edit(scripts/**)",
-      "Write(scripts/**)",
-      "MultiEdit(scripts/**)",
-      "Edit(/scripts/**)",
-      "Write(/scripts/**)",
-      "MultiEdit(/scripts/**)",
+      "Read(/repo/**)",
+      "Read(repo/**)",
+      "Edit(/repo/**)",
+      "Edit(repo/**)",
+      "Write(/repo/**)",
+      "Write(repo/**)",
       "Bash(rm *)",
       "Bash(sudo *)",
       "Bash(curl * | *)",
-      "Bash(wget * | *)"
+      "Bash(wget * | *)",
+      "Skill"
     ]
   },
   "hooks": {

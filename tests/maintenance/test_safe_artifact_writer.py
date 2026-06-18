@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tools.agent_harness import safe_artifact_writer
+from tools.agent_harness.policy import plan_contract_hash
 from tools.runtime.json_io import read_json_object, write_json_atomic_under_root
 
 VALID_STRUCTURED_EVIDENCE = True
@@ -50,6 +51,19 @@ def test_safe_artifact_writer_writes_latest_and_canonical_archive(tmp_path: Path
     metadata = read_json_object(tmp_path / "ops" / "agent-harness" / "latest-plan-metadata.json")
     assert metadata["affected_surfaces"] == ["docs/example.md"]
     assert metadata["acceptance_criteria_ids"] == ["AC1"]
+    assert metadata["surface_classes"] == ["low_risk_prose"]
+    assert metadata["profile"] == "TINY_DOC"
+    assert metadata["route"] == ["maintenance-planner", "maintenance-implementer", "host-verifier"]
+    assert metadata["verification_mode"] == "semantic"
+    assert "route_changed" in metadata["reapproval_triggers"]
+    assert "verification_mode_changed" in metadata["reapproval_triggers"]
+    assert metadata["plan_body_sha256"] == result["sha256"]
+    assert len(metadata["plan_contract_hash"]) == 64
+    assert result["plan_contract_hash"] == metadata["plan_contract_hash"]
+    assert result["approval_phrase"] == f"승인: O1 {metadata['plan_contract_hash'][:12]}"
+    assert metadata["approval_phrase"] == result["approval_phrase"]
+    assert metadata["approval_phrase_hash_prefix_length"] == 12
+    assert result["approval_phrase"] != f"승인: O1 {result['sha256'][:8]}"
     assert metadata["plan_sha256"] == result["sha256"]
     index = read_json_object(tmp_path / "ops" / "agent-harness" / "latest-artifact-index.json")
     assert index["artifacts"] == [
@@ -65,6 +79,147 @@ def test_safe_artifact_writer_writes_latest_and_canonical_archive(tmp_path: Path
     ]
 
 
+def test_plan_contract_hash_includes_cartography_ambiguity_route(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="cartography",
+        status="passed",
+        summary="ambiguous instruction doc mapped before planning",
+        workflow_id="mw-ambiguous-route",
+        active_candidate_id="DOCS-001",
+    )
+
+    result = safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="plan",
+        status="passed",
+        summary="plan for ambiguous instruction doc",
+        workflow_id="mw-ambiguous-route",
+        candidate_id="DOCS-001",
+        affected_surfaces=("CLAUDE.md",),
+        acceptance_criteria_ids=("AC-001",),
+    )
+
+    metadata = read_json_object(tmp_path / "ops" / "agent-harness" / "latest-plan-metadata.json")
+    assert metadata["route"][0] == "maintenance-cartographer"
+    assert result["plan_contract_hash"] == plan_contract_hash(
+        candidate_id="DOCS-001",
+        affected_surfaces=("CLAUDE.md",),
+        acceptance_criteria_ids=("AC-001",),
+        ambiguity=True,
+    )
+
+
+def test_plan_contract_hash_includes_mechanical_verification_route(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="cartography",
+        status="passed",
+        summary="critical harness doc typo mapped before planning",
+        workflow_id="mw-mechanical-route",
+        active_candidate_id="DOCS-001",
+    )
+
+    semantic = safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="plan",
+        status="passed",
+        summary="semantic plan for critical harness doc",
+        workflow_id="mw-mechanical-route",
+        candidate_id="DOCS-001",
+        affected_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+        acceptance_criteria_ids=("AC-001",),
+    )
+    mechanical = safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="plan",
+        status="passed",
+        summary="mechanical plan for critical harness doc typo",
+        workflow_id="mw-mechanical-route",
+        candidate_id="DOCS-001",
+        affected_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+        acceptance_criteria_ids=("AC-001",),
+        verification_mode="mechanical",
+        revision=2,
+    )
+
+    metadata = read_json_object(tmp_path / "ops" / "agent-harness" / "latest-plan-metadata.json")
+    assert metadata["verification_mode"] == "mechanical"
+    assert metadata["profile"] == "CRITICAL_HARNESS"
+    assert metadata["route"] == [
+        "maintenance-cartographer",
+        "maintenance-planner",
+        "maintenance-plan-critic",
+        "maintenance-implementer",
+        "maintenance-evaluator",
+    ]
+    assert "maintenance-skeptic" not in metadata["route"]
+    assert mechanical["plan_contract_hash"] != semantic["plan_contract_hash"]
+    assert mechanical["plan_contract_hash"] == plan_contract_hash(
+        candidate_id="DOCS-001",
+        affected_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+        acceptance_criteria_ids=("AC-001",),
+        ambiguity=True,
+        verification_mode="mechanical",
+    )
+
+
+def test_mechanical_verification_rejects_broad_or_p1_plan(tmp_path: Path) -> None:
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="mechanical verification requires"):
+        safe_artifact_writer.write_artifact(
+            tmp_path,
+            kind="plan",
+            status="passed",
+            summary="too broad for mechanical verification",
+            workflow_id="mw-mechanical-broad",
+            candidate_id="DOCS-001",
+            affected_surfaces=("README.md", "docs/guide.md"),
+            acceptance_criteria_ids=("AC-001",),
+            verification_mode="mechanical",
+        )
+
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="mechanical verification is limited"):
+        safe_artifact_writer.write_artifact(
+            tmp_path,
+            kind="plan",
+            status="passed",
+            summary="settings typo should not skip skeptic",
+            workflow_id="mw-mechanical-settings",
+            candidate_id="SETTINGS-001",
+            affected_surfaces=(".claude/settings.json",),
+            acceptance_criteria_ids=("AC-001",),
+            verification_mode="mechanical",
+        )
+
+
+def test_safe_artifact_writer_rejects_forbidden_repo_surface(tmp_path: Path) -> None:
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="forbidden affected surfaces"):
+        safe_artifact_writer.write_artifact(
+            tmp_path,
+            kind="plan",
+            status="passed",
+            summary="repo product files are out of maintenance scope",
+            workflow_id="mw-forbidden-repo",
+            candidate_id="REPO-001",
+            affected_surfaces=("repo/src/app.py",),
+            acceptance_criteria_ids=("AC-001",),
+        )
+
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="mechanical verification requires"):
+        safe_artifact_writer.write_artifact(
+            tmp_path,
+            kind="plan",
+            status="passed",
+            summary="too severe for mechanical verification",
+            workflow_id="mw-mechanical-severe",
+            candidate_id="DOCS-002",
+            affected_surfaces=("README.md",),
+            acceptance_criteria_ids=("AC-001",),
+            failure_mode_severity="P1",
+            verification_mode="mechanical",
+        )
+
+
 def test_safe_artifact_writer_rejects_candidate_artifact_without_candidate(tmp_path: Path) -> None:
     with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="candidate-id is required"):
         safe_artifact_writer.write_artifact(
@@ -73,6 +228,31 @@ def test_safe_artifact_writer_rejects_candidate_artifact_without_candidate(tmp_p
             status="passed",
             summary="plan structured evidence",
             workflow_id="mw-safe-writer",
+        )
+
+
+def test_safe_artifact_writer_cli_root_must_match_claude_project_dir(tmp_path: Path, monkeypatch) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="CLAUDE_PROJECT_DIR"):
+        safe_artifact_writer.run(
+            safe_artifact_writer.parse_args(
+                [
+                    "write",
+                    "--root",
+                    str(outside),
+                    "--kind",
+                    "cartography",
+                    "--status",
+                    "passed",
+                    "--summary",
+                    "outside root should be rejected",
+                    "--workflow-id",
+                    "mw-root-boundary",
+                ]
+            )
         )
 
 
@@ -96,6 +276,58 @@ def test_safe_artifact_writer_cli_outputs_json(tmp_path: Path, capsys) -> None:
     output = json.loads(capsys.readouterr().out)
     assert output["kind"] == "cartography"
     assert output["latest_path"] == "ops/agent-harness/evidence/cartography.json"
+
+
+def test_safe_artifact_writer_records_optional_finding_matrix(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="execution-review",
+        status="failed",
+        summary="verification found a policy mismatch",
+        workflow_id="mw-finding-matrix",
+        candidate_id="DOCS-001",
+        verification_passed=False,
+        finding_ids=("F-001",),
+        finding_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+        finding_expected=("contract docs require critical route",),
+        finding_observed=("route was too light",),
+        finding_verdicts=("fail",),
+        finding_severities=("P1",),
+        retry_target_value="retry-plan",
+        checked_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+        evidence_refs=("ops/agent-harness/evidence/execution.json",),
+    )
+
+    evidence = json.loads((tmp_path / "ops" / "agent-harness" / "evidence/execution-review.json").read_text(encoding="utf-8"))
+    assert evidence["findings"] == [
+        {
+            "id": "F-001",
+            "surface": "docs/MAINTENANCE_HARNESS_CONTRACT.md",
+            "expected": "contract docs require critical route",
+            "observed": "route was too light",
+            "verdict": "fail",
+            "severity": "P1",
+        }
+    ]
+    assert evidence["retry_target"] == "retry-plan"
+    assert evidence["checked_surfaces"] == ["docs/MAINTENANCE_HARNESS_CONTRACT.md"]
+    assert evidence["evidence_refs"] == ["ops/agent-harness/evidence/execution.json"]
+
+
+def test_safe_artifact_writer_accepts_typed_retry_targets(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="execution-review",
+        status="failed",
+        summary="approval metadata retry evidence",
+        workflow_id="mw-typed-retry",
+        candidate_id="DOCS-001",
+        verification_passed=False,
+        retry_target_value="retry-approval-metadata",
+    )
+
+    evidence = json.loads((tmp_path / "ops" / "agent-harness" / "evidence/execution-review.json").read_text(encoding="utf-8"))
+    assert evidence["retry_target"] == "retry-approval-metadata"
 
 
 def test_safe_artifact_writer_records_structured_candidate_queue(tmp_path: Path) -> None:
@@ -172,6 +404,108 @@ def test_safe_artifact_writer_rejects_plan_without_structured_metadata(tmp_path:
             candidate_id="DOCS-001",
             acceptance_criteria_ids=("AC1",),
         )
+
+
+def test_safe_artifact_writer_requires_cartography_before_critical_harness_plan(tmp_path: Path) -> None:
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="requires cartography evidence before writing plan"):
+        safe_artifact_writer.write_artifact(
+            tmp_path,
+            kind="plan",
+            status="passed",
+            summary="critical harness plan structured evidence",
+            workflow_id="mw-critical-plan",
+            candidate_id="DOCS-001",
+            affected_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+            acceptance_criteria_ids=("AC-001",),
+        )
+
+
+def test_safe_artifact_writer_allows_critical_harness_plan_after_cartography(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="cartography",
+        status="passed",
+        summary="cartography structured evidence",
+        workflow_id="mw-critical-plan-ok",
+        active_candidate_id="DOCS-001",
+    )
+
+    result = safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="plan",
+        status="passed",
+        summary="critical harness plan structured evidence",
+        workflow_id="mw-critical-plan-ok",
+        candidate_id="DOCS-001",
+        affected_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
+        acceptance_criteria_ids=("AC-001",),
+    )
+
+    metadata = read_json_object(tmp_path / "ops" / "agent-harness" / "latest-plan-metadata.json")
+    assert result["kind"] == "plan"
+    assert metadata["profile"] == "CRITICAL_HARNESS"
+    assert metadata["route"][0] == "maintenance-cartographer"
+
+
+def test_safe_artifact_writer_requires_shards_for_broad_critical_plan(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="cartography",
+        status="passed",
+        summary="cartography structured evidence",
+        workflow_id="mw-critical-broad",
+        active_candidate_id="CAND-001",
+    )
+
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="require cartography shard queue"):
+        safe_artifact_writer.write_artifact(
+            tmp_path,
+            kind="plan",
+            status="passed",
+            summary="broad critical plan structured evidence",
+            workflow_id="mw-critical-broad",
+            candidate_id="CAND-001",
+            affected_surfaces=(
+                "tools/agent_harness/safe_artifact_writer.py",
+                "tools/hooks/maintenance/prompt_approval.py",
+                "docs/MAINTENANCE_HARNESS_CONTRACT.md",
+                "tests/maintenance/test_safe_artifact_writer.py",
+            ),
+            acceptance_criteria_ids=("AC-001",),
+        )
+
+
+def test_safe_artifact_writer_allows_broad_critical_plan_with_shard_queue(tmp_path: Path) -> None:
+    safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="cartography",
+        status="passed",
+        summary="cartography structured evidence",
+        workflow_id="mw-critical-sharded",
+        active_candidate_id="CAND-001",
+        queued_candidate_ids=("CAND-002",),
+        queue_policy="human-decision",
+    )
+
+    result = safe_artifact_writer.write_artifact(
+        tmp_path,
+        kind="plan",
+        status="passed",
+        summary="broad critical plan structured evidence",
+        workflow_id="mw-critical-sharded",
+        candidate_id="CAND-001",
+        affected_surfaces=(
+            "tools/agent_harness/safe_artifact_writer.py",
+            "tools/hooks/maintenance/prompt_approval.py",
+            "docs/MAINTENANCE_HARNESS_CONTRACT.md",
+            "tests/maintenance/test_safe_artifact_writer.py",
+        ),
+        acceptance_criteria_ids=("AC-001",),
+    )
+
+    metadata = read_json_object(tmp_path / "ops" / "agent-harness" / "latest-plan-metadata.json")
+    assert result["kind"] == "plan"
+    assert metadata["profile"] == "CRITICAL_HARNESS"
 
 
 def test_safe_artifact_writer_rejects_workflow_id_outside_active_session(tmp_path: Path) -> None:

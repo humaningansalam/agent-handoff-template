@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from tools.hooks.hook_failures import record_hook_failure
 from tools.agent_harness.retry_policy import retry_agent_start_block_reason, retry_target
-from tools.hooks.maintenance.scope import active_marker_for_session, is_maintenance_artifact_path, is_product_repo_path, json_dumps, relative_to_root, workspace_root
+from tools.hooks.maintenance.scope import active_marker_for_session, is_maintenance_artifact_path, is_repo_path, json_dumps, relative_to_root, workspace_root
 from tools.hooks.maintenance.trace import record_event
 from tools.hooks.tool_input_normalization import UNSAFE_PARSE_ERROR, split_bash_command
 from tools.runtime.json_io import read_json_object
@@ -22,6 +23,28 @@ EVIDENCE_VIEW_NAMES = {
 }
 STATE_VIEW_NAME = "current-run-state.json"
 STATE_VIEW_PATH = "ops/agent-harness/current-run-state.json"
+EVENTS_JSONL = "ops/agent-harness/latest-events.jsonl"
+IMPLEMENTER_BUDGET = {
+    "Read": 30,
+    "Grep": 15,
+    "Glob": 15,
+    "Edit": 10,
+    "MultiEdit": 10,
+    "Write": 10,
+}
+IMPLEMENTER_WALL_CLOCK_SECONDS = 300
+REVIEW_WORKER_BUDGET = {
+    "Read": 16,
+    "Grep": 8,
+    "Glob": 5,
+    "Bash": 8,
+}
+REVIEW_WORKER_WALL_CLOCK_SECONDS = 180
+REVIEW_WORKER_RETRY = {
+    "maintenance-plan-critic": ("plan-review", "retry-plan"),
+    "maintenance-evaluator": ("execution-review", "retry-evaluation"),
+    "maintenance-skeptic": ("skeptic-review", "retry-evaluation"),
+}
 
 
 def _hook_event_name(payload: dict[str, Any]) -> str:
@@ -76,14 +99,14 @@ def _tool_paths(tool_input: dict[str, Any]) -> tuple[str, ...]:
 
 def _blocked_reference(root: Path, tool_name: str, tool_input: dict[str, Any]) -> str:
     for raw_path in _tool_paths(tool_input):
-        if is_product_repo_path(root, raw_path):
+        if is_repo_path(root, raw_path):
             return raw_path
     if tool_name == "Bash":
-        for part in split_bash_command(tool_input):
-            if part == UNSAFE_PARSE_ERROR:
-                continue
-            if is_product_repo_path(root, part):
-                return part
+        parts = split_bash_command(tool_input)
+        if parts != [UNSAFE_PARSE_ERROR]:
+            for part in parts:
+                if is_repo_path(root, part):
+                    return part
     return ""
 
 
@@ -188,6 +211,24 @@ def _agent_retry_block_reason(root: Path, payload: dict[str, Any], tool_input: d
 def _profile_agent_block_reason(state: dict[str, Any], payload: dict[str, Any], tool_input: dict[str, Any]) -> str:
     agent_type = _agent_type_from_payload(payload, tool_input)
     pass_eligibility = state.get("pass_eligibility") if isinstance(state.get("pass_eligibility"), dict) else {}
+    cursor = pass_eligibility.get("route_cursor") if isinstance(pass_eligibility.get("route_cursor"), dict) else {}
+    completed = {str(worker) for worker in cursor.get("completed_workers", []) if str(worker).strip()} if isinstance(cursor.get("completed_workers"), list) else set()
+    next_worker = str(cursor.get("next_required_worker") or "").strip()
+    workflow_profile = pass_eligibility.get("workflow_profile") if isinstance(pass_eligibility.get("workflow_profile"), dict) else {}
+    route = tuple(str(worker) for worker in workflow_profile.get("route", []) if str(worker).strip()) if isinstance(workflow_profile.get("route"), list) else ()
+    if route and agent_type.startswith("maintenance-") and agent_type not in route:
+        return f"checker policy route does not include {agent_type}; allowed route: {', '.join(route)}"
+    if route and agent_type.startswith("maintenance-"):
+        if next_worker and agent_type != next_worker:
+            return f"checker route cursor requires {next_worker}; blocked {agent_type}."
+        if agent_type == "maintenance-implementer" and _implementation_already_allowed_needs_evidence(state):
+            return (
+                "approved implementation edit is already recorded; do not call maintenance-implementer again. "
+                "Write `--kind execution --status passed` evidence with `uv run python -m tools.agent_harness.safe_artifact_writer write ...` "
+                "for the approved changed files before continuing. Do not use direct `python`, script paths, `PYTHONPATH=...`, `rg`, or `git` as evidence commands."
+            )
+        if not next_worker and agent_type in completed:
+            return f"checker route cursor already completed {agent_type}; no required workers remain."
     calculated = pass_eligibility.get("calculated") if isinstance(pass_eligibility.get("calculated"), dict) else {}
     profile = str(calculated.get("workflow_path") or pass_eligibility.get("workflow_path") or "")
     if profile == "TINY_DOC" and agent_type in {"maintenance-plan-critic", "maintenance-evaluator", "maintenance-skeptic"}:
@@ -197,10 +238,16 @@ def _profile_agent_block_reason(state: dict[str, Any], payload: dict[str, Any], 
     return ""
 
 
+def _implementation_already_allowed_needs_evidence(state: dict[str, Any]) -> bool:
+    changed = state.get("changed_files") if isinstance(state.get("changed_files"), list) else []
+    worker_status = state.get("worker_status") if isinstance(state.get("worker_status"), dict) else {}
+    implementer = worker_status.get("maintenance-implementer") if isinstance(worker_status.get("maintenance-implementer"), dict) else {}
+    return bool(changed and not implementer.get("structured_evidence_valid"))
+
+
 def _missing_prior_evidence_agent_blocker(root: Path, payload: dict[str, Any], tool_input: dict[str, Any]) -> str:
     agent_type = _agent_type_from_payload(payload, tool_input)
     required_before_agent = {
-        "maintenance-planner": "ops/agent-harness/evidence/cartography.json",
         "maintenance-plan-critic": "ops/agent-harness/evidence/plan.json",
         "maintenance-evaluator": "ops/agent-harness/evidence/execution.json",
         "maintenance-skeptic": "ops/agent-harness/evidence/execution-review.json",
@@ -213,11 +260,110 @@ def _missing_prior_evidence_agent_blocker(root: Path, payload: dict[str, Any], t
     return f"write {required_path} with safe_artifact_writer JSON evidence before invoking {agent_type}"
 
 
+def _implementer_budget_block_reason(root: Path, marker: dict[str, Any], payload: dict[str, Any], tool_input: dict[str, Any]) -> str:
+    if _agent_type_from_payload(payload, tool_input) != "maintenance-implementer":
+        return ""
+    tool_name = str(payload.get("tool_name") or "")
+    limit = IMPLEMENTER_BUDGET.get(tool_name)
+    if limit is None:
+        return ""
+    workflow_id = str(marker.get("workflow_id") or "")
+    events = _recent_events(root)
+    worker_events = [
+        event for event in events
+        if event.get("workflow_id") == workflow_id and event.get("agent_type") == "maintenance-implementer"
+    ]
+    if _worker_wall_clock_seconds(worker_events) > IMPLEMENTER_WALL_CLOCK_SECONDS:
+        return _implementer_budget_handoff("wall clock over 300s")
+    used = sum(1 for event in worker_events if event.get("event") == "pre_tool" and event.get("tool_name") == tool_name)
+    if used >= limit:
+        return _implementer_budget_handoff(f"{tool_name} limit {limit}")
+    mutation_used = sum(
+        1 for event in worker_events
+        if event.get("event") == "pre_tool" and event.get("tool_name") in {"Edit", "MultiEdit", "Write"}
+    )
+    if tool_name in {"Edit", "MultiEdit", "Write"} and mutation_used >= IMPLEMENTER_BUDGET["Edit"]:
+        return _implementer_budget_handoff("mutation limit 10")
+    return ""
+
+
+def _implementer_budget_handoff(reason: str) -> str:
+    return (
+        f"maintenance-implementer budget exceeded: {reason}; do not call maintenance-implementer again. "
+        "Write failed `--kind execution --status failed --retry-target retry-implementation` evidence with "
+        "`uv run python -m tools.agent_harness.safe_artifact_writer write ...`, "
+        "or return `needs-human-decision` if the failure cannot be represented as structured evidence."
+    )
+
+
+def _review_worker_budget_block_reason(root: Path, marker: dict[str, Any], payload: dict[str, Any], tool_input: dict[str, Any]) -> str:
+    agent_type = _agent_type_from_payload(payload, tool_input)
+    artifact_retry = REVIEW_WORKER_RETRY.get(agent_type)
+    if not artifact_retry:
+        return ""
+    tool_name = str(payload.get("tool_name") or "")
+    limit = REVIEW_WORKER_BUDGET.get(tool_name)
+    if limit is None:
+        return ""
+    workflow_id = str(marker.get("workflow_id") or "")
+    events = _recent_events(root)
+    worker_events = [
+        event for event in events
+        if event.get("workflow_id") == workflow_id and event.get("agent_type") == agent_type
+    ]
+    if _worker_wall_clock_seconds(worker_events) > REVIEW_WORKER_WALL_CLOCK_SECONDS:
+        return _review_worker_budget_handoff(agent_type, artifact_retry, f"wall clock over {REVIEW_WORKER_WALL_CLOCK_SECONDS}s")
+    used = sum(1 for event in worker_events if event.get("event") == "pre_tool" and event.get("tool_name") == tool_name)
+    if used >= limit:
+        return _review_worker_budget_handoff(agent_type, artifact_retry, f"{tool_name} limit {limit}")
+    return ""
+
+
+def _review_worker_budget_handoff(agent_type: str, artifact_retry: tuple[str, str], reason: str) -> str:
+    artifact_kind, retry = artifact_retry
+    return (
+        f"{agent_type} budget exceeded: {reason}; do not call {agent_type} again. "
+        f"Write failed `--kind {artifact_kind} --status failed --retry-target {retry}` evidence with "
+        "`uv run python -m tools.agent_harness.safe_artifact_writer write ...`, "
+        "or return `needs-human-decision` if the failure cannot be represented as structured evidence."
+    )
+
+
+def _recent_events(root: Path) -> list[dict[str, Any]]:
+    path = root / EVENTS_JSONL
+    if not path.is_file() or path.is_symlink():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]:
+        try:
+            loaded = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict):
+            rows.append(loaded)
+    return rows
+
+
+def _worker_wall_clock_seconds(events: list[dict[str, Any]]) -> float:
+    timestamps: list[datetime] = []
+    for event in events:
+        raw = str(event.get("captured_at") or "")
+        if not raw:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    if len(timestamps) < 2:
+        return 0.0
+    return (max(timestamps) - min(timestamps)).total_seconds()
+
+
 def _repo_mutation_before_approval(root: Path, tool_name: str, tool_input: dict[str, Any]) -> str:
     if tool_name not in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
         return ""
     for raw_path in _tool_paths(tool_input):
-        if is_maintenance_artifact_path(root, raw_path) or is_product_repo_path(root, raw_path):
+        if is_maintenance_artifact_path(root, raw_path) or is_repo_path(root, raw_path):
             continue
         path = Path(raw_path)
         absolute = path if path.is_absolute() else root / path
@@ -236,7 +382,7 @@ def _relative_repo_mutation_paths(root: Path, tool_name: str, tool_input: dict[s
         return ()
     paths: list[tuple[str, str]] = []
     for raw_path in _tool_paths(tool_input):
-        if is_maintenance_artifact_path(root, raw_path) or is_product_repo_path(root, raw_path):
+        if is_maintenance_artifact_path(root, raw_path) or is_repo_path(root, raw_path):
             continue
         path = Path(raw_path)
         absolute = path if path.is_absolute() else root / path
@@ -291,6 +437,13 @@ def main() -> None:
         if not marker:
             return
         tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        budget_block = _implementer_budget_block_reason(root, marker, payload, tool_input)
+        if not budget_block:
+            budget_block = _review_worker_budget_block_reason(root, marker, payload, tool_input)
+        if budget_block:
+            record_event(root, marker, payload, event="worker-budget-deny", phase="budget", guard="deny", result=budget_block)
+            _emit_deny(hook_event_name, budget_block)
+            return
         if tool_name == "Agent":
             agent_block = _agent_retry_block_reason(root, payload, tool_input)
             if agent_block:

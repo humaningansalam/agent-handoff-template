@@ -9,6 +9,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 
 from tools.agent_harness import paths as harness_paths
 from tools.agent_harness.pass_gate import calculate_pass_eligibility
+from tools.agent_harness.policy import WorkflowProfile, policy_for_surfaces, required_artifacts_for_route, required_workers_for_route, route_for_profile
 
 
 class DecisionStatus(str, Enum):
@@ -266,6 +267,7 @@ class ApprovalFreeze:
     plan_path: str
     plan_revision: int
     plan_sha256: str = ""
+    plan_contract_hash: str = ""
     affected_surfaces: tuple[str, ...] = ()
     acceptance_criteria_ids: tuple[str, ...] = ()
 
@@ -275,6 +277,7 @@ class ApprovalFreeze:
             "plan_path": self.plan_path,
             "plan_revision": self.plan_revision,
             "plan_sha256": self.plan_sha256,
+            "plan_contract_hash": self.plan_contract_hash,
             "affected_surfaces_sha256": self.affected_surfaces_sha256(),
             "acceptance_criteria_sha256": self.acceptance_criteria_sha256(),
             "approval_hash": self.approval_hash(),
@@ -294,6 +297,7 @@ class ApprovalFreeze:
             "plan_path": self.plan_path,
             "plan_revision": self.plan_revision,
             "plan_sha256": self.plan_sha256,
+            "plan_contract_hash": self.plan_contract_hash,
             "affected_surfaces_sha256": self.affected_surfaces_sha256(),
             "acceptance_criteria_sha256": self.acceptance_criteria_sha256(),
             "affected_surfaces": list(self.affected_surfaces),
@@ -451,43 +455,21 @@ class MaintenanceHarness:
     REQUIRED_PASS_ARTIFACT_PATHS: tuple[str, ...] = (STATE_ARTIFACT_PATH, *REQUIRED_EVIDENCE_ARTIFACT_PATHS)
     FULL_GATED_SURFACE_PATTERNS: ClassVar[tuple[str, ...]] = (
         ".claude/hooks/**",
-        ".claude/settings.maintenance.json",
+        ".claude/settings.json",
         "tools/hooks/**",
         "tools/agent_harness/**",
-        "tests/maintenance/**",
-        "tests/research_ops/test_hook_permission_contracts.py",
+        "tests/maintenance/test_scope_guard.py",
         "tests/maintenance/test_runner_contract.py",
     )
 
     @classmethod
     def mandatory_workers_for_profile(cls, profile_path: str) -> tuple[str, ...]:
-        if profile_path == "TINY_DOC":
-            return ("maintenance-planner", "maintenance-implementer")
-        if profile_path == "STANDARD":
-            return (
-                "maintenance-cartographer",
-                "maintenance-planner",
-                "maintenance-plan-critic",
-                "maintenance-implementer",
-                "maintenance-evaluator",
-            )
-        return cls.MANDATORY_WORKERS
+        return required_workers_for_route(route_for_profile(profile_path))
 
     @classmethod
     def required_pass_artifact_paths_for_profile(cls, profile_path: str) -> tuple[str, ...]:
-        artifact = harness_paths.ARTIFACT_ROOT / "evidence"
-        if profile_path == "TINY_DOC":
-            return (cls.STATE_ARTIFACT_PATH, str(artifact / "plan.json"), str(artifact / "execution.json"), str(artifact / "execution-review.json"))
-        if profile_path == "STANDARD":
-            return (
-                cls.STATE_ARTIFACT_PATH,
-                str(artifact / "cartography.json"),
-                str(artifact / "plan.json"),
-                str(artifact / "plan-review.json"),
-                str(artifact / "execution.json"),
-                str(artifact / "execution-review.json"),
-            )
-        return (cls.STATE_ARTIFACT_PATH, *cls.EVIDENCE_ARTIFACT_PATHS)
+        route = route_for_profile(profile_path)
+        return required_artifacts_for_route(route, host_verifier_allowed=profile_path == WorkflowProfile.TINY_DOC.value)
     LIGHTWEIGHT_SURFACE_PATTERNS: ClassVar[tuple[str, ...]] = (
         "docs/**",
         ".claude/agents/**",
@@ -890,6 +872,7 @@ class MaintenanceHarness:
         evidence: str,
         *,
         approved_plan_sha256: str = "",
+        approved_plan_contract_hash: str = "",
         approved_affected_surfaces: Sequence[str] = (),
         approved_acceptance_criteria_ids: Sequence[str] = (),
     ) -> None:
@@ -914,6 +897,7 @@ class MaintenanceHarness:
             plan_path=plan_record.path,
             plan_revision=plan_record.revision,
             plan_sha256=approved_plan_sha256.strip() or plan_record.content_sha256,
+            plan_contract_hash=approved_plan_contract_hash.strip(),
             affected_surfaces=affected_surfaces,
             acceptance_criteria_ids=acceptance_criteria_ids,
         )
@@ -1171,31 +1155,18 @@ class MaintenanceHarness:
 
     def workflow_profile(self) -> dict[str, Any]:
         surfaces = self._approval_surfaces_or_changed_files()
-        critical = (
-            self.failure_mode_ledger_severity in {FailureModeSeverity.P0, FailureModeSeverity.P1}
-            or any(self._path_matches_any(surface, self.FULL_GATED_SURFACE_PATTERNS) for surface in surfaces)
-        )
-        tiny_doc = (
-            not critical
-            and self.failure_mode_ledger_severity == FailureModeSeverity.P3
-            and bool(surfaces)
-            and all(surface.endswith((".md", ".txt")) for surface in surfaces)
-        )
-        if critical:
-            path = "CRITICAL_HARNESS"
-            verification = "full-replay"
-        elif tiny_doc:
-            path = "TINY_DOC"
-            verification = "checklist"
-        else:
-            path = "STANDARD"
-            verification = "targeted"
+        policy = policy_for_surfaces(surfaces, severity=self.failure_mode_ledger_severity.value)
+        path = policy.profile.value
+        verification = "full-replay" if path == "CRITICAL_HARNESS" else "checklist" if path == "TINY_DOC" else "targeted"
         return {
             "path": path,
             "verification": verification,
             "plan_review_required": path != "TINY_DOC",
             "evaluator_required": path != "TINY_DOC",
             "skeptic_required": path == "CRITICAL_HARNESS",
+            "route": list(policy.route),
+            "surface_classes": [surface_class.value for surface_class in policy.surface_classes],
+            "reason": policy.reason,
             "surfaces": list(surfaces),
         }
 
@@ -1303,8 +1274,6 @@ class MaintenanceHarness:
 
     def _scope_ok(self) -> bool:
         if self.approval_freeze is None or not self.approval_freeze.affected_surfaces:
-            return False
-        if not self.changed_files:
             return False
         return all(self._path_in_approved_surfaces(path, self.approval_freeze.affected_surfaces) for path in self.changed_files)
 

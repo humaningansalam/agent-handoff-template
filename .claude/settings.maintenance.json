@@ -17,13 +17,7 @@
       "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_start.sh\")",
       "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_tool_event.sh\")",
       "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/capture_subagent_trace.sh\")",
-      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce_subagent_final_report.sh\")",
-      "Write(/ops/agent-harness/**)",
-      "Edit(/ops/agent-harness/**)",
-      "MultiEdit(/ops/agent-harness/**)",
-      "Write(ops/agent-harness/**)",
-      "Edit(ops/agent-harness/**)",
-      "MultiEdit(ops/agent-harness/**)"
+      "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce_subagent_final_report.sh\")"
     ],
     "deny": [
       "Read(/repo/**)",
@@ -32,8 +26,6 @@
       "Edit(repo/**)",
       "Write(/repo/**)",
       "Write(repo/**)",
-      "MultiEdit(/repo/**)",
-      "MultiEdit(repo/**)",
       "Bash(rm *)",
       "Bash(sudo *)",
       "Bash(curl * | *)",

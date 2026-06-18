@@ -3,12 +3,25 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
 from tools.agent_harness import paths as harness_paths
 from tools.agent_harness.harness import MaintenanceHarness
 from tools.agent_harness.pass_gate import worker_ready
+from tools.agent_harness.policy import (
+    APPROVAL_HASH_PREFIX_LENGTH,
+    SurfaceClass,
+    VerificationMode,
+    WorkflowProfile,
+    approval_phrase,
+    classify_surface,
+    mechanical_verification_allowed,
+    plan_contract_hash,
+    plan_contract_payload,
+    policy_for_surfaces,
+)
 from tools.agent_harness.retry_policy import retry_artifact_write_block_reason, retry_target
 from tools.runtime.json_io import write_json_atomic_under_root, write_text_atomic_under_root
 
@@ -24,6 +37,16 @@ KIND_TO_WORKER = {
     "skeptic-review": "maintenance-skeptic",
 }
 VALID_EVIDENCE_STATUSES = {"passed", "failed"}
+VALID_RETRY_TARGETS = {
+    "retry-plan",
+    "retry-plan-metadata",
+    "retry-approval-metadata",
+    "retry-implementation",
+    "retry-artifact-metadata",
+    "retry-evaluation",
+    "retry-scope-ledger",
+    "retry-verification-metadata",
+}
 
 
 class SafeArtifactWriterError(RuntimeError):
@@ -41,6 +64,16 @@ def write_artifact(
     status: str = "passed",
     summary: str = "",
     blocking_findings: Sequence[str] = (),
+    finding_ids: Sequence[str] = (),
+    finding_surfaces: Sequence[str] = (),
+    finding_expected: Sequence[str] = (),
+    finding_observed: Sequence[str] = (),
+    finding_verdicts: Sequence[str] = (),
+    finding_severities: Sequence[str] = (),
+    retry_target_value: str = "",
+    checked_commands: Sequence[str] = (),
+    checked_surfaces: Sequence[str] = (),
+    evidence_refs: Sequence[str] = (),
     workflow_id: str,
     candidate_id: str = "",
     active_candidate_id: str = "",
@@ -50,6 +83,7 @@ def write_artifact(
     acceptance_criteria_ids: Sequence[str] = (),
     failure_mode_severity: str = "P3",
     failure_mode_mapped: bool = False,
+    verification_mode: str = VerificationMode.SEMANTIC.value,
     approval_ready: bool | None = None,
     verification_passed: bool | None = None,
     revision: int = 1,
@@ -73,6 +107,14 @@ def write_artifact(
     if normalized_queue_policy and normalized_queue_policy not in {"human-decision", "auto-continuation"}:
         raise SafeArtifactWriterError("queue-policy must be human-decision or auto-continuation")
     _require_plan_review_route_before_replanning(root, workflow, normalized_kind)
+    _require_policy_route_prerequisites(
+        root,
+        kind=normalized_kind,
+        affected_surfaces=affected_surfaces,
+        acceptance_criteria_ids=acceptance_criteria_ids,
+        failure_mode_severity=failure_mode_severity,
+        verification_mode=verification_mode,
+    )
 
     evidence = _structured_evidence(
         normalized_kind,
@@ -80,6 +122,18 @@ def write_artifact(
         status=status,
         summary=summary,
         blocking_findings=blocking_findings,
+        findings=_structured_findings(
+            finding_ids=finding_ids,
+            finding_surfaces=finding_surfaces,
+            finding_expected=finding_expected,
+            finding_observed=finding_observed,
+            finding_verdicts=finding_verdicts,
+            finding_severities=finding_severities,
+        ),
+        retry_target_value=retry_target_value,
+        checked_commands=checked_commands,
+        checked_surfaces=checked_surfaces,
+        evidence_refs=evidence_refs,
     )
     content = _canonical_evidence_text(evidence)
     latest_path = TRACE_ROOT / latest_name
@@ -98,12 +152,14 @@ def write_artifact(
     sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if normalized_kind == "plan":
         plan_metadata = _plan_metadata_payload(
+            root=root,
             workflow_id=workflow,
             candidate_id=candidate,
             affected_surfaces=affected_surfaces,
             acceptance_criteria_ids=acceptance_criteria_ids,
             failure_mode_severity=failure_mode_severity,
             failure_mode_mapped=failure_mode_mapped,
+            verification_mode=verification_mode,
             plan_sha256=sha256,
         )
         write_json_atomic_under_root(root / harness_paths.PLAN_METADATA_JSON, plan_metadata, root)
@@ -145,7 +201,7 @@ def write_artifact(
             "sha256": sha256,
         },
     )
-    return {
+    result = {
         "kind": normalized_kind,
         "latest_path": latest_path.as_posix(),
         "canonical_path": canonical,
@@ -153,7 +209,12 @@ def write_artifact(
         "candidate_id": "" if normalized_kind == "cartography" and not candidate_id.strip() else candidate,
         "revision": revision,
         "sha256": sha256,
-}
+    }
+    if normalized_kind == "plan":
+        contract_hash = str(plan_metadata["plan_contract_hash"])
+        result["plan_contract_hash"] = contract_hash
+        result["approval_phrase"] = approval_phrase(candidate, contract_hash)
+    return result
 
 
 def _require_active_workflow_match(root: Path, workflow_id: str) -> None:
@@ -235,12 +296,69 @@ def _worker_for_evidence(root: Path, kind: str) -> str:
     metadata = _read_json(root / harness_paths.PLAN_METADATA_JSON)
     surfaces = tuple(str(path) for path in metadata.get("affected_surfaces", []) if str(path).strip()) if isinstance(metadata.get("affected_surfaces"), list) else ()
     severity = str(metadata.get("failure_mode_severity") or "P3").upper()
-    if severity not in {"P0", "P1"} and surfaces and all(surface.endswith((".md", ".txt")) for surface in surfaces):
+    verification_mode = str(metadata.get("verification_mode") or VerificationMode.SEMANTIC.value)
+    if policy_for_surfaces(surfaces, severity=severity, verification_mode=verification_mode).profile == WorkflowProfile.TINY_DOC:
         return "host-verifier"
     return KIND_TO_WORKER[kind]
 
 
-def _structured_evidence(kind: str, *, worker: str, status: str, summary: str, blocking_findings: Sequence[str]) -> dict[str, Any]:
+def _require_policy_route_prerequisites(
+    root: Path,
+    *,
+    kind: str,
+    affected_surfaces: Sequence[str],
+    acceptance_criteria_ids: Sequence[str],
+    failure_mode_severity: str,
+    verification_mode: str,
+) -> None:
+    if kind != "plan":
+        return
+    surfaces = _normalize_list(affected_surfaces)
+    criteria = _normalize_list(acceptance_criteria_ids)
+    if not surfaces or not criteria:
+        return
+    mode = VerificationMode(str(verification_mode).strip() or VerificationMode.SEMANTIC.value)
+    severity = failure_mode_severity.strip().upper() or "P3"
+    if mode == VerificationMode.MECHANICAL and (len(surfaces) != 1 or severity in {"P0", "P1"}):
+        raise SafeArtifactWriterError("mechanical verification requires exactly one affected surface and P2/P3 severity")
+    _reject_forbidden_or_unsafe_mechanical_surfaces(surfaces, mode)
+    policy = policy_for_surfaces(surfaces, severity=failure_mode_severity, verification_mode=verification_mode)
+    if not policy.route:
+        raise SafeArtifactWriterError("forbidden affected surfaces cannot be routed by maintenance workflow")
+    if not policy.route or policy.route[0] != "maintenance-cartographer":
+        return
+    cartography_path = root / harness_paths.ARTIFACT_ROOT / harness_paths.LATEST_ARTIFACTS["cartography"]
+    if not cartography_path.is_file() or cartography_path.is_symlink():
+        raise SafeArtifactWriterError(f"policy route {policy.profile.value} requires cartography evidence before writing plan")
+    if policy.profile == WorkflowProfile.CRITICAL_HARNESS and len(surfaces) >= 4 and not _cartography_has_sharded_queue(root):
+        raise SafeArtifactWriterError("CRITICAL_HARNESS plans with 4 or more affected surfaces require cartography shard queue before writing plan")
+
+
+def _cartography_has_sharded_queue(root: Path) -> bool:
+    candidate_state = _read_json(root / harness_paths.CANDIDATE_STATE_JSON)
+    queued = candidate_state.get("queued_candidate_ids") if isinstance(candidate_state.get("queued_candidate_ids"), list) else []
+    active = str(candidate_state.get("active_candidate_id") or "").strip()
+    return bool(active and [candidate for candidate in queued if str(candidate).strip()])
+
+
+def _cartography_artifact_exists(root: Path) -> bool:
+    path = root / harness_paths.ARTIFACT_ROOT / harness_paths.LATEST_ARTIFACTS["cartography"]
+    return path.is_file() and not path.is_symlink()
+
+
+def _structured_evidence(
+    kind: str,
+    *,
+    worker: str,
+    status: str,
+    summary: str,
+    blocking_findings: Sequence[str],
+    findings: Sequence[dict[str, str]] = (),
+    retry_target_value: str = "",
+    checked_commands: Sequence[str] = (),
+    checked_surfaces: Sequence[str] = (),
+    evidence_refs: Sequence[str] = (),
+) -> dict[str, Any]:
     normalized_status = status.strip()
     if normalized_status not in VALID_EVIDENCE_STATUSES:
         raise SafeArtifactWriterError("evidence status must be passed or failed")
@@ -248,7 +366,7 @@ def _structured_evidence(kind: str, *, worker: str, status: str, summary: str, b
     if not normalized_summary:
         raise SafeArtifactWriterError("evidence summary is required")
     blockers = [str(item).strip() for item in blocking_findings if str(item).strip()]
-    return {
+    evidence: dict[str, Any] = {
         "schema_version": 1,
         "worker": worker,
         "evidence_kind": "structured-json",
@@ -256,6 +374,66 @@ def _structured_evidence(kind: str, *, worker: str, status: str, summary: str, b
         "blocking_findings": blockers,
         "summary": normalized_summary,
     }
+    if findings:
+        evidence["findings"] = list(findings)
+    normalized_retry = retry_target_value.strip()
+    if normalized_retry:
+        if normalized_retry not in VALID_RETRY_TARGETS:
+            allowed = ", ".join(sorted(VALID_RETRY_TARGETS))
+            raise SafeArtifactWriterError(f"retry-target must be one of: {allowed}")
+        evidence["retry_target"] = normalized_retry
+    commands = _normalize_list(checked_commands)
+    if commands:
+        evidence["checked_commands"] = commands
+    surfaces = _normalize_list(checked_surfaces)
+    if surfaces:
+        evidence["checked_surfaces"] = surfaces
+    refs = _normalize_list(evidence_refs)
+    if refs:
+        evidence["evidence_refs"] = refs
+    return evidence
+
+
+def _structured_findings(
+    *,
+    finding_ids: Sequence[str],
+    finding_surfaces: Sequence[str],
+    finding_expected: Sequence[str],
+    finding_observed: Sequence[str],
+    finding_verdicts: Sequence[str],
+    finding_severities: Sequence[str],
+) -> tuple[dict[str, str], ...]:
+    fields = (finding_ids, finding_surfaces, finding_expected, finding_observed, finding_verdicts, finding_severities)
+    width = max((len(field) for field in fields), default=0)
+    if width == 0:
+        return ()
+    findings: list[dict[str, str]] = []
+    for index in range(width):
+        finding_id = _nth(finding_ids, index)
+        verdict = _nth(finding_verdicts, index)
+        if not finding_id or not verdict:
+            raise SafeArtifactWriterError("finding-id and finding-verdict are required for every finding row")
+        if verdict not in {"pass", "fail", "warn"}:
+            raise SafeArtifactWriterError("finding-verdict must be pass, fail, or warn")
+        severity = _nth(finding_severities, index) or "P3"
+        if severity not in {"P0", "P1", "P2", "P3"}:
+            raise SafeArtifactWriterError("finding-severity must be P0, P1, P2, or P3")
+        row = {
+            "id": finding_id,
+            "surface": _nth(finding_surfaces, index),
+            "expected": _nth(finding_expected, index),
+            "observed": _nth(finding_observed, index),
+            "verdict": verdict,
+            "severity": severity,
+        }
+        findings.append({key: value for key, value in row.items() if value})
+    return tuple(findings)
+
+
+def _nth(values: Sequence[str], index: int) -> str:
+    if index >= len(values):
+        return ""
+    return str(values[index]).strip()
 
 
 def _canonical_evidence_text(evidence: dict[str, Any]) -> str:
@@ -330,12 +508,14 @@ def _candidate_state_payload(
 
 def _plan_metadata_payload(
     *,
+    root: Path,
     workflow_id: str,
     candidate_id: str,
     affected_surfaces: Sequence[str],
     acceptance_criteria_ids: Sequence[str],
     failure_mode_severity: str,
     failure_mode_mapped: bool,
+    verification_mode: str,
     plan_sha256: str,
 ) -> dict[str, Any]:
     surfaces = _normalize_list(affected_surfaces)
@@ -347,16 +527,57 @@ def _plan_metadata_payload(
     severity = failure_mode_severity.strip().upper() or "P3"
     if severity not in {"P0", "P1", "P2", "P3"}:
         raise SafeArtifactWriterError("failure-mode-severity must be P0, P1, P2, or P3")
+    mode = VerificationMode(str(verification_mode).strip() or VerificationMode.SEMANTIC.value)
+    if mode == VerificationMode.MECHANICAL and (len(surfaces) != 1 or severity in {"P0", "P1"}):
+        raise SafeArtifactWriterError("mechanical verification requires exactly one affected surface and P2/P3 severity")
+    _reject_forbidden_or_unsafe_mechanical_surfaces(surfaces, mode)
+    ambiguity = _cartography_artifact_exists(root)
+    contract_payload = plan_contract_payload(
+        candidate_id=candidate_id,
+        affected_surfaces=surfaces,
+        acceptance_criteria_ids=criteria,
+        severity=severity,
+        ambiguity=ambiguity,
+        verification_mode=mode,
+    )
+    contract_hash = plan_contract_hash(
+        candidate_id=candidate_id,
+        affected_surfaces=surfaces,
+        acceptance_criteria_ids=criteria,
+        severity=severity,
+        ambiguity=ambiguity,
+        verification_mode=mode,
+    )
     return {
         "schema_version": 1,
         "workflow_id": workflow_id,
         "candidate_id": candidate_id,
         "affected_surfaces": surfaces,
         "acceptance_criteria_ids": criteria,
+        "surface_classes": contract_payload["surface_classes"],
+        "profile": contract_payload["profile"],
+        "route": contract_payload["route"],
+        "verification_mode": contract_payload["verification_mode"],
+        "reapproval_triggers": contract_payload["reapproval_triggers"],
         "failure_mode_severity": severity,
         "failure_mode_mapped": bool(failure_mode_mapped),
+        "plan_body_sha256": plan_sha256,
+        "plan_contract_hash": contract_hash,
+        "approval_phrase": approval_phrase(candidate_id, contract_hash),
+        "approval_phrase_hash_prefix_length": APPROVAL_HASH_PREFIX_LENGTH,
         "plan_sha256": plan_sha256,
     }
+
+
+def _reject_forbidden_or_unsafe_mechanical_surfaces(surfaces: Sequence[str], mode: VerificationMode) -> None:
+    classes = tuple(classify_surface(surface) for surface in surfaces)
+    if any(surface_class == SurfaceClass.FORBIDDEN_SURFACE for surface_class in classes):
+        raise SafeArtifactWriterError("forbidden affected surfaces cannot be routed by maintenance workflow")
+    if mode != VerificationMode.MECHANICAL:
+        return
+    surface = str(surfaces[0]) if surfaces else ""
+    if not mechanical_verification_allowed((surface,), classes):
+        raise SafeArtifactWriterError("mechanical verification is limited to low-risk prose or the maintenance contract typo surface")
 
 
 def _normalize_candidate_ids(values: Sequence[str]) -> list[str]:
@@ -384,6 +605,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     write_parser.add_argument("--status", required=True, choices=sorted(VALID_EVIDENCE_STATUSES))
     write_parser.add_argument("--summary", required=True)
     write_parser.add_argument("--blocking-finding", action="append", default=[])
+    write_parser.add_argument("--finding-id", action="append", default=[])
+    write_parser.add_argument("--finding-surface", action="append", default=[])
+    write_parser.add_argument("--finding-expected", action="append", default=[])
+    write_parser.add_argument("--finding-observed", action="append", default=[])
+    write_parser.add_argument("--finding-verdict", action="append", choices=("pass", "fail", "warn"), default=[])
+    write_parser.add_argument("--finding-severity", action="append", choices=("P0", "P1", "P2", "P3"), default=[])
+    write_parser.add_argument("--retry-target", choices=sorted(VALID_RETRY_TARGETS), default="")
+    write_parser.add_argument("--checked-command", action="append", default=[])
+    write_parser.add_argument("--checked-surface", action="append", default=[])
+    write_parser.add_argument("--evidence-ref", action="append", default=[])
     write_parser.add_argument("--workflow-id", required=True)
     write_parser.add_argument("--candidate-id", default="")
     write_parser.add_argument("--active-candidate-id", default="")
@@ -393,6 +624,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     write_parser.add_argument("--acceptance-criteria-id", action="append", default=[])
     write_parser.add_argument("--failure-mode-severity", choices=("P0", "P1", "P2", "P3"), default="P3")
     write_parser.add_argument("--failure-mode-mapped", action="store_true")
+    write_parser.add_argument("--verification-mode", choices=("semantic", "mechanical"), default="semantic")
     write_parser.add_argument("--approval-ready", choices=("true", "false"), default="")
     write_parser.add_argument("--verification-passed", choices=("true", "false"), default="")
     write_parser.add_argument("--revision", type=int, default=1)
@@ -402,12 +634,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command != "write":
         raise SafeArtifactWriterError(f"unknown command: {args.command}")
+    root = Path(args.root).resolve()
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir and root != Path(project_dir).resolve():
+        raise SafeArtifactWriterError("safe artifact writer --root must match CLAUDE_PROJECT_DIR")
     return write_artifact(
-        Path(args.root),
+        root,
         kind=args.kind,
         status=args.status,
         summary=args.summary,
         blocking_findings=tuple(args.blocking_finding or ()),
+        finding_ids=tuple(args.finding_id or ()),
+        finding_surfaces=tuple(args.finding_surface or ()),
+        finding_expected=tuple(args.finding_expected or ()),
+        finding_observed=tuple(args.finding_observed or ()),
+        finding_verdicts=tuple(args.finding_verdict or ()),
+        finding_severities=tuple(args.finding_severity or ()),
+        retry_target_value=args.retry_target or "",
+        checked_commands=tuple(args.checked_command or ()),
+        checked_surfaces=tuple(args.checked_surface or ()),
+        evidence_refs=tuple(args.evidence_ref or ()),
         workflow_id=args.workflow_id,
         candidate_id=args.candidate_id,
         active_candidate_id=args.active_candidate_id,
@@ -417,6 +663,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         acceptance_criteria_ids=tuple(args.acceptance_criteria_id or ()),
         failure_mode_severity=args.failure_mode_severity,
         failure_mode_mapped=bool(args.failure_mode_mapped),
+        verification_mode=args.verification_mode,
         approval_ready={"true": True, "false": False}.get(args.approval_ready),
         verification_passed={"true": True, "false": False}.get(args.verification_passed),
         revision=args.revision,

@@ -15,7 +15,7 @@ class TestMaintenanceScopeGuardContract:
         return set(str(matcher).split("|")) if matcher else set()
 
     def test_maintenance_scope_guard_is_wired_before_general_capture(self):
-        settings = json.loads((ROOT / ".claude" / "settings.maintenance.json").read_text(encoding="utf-8"))
+        settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
         pretool_commands = [entry["hooks"][0]["command"] for entry in settings["hooks"]["PreToolUse"]]
         permission_allow = settings["permissions"]["allow"]
         expansion_commands = [
@@ -31,8 +31,18 @@ class TestMaintenanceScopeGuardContract:
         assert "Skill" in settings["hooks"]["PreToolUse"][0]["matcher"]
         assert any("capture_subagent_tool_event.sh" in command for command in pretool_commands[1:])
         assert 'Bash(bash "$CLAUDE_PROJECT_DIR/.claude/hooks/maintenance/mark_active.sh")' in permission_allow
-        assert "Write(/ops/agent-harness/**)" in permission_allow
-        assert "Edit(/ops/agent-harness/**)" in permission_allow
+        assert "Bash(uv run python -m tools.agent_harness.safe_artifact_writer write *)" in permission_allow
+        assert not any(
+            rule.startswith((
+                "Write(/ops/agent-harness",
+                "Write(ops/agent-harness",
+                "Edit(/ops/agent-harness",
+                "Edit(ops/agent-harness",
+                "MultiEdit(/ops/agent-harness",
+                "MultiEdit(ops/agent-harness",
+            ))
+            for rule in permission_allow
+        )
         assert "Bash(uv run pytest *)" in permission_allow
         assert not any(rule == "Write(.claude/**)" for rule in permission_allow)
 
@@ -116,6 +126,54 @@ class TestMaintenanceScopeGuardContract:
 
         assert capsys.readouterr().out == ""
 
+    def test_maintenance_scope_guard_blocks_agent_outside_policy_route(self, tmp_path, monkeypatch, capsys):
+        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import write_json_atomic_under_root
+
+        session_id = "maintenance-policy-route-session"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow docs polish")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": f"mw-{session_id}",
+                "phase": "draft_planned",
+                "retry": {"target": "", "blockers": []},
+                "pass_eligibility": {
+                    "calculated": {"eligible": False, "workflow_path": "STANDARD"},
+                    "workflow_profile": {
+                        "path": "STANDARD",
+                        "route": ["maintenance-planner", "maintenance-plan-critic", "maintenance-implementer", "maintenance-evaluator"],
+                    },
+                },
+            },
+            tmp_path,
+        )
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Agent",
+                        "session_id": session_id,
+                        "tool_input": {"agent_type": "maintenance-cartographer"},
+                    }
+                )
+            ),
+        )
+
+        enforce_maintenance_scope.main()
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "policy route" in decision["permissionDecisionReason"]
+        assert "maintenance-cartographer" in decision["permissionDecisionReason"]
+
     def test_maintenance_subagent_stop_ignores_denied_unstarted_worker(self, tmp_path):
         from tools.hooks.capture_subagent_trace import capture_trace
         from tools.hooks.maintenance.scope import write_marker
@@ -173,7 +231,7 @@ class TestMaintenanceScopeGuardContract:
         assert decision["permissionDecision"] == "deny"
         assert "must not invoke other skills" in decision["permissionDecisionReason"]
 
-    def test_maintenance_scope_guard_blocks_product_repo_read(self, tmp_path, monkeypatch):
+    def test_maintenance_scope_guard_blocks_repo_read(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
         from tools.hooks.maintenance.scope import write_marker
 
@@ -189,7 +247,7 @@ class TestMaintenanceScopeGuardContract:
                         "hook_event_name": "PreToolUse",
                         "tool_name": "Read",
                         "session_id": session_id,
-                        "tool_input": {"file_path": str(tmp_path / "repo" / "secret.txt")},
+                        "tool_input": {"file_path": str(tmp_path / "repo" / "src" / "state.md")},
                     }
                 )
             ),
@@ -608,7 +666,270 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "allow"
-        assert "approved affected surface" in decision["permissionDecisionReason"]
+
+    def test_route_cursor_blocks_completed_worker_reentry(self, tmp_path, monkeypatch, capsys):
+        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import write_json_atomic_under_root
+
+        session_id = "maintenance-route-cursor-session"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow critical")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": f"mw-{session_id}",
+                "phase": "evaluated",
+                "pass_eligibility": {
+                    "route_cursor": {
+                        "route": ["maintenance-implementer", "maintenance-evaluator", "maintenance-skeptic"],
+                        "completed_workers": ["maintenance-implementer", "maintenance-evaluator"],
+                        "next_required_worker": "maintenance-skeptic",
+                        "remaining_required_artifacts": ["ops/agent-harness/evidence/skeptic-review.json"],
+                    },
+                    "workflow_profile": {"route": ["maintenance-implementer", "maintenance-evaluator", "maintenance-skeptic"]},
+                    "calculated": {"eligible": False, "workflow_path": "CRITICAL_HARNESS"},
+                },
+            },
+            tmp_path,
+        )
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Agent",
+                        "session_id": session_id,
+                        "tool_input": {"agent_type": "maintenance-evaluator"},
+                    }
+                )
+            ),
+        )
+
+        enforce_maintenance_scope.main()
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "requires maintenance-skeptic" in decision["permissionDecisionReason"]
+
+    def test_route_cursor_blocks_future_worker_before_next_required(self, tmp_path, monkeypatch, capsys):
+        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import write_json_atomic_under_root
+
+        session_id = "maintenance-route-cursor-future-session"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow standard")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": f"mw-{session_id}",
+                "phase": "draft_planned",
+                "pass_eligibility": {
+                    "route_cursor": {
+                        "route": ["maintenance-planner", "maintenance-plan-critic", "maintenance-implementer"],
+                        "completed_workers": ["maintenance-planner"],
+                        "next_required_worker": "maintenance-plan-critic",
+                        "remaining_required_artifacts": ["ops/agent-harness/evidence/plan-review.json"],
+                    },
+                    "workflow_profile": {"route": ["maintenance-planner", "maintenance-plan-critic", "maintenance-implementer"]},
+                    "calculated": {"eligible": False, "workflow_path": "STANDARD"},
+                },
+            },
+            tmp_path,
+        )
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Agent",
+                        "session_id": session_id,
+                        "tool_input": {"agent_type": "maintenance-implementer"},
+                    }
+                )
+            ),
+        )
+
+        enforce_maintenance_scope.main()
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "requires maintenance-plan-critic" in decision["permissionDecisionReason"]
+        assert "blocked maintenance-implementer" in decision["permissionDecisionReason"]
+
+    def test_route_cursor_blocks_implementer_rerun_after_approved_edit(self, tmp_path, monkeypatch, capsys):
+        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import write_json_atomic_under_root
+
+        session_id = "maintenance-implementer-rerun-session"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow critical")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": f"mw-{session_id}",
+                "phase": "evaluated",
+                "changed_files": ["docs/MAINTENANCE_HARNESS_CONTRACT.md"],
+                "worker_status": {},
+                "pass_eligibility": {
+                    "route_cursor": {
+                        "route": ["maintenance-implementer", "maintenance-evaluator"],
+                        "completed_workers": [],
+                        "next_required_worker": "maintenance-implementer",
+                        "remaining_required_artifacts": ["ops/agent-harness/evidence/execution.json"],
+                    },
+                    "workflow_profile": {"route": ["maintenance-implementer", "maintenance-evaluator"]},
+                    "calculated": {"eligible": False, "workflow_path": "CRITICAL_HARNESS"},
+                },
+            },
+            tmp_path,
+        )
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Agent",
+                        "session_id": session_id,
+                        "tool_input": {"agent_type": "maintenance-implementer"},
+                    }
+                )
+            ),
+        )
+
+        enforce_maintenance_scope.main()
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "approved implementation edit is already recorded" in decision["permissionDecisionReason"]
+        assert "--kind execution --status passed" in decision["permissionDecisionReason"]
+
+    def test_implementer_budget_blocks_non_converging_edits(self, tmp_path, monkeypatch, capsys):
+        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import append_jsonl_atomic_under_root, write_json_atomic_under_root
+
+        session_id = "maintenance-budget-session"
+        workflow_id = f"mw-{session_id}"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow critical")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": workflow_id,
+                "phase": "approved_frozen",
+                "approval_gate": {"status": "approved-frozen", "freeze": {"affected_surfaces": ["README.md"]}},
+                "pass_eligibility": {"calculated": {"eligible": False}},
+            },
+            tmp_path,
+        )
+        for index in range(10):
+            append_jsonl_atomic_under_root(
+                tmp_path / "ops" / "agent-harness" / "latest-events.jsonl",
+                {
+                    "captured_at": f"2026-06-17T17:00:{index:02d}.000000Z",
+                    "workflow_id": workflow_id,
+                    "event": "pre_tool",
+                    "agent_type": "maintenance-implementer",
+                    "tool_name": "Edit",
+                },
+                tmp_path,
+            )
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Edit",
+                        "agent_type": "maintenance-implementer",
+                        "session_id": session_id,
+                        "tool_input": {"file_path": "README.md"},
+                    }
+                )
+            ),
+        )
+
+        enforce_maintenance_scope.main()
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "maintenance-implementer budget exceeded" in decision["permissionDecisionReason"]
+        assert "do not call maintenance-implementer again" in decision["permissionDecisionReason"]
+        assert "--retry-target retry-implementation" in decision["permissionDecisionReason"]
+
+    def test_review_worker_budget_blocks_non_converging_plan_critic(self, tmp_path, monkeypatch, capsys):
+        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import append_jsonl_atomic_under_root, write_json_atomic_under_root
+
+        session_id = "maintenance-review-budget-session"
+        workflow_id = f"mw-{session_id}"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow critical")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": workflow_id,
+                "phase": "draft_planned",
+                "pass_eligibility": {"calculated": {"eligible": False}},
+            },
+            tmp_path,
+        )
+        for index in range(16):
+            append_jsonl_atomic_under_root(
+                tmp_path / "ops" / "agent-harness" / "latest-events.jsonl",
+                {
+                    "captured_at": f"2026-06-17T17:00:{index:02d}.000000Z",
+                    "workflow_id": workflow_id,
+                    "event": "pre_tool",
+                    "agent_type": "maintenance-plan-critic",
+                    "tool_name": "Read",
+                },
+                tmp_path,
+            )
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Read",
+                        "agent_type": "maintenance-plan-critic",
+                        "session_id": session_id,
+                        "tool_input": {"file_path": "ops/agent-harness/evidence/plan.json"},
+                    }
+                )
+            ),
+        )
+
+        enforce_maintenance_scope.main()
+
+        output = json.loads(capsys.readouterr().out)
+        decision = output["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "maintenance-plan-critic budget exceeded" in decision["permissionDecisionReason"]
+        assert "do not call maintenance-plan-critic again" in decision["permissionDecisionReason"]
+        assert "--kind plan-review --status failed --retry-target retry-plan" in decision["permissionDecisionReason"]
 
     def test_maintenance_scope_guard_denies_repo_edit_outside_approved_surface(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
@@ -1174,6 +1495,19 @@ class TestMaintenanceScopeGuardContract:
             },
             tmp_path,
         )
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "latest-plan-metadata.json",
+            {
+                "schema_version": 1,
+                "workflow_id": marker["workflow_id"],
+                "candidate_id": "O1",
+                "affected_surfaces": ["CLAUDE.md"],
+                "acceptance_criteria_ids": ["AC-001"],
+                "failure_mode_severity": "P3",
+                "plan_contract_hash": "a" * 64,
+            },
+            tmp_path,
+        )
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         monkeypatch.setattr(
             sys,
@@ -1197,6 +1531,10 @@ class TestMaintenanceScopeGuardContract:
         assert set(MaintenanceHarness.STATE_FORBIDDEN_TOP_LEVEL_ALIASES).isdisjoint(state)
         assert isinstance(state["artifacts"], list)
         assert state["latest_event"]["event"] == "post_tool"
+        profile = state["pass_eligibility"]["workflow_profile"]
+        assert profile["path"] == "STANDARD"
+        assert profile["surface_classes"] == ["instruction_doc"]
+        assert profile["route"] == ["maintenance-planner", "maintenance-plan-critic", "maintenance-implementer", "maintenance-evaluator"]
 
     def test_maintenance_final_report_blocks_approval_claim_before_review_state(self, tmp_path):
         from tools.hooks.maintenance.enforce_final_report import final_report_block_reason
@@ -1213,7 +1551,7 @@ class TestMaintenanceScopeGuardContract:
 
         reason = final_report_block_reason(
             tmp_path,
-            {"session_id": session_id, "last_assistant_message": "awaiting-human-approval\n승인해주시면 진행하겠습니다."},
+            {"session_id": session_id, "last_assistant_message": "awaiting-human-approval\n승인: DOCS-001 <plan_contract_hash_prefix> 문구가 필요합니다."},
         )
 
         assert reason is not None
@@ -1236,6 +1574,73 @@ class TestMaintenanceScopeGuardContract:
 
         assert reason is not None
         assert "pass_eligibility" in reason
+
+    def test_maintenance_final_report_includes_route_cursor_next_action(self, tmp_path):
+        from tools.hooks.maintenance.enforce_final_report import final_report_block_reason
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import write_json_atomic_under_root
+
+        session_id = "maintenance-next-action-session"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow critical")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": f"mw-{session_id}",
+                "phase": "evaluated",
+                "pass_eligibility": {
+                    "route_cursor": {
+                        "route": ["maintenance-evaluator", "maintenance-skeptic"],
+                        "completed_workers": ["maintenance-evaluator"],
+                        "next_required_worker": "maintenance-skeptic",
+                        "remaining_required_artifacts": ["ops/agent-harness/evidence/skeptic-review.json"],
+                    },
+                    "calculated": {"eligible": False, "blocked_by": ["missing_artifacts"]},
+                },
+            },
+            tmp_path,
+        )
+
+        reason = final_report_block_reason(tmp_path, {"session_id": session_id, "last_assistant_message": "pass"})
+
+        assert reason is not None
+        assert "Continue with exactly `maintenance-skeptic`" in reason
+        assert "ops/agent-harness/evidence/skeptic-review.json" in reason
+        assert "do not rerun completed workers" in reason
+
+    def test_maintenance_final_report_prefers_execution_evidence_after_edit(self, tmp_path):
+        from tools.hooks.maintenance.enforce_final_report import final_report_block_reason
+        from tools.hooks.maintenance.scope import write_marker
+        from tools.runtime.json_io import write_json_atomic_under_root
+
+        session_id = "maintenance-execution-evidence-session"
+        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow critical")
+        write_json_atomic_under_root(
+            tmp_path / "ops" / "agent-harness" / "current-run-state.json",
+            {
+                "schema_version": 1,
+                "workflow_id": f"mw-{session_id}",
+                "phase": "approved_frozen",
+                "changed_files": ["docs/MAINTENANCE_HARNESS_CONTRACT.md"],
+                "pass_eligibility": {
+                    "route_cursor": {
+                        "route": ["maintenance-implementer", "maintenance-evaluator"],
+                        "completed_workers": [],
+                        "next_required_worker": "maintenance-implementer",
+                        "remaining_required_artifacts": ["ops/agent-harness/evidence/execution.json"],
+                    },
+                    "calculated": {"eligible": False, "blocked_by": ["missing_artifacts"]},
+                },
+            },
+            tmp_path,
+        )
+
+        reason = final_report_block_reason(tmp_path, {"session_id": session_id, "last_assistant_message": "pass"})
+
+        assert reason is not None
+        assert "do not call maintenance-implementer again" in reason
+        assert "--kind execution --status passed" in reason
+        assert "Continue with exactly `maintenance-implementer`" not in reason
 
     def test_maintenance_final_report_blocks_pass_without_marker_when_state_active(self, tmp_path):
         from tools.hooks.maintenance.enforce_final_report import final_report_block_reason
@@ -1441,11 +1846,11 @@ def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
     assert "unparseable Bash" in decision["permissionDecisionReason"]
 
 
-def test_maintenance_scope_guard_denies_parseable_bash_repo_reference(tmp_path, monkeypatch):
+def test_maintenance_scope_guard_denies_parseable_bash_repo_read(tmp_path, monkeypatch):
     from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
     from tools.hooks.maintenance.scope import write_marker
 
-    session_id = "maintenance-parseable-repo-bash"
+    session_id = "maintenance-parseable-bash-repo"
     write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow docs")
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(
@@ -1504,67 +1909,3 @@ def test_maintenance_scope_guard_denies_safe_writer_content_payload_flags(tmp_pa
     decision = json.loads(captured.getvalue())["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
     assert "content payload flags" in decision["permissionDecisionReason"]
-
-
-def _ready_worker(worker: str) -> dict:
-    return {
-        "required": True,
-        "invoked": True,
-        "worker": worker,
-        "evidence_kind": "structured-json",
-        "status": "passed",
-        "blocking_findings": [],
-        "artifact_path": f"ops/agent-harness/evidence/{worker}.json",
-        "artifact_sha256": "abc123",
-        "schema_version": 1,
-        "evidence": "verified",
-        "structured_evidence_valid": True,
-    }
-
-
-def test_checker_does_not_trust_stale_state_pass_eligibility_without_verification(tmp_path):
-    from tools.agent_harness.checker import _calculated_pass_eligibility
-
-    state = {
-        "pass_eligibility": {
-            "tests_passed": True,
-            "evaluation_pass_candidate": True,
-            "calculated": {"tests_passed": True, "evaluation_pass_candidate": True},
-        },
-        "approval_gate": {"status": "approved-frozen", "freeze": {"approval_hash": "h", "affected_surfaces": ["docs/a.md"]}},
-        "changed_files": ["docs/a.md"],
-    }
-    evidence_paths = {
-        "ops/agent-harness/evidence/plan.json",
-        "ops/agent-harness/evidence/execution.json",
-        "ops/agent-harness/evidence/execution-review.json",
-    }
-    worker_status = {worker: _ready_worker(worker) for worker in ("maintenance-planner", "maintenance-implementer")}
-
-    calculated = _calculated_pass_eligibility(tmp_path, state, evidence_paths, worker_status, [])
-
-    assert calculated["eligible"] is False
-    assert calculated["tests_passed"] is False
-    assert "tests_not_passed" in calculated["blocked_by"]
-
-
-def test_checker_blocks_empty_changed_files_even_when_approval_surface_exists(tmp_path):
-    from tools.agent_harness.checker import _changed_files_within_approval
-
-    state = {
-        "approval_gate": {"status": "approved-frozen", "freeze": {"approval_hash": "h", "affected_surfaces": ["docs/a.md"]}},
-        "changed_files": [],
-    }
-
-    assert _changed_files_within_approval(state) is False
-
-
-def test_maintenance_tests_are_full_gated_surface():
-    from tools.agent_harness.checker import _workflow_profile_path
-
-    state = {
-        "approval_gate": {"freeze": {"affected_surfaces": ["tests/maintenance/test_scope_guard.py"]}},
-        "failure_mode_ledger": {"severity": "P3"},
-    }
-
-    assert _workflow_profile_path(ROOT, state) == "CRITICAL_HARNESS"

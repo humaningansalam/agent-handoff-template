@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tools.agent_harness import paths as harness_paths
 from tools.agent_harness.harness import MaintenanceHarness, Phase
+from tools.agent_harness.policy import plan_contract_hash
 from tools.hooks.maintenance.prompt_approval import approval_context_for_prompt
 from tools.hooks.maintenance.scope import write_marker
 from tools.runtime.json_io import read_json_object, write_json_atomic_under_root
@@ -59,6 +60,11 @@ def _plan_metadata(
     criteria: list[str],
     plan_body: str,
 ) -> None:
+    contract_hash = plan_contract_hash(
+        candidate_id=candidate_id,
+        affected_surfaces=surfaces,
+        acceptance_criteria_ids=criteria,
+    )
     write_json_atomic_under_root(
         root / harness_paths.PLAN_METADATA_JSON,
         {
@@ -67,10 +73,32 @@ def _plan_metadata(
             "candidate_id": candidate_id,
             "affected_surfaces": surfaces,
             "acceptance_criteria_ids": criteria,
+            "surface_classes": ["low_risk_prose"],
+            "profile": "TINY_DOC",
+            "route": ["maintenance-planner", "maintenance-implementer", "host-verifier"],
+            "reapproval_triggers": [
+                "affected_surfaces_changed",
+                "acceptance_criteria_identity_changed",
+                "surface_class_changed",
+                "profile_changed",
+                "route_changed",
+                "permission_semantics_changed",
+            ],
+            "plan_body_sha256": hashlib.sha256(plan_body.encode("utf-8")).hexdigest(),
+            "plan_contract_hash": contract_hash,
             "plan_sha256": hashlib.sha256(plan_body.encode("utf-8")).hexdigest(),
         },
         root,
     )
+
+
+def _approval_phrase(candidate_id: str, surfaces: list[str], criteria: list[str]) -> str:
+    contract_hash = plan_contract_hash(
+        candidate_id=candidate_id,
+        affected_surfaces=surfaces,
+        acceptance_criteria_ids=criteria,
+    )
+    return f"승인: {candidate_id} {contract_hash[:12]}"
 
 
 def test_explicit_approval_turn_freezes_reviewed_plan_from_structured_metadata(tmp_path: Path) -> None:
@@ -89,7 +117,10 @@ def test_explicit_approval_turn_freezes_reviewed_plan_from_structured_metadata(t
         plan_body=plan_body,
     )
 
-    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "I approve this plan. Continue.", "maintenance_approval": True})
+    context = approval_context_for_prompt(
+        tmp_path,
+        {"session_id": session_id, "prompt": _approval_phrase(candidate_id, ["docs/example.md"], ["AC1"])},
+    )
 
     state = read_json_object(tmp_path / harness_paths.STATE_JSON)
     MaintenanceHarness.validate_state_checkpoint(state)
@@ -100,6 +131,67 @@ def test_explicit_approval_turn_freezes_reviewed_plan_from_structured_metadata(t
     assert freeze["affected_surfaces"] == ["docs/example.md"]
     assert freeze["acceptance_criteria_ids"] == ["AC1"]
     assert len(freeze["plan_sha256"]) == 64
+    assert len(freeze["plan_contract_hash"]) == 64
+
+
+def test_approval_freeze_records_pre_existing_dirty_baseline(tmp_path: Path, monkeypatch) -> None:
+    from tools.hooks.maintenance import prompt_approval
+
+    session_id = "approval-dirty-baseline"
+    workflow_id = f"mw-{session_id}"
+    candidate_id = "CAND-doc-typo"
+    plan_body = "# Plan\nDirty baseline should be recorded.\n"
+    write_marker(tmp_path, {"session_id": session_id, "workflow_id": workflow_id}, prompt="/maintenance-workflow doc typo")
+    _awaiting_approval_state(tmp_path, workflow_id=workflow_id, candidate_id=candidate_id, plan_body=plan_body)
+    _plan_metadata(
+        tmp_path,
+        workflow_id=workflow_id,
+        candidate_id=candidate_id,
+        surfaces=["docs/example.md"],
+        criteria=["AC1"],
+        plan_body=plan_body,
+    )
+    monkeypatch.setattr(prompt_approval, "_git_status_paths", lambda root: ["unrelated.py", "notes/todo.md"])
+    monkeypatch.setattr(prompt_approval, "_dirty_fingerprints", lambda root, paths: {path: f"sha-{path}" for path in paths})
+    monkeypatch.setattr(prompt_approval, "_git_head", lambda root: "abc123")
+
+    approval_context_for_prompt(
+        tmp_path,
+        {"session_id": session_id, "prompt": _approval_phrase(candidate_id, ["docs/example.md"], ["AC1"])},
+    )
+
+    state = read_json_object(tmp_path / harness_paths.STATE_JSON)
+    freeze = state["approval_gate"]["freeze"]
+    assert freeze["pre_existing_dirty_files"] == ["unrelated.py", "notes/todo.md"]
+    assert freeze["pre_existing_dirty_fingerprints"] == {
+        "unrelated.py": "sha-unrelated.py",
+        "notes/todo.md": "sha-notes/todo.md",
+    }
+    assert freeze["approval_base_git_head"] == "abc123"
+
+
+def test_bare_approval_phrase_fails_closed_with_expected_contract_phrase(tmp_path: Path) -> None:
+    session_id = "approval-bare-phrase"
+    workflow_id = f"mw-{session_id}"
+    candidate_id = "CAND-doc-typo"
+    plan_body = "# Plan\nBare approval must not freeze.\n"
+    write_marker(tmp_path, {"session_id": session_id, "workflow_id": workflow_id}, prompt="/maintenance-workflow doc typo")
+    _awaiting_approval_state(tmp_path, workflow_id=workflow_id, candidate_id=candidate_id, plan_body=plan_body)
+    _plan_metadata(
+        tmp_path,
+        workflow_id=workflow_id,
+        candidate_id=candidate_id,
+        surfaces=["docs/example.md"],
+        criteria=["AC1"],
+        plan_body=plan_body,
+    )
+
+    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "승인"})
+
+    state = read_json_object(tmp_path / harness_paths.STATE_JSON)
+    assert "exact approval phrase required" in context
+    assert "승인: CAND-doc-typo" in context
+    assert state["phase"] == "awaiting_human_approval"
 
 
 def test_approval_turn_without_plan_metadata_fails_closed(tmp_path: Path) -> None:
@@ -110,10 +202,37 @@ def test_approval_turn_without_plan_metadata_fails_closed(tmp_path: Path) -> Non
     write_marker(tmp_path, {"session_id": session_id, "workflow_id": workflow_id}, prompt="/maintenance-workflow doc typo")
     _awaiting_approval_state(tmp_path, workflow_id=workflow_id, candidate_id=candidate_id, plan_body=plan_body)
 
-    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "approved", "maintenance_approval": True})
+    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "승인: CAND-doc-typo deadbeef0000"})
 
     state = read_json_object(tmp_path / harness_paths.STATE_JSON)
     assert "latest-plan-metadata.json is missing" in context
+    assert state["phase"] == "awaiting_human_approval"
+
+
+def test_approval_turn_without_plan_contract_hash_fails_closed(tmp_path: Path) -> None:
+    session_id = "approval-missing-contract-hash"
+    workflow_id = f"mw-{session_id}"
+    candidate_id = "CAND-doc-typo"
+    plan_body = "# Plan\nMetadata lacks a contract hash.\n"
+    write_marker(tmp_path, {"session_id": session_id, "workflow_id": workflow_id}, prompt="/maintenance-workflow doc typo")
+    _awaiting_approval_state(tmp_path, workflow_id=workflow_id, candidate_id=candidate_id, plan_body=plan_body)
+    write_json_atomic_under_root(
+        tmp_path / harness_paths.PLAN_METADATA_JSON,
+        {
+            "schema_version": 1,
+            "workflow_id": workflow_id,
+            "candidate_id": candidate_id,
+            "affected_surfaces": ["docs/example.md"],
+            "acceptance_criteria_ids": ["AC1"],
+            "plan_body_sha256": hashlib.sha256(plan_body.encode("utf-8")).hexdigest(),
+        },
+        tmp_path,
+    )
+
+    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "승인: CAND-doc-typo deadbeef0000"})
+
+    state = read_json_object(tmp_path / harness_paths.STATE_JSON)
+    assert "plan metadata must include plan contract hash" in context
     assert state["phase"] == "awaiting_human_approval"
 
 
@@ -133,7 +252,7 @@ def test_approval_turn_rejects_metadata_for_wrong_workflow(tmp_path: Path) -> No
         plan_body=plan_body,
     )
 
-    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "approved", "maintenance_approval": True})
+    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": _approval_phrase(candidate_id, ["docs/example.md"], ["AC1"])})
 
     state = read_json_object(tmp_path / harness_paths.STATE_JSON)
     assert "plan metadata workflow does not match active session" in context
@@ -155,7 +274,10 @@ def test_approval_turn_freezes_even_if_marker_hook_runs_after_prompt_context(tmp
         plan_body=plan_body,
     )
 
-    context = approval_context_for_prompt(tmp_path, {"session_id": session_id, "prompt": "승인", "maintenance_approval": True})
+    context = approval_context_for_prompt(
+        tmp_path,
+        {"session_id": session_id, "prompt": _approval_phrase(candidate_id, ["docs/example.md"], ["AC1"])},
+    )
 
     state = read_json_object(tmp_path / harness_paths.STATE_JSON)
     assert "Explicit approval frozen" in context

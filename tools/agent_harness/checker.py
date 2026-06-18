@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from tools.agent_harness import paths as harness_paths
 from tools.agent_harness.harness import MaintenanceHarness, Phase
 from tools.agent_harness.pass_gate import calculate_pass_eligibility, worker_ready
+from tools.agent_harness.policy import policy_for_surfaces
+from tools.agent_harness.retry_policy import RETRY_AGENT_PRIMARY, RETRY_ARTIFACT_PRIMARY
 from tools.hooks.maintenance.scope import relative_to_root
 from tools.runtime.json_io import read_json_object, write_json_atomic_under_root, write_text_atomic_under_root
 
@@ -127,7 +130,9 @@ def _reconcile_state_with_evidence(root: Path, checkpoint: dict[str, Any], lates
     changed_files = _implementation_changed_files(root, workflow_id)
     if changed_files:
         state["changed_files"] = list(changed_files)
-    profile_path = _workflow_profile_path(root, state)
+    policy = _policy_decision(root, state)
+    worker_status = _with_policy_required_flags(worker_status, policy.route)
+    profile_path = policy.profile.value
     if (
         profile_path == "TINY_DOC"
         and phase == Phase.DRAFT_PLANNED
@@ -158,6 +163,9 @@ def _reconcile_state_with_evidence(root: Path, checkpoint: dict[str, Any], lates
         }
         state["retry"] = {"target": "", "blockers": []}
     state["worker_status"] = worker_status
+    retry_target = _retry_target_from_worker_status(worker_status)
+    if retry_target:
+        state["retry"] = {"target": retry_target, "blockers": _retry_blockers_from_worker_status(worker_status)}
     if profile_path != "TINY_DOC" and phase == Phase.AWAITING_HUMAN_APPROVAL and not _plan_review_scope_fit_ready(root):
         phase = Phase.PLAN_REVIEWED
         state["phase"] = phase.value
@@ -273,6 +281,7 @@ def _structured_worker_row(row: dict[str, Any]) -> dict[str, bool]:
         "evidence": str(row.get("evidence") or row.get("summary") or "").strip(),
         "artifact_path": str(row.get("artifact_path", "")).strip(),
         "artifact_sha256": str(row.get("artifact_sha256", "")).strip(),
+        "retry_target": str(row.get("retry_target", "")).strip(),
         "schema_version": int(row.get("schema_version") or 0),
         "structured_evidence_valid": bool(row.get("structured_evidence_valid", False)),
     }
@@ -315,9 +324,22 @@ def _worker_row_from_evidence_file(root: Path, path: str, state: dict[str, Any])
         "evidence": str(loaded.get("summary") or "").strip(),
         "artifact_path": path,
         "artifact_sha256": _sha256_text(raw),
+        "retry_target": str(loaded.get("retry_target") or "").strip(),
         "schema_version": 1,
         "structured_evidence_valid": structured_evidence_valid,
     }
+
+
+def _with_policy_required_flags(
+    worker_status: dict[str, dict[str, Any]], route: tuple[str, ...]
+) -> dict[str, dict[str, Any]]:
+    route_workers = set(route)
+    normalized: dict[str, dict[str, Any]] = {}
+    for worker, row in worker_status.items():
+        copied = dict(row)
+        copied["required"] = worker in route_workers
+        normalized[worker] = copied
+    return normalized
 
 
 def _expected_worker_for_evidence(root: Path, path: str, state: dict[str, Any]) -> str:
@@ -353,9 +375,9 @@ def _implementation_changed_files(root: Path, workflow_id: str) -> tuple[str, ..
 def _reconciled_pass_eligibility(root: Path, state: dict[str, Any], evidence_paths: set[str], worker_status: dict[str, dict[str, bool]]) -> dict[str, Any]:
     existing = state.get("pass_eligibility") if isinstance(state.get("pass_eligibility"), dict) else {}
     blockers = [blocker for blocker in _pass_blockers(state) if blocker != "mandatory worker evidence pending"]
-    profile_path = _workflow_profile_path(root, state)
-    mandatory_workers = MaintenanceHarness.mandatory_workers_for_profile(profile_path)
-    required_artifacts = MaintenanceHarness.required_pass_artifact_paths_for_profile(profile_path)
+    policy = _policy_decision(root, state)
+    mandatory_workers = policy.required_workers
+    required_artifacts = policy.required_artifacts
     all_workers_ready = all(
         _worker_ready(worker_status.get(worker, {}))
         for worker in mandatory_workers
@@ -363,8 +385,120 @@ def _reconciled_pass_eligibility(root: Path, state: dict[str, Any], evidence_pat
     all_artifacts_ready = set(required_artifacts) <= (evidence_paths | {MaintenanceHarness.STATE_ARTIFACT_PATH})
     if not (all_workers_ready and all_artifacts_ready):
         blockers.append("mandatory worker evidence pending")
+    route_cursor = _route_cursor(policy.route, worker_status, evidence_paths, policy.required_artifacts, retry_target=_retry_target_from_worker_status(worker_status))
     calculated = _calculated_pass_eligibility(root, state, evidence_paths, worker_status, blockers)
-    return {"eligible": calculated["eligible"], "blocked_by": blockers, "calculated": calculated}
+    return {
+        "eligible": calculated["eligible"],
+        "blocked_by": blockers,
+        "workflow_profile": _policy_checkpoint(policy),
+        "route_cursor": route_cursor,
+        "calculated": calculated,
+    }
+
+
+def _policy_checkpoint(policy) -> dict[str, Any]:
+    return {
+        "path": policy.profile.value,
+        "route": list(policy.route),
+        "surface_classes": [surface_class.value for surface_class in policy.surface_classes],
+        "required_workers": list(policy.required_workers),
+        "required_artifacts": list(policy.required_artifacts),
+        "host_verifier_allowed": policy.host_verifier_allowed,
+        "verification_mode": policy.verification_mode.value,
+        "reason": policy.reason,
+    }
+
+
+def _route_cursor(
+    route: tuple[str, ...],
+    worker_status: dict[str, dict[str, bool]],
+    evidence_paths: set[str],
+    required_artifacts: tuple[str, ...],
+    *,
+    retry_target: str = "",
+) -> dict[str, Any]:
+    retry_worker = _retry_worker_for_route(route, retry_target)
+    if retry_worker:
+        retry_artifact = _retry_artifact_path(retry_target)
+        return {
+            "route": list(route),
+            "completed_workers": [worker for worker in route if route.index(worker) < route.index(retry_worker) and _worker_ready(worker_status.get(worker, {}))],
+            "next_required_worker": retry_worker,
+            "remaining_required_artifacts": [retry_artifact] if retry_artifact else [],
+            "retry_target": retry_target,
+        }
+    completed = []
+    next_worker = ""
+    for worker in route:
+        if _worker_ready(worker_status.get(worker, {})) or (
+            worker == "host-verifier" and "ops/agent-harness/evidence/execution-review.json" in evidence_paths
+        ):
+            completed.append(worker)
+            continue
+        else:
+            next_worker = worker
+            break
+    missing_artifacts = _missing_artifacts_for_route(route, evidence_paths, required_artifacts)
+    return {
+        "route": list(route),
+        "completed_workers": completed,
+        "next_required_worker": next_worker,
+        "remaining_required_artifacts": missing_artifacts,
+    }
+
+
+def _missing_artifacts_for_route(route: tuple[str, ...], evidence_paths: set[str], required_artifacts: tuple[str, ...]) -> list[str]:
+    expected = set(required_artifacts)
+    missing: list[str] = []
+    for worker in route:
+        artifact = _artifact_for_worker(worker)
+        if artifact and artifact in expected and artifact not in evidence_paths and artifact not in missing:
+            missing.append(artifact)
+    return missing
+
+
+def _artifact_for_worker(worker: str) -> str:
+    return {
+        "maintenance-cartographer": "ops/agent-harness/evidence/cartography.json",
+        "maintenance-planner": "ops/agent-harness/evidence/plan.json",
+        "maintenance-plan-critic": "ops/agent-harness/evidence/plan-review.json",
+        "maintenance-implementer": "ops/agent-harness/evidence/execution.json",
+        "maintenance-evaluator": "ops/agent-harness/evidence/execution-review.json",
+        "maintenance-skeptic": "ops/agent-harness/evidence/skeptic-review.json",
+        "host-verifier": "ops/agent-harness/evidence/execution-review.json",
+    }.get(worker, "")
+
+
+def _retry_target_from_worker_status(worker_status: dict[str, dict[str, Any]]) -> str:
+    for row in worker_status.values():
+        target = str(row.get("retry_target") or "").strip()
+        if target.startswith("retry-") and str(row.get("status") or "") == "failed":
+            return target
+    return ""
+
+
+def _retry_blockers_from_worker_status(worker_status: dict[str, dict[str, Any]]) -> list[str]:
+    blockers: list[str] = []
+    for row in worker_status.values():
+        if str(row.get("status") or "") != "failed" or not str(row.get("retry_target") or "").startswith("retry-"):
+            continue
+        findings = row.get("blocking_findings") if isinstance(row.get("blocking_findings"), list) else []
+        blockers.extend(str(item) for item in findings if str(item).strip())
+    return blockers
+
+
+def _retry_worker_for_route(route: tuple[str, ...], retry_target: str) -> str:
+    worker = RETRY_AGENT_PRIMARY.get(retry_target, "")
+    return worker if worker in route else ""
+
+
+def _retry_artifact_path(retry_target: str) -> str:
+    rule = RETRY_ARTIFACT_PRIMARY.get(retry_target)
+    if not rule:
+        return ""
+    kind, _worker = rule
+    artifact_name = harness_paths.LATEST_ARTIFACTS.get(kind)
+    return str(harness_paths.ARTIFACT_ROOT / artifact_name) if artifact_name else ""
 
 
 def _calculated_pass_eligibility(
@@ -376,20 +510,22 @@ def _calculated_pass_eligibility(
 ) -> dict[str, Any]:
     verification_passed = _execution_review_records_verification(root, evidence_paths)
     tests_passed = verification_passed
-    profile_path = _workflow_profile_path(root, state)
+    policy = _policy_decision(root, state)
+    profile_path = policy.profile.value
     tiny_doc = profile_path == "TINY_DOC"
     pass_candidate = bool(
-        (tiny_doc and verification_passed and _worker_ready(worker_status.get("maintenance-implementer", {})))
+        (tiny_doc and _worker_ready(worker_status.get("maintenance-implementer", {})))
+        or (tiny_doc and _worker_ready(worker_status.get("host-verifier", {})))
         or (verification_passed and _worker_ready(worker_status.get("maintenance-evaluator", {})))
     )
     return calculate_pass_eligibility(
-        required_artifact_paths=MaintenanceHarness.required_pass_artifact_paths_for_profile(profile_path),
+        required_artifact_paths=policy.required_artifacts,
         available_artifact_paths=evidence_paths | {MaintenanceHarness.STATE_ARTIFACT_PATH},
-        mandatory_workers=MaintenanceHarness.mandatory_workers_for_profile(profile_path),
+        mandatory_workers=policy.required_workers,
         worker_status=worker_status,
-        approval_hash_ok=_approval_hash_ok(state),
+        approval_hash_ok=_approval_hash_ok(root, state),
         tests_passed=tests_passed,
-        scope_ok=_changed_files_within_approval(state),
+        scope_ok=_changed_files_within_approval(root, state),
         pass_candidate=pass_candidate,
         state_confirmed=not bool(state_blockers),
         state_blockers=state_blockers,
@@ -398,6 +534,10 @@ def _calculated_pass_eligibility(
 
 
 def _workflow_profile_path(root: Path, state: dict[str, Any]) -> str:
+    return _policy_decision(root, state).profile.value
+
+
+def _policy_decision(root: Path, state: dict[str, Any]):
     metadata = _plan_metadata(root)
     surfaces = tuple(str(path) for path in metadata.get("affected_surfaces", []) if str(path).strip()) if isinstance(metadata.get("affected_surfaces"), list) else ()
     if not surfaces:
@@ -407,32 +547,82 @@ def _workflow_profile_path(root: Path, state: dict[str, Any]) -> str:
     if not surfaces:
         surfaces = tuple(str(path) for path in state.get("changed_files", []) if str(path).strip()) if isinstance(state.get("changed_files"), list) else ()
     severity = str(metadata.get("failure_mode_severity") or state.get("failure_mode_ledger", {}).get("severity") or "P3").upper()
-    critical = severity in {"P0", "P1"} or any(MaintenanceHarness._path_matches_any(surface, MaintenanceHarness.FULL_GATED_SURFACE_PATTERNS) for surface in surfaces)
-    if critical:
-        return "CRITICAL_HARNESS"
-    if surfaces and all(surface.endswith((".md", ".txt")) for surface in surfaces):
-        return "TINY_DOC"
-    return "STANDARD"
+    ambiguity = _cartography_artifact_exists(root)
+    verification_mode = str(metadata.get("verification_mode") or "semantic")
+    return policy_for_surfaces(surfaces, severity=severity, ambiguity=ambiguity, verification_mode=verification_mode)
 
 
-def _changed_files_within_approval(state: dict[str, Any]) -> bool:
+def _cartography_artifact_exists(root: Path) -> bool:
+    path = root / "ops/agent-harness/evidence/cartography.json"
+    return path.is_file() and not path.is_symlink()
+
+
+def _changed_files_within_approval(root: Path, state: dict[str, Any]) -> bool:
     changed_files = tuple(str(path) for path in state.get("changed_files", []) if str(path).strip()) if isinstance(state.get("changed_files"), list) else ()
     approval_gate = state.get("approval_gate") if isinstance(state.get("approval_gate"), dict) else {}
     freeze = approval_gate.get("freeze") if isinstance(approval_gate.get("freeze"), dict) else {}
     surfaces = tuple(str(path) for path in freeze.get("affected_surfaces", []) if str(path).strip()) if isinstance(freeze.get("affected_surfaces"), list) else ()
     if not surfaces:
         return False
-    if not changed_files:
-        return False
-    return all(MaintenanceHarness._path_in_approved_surfaces(path, surfaces) for path in changed_files)
+    baseline = freeze.get("pre_existing_dirty_files") if isinstance(freeze.get("pre_existing_dirty_files"), list) else []
+    pre_existing = {str(path).strip() for path in baseline if str(path).strip()}
+    baseline_fingerprints = freeze.get("pre_existing_dirty_fingerprints") if isinstance(freeze.get("pre_existing_dirty_fingerprints"), dict) else {}
+    current_dirty = _current_dirty_files(root)
+    candidate_pool = set(current_dirty) if (root / ".git").exists() else set(changed_files) | set(current_dirty)
+    candidate_changed_files = tuple(
+        path
+        for path in sorted(candidate_pool)
+        if not path.startswith("ops/agent-harness/")
+        and (path not in pre_existing or _dirty_fingerprint(root, path) != str(baseline_fingerprints.get(path) or ""))
+    )
+    return bool(candidate_changed_files) and all(MaintenanceHarness._path_in_approved_surfaces(path, surfaces) for path in candidate_changed_files)
 
 
-def _approval_hash_ok(state: dict[str, Any]) -> bool:
+def _approval_hash_ok(root: Path, state: dict[str, Any]) -> bool:
     approval_gate = state.get("approval_gate") if isinstance(state.get("approval_gate"), dict) else {}
     freeze = approval_gate.get("freeze") if isinstance(approval_gate.get("freeze"), dict) else {}
-    return approval_gate.get("status") == "approved-frozen" and bool(
-        freeze.get("approval_hash") or freeze.get("plan_sha256") or freeze.get("approved_plan_sha256")
+    frozen_contract_hash = str(freeze.get("plan_contract_hash") or "").strip()
+    current_contract_hash = str(_plan_metadata(root).get("plan_contract_hash") or "").strip()
+    return bool(
+        approval_gate.get("status") == "approved-frozen"
+        and frozen_contract_hash
+        and current_contract_hash
+        and frozen_contract_hash == current_contract_hash
     )
+
+
+def _current_dirty_files(root: Path) -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return tuple()
+    if result.returncode != 0:
+        return tuple()
+    dirty: list[str] = []
+    for line in result.stdout.splitlines():
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[-1].strip()
+        if path:
+            dirty.append(path)
+    return tuple(dict.fromkeys(dirty))
+
+
+def _dirty_fingerprint(root: Path, path: str) -> str:
+    target = root / path
+    if not target.is_file() or target.is_symlink():
+        return ""
+    try:
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 def _execution_review_records_verification(root: Path, evidence_paths: set[str]) -> bool:
