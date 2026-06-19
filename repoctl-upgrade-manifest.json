@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "replace_paths": [
     ".claude/agents/README.md",
     ".claude/settings.maintenance.json",
@@ -37,6 +37,7 @@
     "tests/repoctl/test_code_index.py",
     "tests/repoctl/test_meta_check.py",
     "tests/repoctl/test_release.py",
+    "tests/repoctl/test_repositories.py",
     "tests/repoctl/test_task_lifecycle.py",
     "tests/repoctl/test_upgrade.py",
     "tools/__init__.py",
@@ -60,6 +61,7 @@
     "tools/repoctl/markdown.py",
     "tools/repoctl/meta.py",
     "tools/repoctl/release.py",
+    "tools/repoctl/repositories.py",
     "tools/repoctl/settings.py",
     "tools/repoctl/tasks.py",
     "tools/repoctl/upgrade.py",
@@ -67,7 +69,7 @@
   ],
   "preserve_paths": [
     "FEEDBACK.md",
-    "repo/**",
+    "repos/**",
     "docs/BOARD.md",
     "docs/PRD.md",
     "docs/tasks/T-*.md",

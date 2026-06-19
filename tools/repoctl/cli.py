@@ -11,7 +11,8 @@ from .code_index import build_code_index
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
-from .tasks import Problem, append_task_log, block_task, cancel_task, create_task_file, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, start_task, update_task_discovery, validate_tasks, validate_verification_file
+from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
+from .tasks import Problem, REPO_REQUIRED_AREAS, append_task_log, block_task, cancel_task, create_task_file, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, start_task, update_task_discovery, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, write_plan
 
 
@@ -77,20 +78,27 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Create verification evidence", command=f"cat > /tmp/{task_id}-verification.md")
             add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --verification-file /tmp/{task_id}-verification.md --json")
         elif code == "verification_file_inside_repo":
-            add("Move verification evidence outside repo/", command=f"cp {path or 'repo/...'} /tmp/{task_id}-verification.md")
+            add("Move verification evidence outside repos/", command=f"cp {path or 'repos/...'} /tmp/{task_id}-verification.md")
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
-            add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repo/<path> --chosen repo/<path> --json")
+            add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
-        elif code == "repo_git_unavailable":
-            add("Initialize repo/ as an independent git repository", command="git -C repo init")
+        elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
+            add("Initialize repos/ as an independent git repository", command="git -C repos init")
         elif code == "repo_head_changed_since_start":
             add("Restart task baseline after reviewing repo HEAD change", command=f"./scripts/repoctl task start {task_id} --force-dirty --json")
         elif code == "repo_changes_on_cancel":
-            add("Revert or finish repo/ changes before canceling", command="git -C repo status --short")
+            add("Revert or finish repos/ changes before canceling", command="git -C repos status --short")
             add("Explicitly cancel with dirty repo evidence", command=f"./scripts/repoctl task cancel {task_id} --verification-file /tmp/{task_id}-cancel.md --allow-dirty-cancel --json")
         elif code == "annotation_required":
-            rel = path[5:] if path.startswith("repo/") else path
-            add("Add required metadata annotation", command=f"./scripts/repoctl meta set {rel or '<path>'} --role <role> --purpose <purpose> --topic <topic> --json")
+            repository = data.get("repository") if isinstance(data, dict) else None
+            repo_path = str(repository.get("path") or "") if isinstance(repository, dict) else ""
+            repo_id = str(repository.get("id") or "") if isinstance(repository, dict) else ""
+            if repo_path and path.startswith(f"{repo_path}/"):
+                rel = path[len(repo_path) + 1 :]
+            else:
+                rel = path[6:] if path.startswith("repos/") else path
+            selector = f" --repo-id {repo_id}" if repo_id and repo_id != "main" else ""
+            add("Add required metadata annotation", command=f"./scripts/repoctl meta set {rel or '<path>'}{selector} --role <role> --purpose <purpose> --topic <topic> --json")
         elif code == "move_candidate":
             add("Repair metadata path explicitly", command="./scripts/repoctl meta move <old-path> <new-path> --json")
         elif code in {"invalid_frontmatter", "missing_frontmatter", "invalid_status"}:
@@ -98,11 +106,11 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "invalid_area":
             add("Use a broad area enum and keep detailed surface in task text", command="./scripts/repoctl task create --area frontend --slug <slug> \"<title>\" --json")
         elif code == "invalid_repo_ref":
-            add("For root workspace work, omit --repo-ref", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
-            add("For repo work, use the repo branch or worktree name", command="./scripts/repoctl task create --area repo --repo-ref repo --slug <slug> \"<title>\" --json")
+            add("When no product repo is selected, omit --repo-ref", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
+            add("For repo work, use stable repo_id", command="./scripts/repoctl task create --area repo --repo-id <id> --slug <slug> \"<title>\" --json")
         elif code == "repo_ref_non_repo_area":
-            add("Use a repo-scoped area for repo/ work", command="./scripts/repoctl task create --area repo --repo-ref repo --slug <slug> \"<title>\" --json")
-            add("Omit --repo-ref for root docs/ops work", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
+            add("Use a repo-scoped area and stable repo_id for repos/ work", command="./scripts/repoctl task create --area repo --repo-id <id> --slug <slug> \"<title>\" --json")
+            add("Omit --repo-ref when no product repo is selected", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
         elif code == "metadata_coverage_empty":
             add("Configure sparse metadata coverage", command="./scripts/repoctl meta set <path> --role <role> --purpose <purpose> --topic <topic> --json")
         elif code == "board_missing_live_task":
@@ -128,8 +136,15 @@ def _warnings(problems: list[Problem]) -> list[dict[str, str]]:
     return [problem.to_dict() for problem in problems if problem.severity == "warning"]
 
 
+def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget | None:
+    repo_id = getattr(args, "repo_id", None)
+    if repo_id:
+        return require_repo_target(root, repo_id=repo_id)
+    return default_repo_target(root)
+
+
 def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "upgrade_command") if getattr(args, name, None)]
+    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "upgrade_command") if getattr(args, name, None)]
     return ".".join(parts) if parts else "repoctl"
 
 
@@ -178,6 +193,57 @@ def cmd_check(args: argparse.Namespace) -> int:
         if payload["board"]["stale"]:
             print("BOARD is stale. Run: repoctl check --fix-board")
     return 1 if _has_errors(problems) else 0
+
+
+def cmd_repo_list(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    layout = repo_layout(root)
+    payload = {"ok": True, "command": "repo.list", "data": layout.to_dict(), "problems": [], "warnings": []}
+    if args.json:
+        _json(payload)
+    else:
+        for target in layout.targets:
+            print(f"{target.id} {target.display_path} {target.identity_source}")
+        for candidate in layout.candidates:
+            print(f"{candidate.display_path} suggested_id={candidate.suggested_id} {candidate.identity_status}")
+    return 0
+
+
+def cmd_repo_show(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    target = require_repo_target(root, args.repo_id)
+    payload = {"ok": True, "command": "repo.show", "data": {"repository": target.to_dict()}, "problems": [], "warnings": []}
+    if args.json:
+        _json(payload)
+    else:
+        print(f"{target.id} {target.display_path} {target.identity_source}")
+    return 0
+
+
+def cmd_repo_check(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    layout = repo_layout(root)
+    problems = repo_check_problems(layout)
+    payload = {"ok": not problems, "command": "repo.check", "data": layout.to_dict(), "problems": problems, "warnings": []}
+    if args.json:
+        _json(payload)
+    else:
+        print(f"repoctl repo check: {layout.placement} ({len(layout.targets)} repositories)")
+        for problem in problems:
+            print(f"[{problem['severity']}] {problem['code']}: {problem['message']}")
+    return 1 if problems else 0
+
+
+def cmd_repo_adopt(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    with repoctl_lock(root):
+        layout = adopt_repositories(root, all_candidates=args.all, path=args.path or "", repo_id=args.repo_id or "")
+    payload = {"ok": True, "command": "repo.adopt", "data": layout.to_dict(), "problems": [], "warnings": []}
+    if args.json:
+        _json(payload)
+    else:
+        print("repoctl repo adopt: ok")
+    return 0
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
@@ -261,9 +327,10 @@ def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     all_tasks = load_tasks(root)
     task_problems = [problem for problem in validate_tasks(all_tasks, include_archived_warnings=True) if problem.path == task.rel_path]
+    target = _repo_target_for_task_command(root, task)
     delta = repo_changes_since_task_start(root, task_id)
-    changed_files, meta_status_problems, _meta = meta_status(root, changed=True, changes=delta["changes"])
-    meta_problems = check_meta(root, changed=True, changes=delta["changes"]) if changed_files and not _has_errors(meta_status_problems) else []
+    changed_files, meta_status_problems, meta = meta_status(root, changed=True, changes=delta["changes"], target=target)
+    meta_problems = check_meta(root, changed=True, changes=delta["changes"], target=target) if changed_files and not _has_errors(meta_status_problems) else []
     verification_path = Path(f"/tmp/{task_id}-verification.md")
     doctor_problems: list[Problem] = []
     if not verification_path.is_file():
@@ -282,6 +349,7 @@ def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
         "repo_changes": {
             **_repo_change_summary(delta),
         },
+        "repository": meta.get("repository", {}) if isinstance(meta, dict) else {},
         "verification_file": verification_path.as_posix(),
     }
     payload = {
@@ -345,16 +413,15 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         title = args.title
         area = args.area or ""
         repo_ref = args.repo_ref or ""
+        repo_id = args.repo_id or ""
         if not title:
             raise RepoctlError("task title is required")
         if args.backlog_id:
             resolve_backlog_item(board_text, args.backlog_id)
             if not args.slug:
-                raise RepoctlError("Backlog promotion requires explicit --slug")
+                raise RepoctlError("Backlog promotion requires explicit --slug", code="missing_slug")
             if not area:
-                raise RepoctlError("Backlog promotion requires explicit --area")
-            if not repo_ref:
-                raise RepoctlError("Backlog promotion requires explicit --repo-ref")
+                raise RepoctlError("Backlog promotion requires explicit --area", code="missing_area")
         task = create_task_file(
             root,
             title=title,
@@ -364,6 +431,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             owner=args.owner,
             parent=args.parent or "",
             repo_ref=repo_ref,
+            repo_id=repo_id,
             backlog_id=args.backlog_id or "",
         )
         if args.backlog_id:
@@ -451,7 +519,7 @@ def cmd_backlog_add(args: argparse.Namespace) -> int:
     if not title:
         raise RepoctlError("backlog title is required")
     if "\n" in title or "\r" in title:
-        raise RepoctlError("backlog title must be a single line")
+        raise RepoctlError("backlog title must be a single line", code="invalid_title")
     body = ""
     if args.body_file:
         try:
@@ -525,18 +593,61 @@ def _verification_file_arg(root: Path, task_id: str, *, verification_file: str |
     return Path(verification_file)
 
 
+def _repo_target_for_task_command(root: Path, task: Any) -> RepoTarget | None:
+    repo_id = str(task.frontmatter.get("repo_id") or "").strip()
+    area = str(task.frontmatter.get("area") or "")
+    if repo_id:
+        return require_repo_target(root, repo_id=repo_id)
+    if area in REPO_REQUIRED_AREAS:
+        return default_repo_target(root)
+    layout = repo_layout(root)
+    if not layout.registry_ready:
+        return None
+    return layout.targets[0] if len(layout.targets) == 1 else None
+
+
 def _finish_meta_gate(root: Path, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    task = resolve_task(root, task_id)
+    target = _repo_target_for_task_command(root, task)
+    if target is None:
+        delta = repo_changes_since_task_start(root, task_id)
+        if delta.get("changes"):
+            first_changed = str(delta["changes"][0][1])
+            changed = ", ".join(str(entry[1]) for entry in delta["changes"][:8])
+            suffix = "" if len(delta["changes"]) <= 8 else f", ... +{len(delta['changes']) - 8} more"
+            raise RepoctlError(
+                f"task has product repository changes without repo_id: {changed}{suffix}; create a repo-scoped child task with repo_id for product work",
+                code="repository_selector_required",
+                path=first_changed,
+            )
+        layout = repo_layout(root)
+        blocking = [problem for problem in layout.problems if problem.get("code") != "repository_identity_unbound"]
+        if blocking:
+            first = blocking[0]
+            raise RepoctlError(
+                f"{first.get('code', 'repository_topology_invalid')} {first.get('path', '')}: {first.get('message', 'product repository registry is not ready')}",
+                code=first.get("code") or "repository_topology_invalid",
+                path=first.get("path") or "",
+            )
+        reason = "no_repo_directory" if not (root / "repos").exists() else "root_workspace_no_repo_target"
+        return {"status": "skipped", "reason": reason}, {
+            "changes": [],
+            "baseline_available": False,
+            "preexisting_count": 0,
+            "baseline_conflicts": [],
+        }
     delta = repo_changes_since_task_start(root, task_id)
     task_changes = delta["changes"]
-    changed_files, status_problems, meta_summary = meta_status(root, changed=True, changes=task_changes)
-    meta_gate = {"status": "skipped", "reason": "no_repo_directory" if not (root / "repo").exists() else "no_repo_changes"}
+    changed_files, status_problems, meta_summary = meta_status(root, changed=True, changes=task_changes, target=target)
+    repo_exists = bool(target and target.root_path.exists()) or (root / "repos").exists()
+    meta_gate = {"status": "skipped", "reason": "no_repo_directory" if not repo_exists else "no_repo_changes"}
     status_errors = [problem for problem in status_problems if problem.severity == "error"]
     if status_errors:
         first = status_errors[0]
         location = f" {first.path}" if first.path else ""
         raise RepoctlError(f"repo meta changed-file check failed: {first.code}{location}: {first.message}", code=first.code, path=first.path)
     if changed_files:
-        meta_problems = check_meta(root, changed=True, changes=task_changes)
+        meta_problems = check_meta(root, changed=True, changes=task_changes, target=target)
         meta_errors = [problem for problem in meta_problems if problem.severity == "error"]
         if meta_errors:
             first = meta_errors[0]
@@ -568,7 +679,7 @@ def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) ->
         changed = ", ".join(entry[1] for entry in delta["changes"][:5])
         suffix = " ..." if len(delta["changes"]) > 5 else ""
         raise RepoctlError(
-            f"task cancel would leave repo/ changes outside a finished metadata gate: {changed}{suffix}; revert them, finish the task, or pass --allow-dirty-cancel with explicit cancellation evidence",
+            f"task cancel would leave repos/ changes outside a finished metadata gate: {changed}{suffix}; revert them, finish the task, or pass --allow-dirty-cancel with explicit cancellation evidence",
             code="repo_changes_on_cancel",
             path=f"docs/tasks/{task_id}.md",
         )
@@ -717,11 +828,15 @@ def cmd_task_block(args: argparse.Namespace) -> int:
 
 def cmd_meta_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    problems = check_meta(root, changed=args.changed)
+    target = _repo_target_from_args(root, args)
+    problems = check_meta(root, changed=args.changed, target=target)
+    data = {"scope": "changed" if args.changed else "all"}
+    if target is not None:
+        data["repository"] = target.to_dict()
     payload = {
         "ok": not _has_errors(problems),
         "command": "meta check --changed" if args.changed else "meta check",
-        "data": {"scope": "changed" if args.changed else "all"},
+        "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
     }
@@ -740,8 +855,9 @@ def cmd_meta_check(args: argparse.Namespace) -> int:
 
 def cmd_meta_init(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
-        data = init_store(root)
+        data = init_store(root, target=target)
     payload = {"ok": True, "command": "meta init", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
@@ -752,7 +868,8 @@ def cmd_meta_init(args: argparse.Namespace) -> int:
 
 def cmd_meta_status(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    files, problems, meta = meta_status(root, changed=args.changed)
+    target = _repo_target_from_args(root, args)
+    files, problems, meta = meta_status(root, changed=args.changed, target=target)
     visible_files = files
     if not args.include_excluded:
         visible_files = [file for file in visible_files if file.classification != "excluded"]
@@ -791,7 +908,8 @@ def cmd_meta_status(args: argparse.Namespace) -> int:
 
 def cmd_meta_inventory(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    files, problems, meta = meta_inventory(root, changed=False)
+    target = _repo_target_from_args(root, args)
+    files, problems, meta = meta_inventory(root, changed=False, target=target)
     warnings = _metadata_coverage_warnings(meta)
     payload = {
         "ok": not _has_errors(problems),
@@ -822,7 +940,8 @@ def _read_optional_file(path: str | None) -> str:
 
 def cmd_meta_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    data = show_annotation(root, args.path)
+    target = _repo_target_from_args(root, args)
+    data = show_annotation(root, args.path, target=target)
     payload = {"ok": True, "command": "meta show", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
@@ -833,7 +952,8 @@ def cmd_meta_show(args: argparse.Namespace) -> int:
 
 def cmd_meta_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    candidates, problems, meta = meta_query(root, role=args.role or "", topics=args.topic or [], area=args.area or "", effects=args.declared_effect or [], limit=args.limit)
+    target = _repo_target_from_args(root, args)
+    candidates, problems, meta = meta_query(root, role=args.role or "", topics=args.topic or [], area=args.area or "", effects=args.declared_effect or [], limit=args.limit, target=target)
     warnings = _metadata_coverage_warnings(meta)
     payload = {
         "ok": not _has_errors(problems),
@@ -852,8 +972,9 @@ def cmd_meta_query(args: argparse.Namespace) -> int:
 
 def cmd_meta_suggest(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    target = _repo_target_from_args(root, args)
     text = args.text or args.text_arg or ""
-    candidates, problems, meta = meta_suggest(root, text=text, limit=args.limit)
+    candidates, problems, meta = meta_suggest(root, text=text, limit=args.limit, target=target)
     warning = {
         "code": "suggestion_not_authoritative",
         "message": "meta suggest returns candidate files only; inspect files before creating or changing task scope",
@@ -876,7 +997,8 @@ def cmd_meta_suggest(args: argparse.Namespace) -> int:
 
 def cmd_index_code(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    entries, problems, meta = build_code_index(root, changed=args.changed, limit=args.limit)
+    target = _repo_target_from_args(root, args)
+    entries, problems, meta = build_code_index(root, changed=args.changed, limit=args.limit, target=target)
     warning = {
         "code": "index_not_authoritative",
         "message": "index code is read-only technical fact extraction; inspect files before changing task scope",
@@ -953,6 +1075,7 @@ def cmd_upgrade_apply(args: argparse.Namespace) -> int:
 
 def cmd_meta_set(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    target = _repo_target_from_args(root, args)
     purpose = args.purpose or _read_optional_file(args.purpose_file)
     if not purpose:
         raise RepoctlError("--purpose or --purpose-file is required")
@@ -970,6 +1093,7 @@ def cmd_meta_set(args: argparse.Namespace) -> int:
             topics=args.topic,
             declared_effects=args.declared_effect or [],
             caution=caution,
+            target=target,
         )
     payload = {"ok": True, "command": "meta set", "data": data, "problems": [], "warnings": []}
     if args.json:
@@ -981,8 +1105,9 @@ def cmd_meta_set(args: argparse.Namespace) -> int:
 
 def cmd_meta_remove(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
-        data = remove_annotation(root, args.path)
+        data = remove_annotation(root, args.path, target=target)
     payload = {"ok": True, "command": "meta remove", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
@@ -993,8 +1118,9 @@ def cmd_meta_remove(args: argparse.Namespace) -> int:
 
 def cmd_meta_move(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
-        data = move_annotation(root, args.old_path, args.new_path)
+        data = move_annotation(root, args.old_path, args.new_path, target=target)
     payload = {"ok": True, "command": "meta move", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
@@ -1005,8 +1131,9 @@ def cmd_meta_move(args: argparse.Namespace) -> int:
 
 def cmd_meta_exclude(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
-        data = exclude_path(root, args.path, reason=args.reason, excluded_by=args.excluded_by)
+        data = exclude_path(root, args.path, reason=args.reason, excluded_by=args.excluded_by, target=target)
     payload = {"ok": True, "command": "meta exclude", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
@@ -1025,18 +1152,38 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--json", action="store_true")
     check.set_defaults(func=cmd_check)
 
+    repo = sub.add_parser("repo")
+    repo_sub = repo.add_subparsers(dest="repo_command", required=True, parser_class=RepoctlArgumentParser)
+    repo_list = repo_sub.add_parser("list")
+    repo_list.add_argument("--json", action="store_true")
+    repo_list.set_defaults(func=cmd_repo_list)
+    repo_show = repo_sub.add_parser("show")
+    repo_show.add_argument("repo_id")
+    repo_show.add_argument("--json", action="store_true")
+    repo_show.set_defaults(func=cmd_repo_show)
+    repo_check = repo_sub.add_parser("check")
+    repo_check.add_argument("--json", action="store_true")
+    repo_check.set_defaults(func=cmd_repo_check)
+    repo_adopt = repo_sub.add_parser("adopt")
+    repo_adopt.add_argument("path", nargs="?")
+    repo_adopt.add_argument("--id", dest="repo_id", default="")
+    repo_adopt.add_argument("--all", action="store_true")
+    repo_adopt.add_argument("--json", action="store_true")
+    repo_adopt.set_defaults(func=cmd_repo_adopt)
+
     task = sub.add_parser("task")
     task_sub = task.add_subparsers(dest="task_command", required=True, parser_class=RepoctlArgumentParser)
     task_create = task_sub.add_parser("create")
     task_create.add_argument("--type", choices=["task", "parent"], default="task")
     task_create.add_argument("--slug")
-    task_create.add_argument("--area", default="", help="broad area: repo, backend, frontend, infra, docs, ops, mobile; use docs/ops or omit --repo-ref for root workspace work")
+    task_create.add_argument("--area", default="", help="broad area: repo, backend, frontend, infra, docs, ops, mobile")
     task_create.add_argument("--owner", default="unassigned")
     task_create.add_argument("--parent", default="")
-    task_create.add_argument("--repo-ref", default="", help="repo/ branch or worktree name for product repo work; omit for root workspace work")
+    task_create.add_argument("--repo-ref", default="", help="advisory repos/ branch or worktree hint; never selects a repository")
+    task_create.add_argument("--repo-id", default="", help="stable product repository id for repo-scoped work; defaults to main in single-repo workspaces")
     task_create.add_argument("--backlog-id")
     task_create.add_argument("--start", action="store_true")
-    task_create.add_argument("--force-dirty", action="store_true", help="with --start, record an existing dirty repo/ baseline instead of blocking repo-scoped work")
+    task_create.add_argument("--force-dirty", action="store_true", help="with --start, record an existing dirty repos/ baseline instead of blocking repo-scoped work")
     task_create.add_argument("--print-id", action="store_true", help="print only the created task id in non-JSON mode")
     task_create.add_argument("--json", action="store_true")
     task_create.add_argument("title", nargs="?")
@@ -1064,8 +1211,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add = task_discovery_sub.add_parser("add")
     task_discovery_add.add_argument("task_id")
     task_discovery_add.add_argument("--query", help="candidate search/query command or phrase")
-    task_discovery_add.add_argument("--reviewed", action="append", default=[], help="repo/path inspected during discovery; repeat for multiple files")
-    task_discovery_add.add_argument("--chosen", action="append", default=[], help="repo/path selected for task scope; repeat for multiple files")
+    task_discovery_add.add_argument("--reviewed", action="append", default=[], help="repos/path inspected during discovery; repeat for multiple files")
+    task_discovery_add.add_argument("--chosen", action="append", default=[], help="repos/path selected for task scope; repeat for multiple files")
     task_discovery_add.add_argument("--note", help="short rationale for the chosen scope")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)
@@ -1090,7 +1237,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_cancel.add_argument("task_id")
     task_cancel.add_argument("--verification-file")
     task_cancel.add_argument("--use-task-verification", action="store_true", help="use the current ## Verification section as cancellation evidence")
-    task_cancel.add_argument("--allow-dirty-cancel", action="store_true", help="archive cancellation even when task-scoped repo/ changes remain, recording them as explicit evidence")
+    task_cancel.add_argument("--allow-dirty-cancel", action="store_true", help="archive cancellation even when task-scoped repos/ changes remain, recording them as explicit evidence")
     task_cancel.add_argument("--json", action="store_true")
     task_cancel.set_defaults(func=cmd_task_cancel)
 
@@ -1116,26 +1263,32 @@ def build_parser() -> argparse.ArgumentParser:
     meta = sub.add_parser("meta")
     meta_sub = meta.add_subparsers(dest="meta_command", required=True, parser_class=RepoctlArgumentParser)
     meta_init = meta_sub.add_parser("init")
+    meta_init.add_argument("--repo-id")
     meta_init.add_argument("--json", action="store_true")
     meta_init.set_defaults(func=cmd_meta_init)
     meta_check = meta_sub.add_parser("check")
+    meta_check.add_argument("--repo-id")
     meta_check.add_argument("--changed", action="store_true")
     meta_check.add_argument("--json", action="store_true")
     meta_check.set_defaults(func=cmd_meta_check)
     meta_status_cmd = meta_sub.add_parser("status")
+    meta_status_cmd.add_argument("--repo-id")
     meta_status_cmd.add_argument("--changed", action="store_true")
     meta_status_cmd.add_argument("--verbose", action="store_true")
     meta_status_cmd.add_argument("--include-excluded", action="store_true")
     meta_status_cmd.add_argument("--json", action="store_true")
     meta_status_cmd.set_defaults(func=cmd_meta_status)
     meta_inventory_cmd = meta_sub.add_parser("inventory")
+    meta_inventory_cmd.add_argument("--repo-id")
     meta_inventory_cmd.add_argument("--json", action="store_true")
     meta_inventory_cmd.set_defaults(func=cmd_meta_inventory)
     meta_show = meta_sub.add_parser("show")
     meta_show.add_argument("path")
+    meta_show.add_argument("--repo-id")
     meta_show.add_argument("--json", action="store_true")
     meta_show.set_defaults(func=cmd_meta_show)
     meta_query_cmd = meta_sub.add_parser("query")
+    meta_query_cmd.add_argument("--repo-id")
     meta_query_cmd.add_argument("--role", default="")
     meta_query_cmd.add_argument("--topic", action="append")
     meta_query_cmd.add_argument("--area", default="")
@@ -1145,12 +1298,14 @@ def build_parser() -> argparse.ArgumentParser:
     meta_query_cmd.set_defaults(func=cmd_meta_query)
     meta_suggest_cmd = meta_sub.add_parser("suggest")
     meta_suggest_cmd.add_argument("text_arg", nargs="?")
+    meta_suggest_cmd.add_argument("--repo-id")
     meta_suggest_cmd.add_argument("--text")
     meta_suggest_cmd.add_argument("--limit", type=int, default=20)
     meta_suggest_cmd.add_argument("--json", action="store_true")
     meta_suggest_cmd.set_defaults(func=cmd_meta_suggest)
     meta_set = meta_sub.add_parser("set")
     meta_set.add_argument("path")
+    meta_set.add_argument("--repo-id")
     meta_set.add_argument("--role", required=True)
     meta_set.add_argument("--purpose")
     meta_set.add_argument("--purpose-file")
@@ -1162,15 +1317,18 @@ def build_parser() -> argparse.ArgumentParser:
     meta_set.set_defaults(func=cmd_meta_set)
     meta_remove = meta_sub.add_parser("remove")
     meta_remove.add_argument("path")
+    meta_remove.add_argument("--repo-id")
     meta_remove.add_argument("--json", action="store_true")
     meta_remove.set_defaults(func=cmd_meta_remove)
     meta_move = meta_sub.add_parser("move")
     meta_move.add_argument("old_path")
     meta_move.add_argument("new_path")
+    meta_move.add_argument("--repo-id")
     meta_move.add_argument("--json", action="store_true")
     meta_move.set_defaults(func=cmd_meta_move)
     meta_exclude = meta_sub.add_parser("exclude")
     meta_exclude.add_argument("path")
+    meta_exclude.add_argument("--repo-id")
     meta_exclude.add_argument("--reason", required=True)
     meta_exclude.add_argument("--excluded-by", default="agent")
     meta_exclude.add_argument("--json", action="store_true")
@@ -1179,6 +1337,7 @@ def build_parser() -> argparse.ArgumentParser:
     index = sub.add_parser("index")
     index_sub = index.add_subparsers(dest="index_command", required=True)
     index_code = index_sub.add_parser("code")
+    index_code.add_argument("--repo-id")
     index_code.add_argument("--changed", action="store_true")
     index_code.add_argument("--limit", type=int, default=200)
     index_code.add_argument("--json", action="store_true")

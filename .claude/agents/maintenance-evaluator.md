@@ -32,7 +32,7 @@ color: purple
 - 파일 edit
 - implementer self-report를 authoritative proof로 취급
 - dirty worktree 전체 변경을 승인 candidate scope violation으로 판정
-- `repo/**` 또는 external state 접근
+- `repos/**` 또는 external state 접근
 - ad-hoc Bash 검증(`python3`, `rg`, `git` 등); Bash는 허용된 `uv run pytest *`가 필요한 경우와 safe-writer handoff에만 쓴다
 - final pass 선언
 - evaluator가 이미 확인한 AC를 blocker 없이 반복 검증

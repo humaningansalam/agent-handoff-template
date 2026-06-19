@@ -44,9 +44,9 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Verify repoctl tests
+      - name: Verify control-plane tests
         if: steps.existing.outputs.exists == 'false'
-        run: uv run pytest -q tests/repoctl
+        run: uv run pytest -q tests/repoctl tests/maintenance
 
       - name: Verify workspace contracts
         if: steps.existing.outputs.exists == 'false'

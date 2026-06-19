@@ -96,7 +96,7 @@ def find_section(text: str, heading: str) -> SectionRange:
         if found == wanted:
             end = headings[index + 1][1] if index + 1 < len(headings) else len(text)
             return SectionRange(wanted, start, body_start, end)
-    raise RepoctlError(f"section missing: {wanted}")
+    raise RepoctlError(f"section missing: {wanted}", code="missing_section")
 
 
 def replace_section(text: str, heading: str, body: str) -> str:

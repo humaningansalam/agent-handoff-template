@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
+from .repositories import RepoTarget, default_repo_target
+
 
 ChangedEntry: TypeAlias = tuple[str, str, str]
 
@@ -14,40 +16,54 @@ ChangedEntry: TypeAlias = tuple[str, str, str]
 class RepoGitState:
     available: bool
     reason: str = ""
+    repo_id: str = ""
+    repo_path: str = ""
 
 
-def repo_git_state(root: Path) -> RepoGitState:
-    repo = root / "repo"
-    if not repo.exists():
-        return RepoGitState(False, "repo/ directory is missing")
+def _target(root: Path, target: RepoTarget | None = None) -> RepoTarget | None:
+    return target or default_repo_target(root)
+
+
+def repo_git_state(root: Path, target: RepoTarget | None = None) -> RepoGitState:
+    try:
+        selected = _target(root, target)
+    except Exception as exc:
+        return RepoGitState(False, str(exc))
+    if selected is None:
+        return RepoGitState(False, "product repository directory is missing")
+    repo = selected.root_path
     if not (repo / ".git").exists():
-        return RepoGitState(False, "repo/ is not an independent git repository")
+        return RepoGitState(False, f"{selected.display_path}/ is not an independent git repository", selected.id, selected.display_path)
     result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     if result.returncode != 0:
-        return RepoGitState(False, "repo/ git metadata is not usable")
+        return RepoGitState(False, f"{selected.display_path}/ git metadata is not usable", selected.id, selected.display_path)
     try:
         top = Path(result.stdout.strip()).resolve()
         if top != repo.resolve():
-            return RepoGitState(False, "repo/ git resolves outside repo/")
+            return RepoGitState(False, f"{selected.display_path}/ git resolves outside repository root", selected.id, selected.display_path)
     except OSError:
-        return RepoGitState(False, "repo/ git root cannot be resolved")
-    return RepoGitState(True)
+        return RepoGitState(False, f"{selected.display_path}/ git root cannot be resolved", selected.id, selected.display_path)
+    return RepoGitState(True, repo_id=selected.id, repo_path=selected.display_path)
 
 
-def repo_git_status(root: Path) -> tuple[list[str], RepoGitState]:
-    state = repo_git_state(root)
+def repo_git_status(root: Path, target: RepoTarget | None = None) -> tuple[list[str], RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
     if not state.available:
         return [], state
-    repo = root / "repo"
+    assert selected is not None
+    repo = selected.root_path
     result = subprocess.run(["git", "status", "--short"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     return [line for line in result.stdout.splitlines() if line], state
 
 
-def repo_git_head(root: Path) -> tuple[str, RepoGitState]:
-    state = repo_git_state(root)
+def repo_git_head(root: Path, target: RepoTarget | None = None) -> tuple[str, RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
     if not state.available:
         return "", state
-    repo = root / "repo"
+    assert selected is not None
+    repo = selected.root_path
     result = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     if result.returncode != 0:
         return "<unborn>", state
@@ -58,8 +74,6 @@ def normalize_repo_path(path: str | Path) -> str:
     raw = str(path).strip().replace("\\", "/")
     while raw.startswith("./"):
         raw = raw[2:]
-    if raw.startswith("repo/"):
-        raw = raw[5:]
     raw = raw.strip("/")
     parts = [part for part in raw.split("/") if part not in {"", "."}]
     if not parts or any(part == ".." for part in parts):
@@ -89,11 +103,13 @@ def _parse_name_status(line: str) -> list[ChangedEntry]:
     return []
 
 
-def repo_changed_entries(root: Path) -> tuple[list[ChangedEntry], RepoGitState]:
-    state = repo_git_state(root)
+def repo_changed_entries(root: Path, target: RepoTarget | None = None) -> tuple[list[ChangedEntry], RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
     if not state.available:
         return [], state
-    repo = root / "repo"
+    assert selected is not None
+    repo = selected.root_path
     seen: set[ChangedEntry] = set()
     changes: list[ChangedEntry] = []
     for args in (["diff", "--name-status", "--find-renames"], ["diff", "--cached", "--name-status", "--find-renames"]):
@@ -113,11 +129,13 @@ def repo_changed_entries(root: Path) -> tuple[list[ChangedEntry], RepoGitState]:
     return changes, state
 
 
-def repo_change_fingerprints(root: Path, entries: list[ChangedEntry]) -> tuple[dict[str, str], RepoGitState]:
-    state = repo_git_state(root)
+def repo_change_fingerprints(root: Path, entries: list[ChangedEntry], target: RepoTarget | None = None) -> tuple[dict[str, str], RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
     if not state.available:
         return {}, state
-    repo = root / "repo"
+    assert selected is not None
+    repo = selected.root_path
     fingerprints: dict[str, str] = {}
     for entry in entries:
         _change, path, old_path = entry
@@ -148,11 +166,13 @@ def _changed_entry_key(entry: ChangedEntry) -> str:
     return "\0".join([change, path, old_path])
 
 
-def repo_diff_evidence(root: Path) -> tuple[str, RepoGitState]:
-    state = repo_git_state(root)
+def repo_diff_evidence(root: Path, target: RepoTarget | None = None) -> tuple[str, RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
     if not state.available:
         return f"repo git unavailable: {state.reason}", state
-    repo = root / "repo"
+    assert selected is not None
+    repo = selected.root_path
     status_lines = [line for line in subprocess.run(["git", "status", "--short"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout.splitlines() if line]
     diff = subprocess.run(["git", "diff", "--stat"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout.rstrip("\n")
     cached = subprocess.run(["git", "diff", "--cached", "--stat"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout.rstrip("\n")

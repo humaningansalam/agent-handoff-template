@@ -68,7 +68,7 @@ Checker code, not an agent, classifies surface class/profile and derives the rou
 - `tools/**`, `tests/**`, `templates/**`
 
 금지되는 surface:
-- `repo/**`
+- `repos/**`
 - product-repo runtime 작업
 - 생성된 wiki output
 - secret, deployment, database, MCP/Notion write, live external mutation
@@ -143,7 +143,7 @@ PRD의 `AC-001`-`AC-005`는 product acceptance 기준이다. 이 계약은 그 A
 
 - `AC-001` Scope authority: requested edit를 Project collaboration 또는 explicit repo maintenance scope로 분리하고, slash command execution을 별도 runtime phase로 취급하는지 확인한다.
 - `AC-002` Instruction authority: `CLAUDE.md`, PRD, Operations Contract, Maintenance Harness Contract의 authority split을 유지하는지 확인한다.
-- `AC-003` Maintenance harness boundary: approved affected surfaces, changed-file containment, `repo/**`와 generated output 차단, live external mutation 금지로 확인한다.
+- `AC-003` Maintenance harness boundary: approved affected surfaces, changed-file containment, `repos/**`와 generated output 차단, live external mutation 금지로 확인한다.
 - `AC-004` Artifact/state lineage: bounded JSON evidence artifact, run-scoped canonical artifact, trace view, checker-generated state, approval freeze hash로 확인한다.
 - `AC-005` Acceptance verification: profile별 필수 evidence, mandatory FML mapping/direct evidence, checker-calculated pass eligibility로 확인한다.
 

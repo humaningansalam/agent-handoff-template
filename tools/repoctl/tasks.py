@@ -11,6 +11,7 @@ from typing import Any
 from .io import LOCK_REL, RepoctlError, atomic_write
 from .git import ChangedEntry, RepoGitState, repo_change_fingerprints, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status
 from .markdown import append_section_entry, find_section, parse_frontmatter, replace_frontmatter_line, replace_section
+from .repositories import RepoTarget, default_repo_target, repo_layout
 from .settings import document_language, validate_document_language
 
 LIVE = {"todo", "doing", "blocked"}
@@ -51,7 +52,7 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "work_area_primary": "Identify the exact repo, docs, or workspace files during the first implementation pass; do not guess them from the title alone.",
         "parent_goal": "Coordinate `{title}` by splitting the work into child tasks, keeping shared decisions current, and closing integration with verification evidence.",
         "parent_plan": [
-            "Inspect the likely repo/docs surfaces and decide whether child tasks are truly needed.",
+            "Inspect the likely repos/docs surfaces and decide whether child tasks are truly needed.",
             "Create child tasks with explicit parent frontmatter for each independently verifiable surface.",
             "Keep shared decisions and child status summaries current while treating child frontmatter as authoritative.",
             "Finish only after all children are done/canceled and integration verification is recorded.",
@@ -64,27 +65,27 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "integration_done": "All child tasks are done or canceled and integration verification is recorded.",
         "task_goal": "Deliver `{title}` as the smallest verified change, with exact touched files, validation evidence, and restartable handoff recorded before finish.",
         "task_plan": [
-            "Inspect the task record, Board, and relevant repo/docs surfaces before editing.",
+            "Inspect the task record, Board, and relevant repos/docs surfaces before editing.",
             "Identify the exact files to change and keep edits limited to that surface.",
             "Implement the smallest complete change that satisfies the goal.",
-            "Run focused validation and `repoctl meta check --changed` when `repo/` files changed.",
-            "Write a temporary verification file outside `repo/`, then finish with repoctl.",
+            "Run focused validation and `repoctl meta check --changed` when `repos/` files changed.",
+            "Write a temporary verification file outside `repos/`, then finish with repoctl.",
         ],
         "task_handoff_next": "Start the task, inspect `{repo_hint}`, and replace this generated scope with the exact files and validation plan.",
         "task_handoff_done": "The task file names the real touched files, the change is verified, and repoctl finish records archive/Board state.",
         "in_scope": [
             "Identify and record the concrete files/docs that define this task.",
             "Make only the narrow changes needed for the stated goal.",
-            "Keep `repo/.repometa` annotations valid for any changed `repo/` files required by metadata coverage policy.",
+            "Keep `repos/.repometa` annotations valid for any changed `repos/` files required by metadata coverage policy.",
             "Keep Execution Log entries meaningful: creation, start, implementation decision, verification, blocker, or finish.",
-            "Use a temporary verification file outside `repo/`; `repoctl task finish` stores the durable evidence in the task.",
+            "Use a temporary verification file outside `repos/`; `repoctl task finish` stores the durable evidence in the task.",
         ],
         "root_in_scope": [
             "Identify and record the concrete workspace/docs files that define this task.",
             "Make only the narrow changes needed for the stated goal.",
-            "Do not touch product files under `repo/` unless the task is intentionally converted into repo-scoped work.",
+            "Do not touch product files under `repos/` unless the task is intentionally converted into repo-scoped work.",
             "Keep Execution Log entries meaningful: creation, start, implementation decision, verification, blocker, or finish.",
-            "Use a temporary verification file outside `repo/`; `repoctl task finish` stores the durable evidence in the task.",
+            "Use a temporary verification file outside `repos/`; `repoctl task finish` stores the durable evidence in the task.",
         ],
         "out_of_scope": [
             "Unrelated refactors or cleanup.",
@@ -92,7 +93,7 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         ],
         "verification_pending": "Pending.",
         "start_handoff_next": "Continue implementation for `{task_path}`.",
-        "start_handoff_done": "The task names exact touched files, focused validation is recorded, `./scripts/repoctl meta check --changed` is clean for changed `repo/` files, and the task is finished.",
+        "start_handoff_done": "The task names exact touched files, focused validation is recorded, `./scripts/repoctl meta check --changed` is clean for changed `repos/` files, and the task is finished.",
         "context_docs": "<!-- Add only the minimum context docs needed for this task, or leave empty. -->",
         "discovery": [
             "Candidate query: none yet",
@@ -127,7 +128,7 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "work_area_primary": "첫 구현 단계에서 정확한 repo, docs, workspace 파일을 확인한다. 제목만 보고 추측하지 않는다.",
         "parent_goal": "`{title}`를 조율한다. 필요한 child task로 나누고, 공유 결정을 최신으로 유지하며, 통합 검증 증거로 마무리한다.",
         "parent_plan": [
-            "관련 repo/docs 표면을 확인하고 child task가 정말 필요한지 판단한다.",
+            "관련 repos/docs 표면을 확인하고 child task가 정말 필요한지 판단한다.",
             "독립적으로 검증 가능한 표면마다 명시적 parent frontmatter가 있는 child task를 만든다.",
             "child frontmatter를 권위 source로 두고 공유 결정과 child 상태 요약을 최신으로 유지한다.",
             "모든 child가 done/canceled가 되고 통합 검증이 기록된 뒤에만 완료한다.",
@@ -140,27 +141,27 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "integration_done": "모든 child task가 done 또는 canceled이고 통합 검증이 기록됨.",
         "task_goal": "`{title}`를 가장 작은 검증 가능한 변경으로 완수한다. 정확한 변경 파일, 검증 증거, 재시작 가능한 handoff를 완료 전에 기록한다.",
         "task_plan": [
-            "편집 전에 작업 기록, Board, 관련 repo/docs 표면을 확인한다.",
+            "편집 전에 작업 기록, Board, 관련 repos/docs 표면을 확인한다.",
             "변경할 정확한 파일을 식별하고 편집 범위를 그 표면으로 제한한다.",
             "목표를 만족하는 가장 작은 완전한 변경을 구현한다.",
-            "집중 검증을 실행하고, `repo/` 파일이 바뀌었으면 `repoctl meta check --changed`를 실행한다.",
-            "`repo/` 밖 임시 검증 파일을 작성한 뒤 repoctl로 완료한다.",
+            "집중 검증을 실행하고, `repos/` 파일이 바뀌었으면 `repoctl meta check --changed`를 실행한다.",
+            "`repos/` 밖 임시 검증 파일을 작성한 뒤 repoctl로 완료한다.",
         ],
         "task_handoff_next": "작업을 시작하고 `{repo_hint}`를 확인한 뒤, 이 생성된 범위를 정확한 파일과 검증 계획으로 교체한다.",
         "task_handoff_done": "작업 파일에 실제 변경 파일이 기록되고, 변경이 검증되며, repoctl finish가 archive/Board 상태를 기록함.",
         "in_scope": [
             "이 작업을 정의하는 구체적인 파일/docs를 식별하고 기록한다.",
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
-            "metadata coverage policy가 요구하는 변경 `repo/` 파일의 `repo/.repometa` annotation을 유효하게 유지한다.",
+            "metadata coverage policy가 요구하는 변경 `repos/` 파일의 `repos/.repometa` annotation을 유효하게 유지한다.",
             "Execution Log에는 생성, 시작, 구현 결정, 검증, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "`repo/` 밖 임시 검증 파일을 사용한다. `repoctl task finish`가 영구 증거를 작업 파일에 저장한다.",
+            "`repos/` 밖 임시 검증 파일을 사용한다. `repoctl task finish`가 영구 증거를 작업 파일에 저장한다.",
         ],
         "root_in_scope": [
             "이 작업을 정의하는 구체적인 workspace/docs 파일을 식별하고 기록한다.",
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
-            "작업을 의도적으로 repo-scoped로 전환하지 않는 한 `repo/` 제품 파일은 건드리지 않는다.",
+            "작업을 의도적으로 repo-scoped로 전환하지 않는 한 `repos/` 제품 파일은 건드리지 않는다.",
             "Execution Log에는 생성, 시작, 구현 결정, 검증, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "`repo/` 밖 임시 검증 파일을 사용한다. `repoctl task finish`가 영구 증거를 작업 파일에 저장한다.",
+            "`repos/` 밖 임시 검증 파일을 사용한다. `repoctl task finish`가 영구 증거를 작업 파일에 저장한다.",
         ],
         "out_of_scope": [
             "무관한 refactor 또는 cleanup.",
@@ -168,7 +169,7 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         ],
         "verification_pending": "대기 중.",
         "start_handoff_next": "`{task_path}` 구현을 계속한다.",
-        "start_handoff_done": "작업에 정확한 변경 파일이 기록되고, 집중 검증이 남아 있으며, 변경된 `repo/` 파일에 대해 `./scripts/repoctl meta check --changed`가 깨끗하고, 작업이 완료됨.",
+        "start_handoff_done": "작업에 정확한 변경 파일이 기록되고, 집중 검증이 남아 있으며, 변경된 `repos/` 파일에 대해 `./scripts/repoctl meta check --changed`가 깨끗하고, 작업이 완료됨.",
         "context_docs": "<!-- 이 작업에 필요한 최소 context docs만 추가한다. 없으면 비워 둔다. -->",
         "discovery": [
             "Candidate query: none yet",
@@ -240,6 +241,7 @@ class Task:
             "status": self.status,
             "owner": str(self.frontmatter.get("owner") or "unassigned"),
             "repo_ref": str(self.frontmatter.get("repo_ref") or ""),
+            "repo_id": str(self.frontmatter.get("repo_id") or ""),
             "parent": self.parent,
             "depends_on": depends_on,
         }
@@ -387,6 +389,11 @@ def update_task_discovery(
     reviewed_values = _dedupe_preserve([*without_placeholders(fields.get("Candidate files reviewed", [])), *reviewed])
     chosen_values = _dedupe_preserve([*without_placeholders(fields.get("Chosen files", [])), *chosen])
     note_values = _dedupe_preserve([*without_placeholders(fields.get("Notes", [])), *([note] if note.strip() else [])])
+    target = _target_for_task(root, task)
+    if target is not None:
+        invalid = _discovery_paths_outside_target(chosen_values, target)
+        if invalid:
+            raise RepoctlError(f"chosen discovery files must stay under selected repository {target.id} ({target.display_path}): {', '.join(invalid)}", code="discovery_outside_selected_repository", path=task.rel_path)
 
     lines: list[str] = []
     lines.extend(_format_discovery_list("Candidate query", query_values))
@@ -454,16 +461,93 @@ def _entry_fingerprint_key(entry: ChangedEntry) -> str:
     return "\0".join([change, path, old_path])
 
 
-def _write_repo_baseline(root: Path, task: "Task", entries: list[ChangedEntry], git_state: RepoGitState) -> None:
+def _target_for_task(root: Path, task: "Task") -> RepoTarget | None:
+    repo_id = str(task.frontmatter.get("repo_id") or "").strip()
+    repo_scoped = _repo_scoped_task(task)
+    layout = repo_layout(root)
+    if (repo_id or repo_scoped) and not layout.registry_ready:
+        raise RepoctlError("repository identities are unbound; run repoctl repo adopt before mutating product repositories", code="repository_identity_unbound", path=task.rel_path)
+    if repo_id:
+        for target in layout.targets:
+            if target.id == repo_id:
+                return target
+        raise RepoctlError(f"repository not found for task repo_id: {repo_id}", code="repository_not_found", path=task.rel_path)
+    if repo_scoped:
+        return default_repo_target(root)
+    if not layout.registry_ready:
+        return None
+    return layout.targets[0] if len(layout.targets) == 1 else None
+
+
+def _root_task_product_surfaces(root: Path) -> tuple[RepoTarget, ...]:
+    layout = repo_layout(root)
+    targets = list(layout.targets)
+    target_paths = {target.display_path for target in targets}
+    for candidate in layout.candidates:
+        if candidate.display_path in target_paths:
+            continue
+        targets.append(RepoTarget("", candidate.root_path, candidate.display_path, "unbound"))
+    return tuple(targets)
+
+
+def _no_product_repo_state() -> RepoGitState:
+    return RepoGitState(False, "task has no product repository target")
+
+
+def _write_repo_baseline(root: Path, task: "Task", entries: list[ChangedEntry], git_state: RepoGitState, target: RepoTarget | None) -> None:
     if not git_state.available:
         return
-    fingerprints, _fingerprint_state = repo_change_fingerprints(root, entries)
+    fingerprints, _fingerprint_state = repo_change_fingerprints(root, entries, target)
+    git_toplevel = ""
+    if target is not None:
+        try:
+            git_toplevel = target.root_path.resolve().as_posix()
+        except OSError:
+            git_toplevel = target.root_path.as_posix()
+    head, _head_state = repo_git_head(root, target)
     _state_dir(root).mkdir(parents=True, exist_ok=True)
     payload = {
+        "schema_version": 2,
         "task_id": task.id,
         "created": utc_stamp(),
+        "repo_id": git_state.repo_id,
+        "repo_path": git_state.repo_path,
+        "git_toplevel": git_toplevel,
+        "head": head,
         "repo_changes": [_entry_to_dict(entry) for entry in entries],
         "repo_change_fingerprints": fingerprints,
+    }
+    atomic_write(_baseline_path(root, task.id), json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _repo_baseline_record(root: Path, target: RepoTarget) -> dict[str, Any] | None:
+    entries, git_state = repo_changed_entries(root, target)
+    if not git_state.available:
+        return None
+    fingerprints, _fingerprint_state = repo_change_fingerprints(root, entries, target)
+    try:
+        git_toplevel = target.root_path.resolve().as_posix()
+    except OSError:
+        git_toplevel = target.root_path.as_posix()
+    return {
+        "repo_id": target.id,
+        "repo_path": target.display_path,
+        "git_toplevel": git_toplevel,
+        "repo_changes": [_entry_to_dict(entry) for entry in entries],
+        "repo_change_fingerprints": fingerprints,
+    }
+
+
+def _write_product_repo_baselines(root: Path, task: "Task", targets: tuple[RepoTarget, ...]) -> None:
+    records = [record for target in targets if (record := _repo_baseline_record(root, target)) is not None]
+    if not records:
+        return
+    _state_dir(root).mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 2,
+        "task_id": task.id,
+        "created": utc_stamp(),
+        "repositories": records,
     }
     atomic_write(_baseline_path(root, task.id), json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
@@ -477,6 +561,16 @@ def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError) as exc:
         raise RepoctlError(f"task repo dirty baseline is unreadable: {path.relative_to(root).as_posix()}") from exc
     raw_entries = data.get("repo_changes", []) if isinstance(data, dict) else []
+    raw_repositories = data.get("repositories", []) if isinstance(data, dict) else []
+    if raw_repositories:
+        if not isinstance(raw_repositories, list):
+            raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
+        repositories: list[dict[str, Any]] = []
+        for item in raw_repositories:
+            if not isinstance(item, dict):
+                raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
+            repositories.append(item)
+        return {"repositories": repositories, "entries": [], "fingerprints": {}, "repo_id": "", "repo_path": "", "git_toplevel": ""}
     if not isinstance(raw_entries, list):
         raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
     entries: list[ChangedEntry] = []
@@ -493,17 +587,106 @@ def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
     if raw_fingerprints and not isinstance(raw_fingerprints, dict):
         raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
     fingerprints = {str(key): str(value) for key, value in raw_fingerprints.items()} if isinstance(raw_fingerprints, dict) else {}
-    return {"entries": entries, "fingerprints": fingerprints}
+    return {
+        "entries": entries,
+        "fingerprints": fingerprints,
+        "repo_id": str(data.get("repo_id") or ""),
+        "repo_path": str(data.get("repo_path") or ""),
+        "git_toplevel": str(data.get("git_toplevel") or ""),
+        "head": str(data.get("head") or ""),
+    }
+
+
+def _parse_baseline_entries(raw_entries: Any, state_path: Path, root: Path) -> list[ChangedEntry]:
+    if not isinstance(raw_entries, list):
+        raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
+    entries: list[ChangedEntry] = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
+        change = str(item.get("change") or "")
+        path_value = str(item.get("path") or "")
+        old_path = str(item.get("old_path") or "")
+        if not change or not path_value:
+            raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
+        entries.append((change, path_value, old_path))
+    return entries
 
 
 def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
-    current, git_state = repo_changed_entries(root)
+    task = resolve_task(root, task_id)
+    target = _target_for_task(root, task)
+    if target is None:
+        baseline = _read_repo_baseline(root, task_id)
+        if baseline and baseline.get("repositories"):
+            changes: list[ChangedEntry] = []
+            baseline_count = 0
+            current_count = 0
+            baseline_conflicts: list[str] = []
+            for record in baseline["repositories"]:
+                repo_id = str(record.get("repo_id") or "")
+                repo_path = str(record.get("repo_path") or "")
+                matched = next(
+                    (
+                        candidate
+                        for candidate in _root_task_product_surfaces(root)
+                        if candidate.display_path == repo_path and (not repo_id or candidate.id == repo_id)
+                    ),
+                    None,
+                )
+                if matched is None:
+                    if repo_path:
+                        changes.append(("deleted", repo_path, ""))
+                        baseline_conflicts.append(repo_path)
+                    continue
+                current, _git_state = repo_changed_entries(root, matched)
+                current_fingerprints, _fingerprint_state = repo_change_fingerprints(root, current, matched)
+                state_path = _baseline_path(root, task_id)
+                baseline_entries = _parse_baseline_entries(record.get("repo_changes", []), state_path, root)
+                baseline_fingerprints = record.get("repo_change_fingerprints", {})
+                if not isinstance(baseline_fingerprints, dict):
+                    raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
+                baseline_count += len(baseline_entries)
+                current_count += len(current)
+                baseline_keys = {_entry_key(entry) for entry in baseline_entries}
+                for entry in current:
+                    prefixed_entry = (entry[0], f"{repo_path}/{entry[1]}", f"{repo_path}/{entry[2]}" if entry[2] else "")
+                    if _entry_key(entry) not in baseline_keys:
+                        changes.append(prefixed_entry)
+                        continue
+                    key = _entry_fingerprint_key(entry)
+                    baseline_fingerprint = str(baseline_fingerprints.get(key) or "")
+                    current_fingerprint = current_fingerprints.get(key)
+                    if not baseline_fingerprint or current_fingerprint != baseline_fingerprint:
+                        baseline_conflicts.append(prefixed_entry[1])
+                        changes.append(prefixed_entry)
+            git_state = RepoGitState(True, repo_id="", repo_path="repos")
+            return {
+                "changes": changes,
+                "baseline_available": True,
+                "baseline_count": baseline_count,
+                "current_count": current_count,
+                "preexisting_count": max(0, current_count - len(changes)),
+                "baseline_conflicts": sorted(set(baseline_conflicts)),
+                "repo_git": git_state,
+            }
+        git_state = _no_product_repo_state()
+        changes: list[ChangedEntry] = []
+        current_count = 0
+        for product_target in _root_task_product_surfaces(root):
+            current, _target_state = repo_changed_entries(root, product_target)
+            current_count += len(current)
+            changes.extend((entry[0], f"{product_target.display_path}/{entry[1]}", f"{product_target.display_path}/{entry[2]}" if entry[2] else "") for entry in current)
+        if changes:
+            git_state = RepoGitState(True, repo_id="", repo_path="repos")
+        return {"changes": changes, "baseline_available": False, "baseline_count": 0, "current_count": current_count, "preexisting_count": 0, "baseline_conflicts": [], "repo_git": git_state}
+    current, git_state = repo_changed_entries(root, target)
     baseline = _read_repo_baseline(root, task_id) if git_state.available else None
     if baseline is None:
         return {"changes": current, "baseline_available": False, "baseline_count": 0, "current_count": len(current), "preexisting_count": 0, "baseline_conflicts": [], "repo_git": git_state}
     baseline_entries = baseline["entries"]
     baseline_fingerprints = baseline["fingerprints"]
-    current_fingerprints, _fingerprint_state = repo_change_fingerprints(root, current)
+    current_fingerprints, _fingerprint_state = repo_change_fingerprints(root, current, target)
     baseline_keys = {_entry_key(entry) for entry in baseline_entries}
     changes: list[ChangedEntry] = []
     baseline_conflicts: list[str] = []
@@ -536,17 +719,27 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     copy = _copy(_task_language(root, task))
     if task.status not in {"todo", "blocked"} and not (task.status == "doing" and force_dirty):
         raise RepoctlError("task start requires status todo or blocked; use --force-dirty to refresh a doing task's repo evidence")
-    dirty, git_state = repo_git_status(root)
-    baseline_entries, _baseline_git_state = repo_changed_entries(root)
-    if _repo_scoped_task(task) and not git_state.available:
-        raise RepoctlError(f"repo-scoped task cannot start because {git_state.reason}; initialize repo/ as an independent git repository first")
+    target = _target_for_task(root, task)
     repo_scoped = _repo_scoped_task(task)
+    if target is None:
+        product_targets = _root_task_product_surfaces(root)
+        dirty = []
+        for product_target in product_targets:
+            lines, _state = repo_git_status(root, product_target)
+            dirty.extend(f"{product_target.display_path}: {line}" for line in lines)
+        git_state = RepoGitState(bool(product_targets), repo_id="", repo_path="repos") if product_targets else _no_product_repo_state()
+        baseline_entries = []
+    else:
+        dirty, git_state = repo_git_status(root, target)
+        baseline_entries, _baseline_git_state = repo_changed_entries(root, target)
+    if _repo_scoped_task(task) and not git_state.available:
+        raise RepoctlError(f"repo-scoped task cannot start because {git_state.reason}; initialize repos/ as an independent git repository first", code="repo_git_unavailable", path=git_state.repo_path or "repos")
     if dirty and repo_scoped and not force_dirty:
-        raise RepoctlError("repo/ is dirty; use --force-dirty to record dirty files and continue")
+        raise RepoctlError("repos/ is dirty; use --force-dirty to record dirty files and continue", code="repo_dirty", path=git_state.repo_path or "repos")
 
     text = task.path.read_text(encoding="utf-8")
     text = replace_frontmatter_line(text, "status", "doing")
-    head, _head_state = repo_git_head(root)
+    head, _head_state = repo_git_head(root, target) if target is not None else ("", _no_product_repo_state())
     if dirty:
         entry = _dirty_entry(dirty, copy=copy)
     elif not git_state.available:
@@ -554,8 +747,11 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     else:
         entry = f"- {utc_stamp()}: {copy['task_started']}"
     if git_state.available:
-        entry = f"{entry}\n{_repo_head_entry(head, copy=copy)}"
-        _write_repo_baseline(root, task, baseline_entries, git_state)
+        if target is None:
+            _write_product_repo_baselines(root, task, _root_task_product_surfaces(root))
+        else:
+            entry = f"{entry}\n{_repo_head_entry(head, copy=copy)}"
+            _write_repo_baseline(root, task, baseline_entries, git_state, target)
     text = append_section_entry(text, "Execution Log", entry)
     handoff = (
         f"- Next exact step: {copy['start_handoff_next'].format(task_path=task.rel_path)}\n"
@@ -566,7 +762,7 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     text = replace_section(text, "Handoff", handoff)
     warnings: list[Problem] = []
     if dirty and not repo_scoped and not force_dirty:
-        warnings.append(Problem("warning", "root_task_repo_dirty_recorded", "root/workspace task started with existing repo/ dirty state recorded for baseline only", task.rel_path))
+        warnings.append(Problem("warning", "root_task_repo_dirty_recorded", "task started with existing repos/ dirty state recorded for baseline only", task.rel_path))
     return {"task": task, "text": text, "dirty": dirty, "repo_git": git_state, "warnings": warnings}
 
 
@@ -574,6 +770,8 @@ def _verification_gate_summary(meta_gate: dict[str, Any] | None, git_state: Repo
     lines = [copy["gate_summary_title"]]
     if git_state.available:
         lines.append(copy["repo_git_present"])
+        if git_state.repo_id or git_state.repo_path:
+            lines.append(f"- repository: {git_state.repo_id or 'main'} {git_state.repo_path or ''}".rstrip())
     else:
         lines.append(copy["repo_git_unavailable"].format(reason=git_state.reason))
     if meta_gate:
@@ -645,13 +843,16 @@ def _blocked_handoff(task_path: str, task_id: str, *, copy: dict[str, Any]) -> s
 
 def validate_verification_file(root: Path, verification_file: Path) -> None:
     resolved_verification = verification_file.resolve()
-    repo_root = (root / "repo").resolve()
-    try:
-        resolved_verification.relative_to(repo_root)
-    except ValueError:
-        pass
-    else:
-        raise RepoctlError("verification file is an input artifact; keep it outside repo/ so finish records durable evidence in the task without creating repo metadata residue", code="verification_file_inside_repo", path=verification_file.as_posix())
+    product_roots = [target.root_path for target in repo_layout(root).targets]
+    if not product_roots:
+        product_roots = [path for path in (root / "repos",) if path.exists()]
+    for product_root in product_roots:
+        try:
+            resolved_verification.relative_to(product_root.resolve())
+        except (OSError, ValueError):
+            continue
+        rel = product_root.relative_to(root).as_posix() if product_root.is_relative_to(root) else product_root.as_posix()
+        raise RepoctlError(f"verification file is an input artifact; keep it outside {rel}/ so finish records durable evidence in the task without creating product metadata residue", code="verification_file_inside_repo", path=verification_file.as_posix())
     if not verification_file.is_file():
         raise RepoctlError(f"verification file cannot be read: {verification_file}", code="missing_verification_file", path=verification_file.as_posix())
 
@@ -661,42 +862,49 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
         raise RepoctlError("task finish requires a live status")
+    repo_scoped = _repo_scoped_task(task)
     area = str(task.frontmatter.get("area") or "")
+    target = _target_for_task(root, task)
+    _assert_repo_baseline_matches(root, task, target)
     repo_changed = bool(meta_gate and meta_gate.get("status") == "passed" and meta_gate.get("scope") == "changed")
-    start_head = _repo_head_at_start(task)
-    current_head, current_head_state = repo_git_head(root)
-    if (repo_changed or area in REPO_REQUIRED_AREAS) and current_head_state.available and meta_gate and meta_gate.get("reason") != "no_repo_directory":
+    start_head = _repo_head_from_state(root, task) or _repo_head_at_start(task)
+    if target is None:
+        current_head, current_head_state = "", _no_product_repo_state()
+    else:
+        current_head, current_head_state = repo_git_head(root, target)
+    if (repo_changed or repo_scoped) and current_head_state.available and meta_gate and meta_gate.get("reason") != "no_repo_directory":
         if not start_head:
-            raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start")
+            raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
         if current_head != start_head:
-            raise RepoctlError("repo HEAD changed since task start; finish before committing repo/ changes so changed-file gates can validate the actual work", code="repo_head_changed_since_start", path=task.rel_path)
-    if repo_changed and area not in REPO_REQUIRED_AREAS:
-        raise RepoctlError("task that changes repo/ must set area to one of: repo, backend, frontend, infra, mobile; update task frontmatter to the accurate repo area instead of finishing as docs/ops")
-    if repo_changed and not str(task.frontmatter.get("repo_ref") or ""):
-        raise RepoctlError("task that changes repo/ must record repo_ref for handoff traceability; set repo_ref to the repo/ branch or worktree name before finishing")
-    if repo_changed and not _discovery_recorded(task):
+            raise RepoctlError("repo HEAD changed since task start; finish before committing repos/ changes so changed-file gates can validate the actual work", code="repo_head_changed_since_start", path=task.rel_path)
+    if repo_changed and area not in REPO_REQUIRED_AREAS and not str(task.frontmatter.get("repo_id") or ""):
+        raise RepoctlError("task that changes repos/ must set area to one of: repo, backend, frontend, infra, mobile or set repo_id for the selected product repository", code="repository_selector_required", path=task.rel_path)
+    if repo_changed and not _discovery_recorded(task, target):
         raise RepoctlError("repo task must record candidate discovery before finish", code="placeholder_discovery", path=task.rel_path)
-    if area in REPO_REQUIRED_AREAS and not (root / "repo").exists():
-        raise RepoctlError("repo-scoped task cannot finish because repo/ is missing; initialize repo/ as the product repository or use area docs/ops for root-only work")
+    if repo_scoped and target is None:
+        raise RepoctlError("repo-scoped task cannot finish because product repository is missing; initialize repos/ as the product repository or use area docs/ops for root-only work", code="repository_not_found", path=task.rel_path)
     finish_timestamp = utc_stamp()
     timestamp_problem = _execution_log_timestamp_problem(task, now=finish_timestamp)
     if timestamp_problem:
-        raise RepoctlError(f"task finish would create non-monotonic Execution Log timestamps; {timestamp_problem}")
+        raise RepoctlError(f"task finish would create non-monotonic Execution Log timestamps; {timestamp_problem}", code="execution_log_timestamp_order", path=task.rel_path)
     validate_verification_file(root, verification_file)
     try:
         verification = verification_file.read_text(encoding="utf-8")
     except OSError as exc:
         raise RepoctlError(f"verification file cannot be read: {verification_file}") from exc
     if not verification.strip():
-        raise RepoctlError("verification file must contain the commands run and their results")
+        raise RepoctlError("verification file must contain the commands run and their results", code="empty_verification_file", path=verification_file.as_posix())
     all_tasks = load_tasks(root)
     children = children_by_parent(all_tasks)
     live_children = [child for child in children.get(task.id, []) if child.status in LIVE]
     if live_children:
-        raise RepoctlError("cannot finish parent task while live children remain")
+        raise RepoctlError("cannot finish parent task while live children remain", code="live_children_block_finish", path=task.rel_path)
 
     text = task.path.read_text(encoding="utf-8")
-    diff_evidence, git_state = repo_diff_evidence(root)
+    if target is None:
+        diff_evidence, git_state = "", _no_product_repo_state()
+    else:
+        diff_evidence, git_state = repo_diff_evidence(root, target)
     verification_body, truncated = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_finished']}")
@@ -760,7 +968,11 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         raise RepoctlError("cannot cancel parent task while live children remain")
 
     text = task.path.read_text(encoding="utf-8")
-    diff_evidence, git_state = repo_diff_evidence(root)
+    target = _target_for_task(root, task)
+    if target is None:
+        diff_evidence, git_state = "", _no_product_repo_state()
+    else:
+        diff_evidence, git_state = repo_diff_evidence(root, target)
     meta_gate = meta_gate or {"status": "skipped", "reason": "task_canceled"}
     verification_body, truncated = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
     text = replace_section(text, "Verification", verification_body)
@@ -820,7 +1032,11 @@ def block_task(root: Path, task_id: str, *, verification_file: Path) -> dict[str
         raise RepoctlError("verification file must contain the blocker and current evidence")
 
     text = task.path.read_text(encoding="utf-8")
-    diff_evidence, git_state = repo_diff_evidence(root)
+    target = _target_for_task(root, task)
+    if target is None:
+        diff_evidence, git_state = "", _no_product_repo_state()
+    else:
+        diff_evidence, git_state = repo_diff_evidence(root, target)
     meta_gate = {"status": "skipped", "reason": "task_blocked"}
     verification_body, truncated = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
     text = replace_section(text, "Verification", verification_body)
@@ -846,7 +1062,7 @@ def _escape_yaml_double(value: str) -> str:
 
 def _validate_title(title: str) -> None:
     if "\n" in title or "\r" in title:
-        raise RepoctlError("task title must be a single line")
+        raise RepoctlError("task title must be a single line", code="invalid_title")
 
 
 def _slug_from_title(title: str) -> str:
@@ -878,12 +1094,12 @@ def _validate_area(area: str) -> None:
 
 def _validate_repo_ref(repo_ref: str) -> None:
     if repo_ref.strip() in {".", "./", "root", "workspace"}:
-        raise RepoctlError("repo_ref must identify repo/ branch or worktree; omit --repo-ref for root workspace work", code="invalid_repo_ref")
+        raise RepoctlError("repo_ref is only an advisory repos/ branch or worktree hint; omit --repo-ref when no product repo is selected", code="invalid_repo_ref")
 
 
 def validate_repo_ref_area(area: str, repo_ref: str) -> None:
     if repo_ref and area not in REPO_REQUIRED_AREAS:
-        raise RepoctlError("--repo-ref marks repo/ work, so --area must be one of repo, backend, frontend, infra, mobile; omit --repo-ref for root docs/ops work", code="repo_ref_non_repo_area")
+        raise RepoctlError("--repo-ref is only valid with repos/ work, so --area must be one of repo, backend, frontend, infra, mobile", code="repo_ref_non_repo_area")
 
 
 def is_parent_task(task: Task) -> bool:
@@ -899,14 +1115,26 @@ def is_parent_task(task: Task) -> bool:
 
 def _repo_scoped_task(task: Task) -> bool:
     area = str(task.frontmatter.get("area") or "")
-    return area in {"repo", "backend", "frontend", "infra", "mobile"}
+    return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in {"repo", "backend", "frontend", "infra", "mobile"}
 
 
 def _has_backlog_origin(task: Task) -> bool:
     return "Backlog origin:" in task.body
 
 
-def _discovery_recorded(task: Task) -> bool:
+def _repo_discovery_paths(values: list[str]) -> list[str]:
+    return [value for value in values if re.match(r"^repos/[^`]+$", _strip_ticks(value))]
+
+
+def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> list[str]:
+    paths = _repo_discovery_paths(values)
+    if not paths:
+        return []
+    prefix = f"{target.display_path.rstrip('/')}/"
+    return [path for path in paths if not path.startswith(prefix)]
+
+
+def _discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
     try:
         section = find_section(task.body, "Discovery")
     except RepoctlError:
@@ -929,8 +1157,11 @@ def _discovery_recorded(task: Task) -> bool:
     normalized = {key: fields[key].strip().strip("`").strip().lower() for key in fields}
     if any(normalized[key] in placeholders for key in normalized):
         return False
+    chosen_values = _read_discovery_values(task).get("Chosen files", [])
+    if target is not None and _discovery_paths_outside_target(chosen_values, target):
+        return False
     chosen = fields["Chosen files"]
-    return bool(re.search(r"`repo/[^`]+`", chosen))
+    return bool(re.search(r"`repos/[^`]+`", chosen))
 
 
 def _task_workspace_root(task: Task) -> Path:
@@ -956,7 +1187,7 @@ def _context_doc_paths(task: Task) -> list[str]:
             candidates = [stripped[1:].strip()]
         for candidate in candidates:
             candidate = candidate.strip().strip(".,;:")
-            if candidate.startswith(("docs/", "repo/")) or candidate in {"AGENTS.md", "README.md", "CLAUDE.md"}:
+            if candidate.startswith(("docs/", "repos/")) or candidate in {"AGENTS.md", "README.md", "CLAUDE.md"}:
                 paths.append(candidate)
     return paths
 
@@ -969,6 +1200,31 @@ def _repo_head_at_start(task: Task) -> str:
     body = task.body[section.body_start : section.end]
     match = re.search(r"^- repo head at start: `([^`]+)`", body, flags=re.MULTILINE)
     return match.group(1) if match else ""
+
+
+def _repo_head_from_state(root: Path, task: Task) -> str:
+    baseline = _read_repo_baseline(root, task.id)
+    if baseline is None:
+        return ""
+    return str(baseline.get("head") or "")
+
+
+def _assert_repo_baseline_matches(root: Path, task: Task, target: RepoTarget | None) -> None:
+    baseline = _read_repo_baseline(root, task.id)
+    if baseline is None or not baseline.get("repo_id"):
+        return
+    if target is None:
+        raise RepoctlError("task started with a product repository baseline, but no product repository is currently selected", code="repo_target_changed_since_start", path=task.rel_path)
+    if baseline.get("repo_id") != target.id or baseline.get("repo_path") != target.display_path:
+        raise RepoctlError("task product repository target changed since start; review repo_id/repo_path before finishing", code="repo_target_changed_since_start", path=task.rel_path)
+    expected_top = str(baseline.get("git_toplevel") or "")
+    if expected_top:
+        try:
+            current_top = target.root_path.resolve().as_posix()
+        except OSError:
+            current_top = target.root_path.as_posix()
+        if current_top != expected_top:
+            raise RepoctlError("task product repository git root changed since start; restart the task baseline", code="repo_target_changed_since_start", path=task.rel_path)
 
 
 def _execution_log_timestamps(task: Task) -> list[str]:
@@ -1029,21 +1285,24 @@ def _apply_creation_defaults(
     created: str,
     area: str,
     repo_ref: str,
+    repo_id: str,
     parent: str,
     backlog_id: str = "",
     language: str = "en",
 ) -> str:
     copy = _copy(language)
     area_hint = area or copy["area_unspecified"]
-    repo_scoped = bool(repo_ref or area in REPO_REQUIRED_AREAS)
-    repo_hint = repo_ref or ("repo/" if repo_scoped else "root workspace")
-    scope_line = f"- Repository/worktree: `{repo_hint}`\n" if repo_scoped else "- Workspace scope: root workspace (no `repo_ref`)\n"
+    repo_scoped = bool(repo_id or area in REPO_REQUIRED_AREAS)
+    repo_hint = repo_id or ("main" if repo_scoped else "none")
+    scope_line = f"- Repository: `{repo_hint}`\n" if repo_scoped else "- Product repository: none selected\n"
     work_area = (
         f"- Task record: `{rel_path.as_posix()}`\n"
         f"{scope_line}"
         f"- Area hint: {area_hint}\n"
         f"- Primary surface: {copy['work_area_primary']}\n"
     )
+    if repo_ref:
+        work_area += f"- Repo ref hint: `{repo_ref}`\n"
     if task_type == "parent":
         goal = copy["parent_goal"].format(title=title) + "\n"
         plan = _bullet_lines(copy["parent_plan"])
@@ -1106,6 +1365,7 @@ def create_task_file(
     owner: str = "unassigned",
     parent: str = "",
     repo_ref: str = "",
+    repo_id: str = "",
     backlog_id: str = "",
 ) -> Task:
     if not (root / LOCK_REL).is_dir():
@@ -1114,8 +1374,22 @@ def create_task_file(
     _validate_area(area)
     _validate_repo_ref(repo_ref)
     validate_repo_ref_area(area, repo_ref)
+    if repo_id and not re.match(r"^[a-z][a-z0-9_-]*$", repo_id):
+        raise RepoctlError("invalid repo_id; use lowercase [a-z0-9_-] starting with a letter", code="invalid_repo_id")
+    if not repo_id and area in REPO_REQUIRED_AREAS:
+        target = default_repo_target(root)
+        if target is not None:
+            repo_id = target.id
+        else:
+            raise RepoctlError("product task requires a selected product repository; initialize repos/ or pass --repo-id for configured repositories", code="repository_selector_required")
     if task_type not in {"task", "parent"}:
         raise RepoctlError("--type must be 'task' or 'parent'")
+    if repo_id:
+        layout = repo_layout(root)
+        if not layout.registry_ready:
+            raise RepoctlError("repository identities are unbound; run repoctl repo adopt before mutating product repositories", code="repository_identity_unbound")
+        if not any(target.id == repo_id for target in layout.targets):
+            raise RepoctlError(f"repository not found: {repo_id}", code="repository_not_found")
     if task_type == "parent" and parent:
         raise RepoctlError("parent tasks cannot have a parent id")
     _validate_parent_id(parent)
@@ -1155,6 +1429,7 @@ def create_task_file(
         text = _replace_exact(text, 'owner: "unassigned"', f'owner: "{_escape_yaml_double(owner)}"')
         text = _replace_exact(text, "created: YYYYMMDDTHHMMSSZ", f"created: {created}")
         text = _replace_exact(text, 'repo_ref: ""', f'repo_ref: "{_escape_yaml_double(repo_ref)}"')
+        text = _replace_exact(text, 'repo_id: ""', f'repo_id: "{_escape_yaml_double(repo_id)}"')
         text = _replace_exact(text, 'area: ""', f'area: "{_escape_yaml_double(area)}"')
         text = _replace_exact(text, 'parent: ""', f'parent: "{_escape_yaml_double(parent)}"')
         language = document_language(root)
@@ -1170,6 +1445,7 @@ def create_task_file(
             created=created,
             area=area,
             repo_ref=repo_ref,
+            repo_id=repo_id,
             parent=parent,
             backlog_id=backlog_id,
             language=language,
@@ -1196,10 +1472,10 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
     ids = {task.id for task in tasks if task.id}
     children = children_by_parent(tasks)
 
-    def append_warning(task: Task, code: str, message: str) -> None:
+    def append_warning(task: Task, code: str, message: str, path: str | None = None) -> None:
         if task.archived and not include_archived_warnings:
             return
-        problems.append(Problem("warning", code, message, task.rel_path))
+        problems.append(Problem("warning", code, message, path or task.rel_path))
 
     for task in tasks:
         match = TASK_RE.match(task.path.name)
@@ -1223,14 +1499,15 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
                     problems.append(Problem("error", "invalid_document_language", str(exc), task.rel_path))
         if task.parent and task.parent not in ids:
             problems.append(Problem("error", "missing_parent", f"parent task not found: {task.parent}", task.rel_path))
-        if _repo_scoped_task(task) and not str(task.frontmatter.get("repo_ref") or ""):
-            append_warning(task, "missing_repo_ref", "repo-scoped task should record repo_ref for handoff traceability")
+        repo_id = task.frontmatter.get("repo_id")
+        if repo_id not in (None, "") and (not isinstance(repo_id, str) or not re.match(r"^[a-z][a-z0-9_-]*$", repo_id)):
+            problems.append(Problem("error", "invalid_repo_id", "repo_id must be lowercase [a-z0-9_-] starting with a letter", task.rel_path))
         if _repo_scoped_task(task) and task.status in LIVE and not _discovery_recorded(task):
             append_warning(task, "missing_discovery_evidence", "repo-scoped task should record Candidate query, Candidate files reviewed, and Chosen files in Discovery")
         root = _task_workspace_root(task)
         for context_path in _context_doc_paths(task):
             if not (root / context_path).exists():
-                append_warning(task, "missing_context_doc", f"Context Docs path does not exist: {context_path}")
+                append_warning(task, "missing_context_doc", f"Context Docs path does not exist: {context_path}", context_path)
         timestamp_problem = _execution_log_timestamp_problem(task)
         if timestamp_problem:
             append_warning(task, "execution_log_timestamp_order", timestamp_problem)

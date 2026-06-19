@@ -9,10 +9,10 @@ This is not an autonomous agent runtime. It provides deterministic task state, r
 This workspace separates:
 
 - workspace operations in the root repo
-- actual product code in `repo/`
+- actual product code in `repos/` (preferred)
 - task state in `docs/tasks/*.md`
 - shared operating rules in `AGENTS.md`
-- sparse file-level metadata in `repo/.repometa`
+- sparse file-level metadata in `<product-repo>/.repometa`
 
 Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, and verification gates.
 
@@ -56,7 +56,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 |   |-- contracts/
 |   |-- adr/
 |   `-- archive/
-`-- repo/
+`-- repos/
 ```
 
 ## Document map
@@ -72,7 +72,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 
 ## Notes
 
-- `repo/` is the actual code repository.
+- `repos/` is the product code repository boundary.
 - `docs/BOARD.md` is a live-task registry, not a status dashboard.
 - Task state lives in task frontmatter, not in the board.
 - Backlog items are raw planning blocks; agents read them and pass explicit task fields rather than relying on repoctl to parse intent.

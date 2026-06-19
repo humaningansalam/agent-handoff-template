@@ -7,7 +7,7 @@ Accepted for v0 foundation.
 ## Decision
 
 - v0 file identity is the normalized repo-relative path.
-- v0 repo identity is implicit: the single product repository is `repo/`.
+- v0 repo identity is explicit when configured and otherwise reserved as `main` for a single product repository at `repos/`.
 - `repoctl meta move` is the only identity-continuity operation.
 - Content hash and symbol hash are future Graph signals, not v0 identity.
 - `.repometa` must not store graph relation fields.
@@ -23,7 +23,7 @@ Path identity is simple, reviewable, and matches the current task gate. When fil
 
 - No automatic rename inference.
 - No content-addressed identity in v0.
-- No multi-repo namespace in v0.
+- No automatic multi-repo namespace inference in v0.
 - No `imports`, `symbols`, `calls`, `deps`, `relates_to`, or graph edge fields in annotations.
 - No llmwiki authority over `.repometa` identity.
 
@@ -35,6 +35,6 @@ v0 `.repometa` topics are sparse human hints and policy bootstrap labels, not au
 
 Graph may later use path, content hash, symbol hash, and code index facts as signals. Those signals can suggest repair, but repoctl v0 identity remains explicit until a later ADR changes it.
 
-Monorepo layouts inside `repo/` remain compatible with v0 because file identity is still repo-relative, for example `apps/web/src/page.tsx` or `packages/api/src/server.ts`.
+Monorepo layouts inside the selected product repo remain compatible with v0 because file identity is still repo-relative, for example `apps/web/src/page.tsx` or `packages/api/src/server.ts`.
 
-Future multi-repo workspaces must add an explicit repo namespace before Graph, MCP, or llmwiki rely on file IDs. A future file node might become `repo:<repo_id>:file:<path>` or an equivalent stable shape, but v0 must not guess that namespace from directory names.
+Multi-repo workspaces must use the repo registry namespace before Graph, MCP, or llmwiki rely on file IDs. A future file node might become `repo:<repo_id>:file:<path>` or an equivalent stable shape, but v0 must not guess that namespace from prose or arbitrary path strings.

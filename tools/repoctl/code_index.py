@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from .meta import FileClassification, meta_inventory
+from .repositories import RepoTarget
 from .tasks import Problem
 
 
 @dataclass(frozen=True)
 class CodeIndexEntry:
     path: str
+    workspace_path: str
     language: str
     classification: str
     symbols: list[str]
@@ -26,6 +28,7 @@ class CodeIndexEntry:
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "path": self.path,
+            "workspace_path": self.workspace_path,
             "language": self.language,
             "classification": self.classification,
             "symbols": self.symbols,
@@ -145,15 +148,15 @@ def _observed_effects_for(imports: list[str], calls: list[str]) -> list[str]:
 def _index_file(repo: Path, file: FileClassification) -> CodeIndexEntry:
     language = _language_for(file.path)
     if file.classification == "excluded":
-        return CodeIndexEntry(file.path, language, file.classification, [], [], [], [], [], "skipped", "excluded by policy")
+        return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "skipped", "excluded by policy")
 
     path = repo / file.path
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return CodeIndexEntry(file.path, language, file.classification, [], [], [], [], [], "skipped", "non-utf8 file")
+        return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "skipped", "non-utf8 file")
     except OSError as exc:
-        return CodeIndexEntry(file.path, language, file.classification, [], [], [], [], [], "parse_error", str(exc))
+        return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "parse_error", str(exc))
 
     if language == "python":
         symbols, imports, calls, status, error = _index_python(text)
@@ -164,15 +167,15 @@ def _index_file(repo: Path, file: FileClassification) -> CodeIndexEntry:
 
     deps = _dedupe_sorted([import_name.split(".", 1)[0] for import_name in imports])
     effects = _observed_effects_for(imports, calls)
-    return CodeIndexEntry(file.path, language, file.classification, symbols, imports, calls, deps, effects, status, error)
+    return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, symbols, imports, calls, deps, effects, status, error)
 
 
-def build_code_index(root: Path, *, changed: bool = False, limit: int = 200) -> tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]]:
-    files, problems, meta = meta_inventory(root, changed=changed)
+def build_code_index(root: Path, *, changed: bool = False, limit: int = 200, target: RepoTarget | None = None) -> tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]]:
+    files, problems, meta = meta_inventory(root, changed=changed, target=target)
     if problems:
         return [], problems, {**meta, "authoritative": False}
 
-    repo = root / "repo"
+    repo = target.root_path if target is not None else root / str(meta.get("repository", {}).get("path") or "repos")
     entries = [_index_file(repo, file) for file in files if file.classification not in {"orphan_annotation", "orphan_exclusion"}]
     entries.sort(key=lambda entry: entry.path)
     total_before_limit = len(entries)

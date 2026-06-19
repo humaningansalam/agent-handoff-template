@@ -29,7 +29,7 @@ color: orange
 ## 하지 말 것
 - 파일 edit
 - missing evidence 또는 stale artifact 승인
-- `repo/**` 또는 external state 접근
+- `repos/**` 또는 external state 접근
 - checker-calculated gate 밖에서 final pass 선언
 - unrelated dirty files나 전체 repo 상태를 candidate changed-file set으로 확대 해석
 - blocker 없이 같은 evidence bundle을 다시 full reread

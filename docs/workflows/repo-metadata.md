@@ -1,18 +1,18 @@
 ---
-title: repo/ Metadata Operations (.repometa)
+title: Product Repo Metadata Operations (.repometa)
 description: Maintain repo-local semantic metadata through JSON policy, hash-sharded sparse annotations, and changed-file checks.
 tags:
   - metadata
   - repo
   - graph
 expected_output:
-  - valid repo/.repometa JSON policy and annotation shards
+  - valid <product-repo>/.repometa JSON policy and annotation shards
 ---
 
-# repo/ Metadata Operations (.repometa)
+# Product Repo Metadata Operations (.repometa)
 
-This workflow defines the canonical file-level semantic metadata model for `repo/`.
-Metadata is not stored inline in source files. The durable store lives in `repo/.repometa/`, and `repoctl` is the official mutation and validation boundary.
+This workflow defines the canonical file-level semantic metadata model for the selected product repo (`repos/` in direct layout or `repos/<repo-id>/` in collection layout).
+Metadata is not stored inline in source files. The durable store lives in `<product-repo>/.repometa/`, and `repoctl` is the official mutation and validation boundary.
 
 ## Purpose
 
@@ -21,8 +21,8 @@ On-demand inventory and `repoctl index code` discover file nodes and technical f
 
 ## Authority
 
-- `repo/.repometa/*` is the canonical semantic metadata store.
-- Inline `@meta` blocks and metadata frontmatter inside `repo/` files are forbidden residue.
+- `<product-repo>/.repometa/*` is the canonical semantic metadata store.
+- Inline `@meta` blocks and metadata frontmatter inside product repo files are forbidden residue.
 - Agents and humans should use `repoctl meta ...` commands instead of directly editing `.repometa` during normal work.
 - Manual emergency edits are allowed only if followed by a clean `repoctl meta check`.
 
@@ -32,10 +32,10 @@ On-demand inventory and `repoctl index code` discover file nodes and technical f
 repoctl inventory / repoctl index code
 = all file nodes + technical facts
 
-repo/.repometa/policy.json
+<product-repo>/.repometa/policy.json
 = indexing excludes + vocab + area/topic defaults + coverage rules
 
-repo/.repometa/annotations/<hex>.json
+repos/.repometa/annotations/<hex>.json
 = sparse role/purpose/topics/declared_effects/caution + exclusion overrides
 ```
 
@@ -44,7 +44,7 @@ The store is not an inventory. General files can exist without annotations unles
 ## Directory Layout
 
 ```text
-repo/.repometa/
+repos/.repometa/
   policy.json
   annotations/
     0.json
@@ -116,13 +116,13 @@ Use only 16 shards in v0. If scale requires more later, migrate deliberately; do
 }
 ```
 
-Keep the default policy ecosystem-neutral. Add project-specific dependency, cache, build, coverage, or generated-output paths to this repository's `repo/.repometa/policy.json` only when they apply to the adopted project.
+Keep the default policy ecosystem-neutral. Add project-specific dependency, cache, build, coverage, or generated-output paths to this repository's `repos/.repometa/policy.json` only when they apply to the adopted project.
 
 Roles and declared effects are controlled but extendable through policy. Topics are open strings so agents do not need to rewrite policy for every local domain term.
 
 ## Annotation Shards
 
-Example `repo/.repometa/annotations/a.json`:
+Example `repos/.repometa/annotations/a.json`:
 
 ```json
 {
@@ -211,9 +211,9 @@ Discovery commands are read-only helpers for task planning:
 
 - `repoctl meta query` returns files matching explicit metadata/default filters such as role, topic, area, or declared effect.
 - `repoctl meta suggest` returns non-authoritative candidate files from path, filename, policy defaults, and sparse annotation text. It preserves Unicode query tokens, but it is lexical search, not translation or semantic parsing.
-- Suggestions must be inspected before task creation or implementation. They do not define task scope, do not parse Backlog raw text, and do not replace repo/code reading.
+- Suggestions must be inspected before task creation or implementation. They do not define task scope, do not parse Backlog raw text, and do not replace repos/code reading.
 
-Use `repoctl meta init` to create the default `repo/.repometa` policy and shard skeleton for a new `repo/`. It does not overwrite an existing policy or shard.
+Use `repoctl meta init` to create the default `.repometa` policy and shard skeleton for a selected product repo. It does not overwrite an existing policy or shard.
 
 Mutation commands update `.repometa` through repoctl:
 
@@ -242,15 +242,15 @@ Do not add migration or inline compatibility commands in v0.
 
 `repoctl meta check --changed` is the task-finish gate:
 
-- uses the changed set from the nested `repo/` git repository
+- uses the changed set from the selected product git repository
 - includes tracked, staged, renamed, copied, deleted, and untracked files
 - blocks the current task on changed-file metadata errors
 - reports rename metadata as `move_candidate`; agents must confirm and run `repoctl meta move`
 - does not block on unrelated full-repo metadata health
 
-When there are no `repo/` changes and `repo/` is a valid independent git repository, `repoctl task finish` skips the gate with `reason = no_repo_changes`.
+When there are no product repo changes and the selected product repo is a valid independent git repository, `repoctl task finish` skips the gate with `reason = no_repo_changes`.
 
-If `repo/` exists but its git metadata is missing or unusable, changed-file metadata status/check and task finish must fail with `repo_git_unavailable`. Treat this as a blocked verification gate, not as `no_repo_changes`.
+If `repos/` exists but its git metadata is missing or unusable, changed-file metadata status/check and task finish must fail with `repo_git_unavailable`. Treat this as a blocked verification gate, not as `no_repo_changes`.
 
 ## Discovery Before Task Promotion
 
@@ -264,12 +264,12 @@ repoctl meta suggest --text "<PRD phrase or feature name>" --json
 repoctl meta show <candidate-path> --json
 ```
 
-Then inspect the candidate files directly in `repo/` before creating or starting a task.
+Then inspect the candidate files directly in the selected product repo before creating or starting a task.
 
 Discovery output is evidence, not authority:
 
 - Good: record which candidates were reviewed and why the task scope was chosen.
-- Required: for Backlog-origin tasks that change `repo/`, fill the task's `## Discovery` section before `repoctl task finish`.
+- Required: for Backlog-origin tasks that change a product repo, fill the task's `## Discovery` section before `repoctl task finish`.
 - Bad: create a task or choose files solely because `meta suggest` returned them.
 - Forbidden: parse Backlog or PRD prose inside repoctl to infer area, files, validation, or task metadata.
 
@@ -279,7 +279,7 @@ Before hashing or storing keys, paths are normalized to repo-relative forward-sl
 
 ```text
 ./frontend/src/api.ts
-repo/frontend/src/api.ts
+repos/frontend/src/api.ts
 frontend\src\api.ts
 ```
 

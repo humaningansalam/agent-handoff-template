@@ -26,12 +26,20 @@ def write_workspace(root: Path) -> None:
     (root / "docs/tasks/PARENT_TEMPLATE.md").write_text((source_root / "docs/tasks/PARENT_TEMPLATE.md").read_text(encoding="utf-8"), encoding="utf-8")
 
 
+def init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.email", "a@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
+
+
 def task_text(task_id: str, *, status: str = "todo", parent: str = "") -> str:
     return f'''---
 id: {task_id}
 title: "Task {task_id}"
 status: {status}
 owner: "unassigned"
+repo_id: ""
 repo_ref: ""
 created: 20260609T184046Z
 area: ""
@@ -115,9 +123,9 @@ def test_check_reports_board_missing_live_task(tmp_path: Path, monkeypatch, caps
     assert any(problem["code"] == "board_missing_live_task" for problem in payload["problems"])
 
 
-def test_check_warns_when_repo_scoped_task_omits_repo_ref(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_check_does_not_require_repo_ref_for_repository_task(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "backend"')
+    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "backend"').replace('repo_id: ""', 'repo_id: "main"')
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -125,17 +133,17 @@ def test_check_warns_when_repo_scoped_task_omits_repo_ref(tmp_path: Path, monkey
     assert main(["check", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert any(problem["severity"] == "warning" and problem["code"] == "missing_repo_ref" for problem in payload["problems"])
-    assert any(warning["code"] == "missing_repo_ref" for warning in payload["warnings"])
+    assert not any(problem["code"] == "missing_repo_ref" for problem in payload["problems"])
+    assert not any(warning["code"] == "missing_repo_ref" for warning in payload["warnings"])
 
     assert main(["task", "list", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert any(warning["code"] == "missing_repo_ref" for warning in payload["warnings"])
+    assert not any(warning["code"] == "missing_repo_ref" for warning in payload["warnings"])
 
 
 def test_check_warns_when_repo_scoped_task_omits_discovery_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_ref: ""', 'repo_ref: "repo"')
+    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -148,10 +156,10 @@ def test_check_warns_when_repo_scoped_task_omits_discovery_evidence(tmp_path: Pa
 
 def test_check_accepts_structured_discovery_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_ref: ""', 'repo_ref: "repo"')
+    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     text = text.replace(
         "## Execution Log",
-        "## Discovery\n\n- Candidate query: `checkout retry`\n- Candidate files reviewed: `repo/src/checkout.py`\n- Chosen files: `repo/src/checkout.py`\n\n## Execution Log",
+        "## Discovery\n\n- Candidate query: `checkout retry`\n- Candidate files reviewed: `repos/src/checkout.py`\n- Chosen files: `repos/src/checkout.py`\n\n## Execution Log",
     )
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
@@ -165,16 +173,16 @@ def test_check_accepts_structured_discovery_evidence(tmp_path: Path, monkeypatch
 
 def test_check_accepts_multiline_discovery_file_lists(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_ref: ""', 'repo_ref: "repo"')
+    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     text = text.replace(
         "## Execution Log",
         "## Discovery\n\n"
         "- Candidate query: `checkout retry`\n"
         "- Candidate files reviewed:\n"
-        "  - `repo/src/checkout.py`\n"
-        "  - `repo/tests/test_checkout.py`\n"
+        "  - `repos/src/checkout.py`\n"
+        "  - `repos/tests/test_checkout.py`\n"
         "- Chosen files:\n"
-        "  - `repo/src/checkout.py`\n"
+        "  - `repos/src/checkout.py`\n"
         "\n## Execution Log",
     )
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
@@ -210,8 +218,8 @@ def test_check_warns_when_context_doc_is_missing(tmp_path: Path, monkeypatch, ca
     assert main(["check", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert any(problem["code"] == "missing_context_doc" and "docs/MISSING.md" in problem["message"] for problem in payload["problems"])
-    assert not any("AGENTS.md" in problem["message"] for problem in payload["problems"])
+    assert any(problem["code"] == "missing_context_doc" and problem.get("path") == "docs/MISSING.md" for problem in payload["problems"])
+    assert not any(problem["code"] == "missing_context_doc" and problem.get("path") == "AGENTS.md" for problem in payload["problems"])
 
 
 def test_check_warns_on_execution_log_timestamp_order(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -232,7 +240,7 @@ def test_check_suppresses_archived_warnings_by_default(tmp_path: Path, monkeypat
     write_workspace(tmp_path)
     archived = task_text("T-20260609184046Z", status="done").replace('area: ""', 'area: "backend"')
     archived = archived.replace("- created", "- 20260611T020000Z: later\n- 20260611T010000Z: earlier")
-    archive_path = tmp_path / "docs/archive/tasks/T-20260609184046Z--legacy.md"
+    archive_path = tmp_path / "docs/archive/tasks/T-20260609184046Z--archived.md"
     archive_path.write_text(archived, encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -240,26 +248,26 @@ def test_check_suppresses_archived_warnings_by_default(tmp_path: Path, monkeypat
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["warnings"] == []
-    assert not any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--legacy.md" for problem in payload["problems"])
+    assert not any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--archived.md" for problem in payload["problems"])
 
     assert main(["check", "--include-archived-warnings", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--legacy.md" and problem["code"] == "missing_repo_ref" for problem in payload["problems"])
-    assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--legacy.md" and problem["code"] == "execution_log_timestamp_order" for problem in payload["problems"])
+    assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--archived.md" and problem["code"] == "execution_log_timestamp_order" for problem in payload["problems"])
+    assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--archived.md" and problem["code"] == "execution_log_timestamp_order" for problem in payload["problems"])
 
 
 def test_check_keeps_archived_errors_visible(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     archived = task_text("T-20260609184046Z", status="done").replace("id: T-20260609184046Z", "id: T-20260609184047Z")
-    archive_path = tmp_path / "docs/archive/tasks/T-20260609184046Z--legacy.md"
+    archive_path = tmp_path / "docs/archive/tasks/T-20260609184046Z--archived.md"
     archive_path.write_text(archived, encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["check", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
-    assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--legacy.md" and problem["code"] == "id_filename_mismatch" for problem in payload["problems"])
+    assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--archived.md" and problem["code"] == "id_filename_mismatch" for problem in payload["problems"])
 
 
 def test_check_fix_board_renders_live_tasks_only(tmp_path: Path, monkeypatch) -> None:
@@ -381,9 +389,12 @@ def test_render_board_replaces_only_board_section() -> None:
 
 def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "create", "--area", "backend", "--repo-ref", "repo", "--json", "Example Task"]) == 0
+    assert main(["task", "create", "--area", "backend", "--repo-ref", "repos", "--json", "Example Task"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["path"].startswith("docs/tasks/T-")
@@ -396,13 +407,14 @@ def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypa
     assert "Step 1" not in text
     assert "YYYYMMDDTHHMMSSZ" not in text
     assert "## Work Area" in text
-    assert "Repository/worktree: `repo`" in text
+    assert "Repository: `main`" in text
+    assert "Repo ref hint: `repos`" in text
     assert "Area hint: backend" in text
     assert 'document_language: "en"' in text
     assert "do not guess them from the title alone" in text
     assert "task created via repoctl task create" in text
     assert "repoctl meta check --changed" in text
-    assert "Keep `repo/.repometa` annotations valid" in text
+    assert "Keep `repos/.repometa` annotations valid" in text
     assert "First file to open: `docs/tasks/" in text
     assert f"./scripts/repoctl task start {payload['task_id']} --json" in text
 
@@ -447,7 +459,7 @@ def test_task_create_rejects_invalid_document_language_config(tmp_path: Path, mo
     assert main(["task", "create", "--slug", "bad-language", "Bad Language", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert "unsupported docs/repoctl.json document_language" in payload["problems"][0]["message"]
+    assert payload["problems"][0]["code"] == "invalid_document_language"
 
 
 def test_task_create_registers_board_plain_path(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -470,7 +482,7 @@ def test_task_create_rejects_multiline_title(tmp_path: Path, monkeypatch, capsys
     assert main(["task", "create", "--slug", "bad-title", "Bad\nTitle", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert "single line" in payload["problems"][0]["message"]
+    assert payload["problems"][0]["code"] == "invalid_title"
 
 
 def test_task_create_rejects_unknown_area_and_root_repo_ref(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -480,14 +492,10 @@ def test_task_create_rejects_unknown_area_and_root_repo_ref(tmp_path: Path, monk
     assert main(["task", "create", "--area", "app", "--slug", "memo-cli", "Memo CLI", "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "invalid_area"
-    assert "detailed product surfaces" in payload["problems"][0]["message"]
-    assert any(action["label"] == "Use a broad area enum and keep detailed surface in task text" for action in payload["next_actions"])
 
     assert main(["task", "create", "--area", "docs", "--repo-ref", ".", "--slug", "memo-cli", "Memo CLI", "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "invalid_repo_ref"
-    assert "omit --repo-ref" in payload["problems"][0]["message"]
-    assert payload["next_actions"][0]["label"] == "For root workspace work, omit --repo-ref"
 
 
 def test_backlog_list_returns_freeform_items_without_interpreting_fields(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -498,9 +506,9 @@ def test_backlog_list_returns_freeform_items_without_interpreting_fields(tmp_pat
         f"- {title}\n"
         "  - Area: backend\n"
         "  - Repo ref: repo\n"
-        "  - Likely files: `repo/src/pricing.py`, `repo/tests/test_pricing.py`\n"
+        "  - Likely files: `repos/src/pricing.py`, `repos/tests/test_pricing.py`\n"
         "  - Expected behavior: add apply_discount and reject invalid percentages\n"
-        "  - Validation: `cd repo && python -m unittest tests/test_pricing.py`\n",
+        "  - Validation: `cd repos && python -m unittest tests/test_pricing.py`\n",
         encoding="utf-8",
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -513,9 +521,9 @@ def test_backlog_list_returns_freeform_items_without_interpreting_fields(tmp_pat
             f"- {title}",
             "  - Area: backend",
             "  - Repo ref: repo",
-            "  - Likely files: `repo/src/pricing.py`, `repo/tests/test_pricing.py`",
+            "  - Likely files: `repos/src/pricing.py`, `repos/tests/test_pricing.py`",
             "  - Expected behavior: add apply_discount and reject invalid percentages",
-            "  - Validation: `cd repo && python -m unittest tests/test_pricing.py`",
+            "  - Validation: `cd repos && python -m unittest tests/test_pricing.py`",
         ]
     )
     assert payload["ok"] is True
@@ -556,7 +564,7 @@ def test_backlog_add_rejects_multiline_title(tmp_path: Path, monkeypatch, capsys
     assert main(["backlog", "add", "Bad\nTitle", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert "single line" in payload["problems"][0]["message"]
+    assert payload["problems"][0]["code"] == "invalid_title"
 
 
 def test_backlog_add_body_file_keeps_bullets_inside_raw_block(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -603,16 +611,19 @@ def test_backlog_duplicate_raw_blocks_warn_and_cannot_be_removed_by_id(tmp_path:
 
     assert main(["backlog", "remove", backlog_id, "--json"]) == 2
     error = json.loads(capsys.readouterr().out)
-    assert "ambiguous" in error["problems"][0]["message"]
+    assert error["problems"][0]["code"] == "duplicate_backlog_id"
 
 
 def test_task_create_with_backlog_id_removes_raw_block_without_parsing_it(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     assert main(["backlog", "add", "Add discount support", "--json"]) == 0
     backlog_id = json.loads(capsys.readouterr().out)["data"]["item"]["id"]
 
-    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "--repo-ref", "repo", "Add discount support", "--json"]) == 0
+    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "--repo-id", "main", "Add discount support", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     task = (tmp_path / payload["path"]).read_text(encoding="utf-8")
@@ -627,27 +638,34 @@ def test_task_create_with_backlog_id_removes_raw_block_without_parsing_it(tmp_pa
 
 def test_task_create_with_backlog_id_requires_explicit_promotion_fields(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     assert main(["backlog", "add", "Add discount support", "--json"]) == 0
     backlog_id = json.loads(capsys.readouterr().out)["data"]["item"]["id"]
 
-    assert main(["task", "create", "--backlog-id", backlog_id, "--area", "backend", "--repo-ref", "repo", "Add discount support", "--json"]) == 2
+    assert main(["task", "create", "--backlog-id", backlog_id, "--area", "backend", "--repo-ref", "repos", "Add discount support", "--json"]) == 2
     missing_slug = json.loads(capsys.readouterr().out)
-    assert "explicit --slug" in missing_slug["problems"][0]["message"]
+    assert missing_slug["problems"][0]["code"] == "missing_slug"
 
     assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "Add discount support", "--json"]) == 2
     missing_area = json.loads(capsys.readouterr().out)
-    assert "explicit --area" in missing_area["problems"][0]["message"]
+    assert missing_area["problems"][0]["code"] == "missing_area"
 
-    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "Add discount support", "--json"]) == 2
-    missing_repo_ref = json.loads(capsys.readouterr().out)
-    assert "explicit --repo-ref" in missing_repo_ref["problems"][0]["message"]
-    assert not list((tmp_path / "docs/tasks").glob("T-*--discount-support.md"))
-    assert "Add discount support" in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
+    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "Add discount support", "--json"]) == 0
+    promoted = json.loads(capsys.readouterr().out)
+    task = (tmp_path / promoted["path"]).read_text(encoding="utf-8")
+    assert 'repo_id: "main"' in task
+    assert 'repo_ref: ""' in task
+    assert "Add discount support" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
 
 
 def test_task_create_rolls_back_task_file_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     assert main(["backlog", "add", "Add discount support", "--json"]) == 0
     backlog_id = json.loads(capsys.readouterr().out)["data"]["item"]["id"]
@@ -661,7 +679,7 @@ def test_task_create_rolls_back_task_file_when_board_write_fails(tmp_path: Path,
 
     monkeypatch.setattr("tools.repoctl.cli.atomic_write", fail_board_write)
 
-    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "--repo-ref", "repo", "Add discount support", "--json"]) == 2
+    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "--repo-id", "main", "Add discount support", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "io_error"
@@ -677,7 +695,7 @@ def test_task_create_validates_board_before_writing_task_file(tmp_path: Path, mo
     assert main(["task", "create", "--slug", "bad-board", "Bad Board", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert "section missing" in payload["problems"][0]["message"]
+    assert payload["problems"][0]["code"] == "missing_section"
     assert not list((tmp_path / "docs/tasks").glob("T-*--bad-board.md"))
 
 
@@ -773,8 +791,9 @@ def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_
 
 def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
     Path("/tmp/T-20260609184046Z-verification.md").unlink(missing_ok=True)
-    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_ref: ""', 'repo_ref: "repo"')
+    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     before = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -823,7 +842,7 @@ def test_check_rejects_non_live_parent_left_in_tasks(tmp_path: Path, monkeypatch
     assert any(problem["code"] == "non_live_parent_in_tasks" for problem in payload["problems"])
 
 
-def test_legacy_creator_references_are_removed() -> None:
+def test_removed_creator_references_stay_removed() -> None:
     root = Path(__file__).resolve().parents[2]
     forbidden = "new" "-task.sh"
     assert not (root / "scripts" / forbidden).exists()

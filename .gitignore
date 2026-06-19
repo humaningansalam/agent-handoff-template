@@ -1,4 +1,4 @@
-/repo/
+/repos/
 /ops/*
 !/ops/.gitkeep
 !/ops/README.md

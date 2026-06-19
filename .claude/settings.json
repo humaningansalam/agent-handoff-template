@@ -20,12 +20,12 @@
       "Bash(bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce_subagent_final_report.sh\")"
     ],
     "deny": [
-      "Read(/repo/**)",
-      "Read(repo/**)",
-      "Edit(/repo/**)",
-      "Edit(repo/**)",
-      "Write(/repo/**)",
-      "Write(repo/**)",
+      "Read(/repos/**)",
+      "Read(repos/**)",
+      "Edit(/repos/**)",
+      "Edit(repos/**)",
+      "Write(/repos/**)",
+      "Write(repos/**)",
       "Bash(rm *)",
       "Bash(sudo *)",
       "Bash(curl * | *)",

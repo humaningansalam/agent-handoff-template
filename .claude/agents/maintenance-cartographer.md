@@ -1,6 +1,6 @@
 ---
 name: maintenance-cartographer
-description: "/maintenance-workflow cartography phase에서 repo/** 밖 workspace-maintenance surface와 candidate bundle을 매핑한다."
+description: "/maintenance-workflow cartography phase에서 repos/** 밖 workspace-maintenance surface와 candidate bundle을 매핑한다."
 tools: Read, Grep, Glob
 permissionMode: plan
 color: blue
@@ -16,7 +16,7 @@ color: blue
 ## 입력
 - 사용자 focus와 bounded/normal diagnostic intent
 - 관련 authority docs, rules, hooks, tools, tests, trace/state
-- `repo/**` 밖 workspace-maintenance surfaces
+- `repos/**` 밖 workspace-maintenance surfaces
 
 ## 해야 할 일
 - root cause와 candidate option 분류에 필요한 surface만 읽는다.
@@ -28,7 +28,7 @@ color: blue
 ## 하지 말 것
 - 파일 edit 또는 구현 세부 plan 작성
 - 구현 승인 또는 final pass 선언
-- `repo/**` 또는 external state 접근
+- `repos/**` 또는 external state 접근
 
 ## 출력
 

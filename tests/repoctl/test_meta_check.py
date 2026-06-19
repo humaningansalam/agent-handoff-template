@@ -72,8 +72,9 @@ def commit_all(repo: Path) -> None:
 
 def test_meta_check_requires_json_policy(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     (repo / "src.py").write_text("print('hello')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -85,23 +86,16 @@ def test_meta_check_requires_json_policy(tmp_path: Path, monkeypatch, capsys) ->
 
 def test_meta_check_changed_reports_repo_git_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
     write_repometa(repo)
     (repo / "src.py").write_text("print('hello')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "check", "--changed", "--json"]) == 1
+    assert main(["meta", "check", "--changed", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"] == [
-        {
-            "severity": "error",
-            "code": "repo_git_unavailable",
-            "message": "repo/ is expected to be an independent git repository; changed-file metadata gate cannot run safely",
-            "path": "repo/",
-        }
-    ]
+    assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
 
 def test_meta_check_changed_allows_missing_repo_directory(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -117,24 +111,23 @@ def test_meta_check_changed_allows_missing_repo_directory(tmp_path: Path, monkey
 
 def test_meta_status_changed_reports_repo_git_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
     write_repometa(repo)
     (repo / "src.py").write_text("print('hello')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "status", "--changed", "--json"]) == 1
+    assert main(["meta", "status", "--changed", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["summary"]["total"] == 0
-    assert "files" not in payload["data"]
-    assert payload["problems"][0]["code"] == "repo_git_unavailable"
+    assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
 
 def test_meta_inventory_classifies_indexed_only_and_defaults(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "frontend/src/api").mkdir(parents=True)
     (repo / "frontend/src/api/client.ts").write_text("export {}\n", encoding="utf-8")
@@ -151,8 +144,9 @@ def test_meta_inventory_classifies_indexed_only_and_defaults(tmp_path: Path, mon
 
 def test_meta_status_default_is_summary_first_and_verbose_lists_files(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "backend").mkdir()
     (repo / "backend/service.py").write_text("def run():\n    return 1\n", encoding="utf-8")
@@ -177,8 +171,9 @@ def test_default_policy_is_ecosystem_neutral() -> None:
 
 def test_project_policy_can_exclude_project_local_outputs(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     policy = {**BASE_POLICY, "indexing": {"exclude": ["local-cache/**"]}}
     write_repometa(repo, policy=policy)
     (repo / "local-cache").mkdir()
@@ -197,8 +192,9 @@ def test_project_policy_can_exclude_project_local_outputs(tmp_path: Path, monkey
 
 def test_meta_check_requires_annotation_for_coverage_match(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     policy = {**BASE_POLICY, "coverage": {"require_annotations": ["frontend/src/api/**"]}}
     write_repometa(repo, policy=policy)
     (repo / "frontend/src/api").mkdir(parents=True)
@@ -208,13 +204,14 @@ def test_meta_check_requires_annotation_for_coverage_match(tmp_path: Path, monke
     assert main(["meta", "check", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
-    assert any(problem["code"] == "annotation_required" and problem["path"] == "repo/frontend/src/api/billingGateway.ts" for problem in payload["problems"])
+    assert any(problem["code"] == "annotation_required" and problem["path"] == "repos/frontend/src/api/billingGateway.ts" for problem in payload["problems"])
 
 
 def test_meta_set_writes_hash_shard_and_satisfies_coverage(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     policy = {**BASE_POLICY, "coverage": {"require_annotations": ["frontend/src/api/**"]}}
     write_repometa(repo, policy=policy)
     (repo / "frontend/src/api").mkdir(parents=True)
@@ -231,8 +228,9 @@ def test_meta_set_writes_hash_shard_and_satisfies_coverage(tmp_path: Path, monke
 
 def test_meta_check_rejects_wrong_shard_and_duplicate_path(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     rel = "backend/auth/token_service.py"
     (repo / "backend/auth").mkdir(parents=True)
     (repo / rel).write_text("def issue():\n    return 'x'\n", encoding="utf-8")
@@ -256,7 +254,7 @@ def test_meta_check_rejects_wrong_shard_and_duplicate_path(tmp_path: Path, monke
 
 def test_meta_check_changed_ignores_unrelated_wrong_shard(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
     init_repo(repo)
     unrelated = "backend/auth/token_service.py"
@@ -288,8 +286,9 @@ def test_meta_check_changed_ignores_unrelated_wrong_shard(tmp_path: Path, monkey
 
 def test_meta_check_rejects_forbidden_fields_and_none_combo(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     rel = "backend/auth/token_service.py"
     (repo / "backend/auth").mkdir(parents=True)
     (repo / rel).write_text("def issue():\n    return 'x'\n", encoding="utf-8")
@@ -306,8 +305,9 @@ def test_meta_check_rejects_forbidden_fields_and_none_combo(tmp_path: Path, monk
 
 def test_meta_check_blocks_inline_meta_residue(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "src.py").write_text("# @meta\nprint('forbidden')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -320,8 +320,9 @@ def test_meta_check_blocks_inline_meta_residue(tmp_path: Path, monkeypatch, caps
 
 def test_meta_exclude_allows_covered_false_positive(tmp_path: Path, monkeypatch) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     policy = {**BASE_POLICY, "coverage": {"require_annotations": ["frontend/src/api/**"]}}
     write_repometa(repo, policy=policy)
     rel = "frontend/src/api/service_stub.ts"
@@ -335,7 +336,7 @@ def test_meta_exclude_allows_covered_false_positive(tmp_path: Path, monkeypatch)
 
 def test_meta_check_changed_includes_untracked_and_ignores_unrelated_full_orphan(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
     init_repo(repo)
     policy = {**BASE_POLICY, "coverage": {"require_annotations": ["frontend/src/api/**"]}}
@@ -350,13 +351,14 @@ def test_meta_check_changed_includes_untracked_and_ignores_unrelated_full_orphan
 
     payload = json.loads(capsys.readouterr().out)
     assert any(problem["code"] == "annotation_required" and "newClient" in problem["path"] for problem in payload["problems"])
-    assert not any(problem["path"] == "repo/backend/deleted.py" for problem in payload["problems"])
+    assert not any(problem["path"] == "repos/backend/deleted.py" for problem in payload["problems"])
 
 
 def test_meta_move_handles_cross_shard_without_loss(tmp_path: Path, monkeypatch) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     old = "backend/auth/token_service.py"
     new = next(f"backend/auth/token_service_{index}.py" for index in range(100) if shard_for_path(f"backend/auth/token_service_{index}.py") != shard_for_path(old))
     (repo / "backend/auth").mkdir(parents=True)
@@ -375,15 +377,17 @@ def test_meta_move_handles_cross_shard_without_loss(tmp_path: Path, monkeypatch)
 
 def test_path_normalization_routes_repo_prefix_and_backslashes(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     rel = "frontend/src/api/client.ts"
     (repo / "frontend/src/api").mkdir(parents=True)
     (repo / rel).write_text("export {}\n", encoding="utf-8")
     write_repometa(repo)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "set", "repo/frontend\\src\\api\\client.ts", "--role", "adapter", "--purpose", "call API", "--topic", "api", "--json"]) == 0
+    assert main(["meta", "set", "repos/frontend\\src\\api\\client.ts", "--role", "adapter", "--purpose", "call API", "--topic", "api", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["path"] == rel
@@ -392,8 +396,9 @@ def test_path_normalization_routes_repo_prefix_and_backslashes(tmp_path: Path, m
 
 def test_meta_set_invalid_path_leaves_no_repometa_skeleton(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["meta", "set", "../bad.py", "--role", "service", "--purpose", "bad", "--topic", "bad", "--json"]) == 2
@@ -405,8 +410,9 @@ def test_meta_set_invalid_path_leaves_no_repometa_skeleton(tmp_path: Path, monke
 
 def test_meta_set_and_exclude_reject_missing_file_without_mutation(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     before = sorted(path.relative_to(repo).as_posix() for path in (repo / ".repometa").rglob("*"))
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -421,8 +427,9 @@ def test_meta_set_and_exclude_reject_missing_file_without_mutation(tmp_path: Pat
 
 def test_policy_deep_validation_rejects_silent_coverage_disable(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     bad_policy = {**BASE_POLICY, "coverage": {"require_annotations": "frontend/src/api/**"}}
     write_repometa(repo, policy=bad_policy)
     (repo / "frontend/src/api").mkdir(parents=True)
@@ -437,8 +444,9 @@ def test_policy_deep_validation_rejects_silent_coverage_disable(tmp_path: Path, 
 
 def test_orphan_exclusion_has_own_classification_and_repoctl_repair(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo, exclusions={"missing.py": {"reason": "stale", "excluded_by": "agent"}})
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -459,8 +467,9 @@ def test_orphan_exclusion_has_own_classification_and_repoctl_repair(tmp_path: Pa
 
 def test_meta_set_caution_file_round_trip(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     rel = "frontend/src/api/client.ts"
     (repo / "frontend/src/api").mkdir(parents=True)
@@ -480,8 +489,9 @@ def test_meta_set_caution_file_round_trip(tmp_path: Path, monkeypatch, capsys) -
 
 def test_meta_query_filters_annotated_files_by_role_topic_area_and_effect(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "frontend/src/api").mkdir(parents=True)
     (repo / "backend").mkdir()
@@ -523,8 +533,9 @@ def test_meta_query_filters_annotated_files_by_role_topic_area_and_effect(tmp_pa
 
 def test_meta_suggest_returns_non_authoritative_candidate_signals(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "frontend/src/api").mkdir(parents=True)
     (repo / "tests").mkdir()
@@ -566,8 +577,9 @@ def test_meta_suggest_returns_non_authoritative_candidate_signals(tmp_path: Path
 
 def test_meta_status_warns_when_discovery_coverage_is_empty(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "app.py").write_text("print('app')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -581,8 +593,9 @@ def test_meta_status_warns_when_discovery_coverage_is_empty(tmp_path: Path, monk
 
 def test_meta_init_creates_default_policy_and_shards_without_overwriting(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["meta", "init", "--json"]) == 0
@@ -606,8 +619,9 @@ def test_meta_init_creates_default_policy_and_shards_without_overwriting(tmp_pat
 
 def test_meta_suggest_preserves_unicode_query_tokens(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     rel = "docs/검색.md"
     (repo / "docs").mkdir()
@@ -635,8 +649,9 @@ def test_meta_suggest_preserves_unicode_query_tokens(tmp_path: Path, monkeypatch
 
 def test_meta_suggest_accepts_positional_text_alias(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     rel = "src/search.ts"
     (repo / "src").mkdir()
@@ -652,8 +667,9 @@ def test_meta_suggest_accepts_positional_text_alias(tmp_path: Path, monkeypatch,
 
 def test_meta_suggest_matches_identifier_tokens_not_arbitrary_substrings(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     (repo / "src").mkdir()
     (repo / "src/DelegateAdapter.ts").write_text("export class DelegateAdapter {}\n", encoding="utf-8")
@@ -670,8 +686,9 @@ def test_meta_suggest_matches_identifier_tokens_not_arbitrary_substrings(tmp_pat
 
 def test_meta_check_rejects_coverage_pattern_hidden_by_exclude(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     policy = {
         **BASE_POLICY,
         "indexing": {"exclude": [".git/**", ".repometa/**", "frontend/src/api/**"]},
@@ -690,8 +707,9 @@ def test_meta_check_rejects_coverage_pattern_hidden_by_exclude(tmp_path: Path, m
 
 def test_meta_check_rejects_partial_coverage_exclude_overlap(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     policy = {
         **BASE_POLICY,
         "indexing": {"exclude": [".git/**", ".repometa/**", "src/generated/**"]},
@@ -710,7 +728,7 @@ def test_meta_check_rejects_partial_coverage_exclude_overlap(tmp_path: Path, mon
 
 def test_meta_check_changed_skips_policy_validation_when_no_repo_changes(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
     init_repo(repo)
     write_repometa(repo)

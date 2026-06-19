@@ -10,13 +10,13 @@ repoctl uses `TEMPLATE.md` or `PARENT_TEMPLATE.md` internally; these files are o
 Backlog text is free-form planning text. repoctl treats each backlog item as an opaque raw block; it must not infer `area`, likely files, expected behavior, validation, or task body sections from that text.
 Repo-scoped live tasks should fill in `## Discovery` with the inspected sources, candidate files, and selected files; `repoctl check` warns when this evidence is missing. The finish gate blocks placeholder discovery for Backlog-origin repo changes.
 Use `repoctl meta query` and `repoctl meta suggest` only as discovery aids; inspect the files yourself and keep the final task scope explicit.
-Use `./scripts/repoctl task discovery add T-... --query "..." --reviewed repo/path --chosen repo/path --json` to record structured Discovery without hand-editing the task file.
+Use `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` to record structured Discovery without hand-editing the task file.
 Use `./scripts/repoctl task show T-... --json` for task inspection and `./scripts/repoctl task log append T-... "message" --json` for timestamped execution log entries.
-Finish with a verification file outside `repo/`: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
+Finish with a verification file outside `repos/`: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
 
 Example task files live under `examples/tasks/` and are documentation-only references.
 
-If `repoctl` is installed on `PATH`, the shorter `repoctl ...` form is equivalent. The wrapper resolves the workspace root from the script location, so invoking it by explicit path from `repo/` or a nested directory is also supported.
+If `repoctl` is installed on `PATH`, the shorter `repoctl ...` form is equivalent. The wrapper resolves the workspace root from the script location, so invoking it by explicit path from `repos/` or a nested directory is also supported.
 
 Standalone tasks reaching `done` or `canceled` move to `docs/archive/tasks/` and are removed from `docs/BOARD.md`.
 Child tasks reaching `done` or `canceled` are also removed from `docs/BOARD.md`, but may stay here until their parent task is archived.

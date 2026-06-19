@@ -8,7 +8,7 @@ Use this workflow to update the workspace control plane in an adopting workspace
 
 It must preserve project state:
 
-- `repo/**`
+- `repos/**`
 - `docs/BOARD.md`
 - `docs/PRD.md`
 - `docs/tasks/T-*.md`
@@ -25,7 +25,7 @@ It must preserve project state:
 4. Apply only the inspected plan:
    `./scripts/repoctl upgrade apply --plan-file /tmp/repoctl-upgrade-plan.json --json`
 5. Run verification:
-   `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q tests/repoctl`
+   `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q tests/repoctl tests/maintenance`
    `./scripts/repoctl check --json`
    `./scripts/repoctl meta check --json`
 
@@ -42,4 +42,4 @@ Workflow docs are distributed as `create_paths` by default. This lets new worksp
 - Do not parse Backlog, PRD, task, or workflow prose to infer upgrade scope.
 - Do not repair Board, task, archive, or metadata state inside upgrade apply.
 - Do not use broad mirror sync or delete files absent from the release artifact.
-- Do not update `repo/**` through this command.
+- Do not update `repos/**` through this command.

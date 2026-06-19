@@ -110,7 +110,7 @@ LOW_RISK_PROSE_PATTERNS = (
 )
 
 FORBIDDEN_SURFACE_PATTERNS = (
-    "repo/**",
+    "repos/**",
 )
 
 REAPPROVAL_TRIGGERS = (

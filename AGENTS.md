@@ -5,9 +5,9 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 ## Workspace Contract
 
 - Root is the private workspace repo for agent operations, tasks, PRD, workflows, and repoctl tooling.
-- `repo/` is the product code repo. It must have its own `.git`; root `.gitignore` must ignore `/repo/`.
-- Code work defaults to `repo/`; root `tools/`, root `tests/`, and `scripts/` are workspace/repoctl surfaces only.
-- Ambiguous product requests such as “add search”, “fix list”, or “improve the CLI” belong in `repo/` unless repoctl/workspace tooling is explicitly named.
+- `repos/` is the product code repo boundary. Each product repo must have its own `.git`; root `.gitignore` must ignore `/repos/`.
+- Code work defaults to the selected product repo (`repos/`); root `tools/`, root `tests`, and `scripts/` are workspace/repoctl surfaces only.
+- Ambiguous product requests such as “add search”, “fix list”, or “improve the CLI” belong in the selected product repo unless repoctl/workspace tooling is explicitly named.
 - Submodules are not used.
 
 ## Read Order
@@ -23,7 +23,7 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 If no active task is assigned:
 
 - Resume a live task from `docs/BOARD.md` if one exists.
-- For product work under `repo/`, create a live task with `./scripts/repoctl task create ...`.
+- For product work under `repos/`, create a live task with `./scripts/repoctl task create ...`.
 - For read-only questions/status checks, do not create a task.
 - Use a parent task only for coordination across multiple independently verifiable child tasks.
 
@@ -31,17 +31,16 @@ Scope matrix:
 
 | Request scope | Task? | Boundary |
 |---|---:|---|
-| Product changes under `repo/` | Yes | `task start` -> edit/verify -> `task finish` |
+| Product changes under `repos/` | Yes | `task start` -> edit/verify -> `task finish` |
 | Backlog item promoted for implementation | Yes | `backlog show` -> explicit `task create --backlog-id` |
-| Workspace control-plane changes (`tools/repoctl`, `scripts/repoctl`, task/workflow contracts) | Yes | Use a root/workspace task for audit and handoff |
-| Minor root notes or one-off docs cleanup | No | Write directly when no handoff trail is useful |
+| Workspace/control-plane changes outside `repos/` | No | Write directly unless the user explicitly asks for a task |
 | Read-only questions or inspections | No | Report findings without Board mutation |
 
 ## Backlog
 
 - Backlog is for deferred ideas or planned work that should not be executed yet; work requested for now uses a task.
 - Manage Backlog only through `./scripts/repoctl backlog add/list/show/remove`.
-- To promote a Backlog item, `list` and `show` it first, read enough repo context, then run `./scripts/repoctl task create --backlog-id BL-...` with explicit `--slug`, `--area`, `--repo-ref`, and title.
+- To promote a Backlog item, `list` and `show` it first, read enough repo context, then run `./scripts/repoctl task create --backlog-id BL-...` with explicit `--slug`, `--area`, and title; pass `--repo-id` for product-repo work in configured multi-repo workspaces.
 - `repoctl` must not parse Backlog or PRD prose into task scope, files, validation, area, repo metadata, or annotations.
 
 ## Task Rules
@@ -60,20 +59,20 @@ Scope matrix:
 - Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
 - Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
 - Use `./scripts/repoctl task show T-... --json` to inspect a task and `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
-- Finish tasks with a verification artifact outside `repo/`: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
+- Finish tasks with a verification artifact outside every product repo: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
 - If `## Verification` is already complete, `./scripts/repoctl task finish T-... --use-task-verification --json` may reuse it.
 - Use `./scripts/repoctl task block T-... --verification-file /tmp/T-...-blocker.md --json` when acceptance fails but work should remain live.
 
 ## Working Commands
 
-- Code search: `cd repo && rg ...`
-- Code Git: `cd repo && git ...`
-- Docker: `cd repo && docker compose ...`
+- Code search: `cd <selected-product-repo> && rg ...` (`repos/` for direct layout, `repos/<repo-id>/` for collection layout)
+- Code Git: `cd <selected-product-repo> && git ...`
+- Docker: `cd <selected-product-repo> && docker compose ...`
 - Root checks: `./scripts/repoctl check --json`
 - Changed metadata gate: `./scripts/repoctl meta check --changed --json`
 - Status fallback: `rg "^status:" docs/tasks/T-*.md` and `cat docs/BOARD.md`
 
-Root-level automation under `scripts/` must resolve the workspace root from the script location, not `git rev-parse`, because `repo/` is a separate repository.
+Root-level automation under `scripts/` must resolve the workspace root from the script location, not `git rev-parse`, because product repos are separate repositories.
 
 ## Task Sections
 
@@ -102,15 +101,15 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - Keep one-off task-local instructions in the task file.
 - Task isolation is required for parallel work: no shared files, generated boundaries, or interface boundaries without coordination.
 
-## repo/ Metadata
+## Product Repo Metadata
 
-- `repo/.repometa/*` is the canonical sparse file-level metadata store for `repo/`; inline `@meta` or source-file metadata frontmatter is forbidden residue.
+- `<product-repo>/.repometa/*` is the canonical sparse file-level metadata store for the selected product repo; inline `@meta` or source-file metadata frontmatter is forbidden residue.
 - Full schema and operations live in `docs/workflows/repo-metadata.md`.
 - Use `repoctl meta ...`; do not directly edit `.repometa` in normal work.
 - `repoctl meta query` and `repoctl meta suggest` are read-only discovery hints. Inspect files directly before choosing scope.
 - Repo-scoped live tasks should fill `## Discovery` with candidate query, reviewed files, and chosen files; `repoctl check` warns when this evidence is missing.
-- When a task changes `repo/`, `repoctl task finish` runs the changed-file metadata gate. If `repo/` exists but its git repository is missing/unusable, finish blocks.
-- If a task started with pre-existing dirty `repo/` state, finish separates baseline dirty files from task-new changes; pre-existing dirty state is not task scope.
+- When a task changes a product repo, `repoctl task finish` runs the changed-file metadata gate. If `repos/` exists but its git repository is missing/unusable, finish blocks.
+- If a task started with pre-existing dirty product repo state, finish separates baseline dirty files from task-new changes; pre-existing dirty state is not task scope.
 
 ## Adapter Policy
 

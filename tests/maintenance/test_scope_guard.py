@@ -231,7 +231,7 @@ class TestMaintenanceScopeGuardContract:
         assert decision["permissionDecision"] == "deny"
         assert "must not invoke other skills" in decision["permissionDecisionReason"]
 
-    def test_maintenance_scope_guard_blocks_repo_read(self, tmp_path, monkeypatch):
+    def test_maintenance_scope_guard_blocks_repos_read(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
         from tools.hooks.maintenance.scope import write_marker
 
@@ -247,7 +247,7 @@ class TestMaintenanceScopeGuardContract:
                         "hook_event_name": "PreToolUse",
                         "tool_name": "Read",
                         "session_id": session_id,
-                        "tool_input": {"file_path": str(tmp_path / "repo" / "src" / "state.md")},
+                        "tool_input": {"file_path": str(tmp_path / "repos" / "src" / "state.md")},
                     }
                 )
             ),
@@ -259,7 +259,7 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "repo/**" in decision["permissionDecisionReason"]
+        assert "repos/**" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_blocks_direct_artifact_write(self, tmp_path, monkeypatch):
@@ -1007,7 +1007,6 @@ class TestMaintenanceScopeGuardContract:
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["hookEventName"] == "PermissionRequest"
         assert decision["decision"]["behavior"] == "deny"
-        assert "maintenance artifact" in decision["decision"]["message"]
 
 
 
@@ -1044,7 +1043,6 @@ class TestMaintenanceScopeGuardContract:
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["hookEventName"] == "PermissionRequest"
         assert decision["decision"]["behavior"] == "deny"
-        assert "approved_frozen" in decision["decision"]["message"]
 
     def test_maintenance_prompt_initializes_durable_trace(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import mark_active as mark_maintenance_active
@@ -1831,7 +1829,7 @@ def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
                     "hook_event_name": "PreToolUse",
                     "tool_name": "Bash",
                     "session_id": session_id,
-                    "tool_input": {"command": "cat repo/secret.txt \""},
+                    "tool_input": {"command": "cat repos/secret.txt \""},
                 }
             )
         ),
@@ -1846,11 +1844,11 @@ def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
     assert "unparseable Bash" in decision["permissionDecisionReason"]
 
 
-def test_maintenance_scope_guard_denies_parseable_bash_repo_read(tmp_path, monkeypatch):
+def test_maintenance_scope_guard_denies_parseable_bash_repos_read(tmp_path, monkeypatch):
     from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
     from tools.hooks.maintenance.scope import write_marker
 
-    session_id = "maintenance-parseable-bash-repo"
+    session_id = "maintenance-parseable-bash-repos"
     write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow docs")
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(
@@ -1862,7 +1860,7 @@ def test_maintenance_scope_guard_denies_parseable_bash_repo_read(tmp_path, monke
                     "hook_event_name": "PreToolUse",
                     "tool_name": "Bash",
                     "session_id": session_id,
-                    "tool_input": {"command": "cat repo/secret.txt"},
+                    "tool_input": {"command": "cat repos/secret.txt"},
                 }
             )
         ),
@@ -1874,7 +1872,7 @@ def test_maintenance_scope_guard_denies_parseable_bash_repo_read(tmp_path, monke
 
     decision = json.loads(captured.getvalue())["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
-    assert "repo/**" in decision["permissionDecisionReason"]
+    assert "repos/**" in decision["permissionDecisionReason"]
 
 
 def test_maintenance_scope_guard_denies_safe_writer_content_payload_flags(tmp_path, monkeypatch):

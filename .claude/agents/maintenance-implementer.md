@@ -28,7 +28,7 @@ approved frozen plan을 가장 작은 안전한 diff로 적용한다. state, app
 ## 하지 말 것
 - approved surfaces 밖 edit
 - state checkpoint 또는 approval freeze record 수정
-- `repo/**` 또는 external state 접근
+- `repos/**` 또는 external state 접근
 - evaluation 또는 final pass 선언
 - 승인된 diff를 이미 적용한 뒤 같은 surface를 반복 탐색하며 수렴 시도
 - budget deny 이후 재시도; 이 경우 failed execution evidence와 `retry-implementation` handoff가 필요하다

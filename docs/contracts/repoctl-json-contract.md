@@ -58,11 +58,50 @@ This contract freezes the common envelope, not every command's full payload.
   "severity": "error",
   "code": "annotation_required",
   "message": "file matches coverage rule: matched coverage pattern src/**",
-  "path": "repo/src/service.py"
+  "path": "repos/src/service.py"
 }
 ```
 
 `path` is optional. Codes are intended for agents and MCP wrappers; messages are for humans.
+
+Repo-aware payloads should include repository context instead of overloading `path`:
+
+```json
+{
+  "repository": {
+    "id": "main",
+    "path": "repos",
+    "identity_source": "reserved"
+  },
+  "files": [
+    {
+      "path": "src/service.py",
+      "workspace_path": "repos/src/service.py"
+    }
+  ]
+}
+```
+
+`path` inside file entries remains repo-relative. `workspace_path` is workspace-root-relative when a caller needs a clickable location.
+
+Repository diagnostics separate stable targets from unbound candidates:
+
+```json
+{
+  "placement": "collection",
+  "registry_ready": false,
+  "targets": [],
+  "candidates": [
+    {
+      "path": "repos/web",
+      "suggested_id": "web",
+      "identity_status": "unbound"
+    }
+  ]
+}
+```
+
+`suggested_id` is not a stable `repo_id` until `repoctl repo adopt` pins it into `docs/repoctl.json`.
 
 ## next_actions rules
 

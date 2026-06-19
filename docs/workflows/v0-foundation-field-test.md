@@ -14,10 +14,10 @@ Use this before MCP, Graph, llmwiki, or multi-repo work. The goal is to verify t
 - Confirm changed-file metadata gate blocks only changed-file issues.
 - Confirm `move_candidate` gives an explicit `repoctl meta move` repair path.
 - Confirm Korean `document_language` survives create/start/log/finish lifecycle.
-- Confirm project-specific generated/cache paths are handled by `repo/.repometa/policy.json`, not core hardcode.
+- Confirm project-specific generated/cache paths are handled by `repos/.repometa/policy.json`, not core hardcode.
 - Confirm `repoctl task doctor T-... --json` is read-only and reports recovery hints.
 - Confirm completion audit distinguishes executable live work from explicitly blocked or deferred work that the user chose to keep.
-- Confirm a monorepo-shaped `repo/` is treated as one product git repository with repo-relative paths, not as multiple workspace roots.
+- Confirm a monorepo-shaped `repos/` is treated as one product git repository with repo-relative paths, not as multiple workspace roots.
 
 ## Triage
 

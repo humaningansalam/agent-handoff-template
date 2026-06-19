@@ -28,5 +28,5 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run repoctl tests
-        run: uv run pytest -q tests/repoctl
+      - name: Run control-plane tests
+        run: uv run pytest -q tests/repoctl tests/maintenance

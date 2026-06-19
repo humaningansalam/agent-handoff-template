@@ -28,11 +28,11 @@ This directory contains the live task registry, task files, workflows, and archi
 - Add backlog item: `./scripts/repoctl backlog add "Short backlog title" --body-file /tmp/backlog.md`
 - Show backlog item: `./scripts/repoctl backlog show BL-...`
 - Remove backlog item: `./scripts/repoctl backlog remove BL-...`
-- Promote backlog item: read the item, inspect repo context, then run `./scripts/repoctl task create --backlog-id BL-... --slug my-slug --area repo --repo-ref repo "Task title"` with explicit fields, record `## Discovery` before repo changes are finished, and refine the task file.
+- Promote backlog item: read the item, inspect repo context, then run `./scripts/repoctl task create --backlog-id BL-... --slug my-slug --area repo --repo-id <id> "Task title"` for configured multi-repo product work, record `## Discovery` before repo changes are finished, and refine the task file.
 - Show live tasks: `./scripts/repoctl task list --json`
 - Show a task: `./scripts/repoctl task show T-... --json`
 - Diagnose finish readiness: `./scripts/repoctl task doctor T-... --json`
-- Record Discovery evidence: `./scripts/repoctl task discovery add T-... --query "..." --reviewed repo/path --chosen repo/path --json`
+- Record Discovery evidence: `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json`
 - Append execution log: `./scripts/repoctl task log append T-... "message" --json`
 - Finish task: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
 - Scan task statuses: `rg "^status:" docs/tasks/T-*.md`
@@ -49,7 +49,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Read `docs/contracts/repoctl-module-boundaries.md` before changing repoctl internals.
 - Read `docs/workflows/v0-foundation-field-test.md` before starting MCP, Graph, or llmwiki work.
 - Command examples use the workspace wrapper. If `repoctl` is installed on `PATH`, the shorter `repoctl ...` form is equivalent.
-- `scripts/repoctl` resolves the workspace root from the script location, so invoking it by explicit path from `repo/` or nested directories is also supported.
+- `scripts/repoctl` resolves the workspace root from the script location, so invoking it by explicit path from `repos/` or nested directories is also supported.
 - Backlog text is free-form human planning text. repoctl manages backlog items as opaque raw blocks with content-hash IDs, but it does not infer files, scope, validation, metadata, or task body sections from that text.
 - For PRD or external-note triage, use `docs/workflows/prd-backlog-sequential.md` to list gaps as Backlog items and promote them one at a time.
 - `repoctl meta suggest` is a discovery aid only. The agent must inspect candidate files and write its own `## Discovery`; suggestions are not authoritative scope.

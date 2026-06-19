@@ -4,8 +4,10 @@ title: "Replace with task title"
 # canonical values: todo | doing | blocked | done | canceled (see AGENTS.md)
 status: todo
 owner: "unassigned"
-# optional: repo/ branch name or worktree path
+# optional future branch/worktree hint; never used as repository selector
 repo_ref: ""
+# optional stable product repository id; empty means no product repo selected
+repo_id: ""
 created: YYYYMMDDTHHMMSSZ
 # optional: frontend | backend | infra | docs | ops
 area: ""
@@ -37,8 +39,8 @@ Example:
 
 <!-- For repo work, record candidate-file discovery evidence before editing.
 Use `repoctl meta query` / `repoctl meta suggest` as read-only hints only; inspect files directly before choosing scope.
-Prefer `./scripts/repoctl task discovery add T-... --query "..." --reviewed repo/path --chosen repo/path --json` over hand-editing.
-Each required field may be one line or an indented sub-list; include at least one `repo/...` path under Chosen files.
+Prefer `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` over hand-editing.
+Each required field may be one line or an indented sub-list; include at least one `repos/...` path under Chosen files.
 This section may be empty for root-only or already-obvious work. -->
 
 - Candidate query: none yet

@@ -10,7 +10,7 @@ def write_workspace(root: Path) -> None:
     (root / "docs/tasks").mkdir(parents=True)
     (root / "docs/archive/tasks").mkdir(parents=True)
     (root / "scripts").mkdir()
-    (root / "repo").mkdir()
+    (root / "repos").mkdir()
     (root / "docs/BOARD.md").write_text(
         "# Board\n\n## Board\n\n- docs/tasks/T-20260609120000Z--live.md\n\n## Backlog\n\n<!-- backlog:item BL-abc -->\nraw idea\n<!-- /backlog:item -->\n",
         encoding="utf-8",
@@ -19,7 +19,7 @@ def write_workspace(root: Path) -> None:
     (root / "docs/tasks/T-20260609120000Z--live.md").write_text("live task\n", encoding="utf-8")
     (root / "docs/archive/tasks/T-20260608120000Z--done.md").write_text("archived task\n", encoding="utf-8")
     (root / "scripts/repoctl").write_text("old repoctl\n", encoding="utf-8")
-    (root / "repo/app.py").write_text("print('product')\n", encoding="utf-8")
+    (root / "repos/app.py").write_text("print('product')\n", encoding="utf-8")
     (root / "AGENTS.md").write_text("rules\n", encoding="utf-8")
 
 
@@ -36,7 +36,7 @@ def write_source(root: Path, *, manifest: dict | None = None) -> None:
                 "package": "agent-workspace-control-plane",
                 "version": "0.1.0",
                 "replace_paths": ["scripts/repoctl", "docs/tasks/TEMPLATE.md"],
-                "preserve_paths": ["repo/**", "docs/BOARD.md", "docs/PRD.md", "docs/tasks/T-*.md", "docs/archive/tasks/**"],
+                "preserve_paths": ["repos/**", "docs/BOARD.md", "docs/PRD.md", "docs/tasks/T-*.md", "docs/archive/tasks/**"],
             },
             indent=2,
         ),
@@ -52,7 +52,7 @@ def test_upgrade_plan_is_read_only_and_reports_managed_changes(tmp_path: Path, m
     before = {
         "board": (workspace / "docs/BOARD.md").read_text(encoding="utf-8"),
         "task": (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8"),
-        "repo": (workspace / "repo/app.py").read_text(encoding="utf-8"),
+        "repos": (workspace / "repos/app.py").read_text(encoding="utf-8"),
     }
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 
@@ -63,7 +63,7 @@ def test_upgrade_plan_is_read_only_and_reports_managed_changes(tmp_path: Path, m
     assert [operation["path"] for operation in payload["data"]["operations"]] == ["docs/tasks/TEMPLATE.md", "scripts/repoctl"]
     assert (workspace / "docs/BOARD.md").read_text(encoding="utf-8") == before["board"]
     assert (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8") == before["task"]
-    assert (workspace / "repo/app.py").read_text(encoding="utf-8") == before["repo"]
+    assert (workspace / "repos/app.py").read_text(encoding="utf-8") == before["repos"]
 
 
 def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -88,7 +88,7 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     assert (workspace / "docs/BOARD.md").read_text(encoding="utf-8") == board_before
     assert (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8") == task_before
     assert (workspace / "docs/PRD.md").read_text(encoding="utf-8") == "project prd\n"
-    assert (workspace / "repo/app.py").read_text(encoding="utf-8") == "print('product')\n"
+    assert (workspace / "repos/app.py").read_text(encoding="utf-8") == "print('product')\n"
     assert (workspace / payload["data"]["receipt_path"]).is_file()
 
 
@@ -151,7 +151,7 @@ def test_upgrade_create_paths_add_missing_workflow_without_overwriting_existing(
                 "version": "0.1.0",
                 "replace_paths": [],
                 "create_paths": ["docs/workflows/INDEX.md", "docs/workflows/repo-metadata.md"],
-                "preserve_paths": ["repo/**", "docs/BOARD.md", "docs/PRD.md", "docs/tasks/T-*.md", "docs/archive/tasks/**"],
+                "preserve_paths": ["repos/**", "docs/BOARD.md", "docs/PRD.md", "docs/tasks/T-*.md", "docs/archive/tasks/**"],
             },
             indent=2,
         ),

@@ -4,8 +4,10 @@ title: "Replace with parent task title"
 # canonical values: todo | doing | blocked | done | canceled (see AGENTS.md)
 status: todo
 owner: "unassigned"
-# optional: repo/ branch name or worktree path
+# optional future branch/worktree hint; never used as repository selector
 repo_ref: ""
+# optional stable product repository id; child tasks usually own executable repo scope
+repo_id: ""
 created: YYYYMMDDTHHMMSSZ
 # optional: frontend | backend | infra | docs | ops
 area: ""

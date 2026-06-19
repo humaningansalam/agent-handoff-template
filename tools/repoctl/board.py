@@ -133,11 +133,11 @@ def resolve_backlog_item(board_text: str, backlog_id: str) -> BacklogItem:
     if not matches:
         from .io import RepoctlError
 
-        raise RepoctlError(f"backlog item not found: {backlog_id}")
+        raise RepoctlError(f"backlog item not found: {backlog_id}", code="backlog_not_found")
     if len(matches) > 1:
         from .io import RepoctlError
 
-        raise RepoctlError(f"backlog item id is ambiguous: {backlog_id}")
+        raise RepoctlError(f"backlog item id is ambiguous: {backlog_id}", code="duplicate_backlog_id")
     return matches[0]
 
 

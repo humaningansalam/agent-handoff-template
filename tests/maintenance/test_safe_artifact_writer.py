@@ -198,10 +198,10 @@ def test_safe_artifact_writer_rejects_forbidden_repo_surface(tmp_path: Path) -> 
             tmp_path,
             kind="plan",
             status="passed",
-            summary="repo product files are out of maintenance scope",
+            summary="repos product files are out of maintenance scope",
             workflow_id="mw-forbidden-repo",
             candidate_id="REPO-001",
-            affected_surfaces=("repo/src/app.py",),
+            affected_surfaces=("repos/src/app.py",),
             acceptance_criteria_ids=("AC-001",),
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -10,30 +11,55 @@ from tools.repoctl.release import build_release_archive
 def test_build_release_archive_uses_manifest_managed_paths(tmp_path: Path) -> None:
     root = tmp_path / "source"
     out = tmp_path / "dist"
+    manifest = {
+        "schema_version": 1,
+        "package": "agent-workspace-control-plane",
+        "version": "0.1.0",
+        "replace_paths": ["scripts/repoctl"],
+        "create_paths": ["docs/workflows/repo-metadata.md"],
+        "preserve_paths": ["repos/**", "docs/BOARD.md"],
+    }
+    prefix = f"{manifest['package']}-{manifest['version']}"
     (root / "scripts").mkdir(parents=True)
     (root / "docs/workflows").mkdir(parents=True)
     (root / "scripts/repoctl").write_text("tool\n", encoding="utf-8")
     (root / "docs/workflows/repo-metadata.md").write_text("workflow\n", encoding="utf-8")
     (root / "repoctl-upgrade-manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "package": "agent-workspace-control-plane",
-                "version": "0.1.0",
-                "replace_paths": ["scripts/repoctl"],
-                "create_paths": ["docs/workflows/repo-metadata.md"],
-                "preserve_paths": ["repo/**", "docs/BOARD.md"],
-            },
-            indent=2,
-        ),
+        json.dumps(manifest, indent=2),
         encoding="utf-8",
     )
 
     archive_path = build_release_archive(root, out)
 
-    assert archive_path.name == "agent-workspace-control-plane-0.1.0.tar.gz"
+    assert archive_path.name == f"{prefix}.tar.gz"
     with tarfile.open(archive_path, "r:gz") as archive:
         names = set(archive.getnames())
-    assert "agent-workspace-control-plane-0.1.0/repoctl-upgrade-manifest.json" in names
-    assert "agent-workspace-control-plane-0.1.0/scripts/repoctl" in names
-    assert "agent-workspace-control-plane-0.1.0/docs/workflows/repo-metadata.md" in names
+    assert f"{prefix}/repoctl-upgrade-manifest.json" in names
+    assert f"{prefix}/scripts/repoctl" in names
+    assert f"{prefix}/docs/workflows/repo-metadata.md" in names
+
+
+def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
+    archive_path = build_release_archive(source_root, tmp_path / "dist")
+    extract_dir = tmp_path / "extract"
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(extract_dir)
+    package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
+
+    assert (package_root / "tools/repoctl/repositories.py").is_file()
+    (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
+    (package_root / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
+    result = subprocess.run(
+        ["python3", "-m", "tools.repoctl", "repo", "list", "--json"],
+        cwd=package_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "repo.list"

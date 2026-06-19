@@ -16,14 +16,14 @@ These boundaries keep repoctl stable before MCP, Graph, llmwiki, and broader rep
 - Future Graph must derive relation data from index facts, task evidence, and `.repometa`; it must not store graph fields inside `.repometa` annotations.
 - Future Graph/Index owns observed repo-specific topics; `.repometa` topics are human hints and bootstrap labels, not the authoritative topic graph.
 - Future llmwiki must promote stable knowledge from task/archive evidence; it must not replace task frontmatter, Board, Backlog, or `.repometa` authority.
-- Future monorepo support should treat packages/apps/services inside the current `repo/` as scoped surfaces, not as separate workspace roots.
-- Future multi-repo support must introduce an explicit repo selector/namespace before adding more product git repositories; MCP, Graph, and llmwiki must not infer repo identity from path strings alone.
+- Monorepo layouts should treat packages/apps/services inside the selected product repo as scoped surfaces, not as separate workspace roots.
+- Multi-repo support must use explicit repo selectors/namespaces; MCP, Graph, and llmwiki must not infer repo identity from path strings alone.
 
 ## Repo layout direction
 
-v0 assumes one product git repository at `repo/`. That repository may be a monorepo internally, with apps, packages, services, infra, and docs under repo-relative paths.
+The preferred single product git repository lives at `repos/`. That repository may be a monorepo internally, with apps, packages, services, infra, and docs under repo-relative paths.
 
-Multi-repo workspaces are a future contract change. They require repo IDs in task metadata, `.repometa` paths, changed-file gates, JSON payloads, Graph node IDs, and MCP tool schemas. Do not add ad hoc `repo2/`, `api/`, or `web/` mutation paths without that namespace design.
+Configured multi-repo workspaces use stable repo IDs in task metadata, changed-file gates, JSON payloads, and future Graph/MCP schemas. Do not add ad hoc `repo2/`, `api/`, or `web/` mutation paths outside the registry.
 
 ## Forbidden shortcuts
 

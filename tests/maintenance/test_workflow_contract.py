@@ -122,7 +122,7 @@ def test_contract_profile_matrix_matches_harness_sources() -> None:
     assert policy_for_surfaces((".claude/agents/maintenance-planner.md",)).profile == WorkflowProfile.CRITICAL_HARNESS
     assert policy_for_surfaces(("tools/agent_harness/checker.py",)).profile == WorkflowProfile.CRITICAL_HARNESS
     assert policy_for_surfaces(("tests/maintenance/test_workflow_contract.py",)).profile == WorkflowProfile.CRITICAL_HARNESS
-    forbidden = policy_for_surfaces(("repo/src/app.py",))
+    forbidden = policy_for_surfaces(("repos/src/app.py",))
     assert forbidden.route == ()
     assert forbidden.required_workers == ()
     assert "forbidden surface" in forbidden.reason

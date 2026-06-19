@@ -5,13 +5,14 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tests.repoctl.test_check import write_workspace
-from tests.repoctl.test_meta_check import write_repometa
+from tests.repoctl.test_meta_check import init_repo, write_repometa
 
 
 def test_index_code_extracts_python_facts_without_writing_annotations(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     rel = "backend/auth/token_service.py"
     (repo / "backend/auth").mkdir(parents=True)
@@ -43,8 +44,9 @@ def test_index_code_extracts_python_facts_without_writing_annotations(tmp_path: 
 
 def test_index_code_extracts_typescript_facts(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     rel = "frontend/src/api/billingGateway.ts"
     (repo / "frontend/src/api").mkdir(parents=True)
@@ -70,23 +72,24 @@ def test_index_code_extracts_typescript_facts(tmp_path: Path, monkeypatch, capsy
 
 def test_index_code_changed_requires_repo_git(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
     write_repometa(repo)
     (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["index", "code", "--changed", "--json"]) == 1
+    assert main(["index", "code", "--changed", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert any(problem["code"] == "repo_git_unavailable" for problem in payload["problems"])
+    assert any(problem["code"] == "repository_identity_unbound" for problem in payload["problems"])
 
 
 def test_index_code_reports_truncation_separately_from_total(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "repos"
     repo.mkdir()
+    init_repo(repo)
     write_repometa(repo)
     for index in range(3):
         (repo / f"mod{index}.py").write_text(f"def run_{index}():\n    return {index}\n", encoding="utf-8")

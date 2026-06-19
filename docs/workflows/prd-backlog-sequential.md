@@ -11,7 +11,7 @@ authorized_scope:
   - docs/BOARD.md
   - docs/tasks/**
   - docs/archive/tasks/**
-  - repo/**
+  - repos/**
 expected_output:
   - PRD gap Backlog items or one finished archived task per promoted item
 ---
@@ -84,11 +84,11 @@ Read the raw Backlog block, inspect candidate files directly, then promote with 
   --backlog-id BL-... \
   --slug <english-kebab-slug> \
   --area repo \
-  --repo-ref repo \
+  --repo-id <id> \
   "Task title"
 ```
 
-`repoctl task create --backlog-id` must fail if `--slug`, `--area`, or `--repo-ref` is missing. Do not work around that gate.
+`repoctl task create --backlog-id` must fail if `--slug` or `--area` is missing. In configured multi-repo workspaces, product tasks must also pass the selected stable `--repo-id`. Do not work around those gates.
 
 ## Phase 3: Execute One Task
 
@@ -98,12 +98,12 @@ Required sequence:
 ./scripts/repoctl task start T-...
 ```
 
-Before editing `repo/`, fill the task's `## Discovery` section with:
+Before editing `repos/`, fill the task's `## Discovery` section with:
 
 ```md
 - Candidate query: `<repoctl meta query/suggest commands used>`
-- Candidate files reviewed: `repo/path`, ...
-- Chosen files: `repo/path`, ...
+- Candidate files reviewed: `repos/path`, ...
+- Chosen files: `repos/path`, ...
 ```
 
 Then implement the smallest complete change for that one item.
@@ -113,11 +113,11 @@ Then implement the smallest complete change for that one item.
 Run focused validation first, then metadata gate:
 
 ```bash
-cd repo && <focused test or smoke command>
+cd <selected-product-repo> && <focused test or smoke command>
 ./scripts/repoctl meta check --changed --json
 ```
 
-Write verification evidence outside `repo/`, then finish:
+Write verification evidence outside `repos/`, then finish:
 
 ```bash
 ./scripts/repoctl task finish T-... --verification-file /tmp/verification.md --json

@@ -472,8 +472,8 @@ def main() -> None:
                 return
         blocked = _blocked_reference(root, tool_name, tool_input)
         if blocked:
-            record_event(root, marker, payload, event="scope-guard-deny", phase="guard", guard="deny", result="repo/** blocked")
-            _emit_deny(hook_event_name, "maintenance scope guard blocks repo/** access")
+            record_event(root, marker, payload, event="scope-guard-deny", phase="guard", guard="deny", result="repos/** blocked")
+            _emit_deny(hook_event_name, "maintenance scope guard blocks repos/** access")
             return
         stale_run_read = _stale_run_artifact_read(root, str(marker.get("workflow_id") or ""), tool_name, tool_input)
         if stale_run_read:
