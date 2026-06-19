@@ -89,6 +89,21 @@ def test_task_show_and_log_append_use_repoctl_lifecycle_boundary(tmp_path: Path,
     assert "checked worker output" in show_payload["body"]
 
 
+def test_task_commands_accept_slugged_task_file_id(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="todo"))
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "show", "T-20260609184046Z--alpha", "--json"]) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["task"]["id"] == "T-20260609184046Z"
+
+    assert main(["task", "start", "T-20260609184046Z--alpha.md", "--json"]) == 0
+    start_payload = json.loads(capsys.readouterr().out)
+    assert start_payload["status"] == "doing"
+
+
 def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     init_repo(tmp_path / "repos")
@@ -443,6 +458,23 @@ def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypat
     payload = json.loads(capsys.readouterr().out)
     archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
     assert "Result: pass" in archived
+    assert "status: done" in archived
+
+
+def test_task_finish_strips_verification_artifact_title(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
+    verification = tmp_path / "verification.md"
+    verification.write_text("# Verification for T-20260609184046Z\n\n- Command: pytest\n- Result: pass\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
+    assert "# Verification for T-20260609184046Z" not in archived
+    assert "- Command: pytest" in archived
     assert "status: done" in archived
 
 

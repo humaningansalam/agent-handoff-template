@@ -21,6 +21,7 @@ AREAS = {"", "repo", "backend", "frontend", "infra", "docs", "ops", "mobile"}
 REPO_REQUIRED_AREAS = {"repo", "backend", "frontend", "infra", "mobile"}
 TASK_RE = re.compile(r"^(T-[0-9]{14}Z)--[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
 ID_RE = re.compile(r"^T-[0-9]{14}Z$")
+TASK_ID_WITH_SLUG_RE = re.compile(r"^(T-[0-9]{14}Z)--[a-z0-9]+(?:-[a-z0-9]+)*$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
 
@@ -272,9 +273,21 @@ def utc_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
+def normalize_task_id(task_id: str) -> str:
+    candidate = Path(str(task_id)).name
+    if ID_RE.match(candidate):
+        return candidate
+    file_match = TASK_RE.match(candidate)
+    if file_match:
+        return file_match.group(1)
+    slug_match = TASK_ID_WITH_SLUG_RE.match(candidate)
+    if slug_match:
+        return slug_match.group(1)
+    raise RepoctlError("invalid task id format; expected T-YYYYMMDDHHMMSSZ or T-YYYYMMDDHHMMSSZ--slug")
+
+
 def resolve_live_task(root: Path, task_id: str) -> Task:
-    if not ID_RE.match(task_id):
-        raise RepoctlError("invalid task id format; expected T-YYYYMMDDHHMMSSZ")
+    task_id = normalize_task_id(task_id)
     matches = sorted((root / "docs/tasks").glob(f"{task_id}--*.md"))
     if not matches:
         raise RepoctlError(f"task not found: {task_id}")
@@ -284,8 +297,7 @@ def resolve_live_task(root: Path, task_id: str) -> Task:
 
 
 def resolve_task(root: Path, task_id: str) -> Task:
-    if not ID_RE.match(task_id):
-        raise RepoctlError("invalid task id format; expected T-YYYYMMDDHHMMSSZ")
+    task_id = normalize_task_id(task_id)
     matches = sorted((root / "docs/tasks").glob(f"{task_id}--*.md")) + sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md"))
     if not matches:
         raise RepoctlError(f"task not found: {task_id}")
@@ -615,6 +627,7 @@ def _parse_baseline_entries(raw_entries: Any, state_path: Path, root: Path) -> l
 
 def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
     task = resolve_task(root, task_id)
+    task_id = task.id
     target = _target_for_task(root, task)
     if target is None:
         baseline = _read_repo_baseline(root, task_id)
@@ -804,6 +817,7 @@ def _verification_gate_summary(meta_gate: dict[str, Any] | None, git_state: Repo
 def _verification_body(verification: str, diff_evidence: str, *, meta_gate: dict[str, Any] | None, git_state: RepoGitState, copy: dict[str, Any]) -> tuple[str, bool]:
     truncated = False
     verification = verification.strip()
+    verification = _normalize_verification_artifact(verification)
     if len(verification) > 4000:
         verification = verification[:4000].rstrip() + "\n... truncated"
         truncated = True
@@ -812,6 +826,17 @@ def _verification_body(verification: str, diff_evidence: str, *, meta_gate: dict
     if diff_evidence:
         body += f"\n\n{copy['repo_change_evidence']}\n\n```text\n" + diff_evidence + "\n```"
     return body + "\n", truncated
+
+
+def _normalize_verification_artifact(verification: str) -> str:
+    lines = verification.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines and re.match(r"^#\s+Verification(?:\s+for\b.*)?\s*$", lines[0].strip(), re.IGNORECASE):
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+    return "\n".join(lines).strip()
 
 
 def _done_handoff(new_path: str, *, copy: dict[str, Any]) -> str:
