@@ -28,5 +28,5 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run control-plane tests
-        run: uv run pytest -q tests/repoctl tests/maintenance
+      - name: Run tests
+        run: uv run pytest -q

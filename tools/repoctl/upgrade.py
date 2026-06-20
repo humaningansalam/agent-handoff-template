@@ -181,6 +181,29 @@ def _atomic_copy_file(source: Path, target: Path) -> None:
         raise
 
 
+def _rollback_applied(root: Path, applied: list[dict[str, str]], backups: list[dict[str, str]]) -> list[dict[str, str]]:
+    backup_by_path = {backup["path"]: backup["backup_path"] for backup in backups}
+    rolled_back: list[dict[str, str]] = []
+    for operation in reversed(applied):
+        rel = _safe_rel(str(operation["path"]))
+        target = root / rel
+        backup_rel = backup_by_path.get(rel, "")
+        if backup_rel:
+            backup_path = root / backup_rel
+            if not backup_path.is_file():
+                raise RepoctlError(f"upgrade rollback backup is missing: {backup_rel}", code="upgrade_rollback_failed", path=backup_rel)
+            _atomic_copy_file(backup_path, target)
+            rolled_back.append({"path": rel, "action": "restore"})
+        else:
+            if target.exists():
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+                else:
+                    raise RepoctlError(f"upgrade rollback target is not a file: {rel}", code="upgrade_rollback_failed", path=rel)
+            rolled_back.append({"path": rel, "action": "remove_created"})
+    return rolled_back
+
+
 def _load_plan(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise RepoctlError(f"upgrade plan file not found: {path}", code="missing_upgrade_plan", path=str(path))
@@ -219,22 +242,46 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
     backup_root = root / UPGRADE_STATE_REL / run_id / "backup"
     with repoctl_lock(root):
         _verify_plan_fresh(root, plan)
-        for operation in plan["operations"]:
-            rel = _safe_rel(str(operation["path"]))
-            source_path = source_root / rel
-            target_path = root / rel
-            if not source_path.is_file():
-                raise RepoctlError(f"managed source file disappeared: {rel}", code="managed_source_missing", path=rel)
-            source_hash = _hash_file(source_path)
-            if source_hash != operation.get("source_hash"):
-                raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
-            if target_path.is_file():
-                backup_path = backup_root / rel
-                backup_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target_path, backup_path)
-                backups.append({"path": rel, "backup_path": backup_path.relative_to(root).as_posix()})
-            _atomic_copy_file(source_path, target_path)
-            applied.append({"path": rel, "action": str(operation.get("action") or "replace")})
+        try:
+            for operation in plan["operations"]:
+                rel = _safe_rel(str(operation["path"]))
+                source_path = source_root / rel
+                target_path = root / rel
+                if not source_path.is_file():
+                    raise RepoctlError(f"managed source file disappeared: {rel}", code="managed_source_missing", path=rel)
+                source_hash = _hash_file(source_path)
+                if source_hash != operation.get("source_hash"):
+                    raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
+                if target_path.is_file():
+                    backup_path = backup_root / rel
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target_path, backup_path)
+                    backups.append({"path": rel, "backup_path": backup_path.relative_to(root).as_posix()})
+                _atomic_copy_file(source_path, target_path)
+                applied.append({"path": rel, "action": str(operation.get("action") or "replace")})
+        except Exception as error:
+            rolled_back = _rollback_applied(root, applied, backups)
+            rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
+            atomic_write(
+                rollback_path,
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "plan_file": plan_path.as_posix(),
+                        "plan_sha256": plan.get("plan_sha256", ""),
+                        "applied": applied,
+                        "backups": backups,
+                        "rolled_back": rolled_back,
+                        "error": str(error),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+            if isinstance(error, RepoctlError):
+                raise
+            raise
         receipt = {
             "run_id": run_id,
             "plan_file": plan_path.as_posix(),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -52,8 +54,9 @@ def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path
     (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
     (package_root / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
     result = subprocess.run(
-        ["python3", "-m", "tools.repoctl", "repo", "list", "--json"],
+        ["./scripts/repoctl", "repo", "list", "--json"],
         cwd=package_root,
+        env={**os.environ, "UV_CACHE_DIR": str(tmp_path / "uv-cache")},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -63,3 +66,65 @@ def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["command"] == "repo.list"
+
+
+def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
+    prefix = f"{manifest['package']}-{manifest['version']}"
+    archive_path = build_release_archive(source_root, tmp_path / "dist")
+    with tarfile.open(archive_path, "r:gz") as archive:
+        names = set(archive.getnames())
+
+    managed = {"repoctl-upgrade-manifest.json", *manifest["replace_paths"], *manifest["create_paths"]}
+    missing = sorted(path for path in managed if f"{prefix}/{path}" not in names)
+    assert missing == []
+
+    settings_paths = [".claude/settings.json", ".claude/settings.maintenance.json"]
+    hook_commands: set[str] = set()
+    agent_names: set[str] = set()
+    for rel in settings_paths:
+        settings = json.loads((source_root / rel).read_text(encoding="utf-8"))
+        for permission in settings.get("permissions", {}).get("allow", []):
+            agent_match = re.fullmatch(r"Agent\(([^)]+)\)", permission)
+            if agent_match:
+                agent_names.add(agent_match.group(1))
+            hook_match = re.search(r"\.claude/hooks/maintenance/[^\" ]+\.sh", permission)
+            if hook_match:
+                hook_commands.add(hook_match.group(0))
+        for hook_entries in settings.get("hooks", {}).values():
+            for entry in hook_entries:
+                for hook in entry.get("hooks", []):
+                    command = str(hook.get("command") or "")
+                    hook_match = re.search(r"\.claude/hooks/maintenance/[^\" ]+\.sh", command)
+                    if hook_match:
+                        hook_commands.add(hook_match.group(0))
+
+    for agent_name in agent_names:
+        assert f"{prefix}/.claude/agents/{agent_name}.md" in names
+    for hook_path in hook_commands:
+        assert f"{prefix}/{hook_path}" in names
+
+    required_imports = [
+        "tools.agent_harness.safe_artifact_writer",
+        "tools.agent_harness.checker",
+        "tools.hooks.maintenance.enforce_scope",
+        "tools.hooks.maintenance.enforce_final_report",
+        "tools.hooks.maintenance.mark_active",
+        "tools.runtime.json_io",
+        "tools.registries.agent_registry",
+    ]
+    extract_dir = tmp_path / "extract-maintenance"
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(extract_dir)
+    package_root = extract_dir / prefix
+    for module in required_imports:
+        result = subprocess.run(
+            ["python3", "-c", f"import {module}"],
+            cwd=package_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, f"{module}: {result.stderr}"

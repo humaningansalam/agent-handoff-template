@@ -39,33 +39,40 @@ jobs:
         id: existing
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
           fi
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      - name: Verify control-plane tests
-        if: steps.existing.outputs.exists == 'false'
-        run: uv run pytest -q tests/repoctl tests/maintenance
+      - name: Verify tests
+        if: steps.existing.outputs.release_exists == 'false'
+        run: uv run pytest -q
 
       - name: Verify workspace contracts
-        if: steps.existing.outputs.exists == 'false'
+        if: steps.existing.outputs.release_exists == 'false'
         run: |
           ./scripts/repoctl check --json
           ./scripts/repoctl meta check --json
 
       - name: Build release artifact
-        if: steps.existing.outputs.exists == 'false'
+        if: steps.existing.outputs.release_exists == 'false'
         run: uv run python -m tools.repoctl.release dist
 
       - name: Create release tag
-        if: steps.existing.outputs.exists == 'false'
+        if: steps.existing.outputs.tag_exists == 'false'
         run: |
           git tag "${{ steps.version.outputs.tag }}" "${GITHUB_SHA}"
           git push origin "${{ steps.version.outputs.tag }}"
 
       - name: Create GitHub release
-        if: steps.existing.outputs.exists == 'false'
+        if: steps.existing.outputs.release_exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
