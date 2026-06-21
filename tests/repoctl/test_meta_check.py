@@ -354,6 +354,25 @@ def test_meta_check_changed_includes_untracked_and_ignores_unrelated_full_orphan
     assert not any(problem["path"] == "repos/backend/deleted.py" for problem in payload["problems"])
 
 
+def test_meta_check_changed_handles_unicode_git_paths(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    init_repo(repo)
+    policy = {**BASE_POLICY, "coverage": {"require_annotations": ["*.py"]}}
+    write_repometa(repo, policy=policy)
+    rel = "unicodé.py"
+    (repo / rel).write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo)
+    (repo / rel).write_text("x = 2\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["meta", "check", "--changed", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "annotation_required" and problem["path"] == f"repos/{rel}" for problem in payload["problems"])
+
+
 def test_meta_move_handles_cross_shard_without_loss(tmp_path: Path, monkeypatch) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

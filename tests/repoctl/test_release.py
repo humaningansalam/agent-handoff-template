@@ -89,16 +89,20 @@ def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path)
             agent_match = re.fullmatch(r"Agent\(([^)]+)\)", permission)
             if agent_match:
                 agent_names.add(agent_match.group(1))
-            hook_match = re.search(r"\.claude/hooks/maintenance/[^\" ]+\.sh", permission)
+            hook_match = re.search(r"\.claude/hooks/[^\" ]+\.sh", permission)
             if hook_match:
                 hook_commands.add(hook_match.group(0))
         for hook_entries in settings.get("hooks", {}).values():
             for entry in hook_entries:
                 for hook in entry.get("hooks", []):
                     command = str(hook.get("command") or "")
-                    hook_match = re.search(r"\.claude/hooks/maintenance/[^\" ]+\.sh", command)
+                    hook_match = re.search(r"\.claude/hooks/[^\" ]+\.sh", command)
                     if hook_match:
                         hook_commands.add(hook_match.group(0))
+    for hook_path in tuple(hook_commands):
+        source = source_root / hook_path
+        if source.is_file() and "run_python_module.sh" in source.read_text(encoding="utf-8"):
+            hook_commands.add(".claude/hooks/run_python_module.sh")
 
     for agent_name in agent_names:
         assert f"{prefix}/.claude/agents/{agent_name}.md" in names

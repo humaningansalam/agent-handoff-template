@@ -82,7 +82,7 @@ def normalize_repo_path(path: str | Path) -> str:
 
 
 def _git_lines(repo: Path, args: list[str]) -> list[str]:
-    result = subprocess.run(["git", *args], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    result = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
     if result.returncode != 0:
         return []
     return [line for line in result.stdout.splitlines() if line]

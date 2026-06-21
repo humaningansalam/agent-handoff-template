@@ -979,7 +979,14 @@ def _blocked_handoff(task_path: str, task_id: str, *, copy: dict[str, Any]) -> s
 
 def validate_verification_file(root: Path, verification_file: Path) -> None:
     resolved_verification = verification_file.resolve()
-    product_roots = [target.root_path for target in repo_layout(root).targets]
+    layout = repo_layout(root)
+    product_roots = [target.root_path for target in layout.targets]
+    seen_roots = {path.resolve() for path in product_roots}
+    for candidate in layout.candidates:
+        resolved_candidate = candidate.root_path.resolve()
+        if resolved_candidate not in seen_roots:
+            product_roots.append(candidate.root_path)
+            seen_roots.add(resolved_candidate)
     if not product_roots:
         product_roots = [path for path in (root / "repos",) if path.exists()]
     for product_root in product_roots:
@@ -1304,7 +1311,7 @@ def _has_backlog_origin(task: Task) -> bool:
 
 
 def _repo_discovery_paths(values: list[str]) -> list[str]:
-    return [value for value in values if re.match(r"^repos/[^`]+$", _strip_ticks(value))]
+    return [stripped for value in values if re.match(r"^repos/[^`]+$", stripped := _strip_ticks(value))]
 
 
 def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> list[str]:
@@ -1312,7 +1319,12 @@ def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> li
     if not paths:
         return []
     prefix = f"{target.display_path.rstrip('/')}/"
-    return [path for path in paths if not path.startswith(prefix)]
+    invalid: list[str] = []
+    for path in paths:
+        normalized = normalize_repo_path(path)
+        if not normalized or not normalized.startswith(prefix):
+            invalid.append(path)
+    return invalid
 
 
 def _discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:

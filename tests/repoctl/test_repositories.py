@@ -623,6 +623,30 @@ def test_repo_task_discovery_must_match_selected_repository(tmp_path: Path, monk
     assert payload["problems"][0]["code"] == "discovery_outside_selected_repository"
 
 
+def test_repo_task_discovery_rejects_dotdot_escape_from_selected_repository(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    web = tmp_path / "repos/web"
+    api = tmp_path / "repos/api"
+    init_repo(web)
+    init_repo(api)
+    write_repometa(web)
+    write_repometa(api)
+    (web / "app.py").write_text("print('web')\n", encoding="utf-8")
+    (api / "app.py").write_text("print('api')\n", encoding="utf-8")
+    commit_all(web)
+    commit_all(api)
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--area", "repo", "--repo-id", "web", "--start", "--slug", "discovery-dotdot", "Discovery dotdot", "--json"]) == 0
+    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
+
+    assert main(["task", "discovery", "add", task_id, "--query", "api app", "--reviewed", "repos/web/app.py", "--chosen", "repos/web/../api/app.py", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "discovery_outside_selected_repository"
+
+
 def test_repo_task_allows_other_product_repo_preexisting_dirty_at_start(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     web = tmp_path / "repos/web"
@@ -850,3 +874,26 @@ def test_verification_file_must_be_outside_all_product_repos(tmp_path: Path) -> 
         assert "repos/api/" in str(exc)
     else:
         raise AssertionError("verification file inside a non-selected product repo should be rejected")
+
+
+def test_verification_file_must_be_outside_unbound_candidate_when_target_configured(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    web = tmp_path / "repos/web"
+    api = tmp_path / "repos/api"
+    init_repo(web)
+    init_repo(api)
+    write_repometa(web)
+    (web / "app.py").write_text("print('web')\n", encoding="utf-8")
+    (api / "proof.md").write_text("candidate proof\n", encoding="utf-8")
+    commit_all(web)
+    commit_all(api)
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}]})
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--area", "docs", "--start", "--slug", "root-docs-candidate-proof", "Root docs candidate proof", "--json"]) == 0
+    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
+
+    assert main(["task", "finish", task_id, "--verification-file", str(api / "proof.md"), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "verification_file_inside_repo"

@@ -857,7 +857,7 @@ def check_meta(root: Path, *, changed: bool = False, changes: list[ChangedEntry]
             problems.append(Problem("error", "unknown_exclusion_field", f"unknown exclusion fields: {', '.join(unknown)}", workspace_path))
         if not data.get("reason"):
             problems.append(Problem("error", "missing_exclusion_reason", "exclusion reason is required", workspace_path))
-    inventory, inventory_problems, _meta = meta_inventory(root, changed=changed, target=target)
+    inventory, inventory_problems, _meta = meta_inventory(root, changed=changed, changes=changes, target=target)
     problems.extend(inventory_problems)
     considered_paths = {file.path for file in inventory if not changed or file.change}
     for file in inventory:

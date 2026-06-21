@@ -338,6 +338,38 @@ def test_task_finish_uses_task_start_dirty_baseline_for_root_only_task(tmp_path:
     assert "non-product update verified" in archived
 
 
+def test_task_finish_changed_meta_gate_uses_explicit_task_changes(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
+    verification = tmp_path / "verification.md"
+    verification.write_text("repo update verified\n", encoding="utf-8")
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.email", "a@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
+    write_repometa(repo, coverage=["*.py"])
+    (repo / "preexisting.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    (repo / "preexisting.py").write_text("x = 2\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    write_repometa(repo, coverage=["*.py"], annotations={"task_new.py": {"role": "service", "purpose": "new task file", "topics": ["task"]}})
+    (repo / "task_new.py").write_text("y = 1\n", encoding="utf-8")
+    record_discovery(tmp_path, "T-20260609184046Z", query="task new", reviewed="repos/task_new.py", chosen="repos/task_new.py")
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["meta_gate"]["status"] == "passed"
+    assert payload["meta_gate"]["changed_files"] >= 1
+
+
 def test_task_finish_allows_root_task_when_repo_head_changes_without_task_repo_changes(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     add_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "ops"'))
