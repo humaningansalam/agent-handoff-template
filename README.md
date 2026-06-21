@@ -77,5 +77,6 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - Task state lives in task frontmatter, not in the board.
 - Backlog items are raw planning blocks; agents read them and pass explicit task fields rather than relying on repoctl to parse intent.
 - `.repometa` provides file-level discovery and changed-file metadata gates; `repoctl index code` extracts read-only technical facts, and neither is a generated graph.
+- `repoctl graph build` emits a read-only deterministic snapshot over repository files, raw import references, repo-local topics, task completion receipts, and precise provider symbols/anchors.
 - Future MCP should be transport over repoctl contracts, not a second mutation path.
 - Future Graph and llmwiki layers should derive from task evidence, `.repometa`, and index facts without replacing their authority.

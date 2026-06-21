@@ -8,6 +8,7 @@ from typing import Any
 
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
+from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -144,7 +145,7 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
 
 
 def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "upgrade_command") if getattr(args, name, None)]
+    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "upgrade_command") if getattr(args, name, None)]
     return ".".join(parts) if parts else "repoctl"
 
 
@@ -694,6 +695,8 @@ def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) ->
 
 def _write_task_result(root: Path, result: dict[str, Any]) -> None:
     written_archives: list[Path] = []
+    original_task_text = ""
+    task_written = False
     if result["archived"]:
         try:
             for _source, target in result["moves"]:
@@ -711,6 +714,35 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
     else:
         original_task_text = result["task"].path.read_text(encoding="utf-8")
         atomic_write(result["task"].path, result["text"])
+        task_written = True
+    receipt_writes = result.get("receipt_writes") or []
+    if not receipt_writes and result.get("receipt_path") is not None and result.get("receipt_text"):
+        receipt_writes = [(result["receipt_path"], str(result["receipt_text"]))]
+    original_receipts: dict[Path, str | None] = {}
+
+    def restore_receipts() -> None:
+        for receipt_path, original_text in original_receipts.items():
+            if original_text is None:
+                if receipt_path.exists() and receipt_path.is_file():
+                    receipt_path.unlink()
+            else:
+                atomic_write(receipt_path, original_text)
+
+    if receipt_writes:
+        try:
+            for receipt_path, receipt_text in receipt_writes:
+                if receipt_path not in original_receipts:
+                    original_receipts[receipt_path] = receipt_path.read_text(encoding="utf-8") if receipt_path.is_file() else None
+                receipt_path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(receipt_path, str(receipt_text))
+        except Exception:
+            restore_receipts()
+            for target in written_archives:
+                if target.exists() and target.is_file():
+                    target.unlink()
+            if task_written:
+                atomic_write(result["task"].path, original_task_text)
+            raise
     board_path = root / "docs/BOARD.md"
     board_text = board_path.read_text(encoding="utf-8")
     remove_paths = set() if result.get("keep_board") else {result["old_path"]}
@@ -723,10 +755,11 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
     try:
         atomic_write(board_path, render_board(board_text, kept))
     except Exception:
+        restore_receipts()
         for target in written_archives:
             if target.exists() and target.is_file():
                 target.unlink()
-        if not result["archived"]:
+        if task_written:
             atomic_write(result["task"].path, original_task_text)
         raise
     if result["archived"]:
@@ -740,8 +773,8 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     verification_file = _verification_file_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, suffix="verification", command="finish")
     validate_verification_file(root, verification_file)
     with repoctl_lock(root):
-        meta_gate, _delta = _finish_meta_gate(root, args.task_id)
-        result = finish_task(root, args.task_id, verification_file=verification_file, meta_gate=meta_gate)
+        meta_gate, delta = _finish_meta_gate(root, args.task_id)
+        result = finish_task(root, args.task_id, verification_file=verification_file, meta_gate=meta_gate, repo_delta=delta)
         _write_task_result(root, result)
     data = {
         "task_id": args.task_id,
@@ -751,6 +784,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "archived": result["archived"],
         "truncated": result["truncated"],
         "meta_gate": meta_gate,
+        "completion_receipt": result["receipt_path"].relative_to(root).as_posix(),
     }
     payload = {
         "ok": True,
@@ -1026,6 +1060,74 @@ def cmd_index_code(args: argparse.Namespace) -> int:
         for entry in entries:
             print(f"{entry.path} language={entry.language} symbols={','.join(entry.symbols) or '-'} deps={','.join(entry.deps) or '-'}")
     return 1 if _has_errors(problems) else 0
+
+
+def cmd_graph_build(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    target = require_repo_target(root, repo_id=args.repo_id)
+    snapshot, problems, meta = build_graph(root, target=target)
+    payload = {
+        "ok": snapshot is not None and not _has_errors(problems),
+        "command": "graph build",
+        "data": {"snapshot": snapshot.to_dict() if snapshot is not None else None, **meta},
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "graph_not_authoritative",
+                "message": "graph build is a read-only derived snapshot; source authorities remain repo registry, code index, and .repometa",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        if snapshot is not None:
+            print(f"graph snapshot {snapshot.snapshot_digest} repository={target.id} nodes={len(snapshot.nodes)} edges={len(snapshot.edges)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
+def cmd_graph_query(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    target = require_repo_target(root, repo_id=args.repo_id)
+    snapshot, build_problems, meta = build_graph(root, target=target)
+    if snapshot is None or _has_errors(build_problems):
+        payload = {
+            "ok": False,
+            "command": "graph query",
+            "data": {"result": None, **meta},
+            "problems": [problem.to_dict() for problem in build_problems],
+            "warnings": [],
+        }
+        if args.json:
+            _json(payload)
+        else:
+            for problem in build_problems:
+                print(problem.message)
+        return 1 if _has_errors(build_problems) else 0
+
+    result, query_problems = query_graph(snapshot, file=args.file or "", topic=args.topic or "", import_ref=args.import_ref or "")
+    payload = {
+        "ok": result is not None and not _has_errors(query_problems),
+        "command": "graph query",
+        "data": {"result": result, "repository": target.to_dict(), "snapshot_digest": snapshot.snapshot_digest},
+        "problems": [problem.to_dict() for problem in query_problems],
+        "warnings": [
+            {
+                "code": "graph_not_authoritative",
+                "message": "graph query uses a read-only derived snapshot; inspect source files before changing task scope",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        if result is not None:
+            print(f"graph query {result['query']} nodes={len(result['nodes'])} edges={len(result['edges'])}")
+        for problem in query_problems:
+            print(problem.message)
+    return 1 if _has_errors(query_problems) else 0
 
 
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
@@ -1342,6 +1444,20 @@ def build_parser() -> argparse.ArgumentParser:
     index_code.add_argument("--limit", type=int, default=200)
     index_code.add_argument("--json", action="store_true")
     index_code.set_defaults(func=cmd_index_code)
+
+    graph = sub.add_parser("graph")
+    graph_sub = graph.add_subparsers(dest="graph_command", required=True, parser_class=RepoctlArgumentParser)
+    graph_build = graph_sub.add_parser("build")
+    graph_build.add_argument("--repo-id")
+    graph_build.add_argument("--json", action="store_true")
+    graph_build.set_defaults(func=cmd_graph_build)
+    graph_query = graph_sub.add_parser("query")
+    graph_query.add_argument("--repo-id")
+    graph_query.add_argument("--file", default="")
+    graph_query.add_argument("--topic", default="")
+    graph_query.add_argument("--import", dest="import_ref", default="")
+    graph_query.add_argument("--json", action="store_true")
+    graph_query.set_defaults(func=cmd_graph_query)
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)

@@ -119,8 +119,10 @@ def _index_python(text: str) -> tuple[list[str], list[str], list[str], str, str]
         elif isinstance(node, ast.Import):
             imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level
             module = node.module or ""
-            imports.extend(f"{module}.{alias.name}" if module else alias.name for alias in node.names)
+            base = f"{prefix}{module}"
+            imports.extend(f"{base}.{alias.name}" if module else f"{prefix}{alias.name}" for alias in node.names)
         elif isinstance(node, ast.Call):
             calls.append(_python_call_name(node.func))
     return _dedupe_sorted(symbols), _dedupe_sorted(imports), _dedupe_sorted(calls), "ok", ""

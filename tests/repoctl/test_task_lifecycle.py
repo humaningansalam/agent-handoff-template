@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -435,6 +436,7 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     assert payload["old_path"] == "docs/tasks/T-20260609184046Z--alpha.md"
     assert payload["new_path"] == "docs/archive/tasks/T-20260609184046Z--alpha.md"
     assert payload["archived"] is True
+    assert payload["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
     assert not (tmp_path / payload["old_path"]).exists()
     archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
     assert "status: done" in archived
@@ -444,6 +446,14 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     assert "First command to run: `./scripts/repoctl check --json`" in archived
     assert f"First file to open: `{payload['new_path']}`" in archived
     assert "docs/tasks/T-20260609184046Z--alpha.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
+    receipt = json.loads((tmp_path / payload["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["schema"] == "repoctl.task.completion"
+    assert receipt["task_id"] == "T-20260609184046Z"
+    assert receipt["status"] == "done"
+    assert receipt["task_path"] == payload["new_path"]
+    assert receipt["archive_path"] == payload["new_path"]
+    assert receipt["changed_entries"] == []
+    assert receipt["verification"]["content_sha256"] == receipt["content_sha256"]
 
 
 def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -827,6 +837,7 @@ def test_task_finish_does_not_update_board_before_archive_write_succeeds(tmp_pat
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
     assert "docs/tasks/T-20260609184046Z--alpha.md" in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     assert not (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").exists()
+    assert not (tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json").exists()
 
 
 def test_task_finish_rolls_back_archive_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1056,6 +1067,76 @@ def test_task_finish_parent_archives_non_live_child_with_archive_handoff(tmp_pat
     assert not (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
     child_text = child_archive.read_text(encoding="utf-8")
     assert "First file to open: `docs/archive/tasks/T-20260609184047Z--child.md`" in child_text
+
+
+def test_task_finish_parent_restores_child_receipt_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
+    child_path = add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
+    child_text = child_path.read_text(encoding="utf-8")
+    child_hash = "sha256:" + hashlib.sha256(child_text.encode("utf-8")).hexdigest()
+    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184047Z.json"
+    write_json(
+        receipt_path,
+        {
+            "schema": "repoctl.task.completion",
+            "schema_version": 1,
+            "task_id": "T-20260609184047Z",
+            "repo_id": "",
+            "status": "done",
+            "completed_at": "2026-06-09T18:40:47Z",
+            "task_path": "docs/tasks/T-20260609184047Z--child.md",
+            "archive_path": "",
+            "content_sha256": child_hash,
+            "changed_entries": [],
+            "verification": {
+                "task_path": "docs/tasks/T-20260609184047Z--child.md",
+                "archive_path": "",
+                "content_sha256": child_hash,
+            },
+        },
+    )
+    original_receipt = receipt_path.read_text(encoding="utf-8")
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--parent.md\n\n## Backlog\n", encoding="utf-8")
+    verification = tmp_path / "verification.md"
+    verification.write_text("parent verified\n", encoding="utf-8")
+    real_atomic_write = __import__("tools.repoctl.cli", fromlist=["atomic_write"]).atomic_write
+
+    def fail_board_write(path: Path, text: str) -> None:
+        if path.name == "BOARD.md":
+            raise OSError("simulated board write failure")
+        real_atomic_write(path, text)
+
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.atomic_write", fail_board_write)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "io_error"
+    assert child_path.exists()
+    assert not (tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md").exists()
+    assert receipt_path.read_text(encoding="utf-8") == original_receipt
+
+
+def test_task_finish_parent_reports_corrupt_child_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
+    add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
+    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184047Z.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text("{not json\n", encoding="utf-8")
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--parent.md\n\n## Backlog\n", encoding="utf-8")
+    verification = tmp_path / "verification.md"
+    verification.write_text("parent verified\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "invalid_completion_receipt"
+    assert (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
+    assert not (tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md").exists()
 
 
 def test_task_finish_blocks_when_repo_head_changed_after_start_with_clean_worktree(tmp_path: Path, monkeypatch, capsys) -> None:

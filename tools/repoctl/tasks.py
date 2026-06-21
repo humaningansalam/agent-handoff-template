@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .io import LOCK_REL, RepoctlError, atomic_write
-from .git import ChangedEntry, RepoGitState, repo_change_fingerprints, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status
+from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_change_fingerprints, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status
 from .markdown import append_section_entry, find_section, parse_frontmatter, replace_frontmatter_line, replace_section
 from .repositories import RepoTarget, default_repo_target, repo_layout
 from .settings import document_language, validate_document_language
@@ -456,12 +457,122 @@ def _baseline_path(root: Path, task_id: str) -> Path:
     return _state_dir(root) / f"{task_id}.json"
 
 
+def _completion_receipt_path(root: Path, task_id: str) -> Path:
+    return _state_dir(root) / "completions" / f"{task_id}.json"
+
+
 def _entry_to_dict(entry: ChangedEntry) -> dict[str, str]:
     change, path, old_path = entry
     data = {"change": change, "path": path}
     if old_path:
         data["old_path"] = old_path
     return data
+
+
+def _sha256_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _valid_sha256(value: str) -> bool:
+    return bool(re.fullmatch(r"sha256:[0-9a-f]{64}", value))
+
+
+def _valid_receipt_task_path(value: str, *, allow_empty: bool = False) -> bool:
+    if not value:
+        return allow_empty
+    normalized = value.strip().replace("\\", "/")
+    if normalized != value or normalized.startswith("/") or "/../" in f"/{normalized}/":
+        return False
+    prefix = "docs/archive/tasks/" if normalized.startswith("docs/archive/tasks/") else "docs/tasks/" if normalized.startswith("docs/tasks/") else ""
+    if not prefix:
+        return False
+    filename = normalized.removeprefix(prefix)
+    if "/" in filename or not filename.endswith(".md"):
+        return False
+    return bool(TASK_ID_WITH_SLUG_RE.match(filename[:-3]))
+
+
+def _read_receipt_artifact(root: Path, value: str) -> str:
+    path = root / value
+    try:
+        resolved = path.resolve()
+        root_resolved = root.resolve()
+    except OSError as exc:
+        raise RepoctlError(f"task completion receipt artifact cannot be resolved: {value}", code="invalid_completion_receipt", path=value) from exc
+    if root_resolved not in (resolved, *resolved.parents):
+        raise RepoctlError(f"task completion receipt artifact escapes workspace: {value}", code="invalid_completion_receipt", path=value)
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RepoctlError(f"task completion receipt artifact is missing: {value}", code="invalid_completion_receipt", path=value) from exc
+
+
+def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -> None:
+    rel = path.relative_to(root).as_posix()
+    task_id = str(data.get("task_id") or "")
+    if data.get("schema") != "repoctl.task.completion" or data.get("schema_version") != 1:
+        raise RepoctlError(f"task completion receipt has invalid schema: {rel}", code="invalid_completion_receipt", path=rel)
+    if not ID_RE.match(task_id) or path.stem != task_id:
+        raise RepoctlError(f"task completion receipt task_id does not match filename: {rel}", code="invalid_completion_receipt", path=rel)
+    if data.get("status") != "done":
+        raise RepoctlError(f"task completion receipt has invalid status: {rel}", code="invalid_completion_receipt", path=rel)
+    repo_id = str(data.get("repo_id") or "")
+    if repo_id and not re.fullmatch(r"[a-z][a-z0-9_-]*", repo_id):
+        raise RepoctlError(f"task completion receipt has invalid repo_id: {rel}", code="invalid_completion_receipt", path=rel)
+    task_path = str(data.get("task_path") or "")
+    archive_path = str(data.get("archive_path") or "")
+    if not _valid_receipt_task_path(task_path) or not _valid_receipt_task_path(archive_path, allow_empty=True):
+        raise RepoctlError(f"task completion receipt has invalid task path: {rel}", code="invalid_completion_receipt", path=rel)
+    content_sha256 = str(data.get("content_sha256") or "")
+    if not _valid_sha256(content_sha256):
+        raise RepoctlError(f"task completion receipt has invalid content hash: {rel}", code="invalid_completion_receipt", path=rel)
+    verification = data.get("verification")
+    if not isinstance(verification, dict):
+        raise RepoctlError(f"task completion receipt has invalid verification: {rel}", code="invalid_completion_receipt", path=rel)
+    verification_task_path = str(verification.get("task_path") or "")
+    verification_archive_path = str(verification.get("archive_path") or "")
+    verification_hash = str(verification.get("content_sha256") or "")
+    if not _valid_receipt_task_path(verification_task_path) or not _valid_receipt_task_path(verification_archive_path, allow_empty=True):
+        raise RepoctlError(f"task completion receipt has invalid verification path: {rel}", code="invalid_completion_receipt", path=rel)
+    if verification_task_path != task_path or verification_archive_path != archive_path:
+        raise RepoctlError(f"task completion receipt verification does not match task path: {rel}", code="invalid_completion_receipt", path=rel)
+    if verification_hash != content_sha256 or not _valid_sha256(verification_hash):
+        raise RepoctlError(f"task completion receipt has invalid verification hash: {rel}", code="invalid_completion_receipt", path=rel)
+    artifact_path = archive_path or task_path
+    if _sha256_text(_read_receipt_artifact(root, artifact_path)) != content_sha256:
+        raise RepoctlError(f"task completion receipt hash does not match artifact: {rel}", code="invalid_completion_receipt", path=rel)
+    raw_entries = data.get("changed_entries")
+    if not isinstance(raw_entries, list):
+        raise RepoctlError(f"task completion receipt has invalid changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            raise RepoctlError(f"task completion receipt has invalid changed entry: {rel}", code="invalid_completion_receipt", path=rel)
+        change = str(item.get("change") or "")
+        path_value = str(item.get("path") or "")
+        old_path = str(item.get("old_path") or "")
+        if change not in {"added", "modified", "deleted", "renamed", "copied", "untracked"} or normalize_repo_path(path_value) != path_value:
+            raise RepoctlError(f"task completion receipt has invalid changed entry: {rel}", code="invalid_completion_receipt", path=rel)
+        if old_path and normalize_repo_path(old_path) != old_path:
+            raise RepoctlError(f"task completion receipt has invalid changed entry old_path: {rel}", code="invalid_completion_receipt", path=rel)
+
+
+def load_completion_receipts(root: Path, *, repo_id: str | None = None) -> list[dict[str, Any]]:
+    directory = _state_dir(root) / "completions"
+    if not directory.is_dir():
+        return []
+    receipts: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("T-*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RepoctlError(f"task completion receipt is unreadable: {path.relative_to(root).as_posix()}") from exc
+        if repo_id is not None and isinstance(data, dict) and str(data.get("repo_id") or "") != repo_id:
+            continue
+        if not isinstance(data, dict):
+            raise RepoctlError(f"task completion receipt has invalid schema: {path.relative_to(root).as_posix()}", code="invalid_completion_receipt", path=path.relative_to(root).as_posix())
+        _validate_completion_receipt(path, root, data)
+        receipts.append(data)
+    return receipts
 
 
 def _entry_key(entry: ChangedEntry) -> tuple[str, str, str]:
@@ -882,7 +993,7 @@ def validate_verification_file(root: Path, verification_file: Path) -> None:
         raise RepoctlError(f"verification file cannot be read: {verification_file}", code="missing_verification_file", path=verification_file.as_posix())
 
 
-def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate: dict[str, Any] | None = None) -> dict[str, Any]:
+def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -942,6 +1053,7 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     new_path = old_path
     moves: list[tuple[Path, Path]] = []
     archive_texts: dict[Path, str] = {}
+    receipt_writes: list[tuple[Path, str]] = []
     if is_parent or not is_child:
         archived = True
         new_path = f"docs/archive/tasks/{task.path.name}"
@@ -950,14 +1062,54 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
             for child in children.get(task.id, []):
                 if not child.archived:
                     child_new_path = f"docs/archive/tasks/{child.path.name}"
-                    target = root / child_new_path
+                    child_archive_target = root / child_new_path
                     child_text = child.path.read_text(encoding="utf-8")
                     child_text = append_section_entry(child_text, "Execution Log", f"- {utc_stamp()}: task archived with parent `{task.id}`.")
-                    archive_texts[target] = replace_section(child_text, "Handoff", _done_handoff(child_new_path, copy=copy))
-                    moves.append((child.path, target))
+                    child_archive_text = replace_section(child_text, "Handoff", _done_handoff(child_new_path, copy=copy))
+                    archive_texts[child_archive_target] = child_archive_text
+                    moves.append((child.path, child_archive_target))
+                    child_receipt_path = _completion_receipt_path(root, child.id)
+                    if child_receipt_path.is_file():
+                        child_receipt_rel = child_receipt_path.relative_to(root).as_posix()
+                        try:
+                            child_receipt = json.loads(child_receipt_path.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError) as exc:
+                            raise RepoctlError(f"task completion receipt is unreadable: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel) from exc
+                        if not isinstance(child_receipt, dict):
+                            raise RepoctlError(f"task completion receipt has invalid schema: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel)
+                        _validate_completion_receipt(child_receipt_path, root, child_receipt)
+                        child_hash = _sha256_text(child_archive_text)
+                        child_receipt["task_path"] = child_new_path
+                        child_receipt["archive_path"] = child_new_path
+                        child_receipt["content_sha256"] = child_hash
+                        verification = child_receipt.get("verification")
+                        if isinstance(verification, dict):
+                            verification["task_path"] = child_new_path
+                            verification["archive_path"] = child_new_path
+                            verification["content_sha256"] = child_hash
+                        receipt_writes.append((child_receipt_path, json.dumps(child_receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"))
     text = replace_section(text, "Handoff", _done_handoff(new_path, copy=copy))
     if moves:
         archive_texts[root / new_path] = text
+    changed_entries = [_entry_to_dict(entry) for entry in (repo_delta or {}).get("changes", [])]
+    receipt = {
+        "schema": "repoctl.task.completion",
+        "schema_version": 1,
+        "task_id": task.id,
+        "repo_id": target.id if target is not None else "",
+        "status": "done",
+        "completed_at": finish_timestamp,
+        "task_path": new_path,
+        "archive_path": new_path if archived else "",
+        "content_sha256": _sha256_text(text),
+        "changed_entries": changed_entries,
+        "verification": {
+            "task_path": new_path,
+            "archive_path": new_path if archived else "",
+            "content_sha256": _sha256_text(text),
+        },
+    }
+    receipt_writes.append((_completion_receipt_path(root, task.id), json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"))
     return {
         "task": task,
         "text": text,
@@ -967,6 +1119,10 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         "moves": moves,
         "archive_texts": archive_texts,
         "truncated": truncated,
+        "receipt_path": _completion_receipt_path(root, task.id),
+        "receipt_text": json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        "receipt_writes": receipt_writes,
+        "receipt": receipt,
     }
 
 

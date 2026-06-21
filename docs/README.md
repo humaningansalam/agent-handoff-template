@@ -40,12 +40,15 @@ This directory contains the live task registry, task files, workflows, and archi
 - Find annotated/default metadata matches: `./scripts/repoctl meta query --topic auth --json`
 - Suggest candidate files from explicit text: `./scripts/repoctl meta suggest "login flow" --json`
 - Extract read-only code facts: `./scripts/repoctl index code --json`
+- Build a read-only Graph snapshot: `./scripts/repoctl graph build --repo-id main --json`
+- Query the derived Graph snapshot: `./scripts/repoctl graph query --repo-id main --file src/app.py --json`
 - Check changed-file metadata gate: `./scripts/repoctl meta check --changed --json`
 
 ## Notes
 
 - Read `AGENTS.md` for the full operating contract.
 - Read `docs/contracts/repoctl-json-contract.md` before wrapping repoctl with MCP or other machine clients.
+- Read `docs/contracts/repoctl-graph-contract.md` before consuming `repoctl graph build` output.
 - Read `docs/contracts/repoctl-module-boundaries.md` before changing repoctl internals.
 - Read `docs/workflows/v0-foundation-field-test.md` before starting MCP, Graph, or llmwiki work.
 - Command examples use the workspace wrapper. If `repoctl` is installed on `PATH`, the shorter `repoctl ...` form is equivalent.
@@ -54,4 +57,5 @@ This directory contains the live task registry, task files, workflows, and archi
 - For PRD or external-note triage, use `docs/workflows/prd-backlog-sequential.md` to list gaps as Backlog items and promote them one at a time.
 - `repoctl meta suggest` is a discovery aid only. The agent must inspect candidate files and write its own `## Discovery`; suggestions are not authoritative scope.
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
+- `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

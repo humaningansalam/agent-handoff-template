@@ -158,6 +158,29 @@ class DiscoveryCandidate:
         return data
 
 
+@dataclass(frozen=True)
+class RepoMetadataFacts:
+    path: str
+    workspace_path: str
+    classification: str
+    areas: tuple[str, ...]
+    policy_topics: tuple[str, ...]
+    annotation: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "path": self.path,
+            "workspace_path": self.workspace_path,
+            "classification": self.classification,
+            "areas": list(self.areas),
+            "policy_topics": list(self.policy_topics),
+            "annotation_present": self.annotation is not None,
+        }
+        if self.annotation is not None:
+            data["annotation"] = self.annotation
+        return data
+
+
 ChangedFileStatus = FileClassification
 
 
@@ -744,6 +767,34 @@ def meta_inventory(root: Path, *, changed: bool = False, changes: list[ChangedEn
         summary[file.classification] = summary.get(file.classification, 0) + 1
     meta = {"scope": "changed" if changed else "all", "summary": summary, "repository": repository}
     return files, problems, meta
+
+
+def read_metadata_facts(root: Path, *, target: RepoTarget) -> tuple[list[RepoMetadataFacts], list[Problem], dict[str, Any]]:
+    files, problems, meta = meta_inventory(root, changed=False, target=target)
+    repo = _repo(root, target)
+    if not repo.exists() or problems:
+        return [], problems, meta
+    policy = _load_policy(repo, problems, root=root)
+    if not policy:
+        return [], problems, meta
+    annotations, _exclusions, _annotation_shards, _exclusion_shards = _load_all_annotations(repo, problems, root=root)
+    facts: list[RepoMetadataFacts] = []
+    for file in files:
+        if file.classification in {"orphan_annotation", "orphan_exclusion"}:
+            continue
+        annotation = annotations.get(file.path)
+        facts.append(
+            RepoMetadataFacts(
+                path=file.path,
+                workspace_path=file.workspace_path,
+                classification=file.classification,
+                areas=tuple(sorted(set(file.areas))),
+                policy_topics=tuple(sorted(set(_topics_for(file.path, policy)))),
+                annotation=dict(annotation) if annotation is not None else None,
+            )
+        )
+    facts.sort(key=lambda item: item.path)
+    return facts, problems, meta
 
 
 def meta_status(root: Path, *, changed: bool = False, changes: list[ChangedEntry] | None = None, target: RepoTarget | None = None) -> tuple[list[FileClassification], list[Problem], dict[str, Any]]:
