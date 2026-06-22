@@ -7,6 +7,7 @@ from tools.repoctl.cli import main
 from tests.repoctl.test_check import write_workspace
 from tests.repoctl.test_meta_check import write_repometa
 from tests.repoctl.test_repositories import init_repo
+from tests.repoctl.test_task_lifecycle import add_task, task_text
 
 
 def _write_knowledge_docs(root: Path) -> None:
@@ -219,3 +220,52 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     query_payload = json.loads(capsys.readouterr().out)
     assert query_payload["data"]["available_record_count"] == 0
     assert query_payload["data"]["results"] == []
+
+
+def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_body = task_text("T-20260609184046Z", status="todo").replace("State the outcome in one clear sentence.", "Document the stable receipt-backed recovery invariant.")
+    add_task(tmp_path, "T-20260609184046Z--receipt-backed.md", task_body)
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--receipt-backed.md\n\n## Backlog\n", encoding="utf-8")
+    verification = tmp_path / "verification.md"
+    verification.write_text("- Command: pytest tests/repoctl/test_knowledge_candidates.py\n- Result: pass\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", verification.as_posix(), "--json"]) == 0
+    finish_payload = json.loads(capsys.readouterr().out)
+    assert finish_payload["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
+
+    assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260609184046Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    candidate = payload["data"]["candidate"]
+    assert candidate["kind"] == "invariant"
+    assert candidate["title"] == "Task T-20260609184046Z"
+    assert candidate["authoritative"] is False
+    assert candidate["derived_from"] == {"kind": "completion_receipt", "task_id": "T-20260609184046Z"}
+    source_refs = candidate["source_refs"]
+    assert source_refs[0]["kind"] == "completion_receipt"
+    assert source_refs[0]["path"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
+    assert source_refs[0]["content_sha256"].startswith("sha256:")
+    assert source_refs[1]["kind"] == "task_artifact"
+    assert source_refs[1]["path"] == "docs/archive/tasks/T-20260609184046Z--receipt-backed.md"
+    assert source_refs[1]["content_sha256"].startswith("sha256:")
+    assert "pytest tests/repoctl/test_knowledge_candidates.py" in candidate["summary"]
+
+
+def test_knowledge_candidate_build_requires_one_source_mode(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--repo-id", "main", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_candidate_source_required"

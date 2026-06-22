@@ -13,7 +13,7 @@ from .context_benchmark import run_context_benchmark
 from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, check_knowledge_records, list_knowledge_candidates, query_knowledge_records, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_knowledge_records, list_knowledge_candidates, query_knowledge_records, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -1297,7 +1297,13 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind)
+    if bool(args.source) == bool(args.from_receipt):
+        data: dict[str, Any] = {}
+        problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source or --from-receipt")]
+    elif args.from_receipt:
+        data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind)
+    else:
+        data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge candidate build",
@@ -1855,7 +1861,8 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate = knowledge_sub.add_parser("candidate")
     knowledge_candidate_sub = knowledge_candidate.add_subparsers(dest="knowledge_candidate_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_candidate_build = knowledge_candidate_sub.add_parser("build")
-    knowledge_candidate_build.add_argument("--source", required=True)
+    knowledge_candidate_build.add_argument("--source")
+    knowledge_candidate_build.add_argument("--from-receipt")
     knowledge_candidate_build.add_argument("--repo-id", required=True)
     knowledge_candidate_build.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
     knowledge_candidate_build.add_argument("--json", action="store_true")

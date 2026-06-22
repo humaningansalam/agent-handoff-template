@@ -11,7 +11,8 @@ from typing import Any
 from .context_chunks import chunk_markdown_file
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write
-from .tasks import Problem
+from .markdown import find_section, parse_frontmatter
+from .tasks import Problem, load_completion_receipts, normalize_task_id
 
 
 ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
@@ -55,6 +56,68 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
             ],
         },
         "conflict_detected": False,
+    }
+    candidate["candidate_digest"] = digest_data(candidate)
+    destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(destination, json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {"candidate": candidate, "path": destination.relative_to(root).as_posix()}, []
+
+
+def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id: str, kind: str) -> tuple[dict[str, Any], list[Problem]]:
+    if kind not in ALLOWED_KINDS:
+        return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
+    normalized_task_id = normalize_task_id(task_id)
+    receipt = _receipt_for_task(root, task_id=normalized_task_id, repo_id=repo_id)
+    if receipt is None:
+        return {}, [Problem("error", "knowledge_candidate_receipt_missing", f"completion receipt not found for task: {normalized_task_id}")]
+    receipt_rel = f"docs/tasks/.repoctl-state/completions/{normalized_task_id}.json"
+    artifact_rel = str(receipt.get("archive_path") or receipt.get("task_path") or "")
+    artifact_path = root / artifact_rel
+    if not artifact_path.is_file():
+        return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_rel)]
+    artifact_text = artifact_path.read_text(encoding="utf-8")
+    title = _receipt_title(receipt, artifact_text)
+    summary = _receipt_summary(receipt, artifact_text)
+    receipt_text = (root / receipt_rel).read_text(encoding="utf-8")
+    source_refs = [
+        {
+            "kind": "completion_receipt",
+            "path": receipt_rel,
+            "section": normalized_task_id,
+            "content_sha256": _sha256_text(receipt_text),
+        },
+        {
+            "kind": "task_artifact",
+            "path": artifact_rel,
+            "section": "Verification",
+            "content_sha256": str(receipt.get("content_sha256") or ""),
+        },
+    ]
+    candidate_id = _unique_candidate_id(root, repo_id, title, source_refs[0]["content_sha256"])
+    candidate = {
+        "schema": "repoctl.knowledge.candidate",
+        "schema_version": 1,
+        "id": candidate_id,
+        "repo_id": repo_id,
+        "kind": kind,
+        "status": "candidate",
+        "authoritative": False,
+        "title": title,
+        "claim": _claim(summary),
+        "summary": summary,
+        "source_refs": source_refs,
+        "review": {
+            "required": True,
+            "status": "pending",
+            "checklist": [
+                "completion receipt and task artifact digests still match",
+                "candidate captures a stable reusable fact, not one-off task prose",
+                "candidate should not replace task, Board, Graph, or .repometa authority",
+            ],
+        },
+        "conflict_detected": False,
+        "derived_from": {"kind": "completion_receipt", "task_id": normalized_task_id},
     }
     candidate["candidate_digest"] = digest_data(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
@@ -301,6 +364,61 @@ def _primary_chunk(chunks: Any, kind: str) -> Any:
     return chunks[0]
 
 
+def _receipt_for_task(root: Path, *, task_id: str, repo_id: str) -> dict[str, Any] | None:
+    for receipt in load_completion_receipts(root, repo_id=repo_id):
+        if str(receipt.get("task_id") or "") == task_id:
+            return receipt
+    return None
+
+
+def _receipt_title(receipt: dict[str, Any], artifact_text: str) -> str:
+    task_id = str(receipt.get("task_id") or "task")
+    frontmatter, body = _artifact_parts(artifact_text)
+    title = str(frontmatter.get("title") or "").strip() or _artifact_heading(body)
+    if title:
+        return title
+    return f"{task_id} completion"
+
+
+def _receipt_summary(receipt: dict[str, Any], artifact_text: str) -> str:
+    _frontmatter, body = _artifact_parts(artifact_text)
+    parts = [
+        f"Task `{receipt.get('task_id', '')}` completed with status `{receipt.get('status', '')}`.",
+        _artifact_section(body, "Goal"),
+        _artifact_section(body, "Verification"),
+    ]
+    changed_entries = receipt.get("changed_entries")
+    if isinstance(changed_entries, list) and changed_entries:
+        changed = ", ".join(str(item.get("path") or "") for item in changed_entries if isinstance(item, dict) and item.get("path"))
+        if changed:
+            parts.append(f"Changed files: {changed}")
+    return "\n\n".join(part.strip() for part in parts if part.strip())[:1000]
+
+
+def _artifact_heading(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""
+
+
+def _artifact_parts(text: str) -> tuple[dict[str, Any], str]:
+    try:
+        frontmatter, body = parse_frontmatter(text)
+    except Exception:
+        return {}, text
+    return frontmatter, body
+
+
+def _artifact_section(text: str, heading: str) -> str:
+    try:
+        section = find_section(text, heading)
+    except Exception:
+        return ""
+    return text[section.body_start : section.end].strip()
+
+
 def _claim(text: str) -> str:
     for line in text.splitlines():
         stripped = line.strip().lstrip("-").strip()
@@ -312,6 +430,10 @@ def _claim(text: str) -> str:
 def _summary(text: str) -> str:
     compact = " ".join(line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("```"))
     return compact[:500]
+
+
+def _sha256_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _unique_candidate_id(root: Path, repo_id: str, title: str, source_digest: str) -> str:
