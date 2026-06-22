@@ -391,6 +391,41 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert status_payload["data"]["record_checks"]["problem_codes"] == {"knowledge_source_digest_drift": 1}
 
 
+def test_knowledge_query_ranks_more_specific_record_first(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    (tmp_path / "docs/adr/context-benchmark-gates.md").write_text(
+        "# Context Benchmark Gates\n\n## Decision\n\nContext benchmark gates reject stale reviewed knowledge source drift before release.\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    broad_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", broad_candidate, "--repo-id", "main", "--json"]) == 0
+    broad_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/context-benchmark-gates.md", "--repo-id", "main", "--json"]) == 0
+    specific_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", specific_candidate, "--repo-id", "main", "--json"]) == 0
+    specific_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["knowledge", "query", "context benchmark stale reviewed knowledge source drift", "--repo-id", "main", "--explain", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    result_ids = [item["record"]["id"] for item in payload["data"]["results"]]
+    assert result_ids.index(specific_record) < result_ids.index(broad_record)
+    first = payload["data"]["results"][0]
+    second = next(item for item in payload["data"]["results"] if item["record"]["id"] == broad_record)
+    assert first["record"]["id"] == specific_record
+    assert first["score"] > second["score"]
+    assert first["score_breakdown"]["exact_claim"] == 1.0
+    assert "exact claim match" in first["selection_reasons"]
+
+
 def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)
