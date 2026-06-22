@@ -180,6 +180,15 @@ def test_knowledge_candidate_refresh_all_stale_only_refreshes_drifted_candidates
     assert status_payload["data"]["candidate_count"] == 3
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["data"]["refreshed_count"] == 0
+    assert {"candidate_id": stale_candidate, "reason": "already_refreshed"} in second_payload["data"]["skipped"]
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    second_status = json.loads(capsys.readouterr().out)
+    assert second_status["data"]["candidate_count"] == 3
+    assert second_status["data"]["event_types"] == {"refreshed_candidate": 1}
+
 
 def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

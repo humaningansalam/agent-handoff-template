@@ -275,6 +275,7 @@ def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
 def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
     directory = _candidate_dir(root, repo_id)
     candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    refreshed_before = _refreshed_candidate_ids(root, repo_id=repo_id)
     refreshed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     problems: list[Problem] = []
@@ -285,6 +286,9 @@ def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dic
         hard_errors = [problem for problem in quality_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
         if not has_drift:
             skipped.append({"candidate_id": candidate_id, "reason": "not_stale"})
+            continue
+        if candidate_id in refreshed_before:
+            skipped.append({"candidate_id": candidate_id, "reason": "already_refreshed"})
             continue
         if hard_errors:
             skipped.append({"candidate_id": candidate_id, "reason": "blocked_by_non_drift_errors"})
@@ -668,6 +672,16 @@ def _load_events(root: Path, *, repo_id: str) -> list[dict[str, Any]]:
         return []
     events = [_read_candidate(path) for path in sorted(directory.glob("E-*.json"))]
     return [event for event in events if str(event.get("repo_id") or "") == repo_id]
+
+
+def _refreshed_candidate_ids(root: Path, *, repo_id: str) -> set[str]:
+    refreshed: set[str] = set()
+    for event in _load_events(root, repo_id=repo_id):
+        if event.get("type") == "refreshed_candidate":
+            candidate_id = str(event.get("candidate_id") or "")
+            if candidate_id:
+                refreshed.add(candidate_id)
+    return refreshed
 
 
 def _validate_supersedes(root: Path, *, repo_id: str, supersedes: list[str]) -> list[Problem]:
