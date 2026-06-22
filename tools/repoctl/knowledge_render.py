@@ -20,8 +20,9 @@ PAGE_BY_KIND = {
 def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[str, Any], list[Problem]]:
     output_dir = output if output.is_absolute() else root / output
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    events = _load_events(root, repo_id=repo_id)
     rendered: list[dict[str, Any]] = []
-    pages = _pages(root, records)
+    pages = _pages(root, records, events)
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, content in pages.items():
         path = output_dir / name
@@ -34,6 +35,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         "authoritative": False,
         "output": output_dir.relative_to(root).as_posix(),
         "record_count": len(records),
+        "event_count": len(events),
         "rendered": sorted(rendered, key=lambda item: item["path"]),
     }, []
 
@@ -50,19 +52,31 @@ def _load_records(root: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _pages(root: Path, records: list[dict[str, Any]]) -> dict[str, str]:
+def _load_events(root: Path, *, repo_id: str) -> list[dict[str, Any]]:
+    directory = root / "docs/knowledge/events"
+    events: list[dict[str, Any]] = []
+    if not directory.exists():
+        return events
+    for path in sorted(directory.glob("E-*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and str(data.get("repo_id") or "") == repo_id:
+            events.append(data)
+    return events
+
+
+def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, str]:
     by_kind: dict[str, list[dict[str, Any]]] = {kind: [] for kind in PAGE_BY_KIND}
     for record in records:
         kind = str(record.get("kind") or "")
         if kind in by_kind:
             by_kind[kind].append(record)
-    pages: dict[str, str] = {"INDEX.md": _index_page(records, by_kind)}
+    pages: dict[str, str] = {"INDEX.md": _index_page(records, events, by_kind)}
     for kind, filename in PAGE_BY_KIND.items():
-        pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records))
+        pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records), events)
     return pages
 
 
-def _index_page(records: list[dict[str, Any]], by_kind: dict[str, list[dict[str, Any]]]) -> str:
+def _index_page(records: list[dict[str, Any]], events: list[dict[str, Any]], by_kind: dict[str, list[dict[str, Any]]]) -> str:
     lines = [
         "# Knowledge Index",
         "",
@@ -75,11 +89,13 @@ def _index_page(records: list[dict[str, Any]], by_kind: dict[str, list[dict[str,
         lines.append(f"- [{kind.replace('_', ' ').title()}]({filename}) - {len(by_kind[kind])} records")
     lines.extend(["", "## Source Bundle", ""])
     lines.append(f"- Records: {len(records)}")
+    lines.append(f"- Events: {len(events)}")
     lines.append(f"- Records digest: {digest_data([_record_digest_basis(record) for record in records])}")
+    lines.append(f"- Events digest: {digest_data([_event_digest_basis(event) for event in events])}")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_ids: set[str]) -> str:
+def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_ids: set[str], events: list[dict[str, Any]]) -> str:
     title = kind.replace("_", " ").title()
     lines = [
         f"# {title}",
@@ -90,18 +106,29 @@ def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_
     if not records:
         lines.append("No reviewed records.")
         return "\n".join(lines).rstrip() + "\n"
+    events_by_record = _events_by_record(events)
     for record in sorted(records, key=lambda item: str(item.get("id") or "")):
-        lines.extend(_record_section(root, record, superseded_ids=superseded_ids))
+        lines.extend(_record_section(root, record, superseded_ids=superseded_ids, events=events_by_record.get(str(record.get("id") or ""), [])))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[str]) -> list[str]:
+def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[str], events: list[dict[str, Any]]) -> list[str]:
+    record_id = str(record.get("id") or "")
     lines = [
         f"## {record.get('title', record.get('id', 'Untitled'))}",
         "",
-        f"- Record: `{record.get('id', '')}`",
+        f"- Record: `{record_id}`",
         f"- Status: `{_derived_status(root, record, superseded_ids=superseded_ids)}`",
         f"- Digest: `{record.get('record_digest', '')}`",
+    ]
+    if record.get("supersedes"):
+        lines.append(f"- Supersedes: `{', '.join(str(item) for item in record.get('supersedes', []))}`")
+    superseded_by = [str(event.get("superseded_by") or "") for event in events if event.get("type") == "superseded" and event.get("superseded_by")]
+    if superseded_by:
+        lines.append(f"- Superseded by: `{', '.join(superseded_by)}`")
+    if events:
+        lines.append(f"- Lifecycle events: `{', '.join(str(event.get('id') or '') for event in events)}`")
+    lines.extend([
         "",
         "### Claim",
         "",
@@ -113,7 +140,7 @@ def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[s
         "",
         "### Sources",
         "",
-    ]
+    ])
     refs = record.get("source_refs", [])
     if isinstance(refs, list) and refs:
         for ref in refs:
@@ -134,6 +161,29 @@ def _record_digest_basis(record: dict[str, Any]) -> dict[str, Any]:
         "record_digest": record.get("record_digest", ""),
         "source_refs": record.get("source_refs", []),
     }
+
+
+def _event_digest_basis(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": event.get("id", ""),
+        "type": event.get("type", ""),
+        "event_digest": event.get("event_digest", ""),
+        "record_id": event.get("record_id", ""),
+        "candidate_id": event.get("candidate_id", ""),
+        "superseded_by": event.get("superseded_by", ""),
+    }
+
+
+def _events_by_record(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_record: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        record_ids = [str(event.get("record_id") or "")]
+        if event.get("superseded_by"):
+            record_ids.append(str(event.get("superseded_by") or ""))
+        for record_id in record_ids:
+            if record_id:
+                by_record.setdefault(record_id, []).append(event)
+    return by_record
 
 
 def _superseded_ids(records: list[dict[str, Any]]) -> set[str]:

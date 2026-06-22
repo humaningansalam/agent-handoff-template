@@ -371,15 +371,20 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
+    assert render_payload["data"]["event_count"] == 1
     rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
     assert "docs/knowledge/generated/INDEX.md" in rendered_paths
     assert "docs/knowledge/generated/decisions.md" in rendered_paths
+    index_text = (tmp_path / "docs/knowledge/generated/INDEX.md").read_text(encoding="utf-8")
+    assert "- Events: 1" in index_text
+    assert "- Events digest: sha256:" in index_text
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert "Non-authoritative generated view" in decisions_text
+    assert f"- Lifecycle events: `{approved_event['id']}`" in decisions_text
     assert "docs/adr/evidence-context-authority-v0.md#Decision" in decisions_text
 
     assert main(["context", "query", "Knowledge Index", "--repo-id", "main", "--json"]) == 0
@@ -434,10 +439,14 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     assert include_statuses[new_record] == "reviewed"
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    render_payload = json.loads(capsys.readouterr().out)
+    assert render_payload["data"]["event_count"] == 3
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert f"- Record: `{old_record}`" in decisions_text
     assert "- Status: `superseded`" in decisions_text
+    assert f"- Superseded by: `{new_record}`" in decisions_text
+    assert f"- Supersedes: `{old_record}`" in decisions_text
+    assert "- Lifecycle events: `" in decisions_text
 
 
 def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
