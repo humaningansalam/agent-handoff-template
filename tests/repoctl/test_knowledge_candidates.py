@@ -105,6 +105,39 @@ def test_knowledge_candidate_check_blocks_source_digest_drift(tmp_path: Path, mo
     assert approve_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
 
 
+def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    duplicate_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    drift_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "list", "--repo-id", "main", "--with-checks", "--json"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+    checks = {item["id"]: item["check"] for item in list_payload["data"]["candidates"]}
+    assert checks[duplicate_candidate]["warning_count"] >= 1
+    assert checks[drift_candidate]["error_count"] >= 1
+
+    assert main(["knowledge", "candidate", "check", "--all", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["candidate_count"] == 3
+    assert check_payload["data"]["error_count"] >= 1
+    assert check_payload["data"]["warning_count"] >= 1
+    assert any(result["candidate_id"] == drift_candidate and result["problems"] for result in check_payload["data"]["results"])
+
+
 def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)

@@ -126,23 +126,32 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
     return {"candidate": candidate, "path": destination.relative_to(root).as_posix()}, []
 
 
-def list_knowledge_candidates(root: Path, *, repo_id: str) -> dict[str, Any]:
+def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = False) -> dict[str, Any]:
     directory = _candidate_dir(root, repo_id)
     candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    items = [
+        {
+            "id": candidate.get("id", ""),
+            "kind": candidate.get("kind", ""),
+            "title": candidate.get("title", ""),
+            "source_refs": candidate.get("source_refs", []),
+            "authoritative": bool(candidate.get("authoritative", True)),
+        }
+        for candidate in candidates
+    ]
+    if with_checks:
+        checks = _candidate_checks(root, repo_id=repo_id, candidates=candidates)
+        by_id = {item["candidate_id"]: item for item in checks["results"]}
+        for item in items:
+            check = by_id.get(str(item.get("id") or ""))
+            if check:
+                item["check"] = check
     return {
         "schema": "repoctl.knowledge.candidate_list",
         "schema_version": 1,
         "repo_id": repo_id,
-        "candidates": [
-            {
-                "id": candidate.get("id", ""),
-                "kind": candidate.get("kind", ""),
-                "title": candidate.get("title", ""),
-                "source_refs": candidate.get("source_refs", []),
-                "authoritative": bool(candidate.get("authoritative", True)),
-            }
-            for candidate in candidates
-        ],
+        "with_checks": with_checks,
+        "candidates": items,
     }
 
 
@@ -201,6 +210,17 @@ def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) ->
             "duplicate_reviewed_claim": any(problem.code == "knowledge_candidate_duplicate_reviewed_claim" for problem in check_problems),
         },
     }, check_problems
+
+
+def check_all_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    directory = _candidate_dir(root, repo_id)
+    candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    data = _candidate_checks(root, repo_id=repo_id, candidates=candidates)
+    problems: list[Problem] = []
+    for result in data["results"]:
+        for problem in result["problems"]:
+            problems.append(Problem("error", str(problem.get("code") or ""), str(problem.get("message") or ""), str(problem.get("path") or "") or None))
+    return data, problems
 
 
 def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, supersedes: list[str] | None = None) -> tuple[dict[str, Any], list[Problem]]:
@@ -659,6 +679,42 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
     if duplicate:
         problems.append(Problem("warning", "knowledge_candidate_duplicate_reviewed_claim", f"candidate claim already exists in reviewed record {duplicate}", duplicate))
     return problems
+
+
+def _candidate_checks(root: Path, *, repo_id: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    error_count = 0
+    warning_count = 0
+    passed_count = 0
+    for candidate in candidates:
+        candidate_id = str(candidate.get("id") or "")
+        problems = _candidate_quality_problems(root, candidate)
+        errors = [problem.to_dict() for problem in problems if problem.severity == "error"]
+        warnings = [problem.to_dict() for problem in problems if problem.severity == "warning"]
+        passed = not errors
+        passed_count += 1 if passed else 0
+        error_count += len(errors)
+        warning_count += len(warnings)
+        results.append(
+            {
+                "candidate_id": candidate_id,
+                "passed": passed,
+                "error_count": len(errors),
+                "warning_count": len(warnings),
+                "problems": errors,
+                "warnings": warnings,
+            }
+        )
+    return {
+        "schema": "repoctl.knowledge.candidate_check_all",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "candidate_count": len(candidates),
+        "passed_count": passed_count,
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "results": results,
+    }
 
 
 def _source_ref_excluded(rel: str) -> bool:

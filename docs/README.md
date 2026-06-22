@@ -49,6 +49,8 @@ This directory contains the live task registry, task files, workflows, and archi
 - Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
 - Build a candidate from completed task evidence: `./scripts/repoctl knowledge candidate build --from-receipt T-... --repo-id main --kind invariant --json`
 - Check candidate quality before review: `./scripts/repoctl knowledge candidate check KC-... --repo-id main --json`
+- Check all pending candidates: `./scripts/repoctl knowledge candidate check --all --repo-id main --json`
+- List candidates with check summaries: `./scripts/repoctl knowledge candidate list --repo-id main --with-checks --json`
 - Show knowledge workflow status: `./scripts/repoctl knowledge status --repo-id main --json`
 - Approve a candidate into reviewed knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --json`
 - Approve a replacement decision: `./scripts/repoctl knowledge approve KC-... --repo-id main --supersedes K-... --json`

@@ -13,7 +13,7 @@ from .context_benchmark import run_context_benchmark
 from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, query_knowledge_records, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, query_knowledge_records, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -1329,7 +1329,7 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_list(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data = list_knowledge_candidates(root, repo_id=args.repo_id)
+    data = list_knowledge_candidates(root, repo_id=args.repo_id, with_checks=args.with_checks)
     payload = {
         "ok": True,
         "command": "knowledge candidate list",
@@ -1396,7 +1396,13 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    if args.all:
+        data, problems = check_all_knowledge_candidates(root, repo_id=args.repo_id)
+    elif args.candidate_id:
+        data, problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    else:
+        data = {}
+        problems = [Problem("error", "knowledge_candidate_check_target_required", "provide a candidate id or --all")]
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge candidate check",
@@ -1407,7 +1413,10 @@ def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
     if args.json:
         _json(payload)
     else:
-        print(f"knowledge candidate check candidate={args.candidate_id} passed={data.get('passed', False)}")
+        if args.all:
+            print(f"knowledge candidate check repo_id={args.repo_id} candidates={data.get('candidate_count', 0)} errors={data.get('error_count', 0)} warnings={data.get('warning_count', 0)}")
+        else:
+            print(f"knowledge candidate check candidate={args.candidate_id} passed={data.get('passed', False)}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -1907,6 +1916,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build)
     knowledge_candidate_list = knowledge_candidate_sub.add_parser("list")
     knowledge_candidate_list.add_argument("--repo-id", required=True)
+    knowledge_candidate_list.add_argument("--with-checks", action="store_true")
     knowledge_candidate_list.add_argument("--json", action="store_true")
     knowledge_candidate_list.set_defaults(func=cmd_knowledge_candidate_list)
     knowledge_candidate_show = knowledge_candidate_sub.add_parser("show")
@@ -1915,7 +1925,8 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_show.add_argument("--json", action="store_true")
     knowledge_candidate_show.set_defaults(func=cmd_knowledge_candidate_show)
     knowledge_candidate_check = knowledge_candidate_sub.add_parser("check")
-    knowledge_candidate_check.add_argument("candidate_id")
+    knowledge_candidate_check.add_argument("candidate_id", nargs="?")
+    knowledge_candidate_check.add_argument("--all", action="store_true")
     knowledge_candidate_check.add_argument("--repo-id", required=True)
     knowledge_candidate_check.add_argument("--json", action="store_true")
     knowledge_candidate_check.set_defaults(func=cmd_knowledge_candidate_check)
