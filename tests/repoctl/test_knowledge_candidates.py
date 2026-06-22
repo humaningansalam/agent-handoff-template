@@ -288,6 +288,7 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert record["created_from"]["candidate_check"] == {"passed": True, "warning_codes": []}
     assert approve_payload["data"]["event"]["type"] == "approved"
     assert record["id"].lower().replace("--", "-") in approve_payload["data"]["event"]["id"]
+    approved_event_id = approve_payload["data"]["event"]["id"]
 
     assert main(["knowledge", "show", record["id"], "--json"]) == 0
     show_payload = json.loads(capsys.readouterr().out)
@@ -296,6 +297,18 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert main(["knowledge", "candidate", "list", "--repo-id", "main", "--json"]) == 0
     list_payload = json.loads(capsys.readouterr().out)
     assert list_payload["data"]["candidates"][0]["review_state"] == "approved"
+
+    assert main(["knowledge", "event", "list", "--repo-id", "main", "--candidate-id", candidate_id, "--json"]) == 0
+    event_list = json.loads(capsys.readouterr().out)
+    assert event_list["data"]["event_count"] == 1
+    assert event_list["data"]["events"][0]["id"] == approved_event_id
+    assert event_list["data"]["events"][0]["type"] == "approved"
+    assert event_list["warnings"][0]["code"] == "knowledge_events_are_append_only"
+
+    assert main(["knowledge", "event", "show", approved_event_id, "--repo-id", "main", "--json"]) == 0
+    event_show = json.loads(capsys.readouterr().out)
+    assert event_show["data"]["event"]["id"] == approved_event_id
+    assert event_show["data"]["event"]["record_id"] == record["id"]
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
@@ -458,6 +471,11 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["event_types"] == {"rejected_candidate": 1}
     assert status_payload["data"]["candidate_review_states"] == {"rejected": 1}
+
+    assert main(["knowledge", "event", "list", "--repo-id", "main", "--type", "rejected_candidate", "--json"]) == 0
+    event_payload = json.loads(capsys.readouterr().out)
+    assert event_payload["data"]["event_count"] == 1
+    assert event_payload["data"]["events"][0]["candidate_id"] == candidate_id
 
 
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:

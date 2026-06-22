@@ -13,7 +13,7 @@ from .context_benchmark import run_context_benchmark
 from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -170,7 +170,7 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
 
 
 def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "context_command", "knowledge_command", "knowledge_candidate_command", "upgrade_command") if getattr(args, name, None)]
+    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "context_command", "knowledge_command", "knowledge_candidate_command", "knowledge_event_command", "upgrade_command") if getattr(args, name, None)]
     return ".".join(parts) if parts else "repoctl"
 
 
@@ -1367,6 +1367,55 @@ def cmd_knowledge_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_knowledge_event_list(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data = list_knowledge_events(root, repo_id=args.repo_id, event_type=args.type, candidate_id=args.candidate_id, record_id=args.record_id)
+    payload = {
+        "ok": True,
+        "command": "knowledge event list",
+        "data": data,
+        "problems": [],
+        "warnings": [
+            {
+                "code": "knowledge_events_are_append_only",
+                "message": "knowledge events are append-only lifecycle evidence",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"knowledge events repo_id={args.repo_id} count={data.get('event_count', 0)}")
+    return 0
+
+
+def cmd_knowledge_event_show(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = show_knowledge_event(root, repo_id=args.repo_id, event_id=args.event_id)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge event show",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "knowledge_events_are_append_only",
+                "message": "knowledge events are append-only lifecycle evidence",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        event = data.get("event", {}) if data else {}
+        print(f"knowledge event {event.get('id', args.event_id)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -1984,6 +2033,20 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_status_parser.add_argument("--repo-id", required=True)
     knowledge_status_parser.add_argument("--json", action="store_true")
     knowledge_status_parser.set_defaults(func=cmd_knowledge_status)
+    knowledge_event = knowledge_sub.add_parser("event")
+    knowledge_event_sub = knowledge_event.add_subparsers(dest="knowledge_event_command", required=True, parser_class=RepoctlArgumentParser)
+    knowledge_event_list = knowledge_event_sub.add_parser("list")
+    knowledge_event_list.add_argument("--repo-id", required=True)
+    knowledge_event_list.add_argument("--type", default="")
+    knowledge_event_list.add_argument("--candidate-id", default="")
+    knowledge_event_list.add_argument("--record-id", default="")
+    knowledge_event_list.add_argument("--json", action="store_true")
+    knowledge_event_list.set_defaults(func=cmd_knowledge_event_list)
+    knowledge_event_show = knowledge_event_sub.add_parser("show")
+    knowledge_event_show.add_argument("event_id")
+    knowledge_event_show.add_argument("--repo-id", required=True)
+    knowledge_event_show.add_argument("--json", action="store_true")
+    knowledge_event_show.set_defaults(func=cmd_knowledge_event_show)
     knowledge_approve = knowledge_sub.add_parser("approve")
     knowledge_approve.add_argument("candidate_id")
     knowledge_approve.add_argument("--repo-id", required=True)

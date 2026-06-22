@@ -220,6 +220,43 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     }
 
 
+def list_knowledge_events(root: Path, *, repo_id: str, event_type: str = "", candidate_id: str = "", record_id: str = "") -> dict[str, Any]:
+    events = _load_events(root, repo_id=repo_id)
+    filtered: list[dict[str, Any]] = []
+    for event in events:
+        if event_type and str(event.get("type") or "") != event_type:
+            continue
+        if candidate_id and str(event.get("candidate_id") or "") != candidate_id:
+            continue
+        if record_id and str(event.get("record_id") or "") != record_id:
+            continue
+        filtered.append(event)
+    return {
+        "schema": "repoctl.knowledge.event_list",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "filters": {
+            "type": event_type,
+            "candidate_id": candidate_id,
+            "record_id": record_id,
+        },
+        "event_count": len(filtered),
+        "events": [_event_summary(event) for event in filtered],
+    }
+
+
+def show_knowledge_event(root: Path, *, repo_id: str, event_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    if not re.fullmatch(r"E-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", event_id):
+        return {}, [Problem("error", "invalid_knowledge_event_id", "event id must look like E-YYYYMMDDHHMMSSZ--slug")]
+    path = _event_dir(root) / f"{event_id}.json"
+    if not path.is_file():
+        return {}, [Problem("error", "knowledge_event_not_found", f"knowledge event not found: {event_id}", path.relative_to(root).as_posix())]
+    event = _read_candidate(path)
+    if str(event.get("repo_id") or "") != repo_id:
+        return {}, [Problem("error", "knowledge_event_repo_mismatch", "knowledge event belongs to a different repo", event_id)]
+    return {"event": event, "path": path.relative_to(root).as_posix()}, []
+
+
 def show_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
     if not re.fullmatch(r"KC-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", candidate_id):
         return {}, [Problem("error", "invalid_knowledge_candidate_id", "candidate id must look like KC-YYYYMMDDHHMMSSZ--slug")]
@@ -743,6 +780,21 @@ def _candidate_review_states(root: Path, *, repo_id: str) -> dict[str, str]:
         elif event_type == "refreshed_candidate":
             states.setdefault(candidate_id, "refreshed")
     return states
+
+
+def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        "id": event.get("id", ""),
+        "type": event.get("type", ""),
+        "repo_id": event.get("repo_id", ""),
+        "candidate_id": event.get("candidate_id", ""),
+        "record_id": event.get("record_id", ""),
+        "event_digest": event.get("event_digest", ""),
+    }
+    for key in ("new_candidate_id", "superseded_by"):
+        if event.get(key):
+            summary[key] = event.get(key)
+    return summary
 
 
 def _refreshed_candidate_ids(root: Path, *, repo_id: str) -> set[str]:
