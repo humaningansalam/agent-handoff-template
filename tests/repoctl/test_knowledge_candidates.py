@@ -478,6 +478,33 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     assert event_payload["data"]["events"][0]["candidate_id"] == candidate_id
 
 
+def test_knowledge_event_show_enforces_repo_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    (tmp_path / "docs/repoctl.json").write_text(
+        json.dumps({"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "web", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "web", "--json"]) == 0
+    event_id = json.loads(capsys.readouterr().out)["data"]["event"]["id"]
+
+    assert main(["knowledge", "event", "list", "--repo-id", "api", "--json"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+    assert list_payload["data"]["event_count"] == 0
+
+    assert main(["knowledge", "event", "show", event_id, "--repo-id", "api", "--json"]) == 1
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["problems"][0]["code"] == "knowledge_event_repo_mismatch"
+
+
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
