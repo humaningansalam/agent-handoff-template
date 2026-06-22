@@ -499,6 +499,10 @@ Use reviewed knowledge source authority.
     assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    old_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    replacement_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
 
     assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--explain", "--json"]) == 0
@@ -507,8 +511,10 @@ Use reviewed knowledge source authority.
     reviewed = payload["data"]["groups"]["reviewed_knowledge"]
     assert reviewed[0]["record"]["id"] == record_id
     assert reviewed[0]["record"]["status"] == "reviewed"
+    assert reviewed[0]["record"]["lifecycle_relations"]["supersedes"] == [old_record_id]
     assert reviewed[0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
     assert payload["data"]["bundle"]["query"]["explain"] is True
+    assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["available_statuses"] == {"reviewed": 1, "superseded": 1}
     assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
 
 
