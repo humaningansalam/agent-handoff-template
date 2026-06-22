@@ -4,6 +4,7 @@ import json
 import hashlib
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from .context import build_context_bundle
 from .context_model import ContextBundle
@@ -24,6 +25,7 @@ def run_context_benchmark(
     require_source_integrity: bool = False,
     require_knowledge_source_current: bool = False,
     require_no_forbidden: bool = False,
+    require_no_cross_repo: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
@@ -55,6 +57,7 @@ def run_context_benchmark(
             require_source_integrity=require_source_integrity,
             require_knowledge_source_current=require_knowledge_source_current,
             require_no_forbidden=require_no_forbidden,
+            require_no_cross_repo=require_no_cross_repo,
         )
     )
     data = {
@@ -69,6 +72,7 @@ def run_context_benchmark(
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
             "require_no_forbidden": require_no_forbidden,
+            "require_no_cross_repo": require_no_cross_repo,
         },
     }
     data["benchmark_digest"] = digest_data(data)
@@ -333,6 +337,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     required_top10 = [ref for ref in required if _contains_ref(top10, ref)]
     required_knowledge_top5 = [ref for ref in required_knowledge if _contains_ref(knowledge_top5, ref)]
     selected_forbidden = [ref for ref in forbidden if _contains_ref(candidate_refs, ref) or _contains_ref(packed_refs, ref)]
+    cross_repo_refs = _cross_repo_refs([*candidate_refs, *packed_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
     relevant_top5 = sum(1 for ref in top5 if _contains_ref(required, ref) or _contains_ref(optional, ref))
     integrity_failures = [ref for ref in candidate_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
     knowledge_integrity_failures = [ref for ref in knowledge_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
@@ -349,6 +354,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "source_ref_integrity": len(integrity_failures) == 0,
             "knowledge_source_ref_integrity": len(knowledge_integrity_failures) == 0,
             "forbidden_selected": len(selected_forbidden),
+            "cross_repo_ref_count": len(cross_repo_refs),
             "packed_required_found": sum(1 for ref in required if _contains_ref(packed_refs, ref)),
             "knowledge_recall_at_5": _ratio(len(required_knowledge_top5), len(required_knowledge)) if required_knowledge else 0.0,
             "required_knowledge_count": len(required_knowledge),
@@ -363,6 +369,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "required_knowledge_found_at_5": required_knowledge_top5,
         "missing_required_knowledge_at_5": [ref for ref in required_knowledge if not _contains_ref(knowledge_top5, ref)],
         "selected_forbidden": selected_forbidden,
+        "cross_repo_refs": cross_repo_refs,
         "top_refs": top5,
         "top_knowledge_refs": knowledge_top5,
         "knowledge_score_results": knowledge_score_results,
@@ -386,6 +393,7 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_source_status_current": all(metric["knowledge_source_status_current"] for metric in metrics),
         "knowledge_stale_record_excluded": sum(int(metric["knowledge_stale_record_excluded"]) for metric in metrics),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
+        "cross_repo_ref_count": sum(int(metric["cross_repo_ref_count"]) for metric in metrics),
     }
 
 
@@ -455,6 +463,25 @@ def _contains_ref(haystack: list[dict[str, Any]], needle: dict[str, Any]) -> boo
     return False
 
 
+def _cross_repo_refs(refs: list[dict[str, Any]], *, expected_repo_id: str) -> list[dict[str, Any]]:
+    if not expected_repo_id:
+        return []
+    leaked: list[dict[str, Any]] = []
+    for ref in refs:
+        ref_repo_id = str(ref.get("repo_id") or "") or _repo_id_from_graph_ref(str(ref.get("path") or ""))
+        if ref_repo_id and ref_repo_id != expected_repo_id:
+            leaked.append(ref)
+    return leaked
+
+
+def _repo_id_from_graph_ref(path: str) -> str:
+    if not path.startswith("<graph:repo:") or not path.endswith(">"):
+        return ""
+    rest = path[len("<graph:repo:") : -1]
+    encoded_repo_id = rest.split(":", 1)[0]
+    return unquote(encoded_repo_id)
+
+
 def _ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 1.0
@@ -477,6 +504,7 @@ def _gate_problems(
     require_source_integrity: bool,
     require_knowledge_source_current: bool,
     require_no_forbidden: bool,
+    require_no_cross_repo: bool,
 ) -> list[Problem]:
     problems: list[Problem] = []
     if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:
@@ -493,4 +521,6 @@ def _gate_problems(
         problems.append(Problem("error", "context_benchmark_knowledge_source_stale", "context benchmark knowledge source status is not current"))
     if require_no_forbidden and int(summary.get("forbidden_selected") or 0) > 0:
         problems.append(Problem("error", "context_benchmark_forbidden_selected", "context benchmark selected forbidden source refs"))
+    if require_no_cross_repo and int(summary.get("cross_repo_ref_count") or 0) > 0:
+        problems.append(Problem("error", "context_benchmark_cross_repo_leakage", "context benchmark selected source refs from another repository"))
     return problems

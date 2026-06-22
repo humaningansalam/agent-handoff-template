@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
 from tools.repoctl.graph_model import digest_data
 from tests.repoctl.test_check import write_workspace
 from tests.repoctl.test_meta_check import write_repometa
@@ -390,6 +391,79 @@ def test_context_benchmark_forbidden_gate_fails_on_forbidden_source(tmp_path: Pa
     assert result["selected_forbidden"][0]["path"] == "docs/workflows/generated.md"
     assert payload["data"]["gates"]["require_no_forbidden"] is True
     assert payload["problems"][0]["code"] == "context_benchmark_forbidden_selected"
+
+
+def test_context_benchmark_multi_repo_isolation_passes_for_selected_repo(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    (tmp_path / "repos/web/app.py").write_text("def web_auth():\n    return 'web'\n", encoding="utf-8")
+    (tmp_path / "repos/api/app.py").write_text("def api_auth():\n    return 'api'\n", encoding="utf-8")
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = tmp_path / "context-fixture"
+    fixture.mkdir()
+    (fixture / "questions.jsonl").write_text(
+        '{"id":"Q-WEB","category":"multi-repo","repo_id":"web","question":"web auth repository graph"}\n',
+        encoding="utf-8",
+    )
+    (fixture / "expected-sources.json").write_text(
+        json.dumps({"Q-WEB": {"required_source_refs": [], "required_knowledge_source_refs": [], "acceptable_optional_refs": [], "forbidden_refs": []}}),
+        encoding="utf-8",
+    )
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--require-no-cross-repo", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["summary"]["cross_repo_ref_count"] == 0
+    assert payload["data"]["results"][0]["cross_repo_refs"] == []
+    assert payload["data"]["gates"]["require_no_cross_repo"] is True
+
+
+def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    fixture = tmp_path / "context-fixture"
+    fixture.mkdir()
+    (fixture / "questions.jsonl").write_text(
+        '{"id":"Q-WEB","category":"multi-repo","repo_id":"web","question":"auth"}\n',
+        encoding="utf-8",
+    )
+    (fixture / "expected-sources.json").write_text(
+        json.dumps({"Q-WEB": {"required_source_refs": [], "required_knowledge_source_refs": [], "acceptable_optional_refs": [], "forbidden_refs": []}}),
+        encoding="utf-8",
+    )
+    foreign = ContextCandidate(
+        source_ref=ContextSourceRef(kind="graph_node", path="<graph:repo:api:file:app.py>", section="file app.py", content_sha256="sha256:" + "0" * 64),
+        text='{"identity":{"repo_id":"api","path":"app.py"}}',
+        score=1.0,
+        score_breakdown={"exact": 1.0},
+    )
+    bundle = ContextBundle(
+        repository={"id": "web", "path": "repos/web", "identity_source": "pinned"},
+        query={"text": "auth"},
+        source_snapshots={},
+        completeness={},
+        candidates=[foreign],
+        packed_context=[foreign],
+        budget={"requested_tokens": 3000, "estimated_tokens": 10, "candidate_count": 1, "packed_count": 1},
+    ).with_digest()
+    monkeypatch.setattr("tools.repoctl.context_benchmark.build_context_bundle", lambda *args, **kwargs: (bundle, [], {}))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--require-no-cross-repo", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["summary"]["cross_repo_ref_count"] == 2
+    assert payload["data"]["results"][0]["cross_repo_refs"][0]["path"] == "<graph:repo:api:file:app.py>"
+    assert payload["problems"][0]["code"] == "context_benchmark_cross_repo_leakage"
 
 
 def test_context_benchmark_knowledge_source_current_gate_fails_on_stale_record(tmp_path: Path, monkeypatch, capsys) -> None:
