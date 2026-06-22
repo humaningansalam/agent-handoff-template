@@ -9,7 +9,7 @@ from typing import Any
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
 from .context import build_context_bundle
-from .context_benchmark import run_context_benchmark
+from .context_benchmark import compare_context_benchmarks, run_context_benchmark
 from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
@@ -1289,6 +1289,40 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_benchmark_compare(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    baseline = Path(args.baseline)
+    candidate = Path(args.candidate)
+    if not baseline.is_absolute():
+        baseline = root / baseline
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    data, problems = compare_context_benchmarks(
+        baseline_path=baseline,
+        candidate_path=candidate,
+        max_recall_at_5_drop=args.max_recall_at_5_drop,
+        max_precision_at_5_drop=args.max_precision_at_5_drop,
+        max_knowledge_recall_at_5_drop=args.max_knowledge_recall_at_5_drop,
+    )
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context benchmark-compare",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        deltas = data.get("metric_deltas", {}) if data else {}
+        recall = deltas.get("mean_recall_at_5", {}).get("delta", 0)
+        precision = deltas.get("mean_precision_at_5", {}).get("delta", 0)
+        print(f"context benchmark compare recall@5_delta={recall} precision@5_delta={precision}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_context_pack(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
@@ -2006,6 +2040,14 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--output")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)
+    context_benchmark_compare = context_sub.add_parser("benchmark-compare")
+    context_benchmark_compare.add_argument("--baseline", required=True)
+    context_benchmark_compare.add_argument("--candidate", required=True)
+    context_benchmark_compare.add_argument("--max-recall-at-5-drop", type=float)
+    context_benchmark_compare.add_argument("--max-precision-at-5-drop", type=float)
+    context_benchmark_compare.add_argument("--max-knowledge-recall-at-5-drop", type=float)
+    context_benchmark_compare.add_argument("--json", action="store_true")
+    context_benchmark_compare.set_defaults(func=cmd_context_benchmark_compare)
     context_pack = context_sub.add_parser("pack")
     context_pack.add_argument("--task", required=True)
     context_pack.add_argument("--repo-id", required=True)

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.graph_model import digest_data
 from tests.repoctl.test_check import write_workspace
 from tests.repoctl.test_meta_check import write_repometa
 from tests.repoctl.test_repositories import init_repo, write_settings
@@ -152,6 +153,41 @@ def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, c
         "path": ".repoctl-state/context-benchmark/result.json",
         "benchmark_digest": payload["data"]["benchmark_digest"],
     }
+
+
+def test_context_benchmark_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+    baseline = tmp_path / ".repoctl-state/context-benchmark/baseline.json"
+    candidate = tmp_path / ".repoctl-state/context-benchmark/candidate.json"
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-recall-at-5-drop", "0", "--json"]) == 0
+
+    pass_payload = json.loads(capsys.readouterr().out)
+    assert pass_payload["data"]["metric_deltas"]["mean_recall_at_5"]["delta"] == 0.0
+    assert pass_payload["problems"] == []
+
+    regressed = json.loads(candidate.read_text(encoding="utf-8"))
+    regressed["data"]["summary"]["mean_recall_at_5"] = 0.0
+    digest_basis = {key: value for key, value in regressed["data"].items() if key not in {"benchmark_digest", "artifact"}}
+    regressed["data"]["benchmark_digest"] = digest_data(digest_basis)
+    regressed["data"]["artifact"]["benchmark_digest"] = regressed["data"]["benchmark_digest"]
+    candidate.write_text(json.dumps(regressed, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-recall-at-5-drop", "0", "--json"]) == 1
+
+    fail_payload = json.loads(capsys.readouterr().out)
+    assert fail_payload["data"]["metric_deltas"]["mean_recall_at_5"]["delta"] < 0
+    assert any(problem["code"] == "context_benchmark_recall_regressed" for problem in fail_payload["problems"])
 
 
 def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:

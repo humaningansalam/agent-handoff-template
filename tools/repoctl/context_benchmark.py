@@ -71,6 +71,50 @@ def run_context_benchmark(
     return data, problems
 
 
+def compare_context_benchmarks(
+    *,
+    baseline_path: Path,
+    candidate_path: Path,
+    max_recall_at_5_drop: float | None = None,
+    max_precision_at_5_drop: float | None = None,
+    max_knowledge_recall_at_5_drop: float | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    baseline = _read_benchmark_artifact(baseline_path, problems, label="baseline")
+    candidate = _read_benchmark_artifact(candidate_path, problems, label="candidate")
+    if not baseline or not candidate:
+        return {}, problems
+    baseline_summary = baseline.get("summary") if isinstance(baseline.get("summary"), dict) else {}
+    candidate_summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
+    metric_deltas = {
+        "mean_recall_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_recall_at_5"),
+        "mean_precision_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_precision_at_5"),
+        "mean_knowledge_recall_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_knowledge_recall_at_5"),
+    }
+    regressions = _compare_regressions(
+        baseline_summary,
+        candidate_summary,
+        metric_deltas,
+        max_recall_at_5_drop=max_recall_at_5_drop,
+        max_precision_at_5_drop=max_precision_at_5_drop,
+        max_knowledge_recall_at_5_drop=max_knowledge_recall_at_5_drop,
+    )
+    problems.extend(regressions)
+    return {
+        "schema": "repoctl.context.benchmark.compare",
+        "schema_version": 1,
+        "baseline": _artifact_identity(baseline_path, baseline),
+        "candidate": _artifact_identity(candidate_path, candidate),
+        "metric_deltas": metric_deltas,
+        "summary_regressions": [problem.to_dict() for problem in regressions],
+        "gates": {
+            "max_recall_at_5_drop": max_recall_at_5_drop,
+            "max_precision_at_5_drop": max_precision_at_5_drop,
+            "max_knowledge_recall_at_5_drop": max_knowledge_recall_at_5_drop,
+        },
+    }, problems
+
+
 def _read_questions(path: Path) -> list[dict[str, Any]]:
     questions: list[dict[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -81,6 +125,85 @@ def _read_questions(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path}:{line_number}: question must be an object")
         questions.append(data)
     return questions
+
+
+def _read_benchmark_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        problems.append(Problem("error", "context_benchmark_artifact_missing", f"{label} context benchmark artifact is missing", path.as_posix()))
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        problems.append(Problem("error", "context_benchmark_artifact_invalid_json", f"{label} context benchmark artifact is not valid JSON", path.as_posix()))
+        return {}
+    if not isinstance(payload, dict):
+        problems.append(Problem("error", "context_benchmark_artifact_invalid", f"{label} context benchmark artifact must be an object", path.as_posix()))
+        return {}
+    data = payload.get("data") if str(payload.get("command") or "") == "context benchmark" else payload
+    if not isinstance(data, dict):
+        problems.append(Problem("error", "context_benchmark_artifact_missing_data", f"{label} context benchmark artifact is missing data", path.as_posix()))
+        return {}
+    summary = data.get("summary")
+    results = data.get("results")
+    if not isinstance(summary, dict) or not isinstance(results, list):
+        problems.append(Problem("error", "context_benchmark_artifact_invalid_data", f"{label} context benchmark artifact is missing benchmark summary/results", path.as_posix()))
+        return {}
+    expected_digest = str(data.get("benchmark_digest") or "")
+    digest_basis = {key: value for key, value in data.items() if key not in {"benchmark_digest", "artifact"}}
+    actual_digest = digest_data(digest_basis)
+    if expected_digest != actual_digest:
+        problems.append(Problem("error", "context_benchmark_artifact_digest_mismatch", f"{label} context benchmark artifact digest does not match its content", path.as_posix()))
+        return {}
+    return data
+
+
+def _artifact_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": path.as_posix(),
+        "benchmark_digest": str(data.get("benchmark_digest") or ""),
+        "question_count": int(data.get("question_count") or 0),
+    }
+
+
+def _metric_delta(baseline_summary: dict[str, Any], candidate_summary: dict[str, Any], key: str) -> dict[str, float]:
+    baseline = float(baseline_summary.get(key) or 0.0)
+    candidate = float(candidate_summary.get(key) or 0.0)
+    return {
+        "baseline": round(baseline, 6),
+        "candidate": round(candidate, 6),
+        "delta": round(candidate - baseline, 6),
+    }
+
+
+def _compare_regressions(
+    baseline_summary: dict[str, Any],
+    candidate_summary: dict[str, Any],
+    metric_deltas: dict[str, dict[str, float]],
+    *,
+    max_recall_at_5_drop: float | None,
+    max_precision_at_5_drop: float | None,
+    max_knowledge_recall_at_5_drop: float | None,
+) -> list[Problem]:
+    problems: list[Problem] = []
+    _append_drop_regression(problems, metric_deltas, "mean_recall_at_5", max_recall_at_5_drop, "context_benchmark_recall_regressed")
+    _append_drop_regression(problems, metric_deltas, "mean_precision_at_5", max_precision_at_5_drop, "context_benchmark_precision_regressed")
+    _append_drop_regression(problems, metric_deltas, "mean_knowledge_recall_at_5", max_knowledge_recall_at_5_drop, "context_benchmark_knowledge_recall_regressed")
+    for key, code in {
+        "source_ref_integrity": "context_benchmark_source_integrity_regressed",
+        "knowledge_source_ref_integrity": "context_benchmark_knowledge_integrity_regressed",
+        "knowledge_source_status_current": "context_benchmark_knowledge_source_status_regressed",
+    }.items():
+        if bool(baseline_summary.get(key)) and not bool(candidate_summary.get(key)):
+            problems.append(Problem("error", code, f"context benchmark {key} regressed"))
+    return problems
+
+
+def _append_drop_regression(problems: list[Problem], metric_deltas: dict[str, dict[str, float]], key: str, max_drop: float | None, code: str) -> None:
+    if max_drop is None:
+        return
+    delta = float(metric_deltas.get(key, {}).get("delta") or 0.0)
+    if delta < -abs(max_drop):
+        problems.append(Problem("error", code, f"context benchmark {key} dropped more than allowed"))
 
 
 def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem]) -> dict[str, Any]:
