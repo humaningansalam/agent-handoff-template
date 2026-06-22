@@ -516,13 +516,16 @@ def reject_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, r
     return {"event": event, "event_path": event_path.relative_to(root).as_posix()}, []
 
 
-def show_knowledge_record(root: Path, *, record_id: str) -> tuple[dict[str, Any], list[Problem]]:
+def show_knowledge_record(root: Path, *, record_id: str, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
     if not re.fullmatch(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", record_id):
         return {}, [Problem("error", "invalid_knowledge_record_id", "record id must look like K-YYYYMMDDHHMMSSZ--slug")]
     path = _record_dir(root) / f"{record_id}.json"
     if not path.is_file():
         return {}, [Problem("error", "knowledge_record_not_found", f"knowledge record not found: {record_id}", path.relative_to(root).as_posix())]
-    return {"record": _read_candidate(path), "path": path.relative_to(root).as_posix()}, []
+    record = _read_candidate(path)
+    if str(record.get("repo_id") or "") != repo_id:
+        return {}, [Problem("error", "knowledge_record_repo_mismatch", "knowledge record belongs to a different repo", record_id)]
+    return {"record": record, "path": path.relative_to(root).as_posix()}, []
 
 
 def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:

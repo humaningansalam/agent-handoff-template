@@ -290,7 +290,7 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert record["id"].lower().replace("--", "-") in approve_payload["data"]["event"]["id"]
     approved_event_id = approve_payload["data"]["event"]["id"]
 
-    assert main(["knowledge", "show", record["id"], "--json"]) == 0
+    assert main(["knowledge", "show", record["id"], "--repo-id", "main", "--json"]) == 0
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["data"]["record"]["record_digest"] == record["record_digest"]
 
@@ -503,6 +503,33 @@ def test_knowledge_event_show_enforces_repo_namespace(tmp_path: Path, monkeypatc
     assert main(["knowledge", "event", "show", event_id, "--repo-id", "api", "--json"]) == 1
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["problems"][0]["code"] == "knowledge_event_repo_mismatch"
+
+
+def test_knowledge_record_show_enforces_repo_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    (tmp_path / "docs/repoctl.json").write_text(
+        json.dumps({"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "web", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "web", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["knowledge", "show", record_id, "--repo-id", "web", "--json"]) == 0
+    web_payload = json.loads(capsys.readouterr().out)
+    assert web_payload["data"]["record"]["repo_id"] == "web"
+
+    assert main(["knowledge", "show", record_id, "--repo-id", "api", "--json"]) == 1
+    api_payload = json.loads(capsys.readouterr().out)
+    assert api_payload["problems"][0]["code"] == "knowledge_record_repo_mismatch"
 
 
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:

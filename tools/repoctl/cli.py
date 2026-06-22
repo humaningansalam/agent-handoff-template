@@ -1529,7 +1529,8 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    data, problems = show_knowledge_record(root, record_id=args.record_id)
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = show_knowledge_record(root, record_id=args.record_id, repo_id=args.repo_id)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge show",
@@ -2055,6 +2056,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_approve.set_defaults(func=cmd_knowledge_approve)
     knowledge_show = knowledge_sub.add_parser("show")
     knowledge_show.add_argument("record_id")
+    knowledge_show.add_argument("--repo-id", required=True)
     knowledge_show.add_argument("--json", action="store_true")
     knowledge_show.set_defaults(func=cmd_knowledge_show)
     knowledge_reject = knowledge_sub.add_parser("reject")
