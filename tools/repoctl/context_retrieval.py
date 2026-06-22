@@ -12,6 +12,10 @@ from .graph_model import GraphSnapshot
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]+|[가-힣]+")
 QUERY_SYNONYMS = {
+    "authority": {"authoritative", "source"},
+    "authorities": {"authority", "authoritative", "source"},
+    "evidence": {"source", "provenance"},
+    "non-authoritative": {"authority", "authoritative", "read-only", "derived"},
     "권위": {"authority", "authoritative", "source"},
     "비권위": {"non-authoritative", "authority", "authoritative"},
     "파생": {"derived", "snapshot"},
@@ -19,6 +23,23 @@ QUERY_SYNONYMS = {
     "계약": {"contract", "invariant"},
     "결정": {"decision", "adr"},
     "검증": {"verification", "receipt"},
+}
+STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "after",
+    "are",
+    "does",
+    "for",
+    "from",
+    "how",
+    "is",
+    "of",
+    "the",
+    "to",
+    "what",
+    "why",
 }
 
 
@@ -71,7 +92,7 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
 
 
 def _terms(query: str) -> set[str]:
-    terms = {token for token in TOKEN_RE.findall(query) if len(token) >= 2}
+    terms = {token for token in TOKEN_RE.findall(query) if len(token) >= 2 and token.lower() not in STOPWORDS}
     expanded = set(terms)
     for term in terms:
         for needle, synonyms in QUERY_SYNONYMS.items():

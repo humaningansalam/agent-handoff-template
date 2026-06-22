@@ -17,6 +17,10 @@ def _write_context_docs(root: Path) -> None:
         "# ADR: repoctl Graph v0\n\n## Decision\n\nGraph is a read-only derived evidence snapshot. Source authorities remain repo registry, code index, .repometa, and task completion receipts.\n",
         encoding="utf-8",
     )
+    (root / "docs/adr/evidence-context-authority-v0.md").write_text(
+        "# ADR: Evidence Context Authority v0\n\n## Authority Rules\n\nEvidence Context is read-only and non-authoritative. Context retrieval does not replace Graph, task, Board, Backlog, or .repometa authority.\n",
+        encoding="utf-8",
+    )
     (root / "docs/contracts/repoctl-module-boundaries.md").write_text(
         "# repoctl module boundaries\n\n## Future layer rules\n\nContext must not replace task, Board, Backlog, Graph, or .repometa authority.\n",
         encoding="utf-8",
@@ -104,3 +108,83 @@ def test_context_benchmark_fixture_has_source_refs() -> None:
     for question in questions:
         assert question["id"] in expected
         assert expected[question["id"]]["required_source_refs"]
+
+
+def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "context benchmark"
+    assert payload["data"]["question_count"] >= 2
+    assert payload["data"]["summary"]["source_ref_integrity"] is True
+    assert payload["data"]["summary"]["mean_recall_at_5"] > 0
+    assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
+
+
+def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622010101Z--context-pack.md"
+    task_path.write_text(
+        """---
+id: T-20260622010101Z
+title: "Use Evidence Context for Graph authority"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T010101Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622010101Z - Use Evidence Context for Graph authority
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: Graph authority context
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Explain why Graph remains non-authoritative.
+
+## Handoff
+
+- Next exact step: inspect context authority ADR.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context query "Graph authority" --json`
+- Done when: source-backed context is available.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["context", "pack", "--task", "T-20260622010101Z", "--repo-id", "main", "--budget-tokens", "1200", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    data = payload["data"]
+    assert payload["command"] == "context pack"
+    assert data["authoritative"] is False
+    assert data["seed"]["source"] == "task_fields_for_retrieval_only"
+    assert any(item["source_ref"]["path"] == "docs/adr/evidence-context-authority-v0.md" for item in data["groups"]["must_read"])
+    assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
+    assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"

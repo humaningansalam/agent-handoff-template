@@ -9,6 +9,8 @@ from typing import Any
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
 from .context import build_context_bundle
+from .context_benchmark import run_context_benchmark
+from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
@@ -1232,6 +1234,55 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_benchmark(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    fixture = Path(args.fixture)
+    if not fixture.is_absolute():
+        fixture = root / fixture
+    data, problems = run_context_benchmark(root, fixture=fixture, repo_id=args.repo_id or "", budget_tokens=args.budget_tokens)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context benchmark",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "context_benchmark_retrieval_only",
+                "message": "context benchmark measures retrieval quality only; it does not validate generated answers",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        summary = data.get("summary", {}) if data else {}
+        print(f"context benchmark questions={data.get('question_count', 0)} recall@5={summary.get('mean_recall_at_5', 0)} precision@5={summary.get('mean_precision_at_5', 0)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
+def cmd_context_pack(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    target = require_repo_target(root, repo_id=args.repo_id)
+    data, problems, meta = build_task_context_pack(root, target=target, task_id=args.task, budget_tokens=args.budget_tokens)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context pack",
+        "data": {**data, **meta},
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": data.get("warnings", []),
+    }
+    if args.json:
+        _json(payload)
+    else:
+        groups = data.get("groups", {})
+        print(f"context pack task={data.get('task', {}).get('id', args.task)} must_read={len(groups.get('must_read', []))} maybe={len(groups.get('maybe_relevant', []))} verification={len(groups.get('verification_hints', []))}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     data = plan_upgrade(root, source=args.source)
@@ -1569,6 +1620,18 @@ def build_parser() -> argparse.ArgumentParser:
     context_query.add_argument("--budget-tokens", type=int, default=3000)
     context_query.add_argument("--json", action="store_true")
     context_query.set_defaults(func=cmd_context_query)
+    context_benchmark = context_sub.add_parser("benchmark")
+    context_benchmark.add_argument("--fixture", default="tests/fixtures/context-benchmark")
+    context_benchmark.add_argument("--repo-id")
+    context_benchmark.add_argument("--budget-tokens", type=int, default=3000)
+    context_benchmark.add_argument("--json", action="store_true")
+    context_benchmark.set_defaults(func=cmd_context_benchmark)
+    context_pack = context_sub.add_parser("pack")
+    context_pack.add_argument("--task", required=True)
+    context_pack.add_argument("--repo-id", required=True)
+    context_pack.add_argument("--budget-tokens", type=int, default=5000)
+    context_pack.add_argument("--json", action="store_true")
+    context_pack.set_defaults(func=cmd_context_pack)
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)

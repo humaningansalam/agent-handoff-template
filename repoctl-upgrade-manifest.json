@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "replace_paths": [
     ".claude/agents/README.md",
     ".claude/agents/maintenance-cartographer.md",
@@ -109,12 +109,14 @@
     "tools/repoctl/cli.py",
     "tools/repoctl/code_index.py",
     "tools/repoctl/context.py",
+    "tools/repoctl/context_benchmark.py",
     "tools/repoctl/context_chunks.py",
     "tools/repoctl/context_graph.py",
     "tools/repoctl/context_model.py",
     "tools/repoctl/context_pack.py",
     "tools/repoctl/context_retrieval.py",
     "tools/repoctl/context_sources.py",
+    "tools/repoctl/context_task_pack.py",
     "tools/repoctl/git.py",
     "tools/repoctl/graph.py",
     "tools/repoctl/graph_code_provider.py",
