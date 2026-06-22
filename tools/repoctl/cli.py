@@ -1256,6 +1256,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     fixture = Path(args.fixture)
     if not fixture.is_absolute():
         fixture = root / fixture
+    category_gates, category_gate_problems = _parse_category_recall_gates(args.min_category_recall_at_5 or [])
     data, problems = run_context_benchmark(
         root,
         fixture=fixture,
@@ -1264,11 +1265,13 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         min_recall_at_5=args.min_recall_at_5,
         min_precision_at_5=args.min_precision_at_5,
         min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
+        min_category_recall_at_5=category_gates,
         require_source_integrity=args.require_source_integrity,
         require_knowledge_source_current=args.require_knowledge_source_current,
         require_no_forbidden=args.require_no_forbidden,
         require_no_cross_repo=args.require_no_cross_repo,
     )
+    problems = [*category_gate_problems, *problems]
     payload = {
         "ok": not _has_errors(problems),
         "command": "context benchmark",
@@ -1303,6 +1306,28 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _parse_category_recall_gates(values: list[str]) -> tuple[dict[str, float], list[Problem]]:
+    gates: dict[str, float] = {}
+    problems: list[Problem] = []
+    for value in values:
+        category, separator, raw_threshold = value.partition("=")
+        category = category.strip()
+        raw_threshold = raw_threshold.strip()
+        if not separator or not category or not raw_threshold:
+            problems.append(Problem("error", "context_benchmark_category_gate_invalid", "category recall gate must use category=threshold", value))
+            continue
+        try:
+            threshold = float(raw_threshold)
+        except ValueError:
+            problems.append(Problem("error", "context_benchmark_category_gate_invalid", "category recall gate threshold must be numeric", value))
+            continue
+        if threshold < 0 or threshold > 1:
+            problems.append(Problem("error", "context_benchmark_category_gate_invalid", "category recall gate threshold must be between 0 and 1", value))
+            continue
+        gates[category] = threshold
+    return gates, problems
 
 
 def cmd_context_benchmark_compare(args: argparse.Namespace) -> int:
@@ -2149,6 +2174,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--min-recall-at-5", type=float)
     context_benchmark.add_argument("--min-precision-at-5", type=float)
     context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
+    context_benchmark.add_argument("--min-category-recall-at-5", action="append", default=[])
     context_benchmark.add_argument("--require-source-integrity", action="store_true")
     context_benchmark.add_argument("--require-knowledge-source-current", action="store_true")
     context_benchmark.add_argument("--require-no-forbidden", action="store_true")

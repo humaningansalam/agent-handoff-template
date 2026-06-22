@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
-from tools.repoctl.graph_model import digest_data
+from tools.repoctl.graph_model import digest_data, file_id
 from tests.repoctl.test_check import write_workspace
 from tests.repoctl.test_meta_check import write_repometa
 from tests.repoctl.test_repositories import init_repo, write_settings
@@ -421,6 +421,64 @@ def test_context_benchmark_multi_repo_isolation_passes_for_selected_repo(tmp_pat
     assert payload["data"]["summary"]["cross_repo_ref_count"] == 0
     assert payload["data"]["results"][0]["cross_repo_refs"] == []
     assert payload["data"]["gates"]["require_no_cross_repo"] is True
+
+
+def test_context_benchmark_surfaces_import_impact_gap_by_category(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "utils").mkdir()
+    (repo / "handlers").mkdir()
+    (repo / "utils/__init__.py").write_text("", encoding="utf-8")
+    (repo / "utils/tokens.py").write_text("def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n", encoding="utf-8")
+    (repo / "handlers/login.py").write_text(
+        "from utils.tokens import issue_token as make_session\n\n\ndef login(user_id: str) -> str:\n    return make_session(user_id)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    fixture = tmp_path / "context-impact-fixture"
+    fixture.mkdir()
+    (fixture / "questions.jsonl").write_text(
+        '{"id":"Q-IMPACT-IMPORT","category":"impact","repo_id":"main","question":"What files are impacted if utils/tokens.py changes?"}\n',
+        encoding="utf-8",
+    )
+    (fixture / "expected-sources.json").write_text(
+        json.dumps(
+            {
+                "Q-IMPACT-IMPORT": {
+                    "required_source_refs": [
+                        {"path": f"<graph:{file_id('main', 'utils/tokens.py')}>"},
+                        {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"},
+                    ],
+                    "required_knowledge_source_refs": [],
+                    "acceptable_optional_refs": [],
+                    "forbidden_refs": [],
+                }
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    result = payload["data"]["results"][0]
+    impact_summary = payload["data"]["summary"]["by_category"]["impact"]
+    assert result["metrics"]["recall_at_5"] < 1.0
+    assert impact_summary["question_count"] == 1
+    assert impact_summary["mean_recall_at_5"] == result["metrics"]["recall_at_5"]
+    assert {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"} in result["missing_required_at_10"]
+    assert payload["data"]["gates"]["min_category_recall_at_5"] == {}
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--json"]) == 1
+
+    gated_payload = json.loads(capsys.readouterr().out)
+    assert gated_payload["data"]["gates"]["min_category_recall_at_5"] == {"impact": 1.0}
+    assert gated_payload["problems"][0]["code"] == "context_benchmark_category_recall_gate_failed"
+    assert gated_payload["problems"][0]["path"] == "impact"
 
 
 def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: Path, monkeypatch, capsys) -> None:

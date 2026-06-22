@@ -22,6 +22,7 @@ def run_context_benchmark(
     min_recall_at_5: float | None = None,
     min_precision_at_5: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
+    min_category_recall_at_5: dict[str, float] | None = None,
     require_source_integrity: bool = False,
     require_knowledge_source_current: bool = False,
     require_no_forbidden: bool = False,
@@ -54,6 +55,7 @@ def run_context_benchmark(
             min_recall_at_5=min_recall_at_5,
             min_precision_at_5=min_precision_at_5,
             min_knowledge_recall_at_5=min_knowledge_recall_at_5,
+            min_category_recall_at_5=min_category_recall_at_5 or {},
             require_source_integrity=require_source_integrity,
             require_knowledge_source_current=require_knowledge_source_current,
             require_no_forbidden=require_no_forbidden,
@@ -69,6 +71,7 @@ def run_context_benchmark(
             "min_recall_at_5": min_recall_at_5,
             "min_precision_at_5": min_precision_at_5,
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
+            "min_category_recall_at_5": dict(sorted((min_category_recall_at_5 or {}).items())),
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
             "require_no_forbidden": require_no_forbidden,
@@ -338,7 +341,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     required_knowledge_top5 = [ref for ref in required_knowledge if _contains_ref(knowledge_top5, ref)]
     selected_forbidden = [ref for ref in forbidden if _contains_ref(candidate_refs, ref) or _contains_ref(packed_refs, ref)]
     cross_repo_refs = _cross_repo_refs([*candidate_refs, *packed_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
-    relevant_top5 = sum(1 for ref in top5 if _contains_ref(required, ref) or _contains_ref(optional, ref))
+    relevant_top5 = sum(1 for ref in top5 if _matches_any_expected(ref, [*required, *optional]))
     integrity_failures = [ref for ref in candidate_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
     knowledge_integrity_failures = [ref for ref in knowledge_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
 
@@ -394,7 +397,27 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_stale_record_excluded": sum(int(metric["knowledge_stale_record_excluded"]) for metric in metrics),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
         "cross_repo_ref_count": sum(int(metric["cross_repo_ref_count"]) for metric in metrics),
+        "by_category": _summarize_by_category(results),
     }
+
+
+def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        category = str(result.get("category") or "uncategorized")
+        metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        grouped.setdefault(category, []).append(metrics)
+    summary: dict[str, dict[str, Any]] = {}
+    for category, items in sorted(grouped.items()):
+        summary[category] = {
+            "question_count": len(items),
+            "mean_recall_at_5": _mean(metric.get("recall_at_5", 0.0) for metric in items),
+            "mean_recall_at_10": _mean(metric.get("recall_at_10", 0.0) for metric in items),
+            "mean_precision_at_5": _mean(metric.get("precision_at_5", 0.0) for metric in items),
+            "forbidden_selected": sum(int(metric.get("forbidden_selected") or 0) for metric in items),
+            "cross_repo_ref_count": sum(int(metric.get("cross_repo_ref_count") or 0) for metric in items),
+        }
+    return summary
 
 
 def _bundle_refs(bundle: ContextBundle | None, *, field: str) -> list[dict[str, Any]]:
@@ -463,6 +486,10 @@ def _contains_ref(haystack: list[dict[str, Any]], needle: dict[str, Any]) -> boo
     return False
 
 
+def _matches_any_expected(ref: dict[str, Any], expected: list[dict[str, Any]]) -> bool:
+    return any(_contains_ref([ref], item) for item in expected)
+
+
 def _cross_repo_refs(refs: list[dict[str, Any]], *, expected_repo_id: str) -> list[dict[str, Any]]:
     if not expected_repo_id:
         return []
@@ -501,6 +528,7 @@ def _gate_problems(
     min_recall_at_5: float | None,
     min_precision_at_5: float | None,
     min_knowledge_recall_at_5: float | None,
+    min_category_recall_at_5: dict[str, float],
     require_source_integrity: bool,
     require_knowledge_source_current: bool,
     require_no_forbidden: bool,
@@ -513,6 +541,12 @@ def _gate_problems(
         problems.append(Problem("error", "context_benchmark_precision_gate_failed", "context benchmark mean Precision@5 is below gate"))
     if min_knowledge_recall_at_5 is not None and float(summary.get("mean_knowledge_recall_at_5") or 0.0) < min_knowledge_recall_at_5:
         problems.append(Problem("error", "context_benchmark_knowledge_gate_failed", "context benchmark mean knowledge Recall@5 is below gate"))
+    by_category = summary.get("by_category") if isinstance(summary.get("by_category"), dict) else {}
+    for category, threshold in sorted(min_category_recall_at_5.items()):
+        category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
+        recall = float(category_summary.get("mean_recall_at_5") or 0.0)
+        if recall < threshold:
+            problems.append(Problem("error", "context_benchmark_category_recall_gate_failed", f"context benchmark {category} Recall@5 is below gate", category))
     if require_source_integrity and not bool(summary.get("source_ref_integrity")):
         problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
     if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):

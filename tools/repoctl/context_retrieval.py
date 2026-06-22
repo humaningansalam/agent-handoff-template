@@ -34,6 +34,7 @@ STOPWORDS = {
     "for",
     "from",
     "how",
+    "if",
     "is",
     "of",
     "the",
@@ -75,6 +76,8 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
 
     candidates: list[ContextCandidate] = []
     for key, breakdown in scores.items():
+        if breakdown["exact"] <= 0 and breakdown["fts"] <= 0 and breakdown["graph"] <= 0:
+            continue
         score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"]
         if score <= 0:
             continue
