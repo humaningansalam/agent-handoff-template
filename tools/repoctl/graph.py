@@ -6,7 +6,7 @@ from typing import Any
 from .code_index import CodeIndexEntry, build_code_index
 from .git import normalize_repo_path
 from .graph_code_provider import build_precise_symbols
-from .graph_import_resolver import resolve_python_imports
+from .graph_import_resolver import resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .repositories import RepoTarget
@@ -253,7 +253,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         add_edge(GraphEdge("DEFINES", file_node_id, symbol_node_id, "resolved", precise_symbol.provider))
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
 
-    import_resolutions = resolve_python_imports(entries)
+    import_resolutions = resolve_code_imports(entries)
     for resolution in import_resolutions:
         importer_node_id = file_id(repo_id, resolution.importer_path)
         target_node_id = file_id(repo_id, resolution.target_path)
@@ -295,7 +295,8 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         ],
         "task_completion": task_receipts,
         "python_ast": [symbol.to_dict() for symbol in precise_symbols],
-        "python_import_resolver": [resolution.to_dict() for resolution in import_resolutions],
+        "python_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "python_import_resolver"],
+        "js_ts_relative_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "js_ts_relative_import_resolver"],
     }
     snapshot = GraphSnapshot(
         repository=target.to_dict(),
@@ -306,6 +307,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             {"kind": "task_completion", "assertion": "recorded", "digest": digest_data(source_payloads["task_completion"])},
             {"kind": "python_ast", "assertion": "resolved", "digest": digest_data(source_payloads["python_ast"])},
             {"kind": "python_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["python_import_resolver"])},
+            {"kind": "js_ts_relative_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["js_ts_relative_import_resolver"])},
         ],
         completeness={
             "inventory_complete": True,

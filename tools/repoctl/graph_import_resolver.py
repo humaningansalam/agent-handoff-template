@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from posixpath import normpath
 
 from .code_index import CodeIndexEntry
 
@@ -23,14 +24,21 @@ class ImportResolution:
         }
 
 
-def resolve_python_imports(entries: list[CodeIndexEntry]) -> list[ImportResolution]:
+def resolve_code_imports(entries: list[CodeIndexEntry]) -> list[ImportResolution]:
     file_paths = {entry.path for entry in entries}
     resolutions: list[ImportResolution] = []
     for entry in entries:
-        if entry.language != "python" or entry.parse_status != "ok":
+        if entry.parse_status != "ok":
             continue
         for raw_import in entry.imports:
-            target_path = _resolve_repo_local_python_import(raw_import, file_paths, importer_path=entry.path)
+            if entry.language == "python":
+                target_path = _resolve_repo_local_python_import(raw_import, file_paths, importer_path=entry.path)
+                provider = "python_import_resolver"
+            elif entry.language in {"javascript", "typescript"}:
+                target_path = _resolve_js_ts_relative_import(raw_import, file_paths, importer_path=entry.path)
+                provider = "js_ts_relative_import_resolver"
+            else:
+                continue
             if target_path:
                 resolutions.append(
                     ImportResolution(
@@ -38,7 +46,7 @@ def resolve_python_imports(entries: list[CodeIndexEntry]) -> list[ImportResoluti
                         language=entry.language,
                         raw_import=raw_import,
                         target_path=target_path,
-                        provider="python_import_resolver",
+                        provider=provider,
                     )
                 )
     return sorted(resolutions, key=lambda item: (item.importer_path, item.raw_import, item.target_path))
@@ -68,3 +76,24 @@ def _relative_prefix(raw_import: str, importer_path: str) -> list[str] | None:
     if base_length < 0:
         return None
     return package_parts[:base_length]
+
+
+def _resolve_js_ts_relative_import(raw_import: str, file_paths: set[str], *, importer_path: str) -> str:
+    if not raw_import.startswith(("./", "../")):
+        return ""
+    importer_dir = "/".join(importer_path.split("/")[:-1])
+    module_path = normpath(f"{importer_dir}/{raw_import}" if importer_dir else raw_import)
+    if module_path == "." or module_path.startswith("../"):
+        return ""
+    candidates = [candidate for candidate in _js_ts_candidates(module_path) if candidate in file_paths]
+    if len(candidates) == 1:
+        return candidates[0]
+    return ""
+
+
+def _js_ts_candidates(module_path: str) -> list[str]:
+    suffixes = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+    values = [module_path]
+    values.extend(f"{module_path}{suffix}" for suffix in suffixes)
+    values.extend(f"{module_path}/index{suffix}" for suffix in suffixes)
+    return values

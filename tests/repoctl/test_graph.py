@@ -186,6 +186,47 @@ def test_graph_skips_ambiguous_python_import_resolution(tmp_path: Path, monkeypa
     assert not any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == file_id("main", "consumer/app.py") for edge in snapshot["edges"])
 
 
+def test_graph_resolves_js_ts_relative_imports(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "frontend/src/api").mkdir(parents=True)
+    (repo / "frontend/src/client.ts").write_text("import { issueToken } from './api/tokens';\nexport const login = () => issueToken();\n", encoding="utf-8")
+    (repo / "frontend/src/api/tokens.ts").write_text("export const issueToken = () => 'token';\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    import_node_id = import_ref_id("main", "typescript", "./api/tokens")
+    source_file_id = file_id("main", "frontend/src/client.ts")
+    target_file_id = file_id("main", "frontend/src/api/tokens.ts")
+    assert any(source["kind"] == "js_ts_relative_import_resolver" and source["assertion"] == "resolved" for source in snapshot["sources"])
+    assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id and edge["to"] == target_file_id for edge in snapshot["edges"])
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in snapshot["edges"])
+
+
+def test_graph_skips_ambiguous_js_ts_relative_import_resolution(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "frontend/src/api").mkdir(parents=True)
+    (repo / "frontend/src/client.ts").write_text("import { issueToken } from './api/tokens';\n", encoding="utf-8")
+    (repo / "frontend/src/api/tokens.ts").write_text("export const issueToken = () => 'ts';\n", encoding="utf-8")
+    (repo / "frontend/src/api/tokens.js").write_text("export const issueToken = () => 'js';\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    import_node_id = import_ref_id("main", "typescript", "./api/tokens")
+    assert any(edge["kind"] == "DECLARES_IMPORT" and edge["to"] == import_node_id for edge in snapshot["edges"])
+    assert not any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id for edge in snapshot["edges"])
+    assert not any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == file_id("main", "frontend/src/client.ts") for edge in snapshot["edges"])
+
+
 def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
