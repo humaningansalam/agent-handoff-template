@@ -1335,6 +1335,17 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems],
         "warnings": data.get("warnings", []),
     }
+    if args.output:
+        output = Path(args.output)
+        if not output.is_absolute():
+            output = root / output
+        if data:
+            payload["data"]["artifact"] = {
+                "path": output.relative_to(root).as_posix() if output.is_relative_to(root) else output.as_posix(),
+                "pack_digest": data.get("pack_digest", ""),
+            }
+        _complete_json_envelope(payload)
+        atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     if args.json:
         _json(payload)
     else:
@@ -2055,6 +2066,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack.add_argument("--repo-id", required=True)
     context_pack.add_argument("--budget-tokens", type=int, default=5000)
     context_pack.add_argument("--explain", action="store_true")
+    context_pack.add_argument("--output")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
 

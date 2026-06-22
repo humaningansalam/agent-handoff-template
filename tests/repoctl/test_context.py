@@ -351,12 +351,20 @@ Explain why Graph remains non-authoritative.
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["context", "pack", "--task", "T-20260622010101Z", "--repo-id", "main", "--budget-tokens", "1200", "--json"]) == 0
+    output = tmp_path / ".repoctl-state/context-pack/T-20260622010101Z.json"
+    assert main(["context", "pack", "--task", "T-20260622010101Z", "--repo-id", "main", "--budget-tokens", "1200", "--output", output.as_posix(), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(output.read_text(encoding="utf-8"))
     data = payload["data"]
+    assert artifact == payload
     assert payload["command"] == "context pack"
     assert data["authoritative"] is False
+    assert data["pack_digest"].startswith("sha256:")
+    assert data["artifact"] == {
+        "path": ".repoctl-state/context-pack/T-20260622010101Z.json",
+        "pack_digest": data["pack_digest"],
+    }
     assert data["seed"]["source"] == "task_fields_for_retrieval_only"
     assert any(item["source_ref"]["path"] == "docs/adr/evidence-context-authority-v0.md" for item in data["groups"]["must_read"])
     assert data["groups"]["reviewed_knowledge"] == []

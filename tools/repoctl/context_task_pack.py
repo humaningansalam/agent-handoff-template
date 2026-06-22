@@ -5,6 +5,7 @@ from typing import Any
 
 from .context import build_context_bundle
 from .context_model import ContextCandidate
+from .graph_model import digest_data
 from .markdown import find_section
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task
@@ -36,6 +37,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         "bundle": bundle.to_dict() if bundle is not None else None,
         "warnings": _pack_warnings(bundle, task),
     }
+    data["pack_digest"] = digest_data(data)
     return data, problems, meta
 
 
