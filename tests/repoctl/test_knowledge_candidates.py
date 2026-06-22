@@ -782,6 +782,11 @@ Create a candidate from a context pack without making the pack an authority sour
     assert missing_pack_payload["data"]["checks"]["pack_provenance_current"] is False
     assert missing_pack_payload["warnings"][0]["code"] == "knowledge_candidate_pack_provenance_missing"
 
+    assert main(["knowledge", "approve", candidate["id"], "--repo-id", "main", "--json"]) == 0
+    approve_payload = json.loads(capsys.readouterr().out)
+    assert approve_payload["warnings"][0]["code"] == "knowledge_candidate_pack_provenance_missing"
+    assert approve_payload["data"]["record"]["created_from"]["candidate_check"]["warning_codes"] == ["knowledge_candidate_pack_provenance_missing"]
+
 
 def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

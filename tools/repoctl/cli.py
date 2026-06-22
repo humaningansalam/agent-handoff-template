@@ -1608,12 +1608,13 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     data, problems = approve_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, supersedes=args.supersedes)
+    record = data.get("record", {}) if data else {}
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge approve",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
+        "warnings": _knowledge_approval_warnings(record),
     }
     if args.json:
         _json(payload)
@@ -1623,6 +1624,21 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _knowledge_approval_warnings(record: dict[str, Any]) -> list[dict[str, str]]:
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    candidate_check = created_from.get("candidate_check") if isinstance(created_from.get("candidate_check"), dict) else {}
+    warning_codes = candidate_check.get("warning_codes") if isinstance(candidate_check.get("warning_codes"), list) else []
+    return [
+        {
+            "severity": "warning",
+            "code": str(code),
+            "message": "candidate was approved with a non-blocking warning",
+        }
+        for code in warning_codes
+        if str(code)
+    ]
 
 
 def cmd_knowledge_show(args: argparse.Namespace) -> int:
