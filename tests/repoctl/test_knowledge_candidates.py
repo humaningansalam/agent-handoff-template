@@ -1122,6 +1122,16 @@ Create a candidate from a context pack without making the pack an authority sour
     assert check_payload["data"]["checks"]["pack_provenance_current"] is True
     assert check_payload["warnings"] == []
 
+    failed_pack_payload = json.loads(pack.read_text(encoding="utf-8"))
+    failed_pack_payload["ok"] = False
+    failed_pack_payload["problems"] = [{"severity": "error", "code": "synthetic_failure", "message": "failed"}]
+    failed_pack = tmp_path / ".repoctl-state/context-pack/failed.json"
+    failed_pack.write_text(json.dumps(failed_pack_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--from-pack", failed_pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--json"]) == 1
+    failed_payload = json.loads(capsys.readouterr().out)
+    assert failed_payload["problems"][0]["code"] == "knowledge_candidate_pack_failed"
+
     pack.unlink()
     assert main(["knowledge", "candidate", "check", candidate["id"], "--repo-id", "main", "--json"]) == 0
     missing_pack_payload = json.loads(capsys.readouterr().out)

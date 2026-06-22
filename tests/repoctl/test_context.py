@@ -455,6 +455,71 @@ Reject context pack output outside the workspace.
     assert not (escape / "out.json").exists()
 
 
+def test_context_pack_does_not_write_failed_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622012121Z--failed-pack.md"
+    task_path.write_text(
+        """---
+id: T-20260622012121Z
+title: "Reject failed context pack artifact"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T012121Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622012121Z - Reject failed context pack artifact
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: source authority knowledge
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Do not write failed context pack artifacts.
+
+## Handoff
+
+- Next exact step: inspect failed pack behavior.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260622012121Z --repo-id main --json`
+- Done when: failed pack output is absent.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    event_id = json.loads(capsys.readouterr().out)["data"]["event"]["id"]
+    event_path = tmp_path / "docs/knowledge/events" / f"{event_id}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["record_digest"] = "sha256:" + "6" * 64
+    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
+    event_path.write_text(json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output = tmp_path / ".repoctl-state/context-pack/failed.json"
+
+    assert main(["context", "pack", "--task", "T-20260622012121Z", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_event_record_digest_mismatch"
+    assert not output.exists()
+
+
 def test_context_pack_groups_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -641,6 +706,15 @@ Use reviewed knowledge source authority.
     assert fail_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] < 0
     assert any(problem["code"] == "context_pack_must_read_regressed" for problem in fail_payload["problems"])
     assert any(problem["code"] == "context_pack_reviewed_knowledge_regressed" for problem in fail_payload["problems"])
+
+    failed_artifact = json.loads(baseline.read_text(encoding="utf-8"))
+    failed_artifact["ok"] = False
+    failed_artifact["problems"] = [{"severity": "error", "code": "synthetic_failure", "message": "failed"}]
+    candidate.write_text(json.dumps(failed_artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--json"]) == 1
+    failed_artifact_payload = json.loads(capsys.readouterr().out)
+    assert failed_artifact_payload["problems"][0]["code"] == "context_pack_artifact_failed"
 
 
 def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -1349,7 +1349,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems],
         "warnings": data.get("warnings", []),
     }
-    if args.output:
+    if args.output and not _has_errors(problems):
         output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
         if output_problem is not None:
             problems.append(output_problem)

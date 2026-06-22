@@ -749,6 +749,8 @@ def _read_context_pack_artifact(root: Path, path: Path) -> tuple[dict[str, Any],
         return {}, [Problem("error", "knowledge_candidate_pack_invalid_json", "context pack artifact is not valid JSON", path.as_posix())]
     if not isinstance(payload, dict):
         return {}, [Problem("error", "knowledge_candidate_pack_invalid", "context pack artifact must be an object", path.as_posix())]
+    if str(payload.get("command") or "") == "context pack" and payload.get("ok") is False:
+        return {}, [Problem("error", "knowledge_candidate_pack_failed", "failed context pack artifact cannot be used for knowledge candidate creation", path.as_posix())]
     data = payload.get("data") if str(payload.get("command") or "") == "context pack" else payload
     if not isinstance(data, dict) or not isinstance(data.get("groups"), dict):
         return {}, [Problem("error", "knowledge_candidate_pack_invalid_data", "context pack artifact is missing groups", path.as_posix())]
