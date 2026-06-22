@@ -267,6 +267,26 @@ def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, c
     assert payload["problems"][0]["code"] == "knowledge_candidate_source_excluded"
 
 
+def test_knowledge_candidate_rejects_generated_knowledge_source(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/knowledge/generated/decisions.md", "--repo-id", "main", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_candidate_source_excluded"
+
+
 def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)
