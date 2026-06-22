@@ -554,6 +554,32 @@ def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) 
     assert first_files == second_files
 
 
+def test_knowledge_render_rejects_output_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    outside = tmp_path.parent / f"{tmp_path.name}-knowledge-render"
+    assert main(["knowledge", "render", "--repo-id", "main", "--output", outside.as_posix(), "--json"]) == 1
+    outside_payload = json.loads(capsys.readouterr().out)
+    assert outside_payload["problems"][0]["code"] == "knowledge_render_output_outside_workspace"
+    assert not outside.exists()
+
+    escape = tmp_path.parent / f"{tmp_path.name}-render-escape"
+    escape.mkdir()
+    symlink = tmp_path / "docs/knowledge/generated"
+    symlink.parent.mkdir(parents=True, exist_ok=True)
+    symlink.symlink_to(escape, target_is_directory=True)
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 1
+    symlink_payload = json.loads(capsys.readouterr().out)
+    assert symlink_payload["problems"][0]["code"] == "knowledge_render_output_outside_workspace"
+    assert not (escape / "INDEX.md").exists()
+
+
 def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)

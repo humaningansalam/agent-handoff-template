@@ -19,6 +19,12 @@ PAGE_BY_KIND = {
 
 def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[str, Any], list[Problem]]:
     output_dir = output if output.is_absolute() else root / output
+    root_real = root.resolve()
+    output_real = output_dir.resolve()
+    try:
+        output_rel = output_real.relative_to(root_real).as_posix()
+    except ValueError:
+        return {}, [Problem("error", "knowledge_render_output_outside_workspace", "render output must stay inside the workspace", output.as_posix())]
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
     rendered: list[dict[str, Any]] = []
@@ -42,7 +48,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         "schema_version": 1,
         "repo_id": repo_id,
         "authoritative": False,
-        "output": output_dir.relative_to(root).as_posix(),
+        "output": output_rel,
         "record_count": len(records),
         "event_count": len(events),
         "render_digest": render_digest,
@@ -56,7 +62,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         "schema_version": 1,
         "repo_id": repo_id,
         "authoritative": False,
-        "output": output_dir.relative_to(root).as_posix(),
+        "output": output_rel,
         "record_count": len(records),
         "event_count": len(events),
         "render_digest": render_digest,
