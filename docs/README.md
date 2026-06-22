@@ -42,6 +42,13 @@ This directory contains the live task registry, task files, workflows, and archi
 - Extract read-only code facts: `./scripts/repoctl index code --json`
 - Build a read-only Graph snapshot: `./scripts/repoctl graph build --repo-id main --json`
 - Query the derived Graph snapshot: `./scripts/repoctl graph query --repo-id main --file src/app.py --json`
+- Query evidence context: `./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --json`
+- Benchmark context retrieval: `./scripts/repoctl context benchmark --repo-id main --json`
+- Pack task startup context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
+- Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
+- Approve a candidate into reviewed knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --json`
+- Query reviewed knowledge: `./scripts/repoctl knowledge query "current auth decision" --repo-id main --json`
+- Check knowledge source drift: `./scripts/repoctl knowledge check --repo-id main --json`
 - Check changed-file metadata gate: `./scripts/repoctl meta check --changed --json`
 
 ## Notes
@@ -59,4 +66,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl meta suggest` is a discovery aid only. The agent must inspect candidate files and record structured `## Discovery` with `repoctl task discovery add`; suggestions are not authoritative scope.
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
+- `repoctl context` returns temporary source bundles only; it does not create durable facts or change task scope.
+- `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
+- `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale records by default.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

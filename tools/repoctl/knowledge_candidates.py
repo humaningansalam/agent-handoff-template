@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
     if not chunks:
         return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", rel)]
     primary = _primary_chunk(chunks, kind)
-    candidate_id = _candidate_id(primary.title)
+    candidate_id = _unique_candidate_id(root, repo_id, primary.title, primary.source_ref.content_sha256)
     candidate = {
         "schema": "repoctl.knowledge.candidate",
         "schema_version": 1,
@@ -126,7 +127,7 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
     event = {
         "schema": "repoctl.knowledge.event",
         "schema_version": 1,
-        "id": _event_id("approved"),
+        "id": _event_id("approved", record_id),
         "type": "approved",
         "repo_id": repo_id,
         "record_id": record_id,
@@ -177,6 +178,42 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     }, problems
 
 
+def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, limit: int = 10) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
+    problems: list[Problem] = []
+    warnings: list[Problem] = []
+    records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    scored: list[dict[str, Any]] = []
+    for record in records:
+        drift = _source_digest_problems(root, record, record_id=str(record.get("id") or ""))
+        status = "stale" if drift else str(record.get("status") or "")
+        if status == "stale" and not include_stale:
+            warnings.append(Problem("warning", "knowledge_stale_record_excluded", "stale knowledge record excluded from default query", str(record.get("id") or "")))
+            continue
+        if status != "reviewed" and not include_stale:
+            continue
+        score, breakdown, reasons = _record_score(query, record)
+        if score <= 0:
+            continue
+        scored.append(
+            {
+                "record": _public_record(record, status=status),
+                "score": round(score, 6),
+                "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
+                "selection_reasons": reasons,
+            }
+        )
+    scored.sort(key=lambda item: (-float(item["score"]), str(item["record"].get("id") or "")))
+    return {
+        "schema": "repoctl.knowledge.query",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "query": {"text": query, "include_stale": include_stale},
+        "results": scored[:limit],
+        "result_count": min(len(scored), limit),
+        "available_record_count": len(records),
+    }, problems, warnings
+
+
 def _source_rel(root: Path, source: Path) -> str:
     path = source if source.is_absolute() else root / source
     try:
@@ -221,15 +258,29 @@ def _summary(text: str) -> str:
     return compact[:500]
 
 
-def _candidate_id(title: str) -> str:
+def _unique_candidate_id(root: Path, repo_id: str, title: str, source_digest: str) -> str:
+    base = _candidate_id(title, source_digest)
+    directory = _candidate_dir(root, repo_id)
+    if not (directory / f"{base}.json").exists():
+        return base
+    for index in range(2, 100):
+        candidate = f"{base}-{index}"
+        if not (directory / f"{candidate}.json").exists():
+            return candidate
+    raise RepoctlError("could not allocate unique knowledge candidate id")
+
+
+def _candidate_id(title: str, source_digest: str) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%SZ")
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "candidate"
-    return f"KC-{stamp}--{slug[:60].strip('-')}"
+    suffix = re.sub(r"[^a-f0-9]", "", source_digest.lower())[:8] or "candidate"
+    return f"KC-{stamp}--{slug[:48].strip('-')}-{suffix}"
 
 
-def _event_id(kind: str) -> str:
+def _event_id(kind: str, target_id: str) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%SZ")
-    return f"E-{stamp}--{kind}"
+    slug = re.sub(r"[^a-z0-9]+", "-", target_id.lower()).strip("-") or kind
+    return f"E-{stamp}--{kind}-{slug[:48].strip('-')}"
 
 
 def _candidate_dir(root: Path, repo_id: str) -> Path:
@@ -247,6 +298,11 @@ def _event_dir(root: Path) -> Path:
 def _read_candidate(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
+
+
+def _load_records(root: Path) -> list[dict[str, Any]]:
+    directory = _record_dir(root)
+    return [_read_candidate(path) for path in sorted(directory.glob("K-*.json"))] if directory.exists() else []
 
 
 def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str = "") -> list[Problem]:
@@ -268,3 +324,75 @@ def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str 
         if expected != actual:
             problems.append(Problem("error", "knowledge_source_digest_drift", "knowledge source digest changed", rel))
     return problems
+
+
+def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:
+    return {
+        "id": record.get("id", ""),
+        "repo_id": record.get("repo_id", ""),
+        "kind": record.get("kind", ""),
+        "status": status,
+        "title": record.get("title", ""),
+        "claim": record.get("claim", ""),
+        "summary": record.get("summary", ""),
+        "source_refs": record.get("source_refs", []),
+        "record_digest": record.get("record_digest", ""),
+    }
+
+
+def _record_score(query: str, record: dict[str, Any]) -> tuple[float, dict[str, float], list[str]]:
+    fields = [
+        str(record.get("id") or ""),
+        str(record.get("kind") or ""),
+        str(record.get("title") or ""),
+        str(record.get("claim") or ""),
+        str(record.get("summary") or ""),
+        json.dumps(record.get("source_refs", []), ensure_ascii=False, sort_keys=True),
+    ]
+    body = "\n".join(fields)
+    exact = _exact_score(query, body)
+    fts = _fts_score(query, body)
+    authority = 0.5 if str(record.get("status") or "") == "reviewed" else 0.0
+    score = exact * 2.0 + fts * 1.2 + authority
+    reasons: list[str] = []
+    if exact:
+        reasons.append("exact record field match")
+    if fts:
+        reasons.append("SQLite FTS record match")
+    if authority:
+        reasons.append("reviewed knowledge record")
+    return score, {"exact": exact, "fts": fts, "authority": authority}, reasons
+
+
+def _exact_score(query: str, body: str) -> float:
+    terms = _query_terms(query)
+    if not terms:
+        return 0.0
+    haystack = body.lower()
+    hits = sum(1 for term in terms if term.lower() in haystack)
+    return min(1.0, hits / len(terms))
+
+
+def _fts_score(query: str, body: str) -> float:
+    terms = _query_terms(query)
+    if not terms:
+        return 0.0
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE VIRTUAL TABLE records USING fts5(body)")
+        conn.execute("INSERT INTO records(body) VALUES (?)", (body,))
+        phrase = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        row = conn.execute("SELECT bm25(records) AS rank FROM records WHERE records MATCH ? LIMIT 1", (phrase,)).fetchone()
+        if row is None:
+            return 0.0
+        return 1.0 / (1.0 + abs(float(row[0])))
+    except sqlite3.Error:
+        return 0.0
+    finally:
+        conn.close()
+
+
+def _query_terms(query: str) -> list[str]:
+    stopwords = {"a", "an", "and", "are", "for", "from", "how", "is", "of", "the", "to", "what", "why"}
+    tokens = re.findall(r"[A-Za-z0-9_./:-]+|[가-힣]+", query)
+    return sorted({token for token in tokens if len(token) >= 2 and token.lower() not in stopwords})
