@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -76,18 +77,28 @@ def run_context_benchmark(
 
 def compare_context_benchmarks(
     *,
+    root: Path | None = None,
     baseline_path: Path,
     candidate_path: Path,
     max_recall_at_5_drop: float | None = None,
     max_precision_at_5_drop: float | None = None,
     max_knowledge_recall_at_5_drop: float | None = None,
     max_question_recall_at_5_drop: float | None = None,
+    require_current_sources: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     problems: list[Problem] = []
     baseline = _read_benchmark_artifact(baseline_path, problems, label="baseline")
     candidate = _read_benchmark_artifact(candidate_path, problems, label="candidate")
     if not baseline or not candidate:
         return {}, problems
+    source_drift: list[Problem] = []
+    if require_current_sources:
+        if root is None:
+            source_drift.append(Problem("error", "context_benchmark_current_source_root_missing", "current source gate requires a workspace root"))
+        else:
+            source_drift.extend(_source_drift_problems(root, baseline, label="baseline"))
+            source_drift.extend(_source_drift_problems(root, candidate, label="candidate"))
+    problems.extend(source_drift)
     baseline_summary = baseline.get("summary") if isinstance(baseline.get("summary"), dict) else {}
     candidate_summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
     metric_deltas = {
@@ -115,11 +126,13 @@ def compare_context_benchmarks(
         "metric_deltas": metric_deltas,
         "question_deltas": question_deltas,
         "summary_regressions": [problem.to_dict() for problem in regressions],
+        "source_drift": [problem.to_dict() for problem in source_drift],
         "gates": {
             "max_recall_at_5_drop": max_recall_at_5_drop,
             "max_precision_at_5_drop": max_precision_at_5_drop,
             "max_knowledge_recall_at_5_drop": max_knowledge_recall_at_5_drop,
             "max_question_recall_at_5_drop": max_question_recall_at_5_drop,
+            "require_current_sources": require_current_sources,
         },
     }, problems
 
@@ -175,6 +188,41 @@ def _artifact_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         "benchmark_digest": str(data.get("benchmark_digest") or ""),
         "question_count": int(data.get("question_count") or 0),
     }
+
+
+def _source_drift_problems(root: Path, data: dict[str, Any], *, label: str) -> list[Problem]:
+    problems: list[Problem] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in _artifact_refs(data):
+        rel = str(ref.get("path") or "")
+        expected = str(ref.get("content_sha256") or "")
+        if not rel or rel.startswith("<") or not expected.startswith("sha256:"):
+            continue
+        key = (rel, expected)
+        if key in seen:
+            continue
+        seen.add(key)
+        path = root / rel
+        if not path.is_file():
+            problems.append(Problem("error", "context_benchmark_artifact_source_missing", f"{label} benchmark source ref no longer exists", rel))
+            continue
+        actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        if actual != expected:
+            problems.append(Problem("error", "context_benchmark_artifact_source_digest_drift", f"{label} benchmark source ref digest no longer matches current source", rel))
+    return problems
+
+
+def _artifact_refs(data: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        for key in ("top_refs", "top_knowledge_refs", "required_found_at_5", "required_found_at_10"):
+            values = result.get(key)
+            if isinstance(values, list):
+                refs.extend(ref for ref in values if isinstance(ref, dict))
+    return refs
 
 
 def _metric_delta(baseline_summary: dict[str, Any], candidate_summary: dict[str, Any], key: str) -> dict[str, float]:

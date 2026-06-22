@@ -1313,12 +1313,14 @@ def cmd_context_benchmark_compare(args: argparse.Namespace) -> int:
     if not candidate.is_absolute():
         candidate = root / candidate
     data, problems = compare_context_benchmarks(
+        root=root,
         baseline_path=baseline,
         candidate_path=candidate,
         max_recall_at_5_drop=args.max_recall_at_5_drop,
         max_precision_at_5_drop=args.max_precision_at_5_drop,
         max_knowledge_recall_at_5_drop=args.max_knowledge_recall_at_5_drop,
         max_question_recall_at_5_drop=args.max_question_recall_at_5_drop,
+        require_current_sources=args.require_current_sources,
     )
     payload = {
         "ok": not _has_errors(problems),
@@ -2159,6 +2161,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark_compare.add_argument("--max-precision-at-5-drop", type=float)
     context_benchmark_compare.add_argument("--max-knowledge-recall-at-5-drop", type=float)
     context_benchmark_compare.add_argument("--max-question-recall-at-5-drop", type=float)
+    context_benchmark_compare.add_argument("--require-current-sources", action="store_true")
     context_benchmark_compare.add_argument("--json", action="store_true")
     context_benchmark_compare.set_defaults(func=cmd_context_benchmark_compare)
     context_pack = context_sub.add_parser("pack")
