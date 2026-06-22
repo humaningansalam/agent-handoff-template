@@ -67,7 +67,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl meta suggest` is a discovery aid only. The agent must inspect candidate files and record structured `## Discovery` with `repoctl task discovery add`; suggestions are not authoritative scope.
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
-- `repoctl context` returns temporary source bundles only; it does not create durable facts or change task scope.
+- `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; it does not create durable facts or change task scope.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
 - `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale records by default.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

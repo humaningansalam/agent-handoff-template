@@ -62,6 +62,7 @@ class ContextBundle:
     candidates: list[ContextCandidate]
     packed_context: list[ContextCandidate]
     budget: dict[str, int]
+    knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     schema: str = "repoctl.context.bundle"
     schema_version: int = 1
     authoritative: bool = False
@@ -78,6 +79,7 @@ class ContextBundle:
             "completeness": self.completeness,
             "candidates": [candidate.to_dict() for candidate in sorted(self.candidates, key=_candidate_sort_key)],
             "packed_context": [candidate.to_dict() for candidate in sorted(self.packed_context, key=_candidate_sort_key)],
+            "knowledge_results": sorted(self.knowledge_results, key=_knowledge_sort_key),
             "budget": self.budget,
         }
         if include_digest:
@@ -93,6 +95,7 @@ class ContextBundle:
             candidates=self.candidates,
             packed_context=self.packed_context,
             budget=self.budget,
+            knowledge_results=self.knowledge_results,
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,
@@ -103,3 +106,8 @@ class ContextBundle:
 def _candidate_sort_key(candidate: ContextCandidate) -> tuple[float, str, str, int]:
     ref = candidate.source_ref
     return (-candidate.score, ref.path, ref.section, ref.line_start)
+
+
+def _knowledge_sort_key(item: dict[str, Any]) -> tuple[float, str]:
+    record = item.get("record") if isinstance(item.get("record"), dict) else {}
+    return (-float(item.get("score") or 0.0), str(record.get("id") or ""))

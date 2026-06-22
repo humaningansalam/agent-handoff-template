@@ -188,3 +188,36 @@ Explain why Graph remains non-authoritative.
     assert any(item["source_ref"]["path"] == "docs/adr/evidence-context-authority-v0.md" for item in data["groups"]["must_read"])
     assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
+
+
+def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    bundle = payload["data"]["bundle"]
+    assert bundle["knowledge_results"][0]["record"]["id"] == record_id
+    assert bundle["knowledge_results"][0]["record"]["status"] == "reviewed"
+    assert bundle["completeness"]["knowledge_result_count"] == 1
+    assert all(candidate["source_ref"]["kind"] != "knowledge_record" for candidate in bundle["packed_context"])
+
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--json"]) == 0
+    stale_payload = json.loads(capsys.readouterr().out)
+    stale_bundle = stale_payload["data"]["bundle"]
+    assert stale_bundle["knowledge_results"] == []
+    assert stale_bundle["completeness"]["knowledge_available_record_count"] == 1
+    assert any(problem["code"] == "knowledge_stale_record_excluded" for problem in stale_payload["problems"])
