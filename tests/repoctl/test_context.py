@@ -509,6 +509,7 @@ Use reviewed knowledge source authority.
     assert reviewed[0]["record"]["status"] == "reviewed"
     assert reviewed[0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
     assert payload["data"]["bundle"]["query"]["explain"] is True
+    assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
 
 
 def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -648,6 +649,8 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     assert bundle["knowledge_results"][0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
     assert bundle["query"]["explain"] is True
     assert bundle["completeness"]["knowledge_result_count"] == 1
+    assert bundle["completeness"]["knowledge_lifecycle"]["available_statuses"] == {"reviewed": 1}
+    assert bundle["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
     assert all(candidate["source_ref"]["kind"] != "knowledge_record" for candidate in bundle["packed_context"])
 
     source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
@@ -658,4 +661,7 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     stale_bundle = stale_payload["data"]["bundle"]
     assert stale_bundle["knowledge_results"] == []
     assert stale_bundle["completeness"]["knowledge_available_record_count"] == 1
+    assert stale_bundle["completeness"]["knowledge_lifecycle"]["available_statuses"] == {"stale": 1}
+    assert stale_bundle["completeness"]["knowledge_lifecycle"]["excluded_statuses"] == {"stale": 1}
+    assert stale_bundle["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {}
     assert any(problem["code"] == "knowledge_stale_record_excluded" for problem in stale_payload["problems"])

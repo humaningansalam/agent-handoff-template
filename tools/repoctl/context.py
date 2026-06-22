@@ -31,6 +31,7 @@ def build_context_bundle(root: Path, *, target: RepoTarget, query: str, budget_t
             "source_count": len(chunks),
             "knowledge_available_record_count": int(knowledge_data.get("available_record_count") or 0),
             "knowledge_result_count": int(knowledge_data.get("result_count") or 0),
+            "knowledge_lifecycle": knowledge_data.get("lifecycle", {}) if isinstance(knowledge_data.get("lifecycle"), dict) else {},
         },
         candidates=candidates,
         packed_context=packed,
