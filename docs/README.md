@@ -84,5 +84,6 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
 - `repoctl knowledge candidate refresh` creates a new candidate plus an event; it does not edit the stale candidate in place.
+- `repoctl knowledge candidate list` and `knowledge status` derive candidate review state from append-only events.
 - `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale and superseded records by default.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

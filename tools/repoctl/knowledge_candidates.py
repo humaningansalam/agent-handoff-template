@@ -129,6 +129,7 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
 def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = False) -> dict[str, Any]:
     directory = _candidate_dir(root, repo_id)
     candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    review_states = _candidate_review_states(root, repo_id=repo_id)
     items = [
         {
             "id": candidate.get("id", ""),
@@ -136,6 +137,7 @@ def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = F
             "title": candidate.get("title", ""),
             "source_refs": candidate.get("source_refs", []),
             "authoritative": bool(candidate.get("authoritative", True)),
+            "review_state": review_states.get(str(candidate.get("id") or ""), "pending"),
         }
         for candidate in candidates
     ]
@@ -159,6 +161,10 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     directory = _candidate_dir(root, repo_id)
     candidate_records = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
     candidates = list_knowledge_candidates(root, repo_id=repo_id)["candidates"]
+    candidate_review_states: dict[str, int] = {}
+    for item in candidates:
+        state = str(item.get("review_state") or "pending")
+        candidate_review_states[state] = candidate_review_states.get(state, 0) + 1
     candidate_checks = _candidate_checks(root, repo_id=repo_id, candidates=candidate_records)
     candidate_problem_codes: dict[str, int] = {}
     candidate_warning_codes: dict[str, int] = {}
@@ -194,6 +200,7 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
         "schema_version": 1,
         "repo_id": repo_id,
         "candidate_count": len(candidates),
+        "candidate_review_states": dict(sorted(candidate_review_states.items())),
         "candidate_checks": {
             "passed_count": candidate_checks["passed_count"],
             "error_count": candidate_checks["error_count"],
@@ -711,6 +718,23 @@ def _load_events(root: Path, *, repo_id: str) -> list[dict[str, Any]]:
         return []
     events = [_read_candidate(path) for path in sorted(directory.glob("E-*.json"))]
     return [event for event in events if str(event.get("repo_id") or "") == repo_id]
+
+
+def _candidate_review_states(root: Path, *, repo_id: str) -> dict[str, str]:
+    states: dict[str, str] = {}
+    for event in _load_events(root, repo_id=repo_id):
+        candidate_id = str(event.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "approved":
+            states[candidate_id] = "approved"
+        elif event_type == "rejected_candidate":
+            if states.get(candidate_id) != "approved":
+                states[candidate_id] = "rejected"
+        elif event_type == "refreshed_candidate":
+            states.setdefault(candidate_id, "refreshed")
+    return states
 
 
 def _refreshed_candidate_ids(root: Path, *, repo_id: str) -> set[str]:

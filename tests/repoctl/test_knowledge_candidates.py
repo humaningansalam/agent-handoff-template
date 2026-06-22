@@ -41,6 +41,7 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert main(["knowledge", "candidate", "list", "--repo-id", "main", "--json"]) == 0
     list_payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in list_payload["data"]["candidates"]] == [candidate["id"]]
+    assert list_payload["data"]["candidates"][0]["review_state"] == "pending"
 
     assert main(["knowledge", "candidate", "show", candidate["id"], "--repo-id", "main", "--json"]) == 0
     show_payload = json.loads(capsys.readouterr().out)
@@ -58,6 +59,7 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["candidate_count"] == 2
+    assert status_payload["data"]["candidate_review_states"] == {"pending": 2}
     assert status_payload["data"]["record_count"] == 0
     assert status_payload["data"]["candidate_checks"]["passed_count"] == 2
     assert status_payload["data"]["candidate_checks"]["error_count"] == 0
@@ -143,6 +145,7 @@ def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tm
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["candidate_count"] == 2
+    assert status_payload["data"]["candidate_review_states"] == {"pending": 1, "refreshed": 1}
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
 
@@ -181,6 +184,7 @@ def test_knowledge_candidate_refresh_all_stale_only_refreshes_drifted_candidates
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["candidate_count"] == 3
+    assert status_payload["data"]["candidate_review_states"] == {"pending": 2, "refreshed": 1}
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
     assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 0
@@ -190,6 +194,7 @@ def test_knowledge_candidate_refresh_all_stale_only_refreshes_drifted_candidates
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     second_status = json.loads(capsys.readouterr().out)
     assert second_status["data"]["candidate_count"] == 3
+    assert second_status["data"]["candidate_review_states"] == {"pending": 2, "refreshed": 1}
     assert second_status["data"]["event_types"] == {"refreshed_candidate": 1}
 
 
@@ -277,6 +282,10 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert main(["knowledge", "show", record["id"], "--json"]) == 0
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["data"]["record"]["record_digest"] == record["record_digest"]
+
+    assert main(["knowledge", "candidate", "list", "--repo-id", "main", "--json"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+    assert list_payload["data"]["candidates"][0]["review_state"] == "approved"
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
@@ -438,6 +447,7 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["event_types"] == {"rejected_candidate": 1}
+    assert status_payload["data"]["candidate_review_states"] == {"rejected": 1}
 
 
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
