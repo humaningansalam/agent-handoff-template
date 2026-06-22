@@ -22,6 +22,7 @@ def run_context_benchmark(
     min_knowledge_recall_at_5: float | None = None,
     require_source_integrity: bool = False,
     require_knowledge_source_current: bool = False,
+    require_no_forbidden: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
@@ -52,6 +53,7 @@ def run_context_benchmark(
             min_knowledge_recall_at_5=min_knowledge_recall_at_5,
             require_source_integrity=require_source_integrity,
             require_knowledge_source_current=require_knowledge_source_current,
+            require_no_forbidden=require_no_forbidden,
         )
     )
     data = {
@@ -65,6 +67,7 @@ def run_context_benchmark(
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
+            "require_no_forbidden": require_no_forbidden,
         },
     }
     data["benchmark_digest"] = digest_data(data)
@@ -422,6 +425,7 @@ def _gate_problems(
     min_knowledge_recall_at_5: float | None,
     require_source_integrity: bool,
     require_knowledge_source_current: bool,
+    require_no_forbidden: bool,
 ) -> list[Problem]:
     problems: list[Problem] = []
     if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:
@@ -436,4 +440,6 @@ def _gate_problems(
         problems.append(Problem("error", "context_benchmark_knowledge_integrity_failed", "context benchmark knowledge source ref integrity failed"))
     if require_knowledge_source_current and not bool(summary.get("knowledge_source_status_current")):
         problems.append(Problem("error", "context_benchmark_knowledge_source_stale", "context benchmark knowledge source status is not current"))
+    if require_no_forbidden and int(summary.get("forbidden_selected") or 0) > 0:
+        problems.append(Problem("error", "context_benchmark_forbidden_selected", "context benchmark selected forbidden source refs"))
     return problems

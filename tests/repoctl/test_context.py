@@ -295,6 +295,44 @@ def test_context_benchmark_quality_gate_passes_with_knowledge(tmp_path: Path, mo
     assert payload["problems"] == []
 
 
+def test_context_benchmark_forbidden_gate_fails_on_forbidden_source(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = tmp_path / "context-fixture"
+    fixture.mkdir()
+    (fixture / "questions.jsonl").write_text(
+        '{"id":"Q-FORBIDDEN","category":"leakage","repo_id":"main","question":"Generated output authority"}\n',
+        encoding="utf-8",
+    )
+    (fixture / "expected-sources.json").write_text(
+        json.dumps(
+            {
+                "Q-FORBIDDEN": {
+                    "required_source_refs": [],
+                    "required_knowledge_source_refs": [],
+                    "acceptable_optional_refs": [],
+                    "forbidden_refs": [{"path": "docs/workflows/generated.md"}],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--require-no-forbidden", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    result = payload["data"]["results"][0]
+    assert payload["data"]["summary"]["forbidden_selected"] >= 1
+    assert result["metrics"]["forbidden_selected"] >= 1
+    assert result["selected_forbidden"][0]["path"] == "docs/workflows/generated.md"
+    assert payload["data"]["gates"]["require_no_forbidden"] is True
+    assert payload["problems"][0]["code"] == "context_benchmark_forbidden_selected"
+
+
 def test_context_benchmark_knowledge_source_current_gate_fails_on_stale_record(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
