@@ -638,6 +638,7 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
     problems: list[Problem] = []
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    events = _load_events(root, repo_id=repo_id)
     superseded_ids = _superseded_ids(records)
     deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     available_statuses: dict[str, int] = {}
@@ -664,7 +665,7 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
         if score <= 0:
             continue
         item = {
-            "record": _public_record(record, status=status),
+            "record": _public_record(record, status=status, lifecycle_relations=_record_lifecycle_relations(record, events)),
             "score": round(score, 6),
             "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
             "selection_reasons": reasons,
@@ -1258,7 +1259,7 @@ def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[di
     return sorted(related, key=lambda item: (item["status"], item["record_id"]))
 
 
-def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:
+def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: dict[str, Any] | None = None) -> dict[str, Any]:
     public = {
         "id": record.get("id", ""),
         "repo_id": record.get("repo_id", ""),
@@ -1270,10 +1271,28 @@ def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:
         "source_refs": record.get("source_refs", []),
         "record_digest": record.get("record_digest", ""),
     }
+    if lifecycle_relations:
+        public["lifecycle_relations"] = lifecycle_relations
     approval_context = _approval_context(record)
     if approval_context:
         public["approval_context"] = approval_context
     return public
+
+
+def _record_lifecycle_relations(record: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+    record_id = str(record.get("id") or "")
+    supersedes = record.get("supersedes", [])
+    relations = {
+        "supersedes": [str(item) for item in supersedes if str(item)] if isinstance(supersedes, list) else [],
+        "superseded_by": [],
+        "deprecated_by": [],
+    }
+    for event in events:
+        if event.get("type") == "superseded" and str(event.get("record_id") or "") == record_id and event.get("superseded_by"):
+            relations["superseded_by"].append(str(event.get("superseded_by") or ""))
+        if event.get("type") == "deprecated" and str(event.get("record_id") or "") == record_id:
+            relations["deprecated_by"].append(str(event.get("id") or ""))
+    return {key: sorted(value) for key, value in relations.items() if value}
 
 
 def _approval_context(record: dict[str, Any]) -> dict[str, Any]:

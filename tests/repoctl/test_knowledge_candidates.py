@@ -644,7 +644,10 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     assert include_statuses[new_record] == "reviewed"
     assert include_payload["data"]["lifecycle"]["excluded_statuses"] == {}
     assert include_payload["data"]["lifecycle"]["returned_statuses"] == {"reviewed": 1, "superseded": 1}
+    old_query_record = next(item["record"] for item in include_payload["data"]["results"] if item["record"]["id"] == old_record)
+    assert old_query_record["lifecycle_relations"]["superseded_by"] == [new_record]
     new_query_record = next(item["record"] for item in include_payload["data"]["results"] if item["record"]["id"] == new_record)
+    assert new_query_record["lifecycle_relations"]["supersedes"] == [old_record]
     assert new_query_record["approval_context"]["related_records"][0]["record_id"] == old_record
     assert new_query_record["approval_context"]["related_records"][0]["status"] == "reviewed"
 
@@ -741,6 +744,7 @@ def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatc
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-deprecated", "--explain", "--json"]) == 0
     include_query = json.loads(capsys.readouterr().out)
     assert include_query["data"]["results"][0]["record"]["status"] == "deprecated"
+    assert include_query["data"]["results"][0]["record"]["lifecycle_relations"]["deprecated_by"] == [deprecate_payload["data"]["event"]["id"]]
     assert include_query["data"]["results"][0]["explain"]["deprecated"] is True
     assert include_query["data"]["lifecycle"]["returned_statuses"] == {"deprecated": 1}
 
