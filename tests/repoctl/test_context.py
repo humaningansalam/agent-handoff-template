@@ -497,7 +497,24 @@ Use reviewed knowledge source authority.
     pass_payload = json.loads(capsys.readouterr().out)
     assert pass_payload["data"]["count_deltas"]["must_read"]["delta"] == 0
     assert pass_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] == 0
+    assert pass_payload["data"]["missing_must_read_refs"] == []
     assert pass_payload["problems"] == []
+
+    swapped = json.loads(baseline.read_text(encoding="utf-8"))
+    assert len(swapped["data"]["groups"]["must_read"]) > 1
+    missing_ref = swapped["data"]["groups"]["must_read"][0]["source_ref"]
+    swapped["data"]["groups"]["must_read"][0] = swapped["data"]["groups"]["must_read"][1]
+    digest_basis = {key: value for key, value in swapped["data"].items() if key not in {"pack_digest", "artifact", "repository", "graph"}}
+    swapped["data"]["pack_digest"] = digest_data(digest_basis)
+    swapped["data"]["artifact"]["pack_digest"] = swapped["data"]["pack_digest"]
+    candidate.write_text(json.dumps(swapped, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--json"]) == 1
+
+    swapped_payload = json.loads(capsys.readouterr().out)
+    assert swapped_payload["data"]["count_deltas"]["must_read"]["delta"] == 0
+    assert any(ref["path"] == missing_ref["path"] and ref["section"] == missing_ref.get("section", "") for ref in swapped_payload["data"]["missing_must_read_refs"])
+    assert any(problem["code"] == "context_pack_must_read_ref_missing" for problem in swapped_payload["problems"])
 
     regressed = json.loads(candidate.read_text(encoding="utf-8"))
     regressed["data"]["groups"]["must_read"] = []
