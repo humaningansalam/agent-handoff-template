@@ -645,6 +645,24 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
+    event_problems = _event_integrity_problems(root, repo_id=repo_id, records=records)
+    if event_problems:
+        return {
+            "schema": "repoctl.knowledge.query",
+            "schema_version": 1,
+            "repo_id": repo_id,
+            "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "include_deprecated": include_deprecated, "explain": explain},
+            "lifecycle": {
+                "available_statuses": {},
+                "excluded_statuses": {},
+                "returned_statuses": {},
+                "default_excludes": ["stale", "superseded", "deprecated"],
+                "event_checks": {"error_count": len(event_problems)},
+            },
+            "results": [],
+            "result_count": 0,
+            "available_record_count": len(records),
+        }, event_problems, warnings
     superseded_ids = _superseded_ids(records)
     deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     available_statuses: dict[str, int] = {}
