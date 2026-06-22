@@ -61,7 +61,8 @@ def compare_task_context_packs(
         "reviewed_knowledge": _group_count_delta(baseline, candidate, "reviewed_knowledge"),
     }
     missing_refs = _missing_group_refs(baseline, candidate, "must_read")
-    regressions = _pack_regressions(count_deltas, missing_refs, max_must_read_drop=max_must_read_drop, max_reviewed_knowledge_drop=max_reviewed_knowledge_drop)
+    missing_reviewed_ids = _missing_reviewed_knowledge_ids(baseline, candidate)
+    regressions = _pack_regressions(count_deltas, missing_refs, missing_reviewed_ids, max_must_read_drop=max_must_read_drop, max_reviewed_knowledge_drop=max_reviewed_knowledge_drop)
     problems.extend(regressions)
     return {
         "schema": "repoctl.context.task_pack.compare",
@@ -70,6 +71,7 @@ def compare_task_context_packs(
         "candidate": _pack_identity(candidate_path, candidate),
         "count_deltas": count_deltas,
         "missing_must_read_refs": missing_refs,
+        "missing_reviewed_knowledge_ids": missing_reviewed_ids,
         "regressions": [problem.to_dict() for problem in regressions],
         "gates": {
             "max_must_read_drop": max_must_read_drop,
@@ -174,7 +176,28 @@ def _ref_key(ref: dict[str, str]) -> tuple[str, str, str]:
     return (str(ref.get("kind") or ""), str(ref.get("path") or ""), str(ref.get("section") or ""))
 
 
-def _pack_regressions(count_deltas: dict[str, dict[str, int]], missing_must_read_refs: list[dict[str, str]], *, max_must_read_drop: int | None, max_reviewed_knowledge_drop: int | None) -> list[Problem]:
+def _missing_reviewed_knowledge_ids(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
+    candidate_ids = set(_reviewed_knowledge_ids(candidate))
+    return sorted(record_id for record_id in _reviewed_knowledge_ids(baseline) if record_id not in candidate_ids)
+
+
+def _reviewed_knowledge_ids(data: dict[str, Any]) -> list[str]:
+    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    values = groups.get("reviewed_knowledge")
+    ids: list[str] = []
+    if not isinstance(values, list):
+        return ids
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        record = item.get("record") if isinstance(item.get("record"), dict) else {}
+        record_id = str(record.get("id") or "")
+        if record_id:
+            ids.append(record_id)
+    return ids
+
+
+def _pack_regressions(count_deltas: dict[str, dict[str, int]], missing_must_read_refs: list[dict[str, str]], missing_reviewed_knowledge_ids: list[str], *, max_must_read_drop: int | None, max_reviewed_knowledge_drop: int | None) -> list[Problem]:
     problems: list[Problem] = []
     if max_must_read_drop is not None and int(count_deltas["must_read"]["delta"]) < -abs(max_must_read_drop):
         problems.append(Problem("error", "context_pack_must_read_regressed", "context pack must_read count dropped more than allowed"))
@@ -182,6 +205,8 @@ def _pack_regressions(count_deltas: dict[str, dict[str, int]], missing_must_read
         problems.append(Problem("error", "context_pack_reviewed_knowledge_regressed", "context pack reviewed_knowledge count dropped more than allowed"))
     for ref in missing_must_read_refs:
         problems.append(Problem("error", "context_pack_must_read_ref_missing", "candidate context pack is missing a baseline must_read source ref", f"{ref.get('path', '')}#{ref.get('section', '')}"))
+    for record_id in missing_reviewed_knowledge_ids:
+        problems.append(Problem("error", "context_pack_reviewed_knowledge_missing", "candidate context pack is missing a baseline reviewed knowledge record", record_id))
     return problems
 
 
