@@ -1066,10 +1066,31 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
             if not str(ref.get("content_sha256") or "").startswith("sha256:"):
                 problems.append(Problem("error", "knowledge_candidate_source_hash_invalid", "candidate source hash is invalid", rel))
     problems.extend(_source_digest_problems(root, candidate, record_id=candidate_id))
+    problems.extend(_context_pack_provenance_warnings(root, candidate))
     duplicate = _duplicate_reviewed_claim(root, candidate)
     if duplicate:
         problems.append(Problem("warning", "knowledge_candidate_duplicate_reviewed_claim", f"candidate claim already exists in reviewed record {duplicate}", duplicate))
     return problems
+
+
+def _context_pack_provenance_warnings(root: Path, candidate: dict[str, Any]) -> list[Problem]:
+    derived = candidate.get("derived_from")
+    if not isinstance(derived, dict) or str(derived.get("kind") or "") != "context_pack":
+        return []
+    rel = str(derived.get("path") or "")
+    expected = str(derived.get("pack_digest") or "")
+    if not rel or not expected:
+        return [Problem("warning", "knowledge_candidate_pack_provenance_incomplete", "context pack provenance is incomplete", str(candidate.get("id") or ""))]
+    path = root / rel
+    if not path.is_file():
+        return [Problem("warning", "knowledge_candidate_pack_provenance_missing", "context pack provenance artifact is missing", rel)]
+    pack_data, pack_problems = _read_context_pack_artifact(root, path)
+    if pack_problems:
+        return [Problem("warning", "knowledge_candidate_pack_provenance_invalid", "context pack provenance artifact is invalid", rel)]
+    actual = str(pack_data.get("pack_digest") or "")
+    if actual != expected:
+        return [Problem("warning", "knowledge_candidate_pack_provenance_drift", "context pack provenance digest changed", rel)]
+    return []
 
 
 def _candidate_checks(root: Path, *, repo_id: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
