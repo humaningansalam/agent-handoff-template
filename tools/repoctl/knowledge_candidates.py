@@ -156,7 +156,21 @@ def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = F
 
 
 def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
+    directory = _candidate_dir(root, repo_id)
+    candidate_records = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
     candidates = list_knowledge_candidates(root, repo_id=repo_id)["candidates"]
+    candidate_checks = _candidate_checks(root, repo_id=repo_id, candidates=candidate_records)
+    candidate_problem_codes: dict[str, int] = {}
+    candidate_warning_codes: dict[str, int] = {}
+    for result in candidate_checks["results"]:
+        for problem in result["problems"]:
+            code = str(problem.get("code") or "")
+            if code:
+                candidate_problem_codes[code] = candidate_problem_codes.get(code, 0) + 1
+        for warning in result["warnings"]:
+            code = str(warning.get("code") or "")
+            if code:
+                candidate_warning_codes[code] = candidate_warning_codes.get(code, 0) + 1
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(records)
     statuses: dict[str, int] = {}
@@ -173,6 +187,13 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
         "schema_version": 1,
         "repo_id": repo_id,
         "candidate_count": len(candidates),
+        "candidate_checks": {
+            "passed_count": candidate_checks["passed_count"],
+            "error_count": candidate_checks["error_count"],
+            "warning_count": candidate_checks["warning_count"],
+            "problem_codes": dict(sorted(candidate_problem_codes.items())),
+            "warning_codes": dict(sorted(candidate_warning_codes.items())),
+        },
         "record_count": len(records),
         "record_statuses": dict(sorted(statuses.items())),
         "event_count": len(events),

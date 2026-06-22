@@ -59,6 +59,8 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["candidate_count"] == 2
     assert status_payload["data"]["record_count"] == 0
+    assert status_payload["data"]["candidate_checks"]["passed_count"] == 2
+    assert status_payload["data"]["candidate_checks"]["error_count"] == 0
 
 
 def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -226,6 +228,13 @@ def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monke
     integrated_payload = json.loads(capsys.readouterr().out)
     assert integrated_payload["data"]["candidate_checks"]["candidate_count"] == 3
     assert any(problem["code"] == "knowledge_source_digest_drift" for problem in integrated_payload["problems"])
+
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["candidate_checks"]["error_count"] >= 1
+    assert status_payload["data"]["candidate_checks"]["warning_count"] >= 1
+    assert status_payload["data"]["candidate_checks"]["problem_codes"]["knowledge_source_digest_drift"] >= 1
+    assert status_payload["data"]["candidate_checks"]["warning_codes"]["knowledge_candidate_duplicate_reviewed_claim"] >= 1
 
 
 def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, capsys) -> None:
