@@ -28,6 +28,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         path = output_dir / name
         atomic_write(path, content)
         rendered.append({"path": path.relative_to(root).as_posix(), "digest": digest_data({"content": content})})
+    rendered = sorted(rendered, key=lambda item: item["path"])
     return {
         "schema": "repoctl.knowledge.render",
         "schema_version": 1,
@@ -36,7 +37,8 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         "output": output_dir.relative_to(root).as_posix(),
         "record_count": len(records),
         "event_count": len(events),
-        "rendered": sorted(rendered, key=lambda item: item["path"]),
+        "render_digest": digest_data({"rendered": rendered}),
+        "rendered": rendered,
     }, []
 
 

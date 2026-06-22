@@ -425,6 +425,38 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     assert all(not path.startswith("docs/knowledge/generated/") for path in refs)
 
 
+def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+    first_files = {
+        item["path"]: (tmp_path / item["path"]).read_text(encoding="utf-8")
+        for item in first_payload["data"]["rendered"]
+    }
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    second_files = {
+        item["path"]: (tmp_path / item["path"]).read_text(encoding="utf-8")
+        for item in second_payload["data"]["rendered"]
+    }
+
+    assert first_payload["data"]["render_digest"] == second_payload["data"]["render_digest"]
+    assert first_payload["data"]["rendered"] == second_payload["data"]["rendered"]
+    assert first_files == second_files
+
+
 def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)
