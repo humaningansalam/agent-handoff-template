@@ -485,6 +485,7 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
             "candidate_check": {
                 "passed": True,
                 "warning_codes": sorted(problem.code for problem in quality_results if problem.severity == "warning"),
+                "related_records": _candidate_related_records(root, candidate),
             },
         },
         "review": {"status": "reviewed", "reviewed_by": "human"},

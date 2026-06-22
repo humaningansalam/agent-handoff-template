@@ -89,6 +89,11 @@ def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: P
     assert payload["data"]["related_records"][0]["relation"] == "same_claim"
     assert payload["warnings"][0]["code"] == "knowledge_candidate_duplicate_reviewed_claim"
 
+    assert main(["knowledge", "approve", second_candidate, "--repo-id", "main", "--json"]) == 0
+    approve_payload = json.loads(capsys.readouterr().out)
+    assert approve_payload["data"]["record"]["created_from"]["candidate_check"]["related_records"][0]["status"] == "reviewed"
+    assert approve_payload["warnings"][0]["code"] == "knowledge_candidate_duplicate_reviewed_claim"
+
 
 def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -341,7 +346,7 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert record["status"] == "reviewed"
     assert record["authoritative"] is True
     assert record["id"].startswith("K-")
-    assert record["created_from"]["candidate_check"] == {"passed": True, "warning_codes": []}
+    assert record["created_from"]["candidate_check"] == {"passed": True, "warning_codes": [], "related_records": []}
     assert approve_payload["data"]["event"]["type"] == "approved"
     assert record["id"].lower().replace("--", "-") in approve_payload["data"]["event"]["id"]
     approved_event_id = approve_payload["data"]["event"]["id"]
