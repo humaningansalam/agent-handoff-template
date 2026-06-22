@@ -1488,12 +1488,18 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     data, problems = check_knowledge_records(root, repo_id=args.repo_id)
+    warnings: list[Problem] = []
+    if args.include_candidates:
+        candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=args.repo_id)
+        data["candidate_checks"] = candidate_data
+        problems.extend(problem for problem in candidate_problems if problem.severity == "error")
+        warnings.extend(problem for problem in candidate_problems if problem.severity == "warning")
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge check",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
+        "warnings": [problem.to_dict() for problem in warnings],
     }
     if args.json:
         _json(payload)
@@ -1952,6 +1958,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_reject.set_defaults(func=cmd_knowledge_reject)
     knowledge_check = knowledge_sub.add_parser("check")
     knowledge_check.add_argument("--repo-id", required=True)
+    knowledge_check.add_argument("--include-candidates", action="store_true")
     knowledge_check.add_argument("--json", action="store_true")
     knowledge_check.set_defaults(func=cmd_knowledge_check)
     knowledge_query = knowledge_sub.add_parser("query")

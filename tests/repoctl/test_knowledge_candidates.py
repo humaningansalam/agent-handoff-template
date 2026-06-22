@@ -137,6 +137,11 @@ def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monke
     assert check_payload["data"]["warning_count"] >= 1
     assert any(result["candidate_id"] == drift_candidate and result["problems"] for result in check_payload["data"]["results"])
 
+    assert main(["knowledge", "check", "--repo-id", "main", "--include-candidates", "--json"]) == 1
+    integrated_payload = json.loads(capsys.readouterr().out)
+    assert integrated_payload["data"]["candidate_checks"]["candidate_count"] == 3
+    assert any(problem["code"] == "knowledge_source_digest_drift" for problem in integrated_payload["problems"])
+
 
 def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

@@ -220,6 +220,8 @@ def check_all_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[st
     for result in data["results"]:
         for problem in result["problems"]:
             problems.append(Problem("error", str(problem.get("code") or ""), str(problem.get("message") or ""), str(problem.get("path") or "") or None))
+        for warning in result["warnings"]:
+            problems.append(Problem("warning", str(warning.get("code") or ""), str(warning.get("message") or ""), str(warning.get("path") or "") or None))
     return data, problems
 
 
