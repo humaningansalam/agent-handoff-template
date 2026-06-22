@@ -155,6 +155,23 @@ def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, c
     }
 
 
+def test_context_benchmark_rejects_output_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+    outside = tmp_path.parent / f"{tmp_path.name}-context-benchmark.json"
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", outside.as_posix(), "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "context_benchmark_output_outside_workspace"
+    assert not outside.exists()
+
+
 def test_context_benchmark_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -370,6 +387,66 @@ Explain why Graph remains non-authoritative.
     assert data["groups"]["reviewed_knowledge"] == []
     assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
+
+
+def test_context_pack_rejects_output_symlink_escape(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622011111Z--context-pack-boundary.md"
+    task_path.write_text(
+        """---
+id: T-20260622011111Z
+title: "Keep context pack output inside workspace"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T011111Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622011111Z - Keep context pack output inside workspace
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: context pack boundary
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Reject context pack output outside the workspace.
+
+## Handoff
+
+- Next exact step: inspect context pack boundary.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260622011111Z --repo-id main --json`
+- Done when: outside output is rejected.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    escape = tmp_path.parent / f"{tmp_path.name}-context-pack-escape"
+    escape.mkdir()
+    symlink = tmp_path / ".repoctl-state/context-pack"
+    symlink.parent.mkdir(parents=True, exist_ok=True)
+    symlink.symlink_to(escape, target_is_directory=True)
+
+    assert main(["context", "pack", "--task", "T-20260622011111Z", "--repo-id", "main", "--output", ".repoctl-state/context-pack/out.json", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "context_pack_output_outside_workspace"
+    assert not (escape / "out.json").exists()
 
 
 def test_context_pack_groups_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:

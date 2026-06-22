@@ -49,6 +49,17 @@ def _complete_json_envelope(data: Any) -> None:
         data.setdefault("next_actions", _next_actions_for_problems([*data.get("problems", []), *data.get("warnings", [])], data=data.get("data", data)))
 
 
+def _workspace_output_path(root: Path, output: str, *, code: str) -> tuple[Path | None, Problem | None]:
+    path = Path(output)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return None, Problem("error", code, "output artifact must stay inside the workspace", output)
+    return path, None
+
+
 def _problem_code(problem: Any) -> str:
     if isinstance(problem, Problem):
         return problem.code
@@ -1269,16 +1280,19 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         ],
     }
     if args.output:
-        output = Path(args.output)
-        if not output.is_absolute():
-            output = root / output
-        if data:
-            data["artifact"] = {
-                "path": output.relative_to(root).as_posix() if output.is_relative_to(root) else output.as_posix(),
-                "benchmark_digest": data.get("benchmark_digest", ""),
-            }
-        _complete_json_envelope(payload)
-        atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        output, output_problem = _workspace_output_path(root, args.output, code="context_benchmark_output_outside_workspace")
+        if output_problem is not None:
+            problems.append(output_problem)
+            payload["ok"] = False
+            payload["problems"] = [problem.to_dict() for problem in problems]
+        else:
+            if data:
+                data["artifact"] = {
+                    "path": output.relative_to(root).as_posix(),
+                    "benchmark_digest": data.get("benchmark_digest", ""),
+                }
+            _complete_json_envelope(payload)
+            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     if args.json:
         _json(payload)
     else:
@@ -1336,16 +1350,19 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         "warnings": data.get("warnings", []),
     }
     if args.output:
-        output = Path(args.output)
-        if not output.is_absolute():
-            output = root / output
-        if data:
-            payload["data"]["artifact"] = {
-                "path": output.relative_to(root).as_posix() if output.is_relative_to(root) else output.as_posix(),
-                "pack_digest": data.get("pack_digest", ""),
-            }
-        _complete_json_envelope(payload)
-        atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
+        if output_problem is not None:
+            problems.append(output_problem)
+            payload["ok"] = False
+            payload["problems"] = [problem.to_dict() for problem in problems]
+        else:
+            if data:
+                payload["data"]["artifact"] = {
+                    "path": output.relative_to(root).as_posix(),
+                    "pack_digest": data.get("pack_digest", ""),
+                }
+            _complete_json_envelope(payload)
+            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     if args.json:
         _json(payload)
     else:
