@@ -177,6 +177,13 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     for record in records:
         status = _derived_status(root, record, superseded_ids=superseded_ids)
         statuses[status] = statuses.get(status, 0) + 1
+    record_problem_codes: dict[str, int] = {}
+    record_problems: list[Problem] = []
+    for record in records:
+        record_problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
+    record_problems.extend(_supersession_problems(records))
+    for problem in record_problems:
+        record_problem_codes[problem.code] = record_problem_codes.get(problem.code, 0) + 1
     events = _load_events(root, repo_id=repo_id)
     event_types: dict[str, int] = {}
     for event in events:
@@ -196,6 +203,11 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
         },
         "record_count": len(records),
         "record_statuses": dict(sorted(statuses.items())),
+        "record_checks": {
+            "error_count": len([problem for problem in record_problems if problem.severity == "error"]),
+            "warning_count": len([problem for problem in record_problems if problem.severity == "warning"]),
+            "problem_codes": dict(sorted(record_problem_codes.items())),
+        },
         "event_count": len(events),
         "event_types": dict(sorted(event_types.items())),
     }

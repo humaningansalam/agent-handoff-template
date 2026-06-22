@@ -61,6 +61,7 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert status_payload["data"]["record_count"] == 0
     assert status_payload["data"]["candidate_checks"]["passed_count"] == 2
     assert status_payload["data"]["candidate_checks"]["error_count"] == 0
+    assert status_payload["data"]["record_checks"]["error_count"] == 0
 
 
 def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -319,6 +320,12 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     drift_payload = json.loads(capsys.readouterr().out)
     assert drift_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
     assert drift_payload["data"]["records"][0]["status"] == "stale"
+
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["record_statuses"] == {"stale": 1}
+    assert status_payload["data"]["record_checks"]["error_count"] == 1
+    assert status_payload["data"]["record_checks"]["problem_codes"] == {"knowledge_source_digest_drift": 1}
 
 
 def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, monkeypatch, capsys) -> None:
