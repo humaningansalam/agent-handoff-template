@@ -5,6 +5,7 @@
 .uv-cache/
 docs/tasks/.repoctl.lock.d/
 docs/tasks/.repoctl-state/
+.repoctl-state/
 docs/**/.*.tmp
 docs/plans/
 
