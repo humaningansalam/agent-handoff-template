@@ -225,14 +225,24 @@ def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monke
 
     assert main(["knowledge", "candidate", "check", "--all", "--repo-id", "main", "--json"]) == 1
     check_payload = json.loads(capsys.readouterr().out)
-    assert check_payload["data"]["candidate_count"] == 3
+    assert check_payload["data"]["candidate_count"] == 2
+    assert check_payload["data"]["candidate_total_count"] == 3
+    assert check_payload["data"]["pending_only"] is True
+    assert check_payload["data"]["skipped_non_pending_count"] == 1
     assert check_payload["data"]["error_count"] >= 1
     assert check_payload["data"]["warning_count"] >= 1
     assert any(result["candidate_id"] == drift_candidate and result["problems"] for result in check_payload["data"]["results"])
 
+    assert main(["knowledge", "candidate", "check", "--all", "--all-states", "--repo-id", "main", "--json"]) == 1
+    all_states_payload = json.loads(capsys.readouterr().out)
+    assert all_states_payload["data"]["candidate_count"] == 3
+    assert all_states_payload["data"]["pending_only"] is False
+    assert all_states_payload["data"]["skipped_non_pending_count"] == 0
+
     assert main(["knowledge", "check", "--repo-id", "main", "--include-candidates", "--json"]) == 1
     integrated_payload = json.loads(capsys.readouterr().out)
-    assert integrated_payload["data"]["candidate_checks"]["candidate_count"] == 3
+    assert integrated_payload["data"]["candidate_checks"]["candidate_count"] == 2
+    assert integrated_payload["data"]["candidate_checks"]["candidate_total_count"] == 3
     assert any(problem["code"] == "knowledge_source_digest_drift" for problem in integrated_payload["problems"])
 
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0

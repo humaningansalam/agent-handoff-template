@@ -52,6 +52,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Build a candidate from completed task evidence: `./scripts/repoctl knowledge candidate build --from-receipt T-... --repo-id main --kind invariant --json`
 - Check candidate quality before review: `./scripts/repoctl knowledge candidate check KC-... --repo-id main --json`
 - Check all pending candidates: `./scripts/repoctl knowledge candidate check --all --repo-id main --json`
+- Check candidates across all lifecycle states: `./scripts/repoctl knowledge candidate check --all --all-states --repo-id main --json`
 - List candidates with check summaries: `./scripts/repoctl knowledge candidate list --repo-id main --with-checks --json`
 - Refresh a stale candidate without mutating it: `./scripts/repoctl knowledge candidate refresh KC-... --repo-id main --json`
 - Refresh all stale candidates non-destructively: `./scripts/repoctl knowledge candidate refresh --all-stale --repo-id main --json`

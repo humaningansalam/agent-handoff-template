@@ -1397,7 +1397,7 @@ def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     if args.all:
-        data, problems = check_all_knowledge_candidates(root, repo_id=args.repo_id)
+        data, problems = check_all_knowledge_candidates(root, repo_id=args.repo_id, pending_only=not args.all_states)
     elif args.candidate_id:
         data, problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
     else:
@@ -1525,7 +1525,7 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
     data, problems = check_knowledge_records(root, repo_id=args.repo_id)
     warnings: list[Problem] = []
     if args.include_candidates:
-        candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=args.repo_id)
+        candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=args.repo_id, pending_only=True)
         data["candidate_checks"] = candidate_data
         problems.extend(problem for problem in candidate_problems if problem.severity == "error")
         warnings.extend(problem for problem in candidate_problems if problem.severity == "warning")
@@ -1970,6 +1970,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_check = knowledge_candidate_sub.add_parser("check")
     knowledge_candidate_check.add_argument("candidate_id", nargs="?")
     knowledge_candidate_check.add_argument("--all", action="store_true")
+    knowledge_candidate_check.add_argument("--all-states", action="store_true")
     knowledge_candidate_check.add_argument("--repo-id", required=True)
     knowledge_candidate_check.add_argument("--json", action="store_true")
     knowledge_candidate_check.set_defaults(func=cmd_knowledge_candidate_check)

@@ -252,10 +252,18 @@ def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) ->
     }, check_problems
 
 
-def check_all_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
+def check_all_knowledge_candidates(root: Path, *, repo_id: str, pending_only: bool = True) -> tuple[dict[str, Any], list[Problem]]:
     directory = _candidate_dir(root, repo_id)
     candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
-    data = _candidate_checks(root, repo_id=repo_id, candidates=candidates)
+    if pending_only:
+        review_states = _candidate_review_states(root, repo_id=repo_id)
+        checked_candidates = [candidate for candidate in candidates if review_states.get(str(candidate.get("id") or ""), "pending") == "pending"]
+    else:
+        checked_candidates = candidates
+    data = _candidate_checks(root, repo_id=repo_id, candidates=checked_candidates)
+    data["candidate_total_count"] = len(candidates)
+    data["pending_only"] = pending_only
+    data["skipped_non_pending_count"] = len(candidates) - len(checked_candidates)
     problems: list[Problem] = []
     for result in data["results"]:
         for problem in result["problems"]:
