@@ -607,13 +607,18 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(records)
+    available_statuses: dict[str, int] = {}
+    excluded_statuses: dict[str, int] = {}
     scored: list[dict[str, Any]] = []
     for record in records:
         status = _derived_status(root, record, superseded_ids=superseded_ids)
+        available_statuses[status] = available_statuses.get(status, 0) + 1
         if status == "stale" and not include_stale:
+            excluded_statuses[status] = excluded_statuses.get(status, 0) + 1
             warnings.append(Problem("warning", "knowledge_stale_record_excluded", "stale knowledge record excluded from default query", str(record.get("id") or "")))
             continue
         if status == "superseded" and not include_superseded:
+            excluded_statuses[status] = excluded_statuses.get(status, 0) + 1
             warnings.append(Problem("warning", "knowledge_superseded_record_excluded", "superseded knowledge record excluded from default query", str(record.get("id") or "")))
             continue
         if status not in {"reviewed", "stale", "superseded"}:
@@ -636,13 +641,26 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
             }
         scored.append(item)
     scored.sort(key=lambda item: (-float(item["score"]), str(item["record"].get("id") or "")))
+    returned = scored[:limit]
+    returned_statuses: dict[str, int] = {}
+    for item in returned:
+        record = item.get("record") if isinstance(item.get("record"), dict) else {}
+        status = str(record.get("status") or "")
+        if status:
+            returned_statuses[status] = returned_statuses.get(status, 0) + 1
     return {
         "schema": "repoctl.knowledge.query",
         "schema_version": 1,
         "repo_id": repo_id,
         "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "explain": explain},
-        "results": scored[:limit],
-        "result_count": min(len(scored), limit),
+        "lifecycle": {
+            "available_statuses": dict(sorted(available_statuses.items())),
+            "excluded_statuses": dict(sorted(excluded_statuses.items())),
+            "returned_statuses": dict(sorted(returned_statuses.items())),
+            "default_excludes": ["stale", "superseded"],
+        },
+        "results": returned,
+        "result_count": len(returned),
         "available_record_count": len(records),
     }, problems, warnings
 

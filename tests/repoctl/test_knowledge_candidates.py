@@ -408,11 +408,19 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 0
     stale_excluded = json.loads(capsys.readouterr().out)
     assert stale_excluded["data"]["result_count"] == 0
+    assert stale_excluded["data"]["lifecycle"] == {
+        "available_statuses": {"stale": 1},
+        "excluded_statuses": {"stale": 1},
+        "returned_statuses": {},
+        "default_excludes": ["stale", "superseded"],
+    }
     assert stale_excluded["warnings"][0]["code"] == "knowledge_stale_record_excluded"
 
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-stale", "--json"]) == 0
     stale_included = json.loads(capsys.readouterr().out)
     assert stale_included["data"]["results"][0]["record"]["status"] == "stale"
+    assert stale_included["data"]["lifecycle"]["excluded_statuses"] == {}
+    assert stale_included["data"]["lifecycle"]["returned_statuses"] == {"stale": 1}
 
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-stale", "--explain", "--json"]) == 0
     stale_explain = json.loads(capsys.readouterr().out)["data"]["results"][0]["explain"]
@@ -618,6 +626,9 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     returned_ids = [item["record"]["id"] for item in query_payload["data"]["results"]]
     assert old_record not in returned_ids
     assert new_record in returned_ids
+    assert query_payload["data"]["lifecycle"]["available_statuses"] == {"reviewed": 1, "superseded": 1}
+    assert query_payload["data"]["lifecycle"]["excluded_statuses"] == {"superseded": 1}
+    assert query_payload["data"]["lifecycle"]["returned_statuses"] == {"reviewed": 1}
     assert any(warning["code"] == "knowledge_superseded_record_excluded" for warning in query_payload["warnings"])
 
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-superseded", "--json"]) == 0
@@ -625,6 +636,8 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     include_statuses = {item["record"]["id"]: item["record"]["status"] for item in include_payload["data"]["results"]}
     assert include_statuses[old_record] == "superseded"
     assert include_statuses[new_record] == "reviewed"
+    assert include_payload["data"]["lifecycle"]["excluded_statuses"] == {}
+    assert include_payload["data"]["lifecycle"]["returned_statuses"] == {"reviewed": 1, "superseded": 1}
     new_query_record = next(item["record"] for item in include_payload["data"]["results"] if item["record"]["id"] == new_record)
     assert new_query_record["approval_context"]["related_records"][0]["record_id"] == old_record
     assert new_query_record["approval_context"]["related_records"][0]["status"] == "reviewed"
