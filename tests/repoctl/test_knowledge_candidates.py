@@ -412,7 +412,7 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
         "available_statuses": {"stale": 1},
         "excluded_statuses": {"stale": 1},
         "returned_statuses": {},
-        "default_excludes": ["stale", "superseded"],
+        "default_excludes": ["stale", "superseded", "deprecated"],
     }
     assert stale_excluded["warnings"][0]["code"] == "knowledge_stale_record_excluded"
 
@@ -691,6 +691,62 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     event_payload = json.loads(capsys.readouterr().out)
     assert event_payload["data"]["event_count"] == 1
     assert event_payload["data"]["events"][0]["candidate_id"] == candidate_id
+
+
+def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record = json.loads(capsys.readouterr().out)["data"]["record"]
+    record_path = tmp_path / "docs/knowledge/records" / f"{record['id']}.json"
+    record_before = record_path.read_text(encoding="utf-8")
+    reason = tmp_path / "deprecated-reason.md"
+    reason.write_text("Decision is no longer used but remains historical evidence.\n", encoding="utf-8")
+
+    assert main(["knowledge", "deprecate", record["id"], "--repo-id", "main", "--reason-file", reason.as_posix(), "--json"]) == 0
+
+    deprecate_payload = json.loads(capsys.readouterr().out)
+    assert deprecate_payload["data"]["event"]["type"] == "deprecated"
+    assert deprecate_payload["data"]["event"]["record_id"] == record["id"]
+    assert deprecate_payload["warnings"][0]["code"] == "knowledge_deprecation_is_append_only"
+    assert record_path.read_text(encoding="utf-8") == record_before
+
+    assert main(["knowledge", "deprecate", record["id"], "--repo-id", "main", "--reason-file", reason.as_posix(), "--json"]) == 1
+    duplicate_payload = json.loads(capsys.readouterr().out)
+    assert duplicate_payload["problems"][0]["code"] == "knowledge_record_already_deprecated"
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["records"][0]["status"] == "deprecated"
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 0
+    default_query = json.loads(capsys.readouterr().out)
+    assert default_query["data"]["result_count"] == 0
+    assert default_query["data"]["lifecycle"]["excluded_statuses"] == {"deprecated": 1}
+    assert default_query["warnings"][0]["code"] == "knowledge_deprecated_record_excluded"
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-deprecated", "--explain", "--json"]) == 0
+    include_query = json.loads(capsys.readouterr().out)
+    assert include_query["data"]["results"][0]["record"]["status"] == "deprecated"
+    assert include_query["data"]["results"][0]["explain"]["deprecated"] is True
+    assert include_query["data"]["lifecycle"]["returned_statuses"] == {"deprecated": 1}
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
+    assert "- Status: `deprecated`" in decisions_text
+
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["record_statuses"] == {"deprecated": 1}
+    assert status_payload["data"]["event_types"] == {"approved": 1, "deprecated": 1}
 
 
 def test_knowledge_event_show_enforces_repo_namespace(tmp_path: Path, monkeypatch, capsys) -> None:

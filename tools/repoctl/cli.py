@@ -13,7 +13,7 @@ from .context_benchmark import compare_context_benchmarks, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compare_task_context_packs
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -1700,6 +1700,32 @@ def cmd_knowledge_reject(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_knowledge_deprecate(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = deprecate_knowledge_record(root, repo_id=args.repo_id, record_id=args.record_id, reason_file=Path(args.reason_file))
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge deprecate",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "knowledge_deprecation_is_append_only",
+                "message": "deprecation writes a lifecycle event and does not edit the record body",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        event = data.get("event", {}) if data else {}
+        print(f"knowledge deprecate event={event.get('id', '')}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_knowledge_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -1729,7 +1755,7 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
 def cmd_knowledge_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=args.include_stale, include_superseded=args.include_superseded, limit=args.limit, explain=args.explain)
+    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=args.include_stale, include_superseded=args.include_superseded, include_deprecated=args.include_deprecated, limit=args.limit, explain=args.explain)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge query",
@@ -2216,6 +2242,12 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_reject.add_argument("--reason-file", required=True)
     knowledge_reject.add_argument("--json", action="store_true")
     knowledge_reject.set_defaults(func=cmd_knowledge_reject)
+    knowledge_deprecate = knowledge_sub.add_parser("deprecate")
+    knowledge_deprecate.add_argument("record_id")
+    knowledge_deprecate.add_argument("--repo-id", required=True)
+    knowledge_deprecate.add_argument("--reason-file", required=True)
+    knowledge_deprecate.add_argument("--json", action="store_true")
+    knowledge_deprecate.set_defaults(func=cmd_knowledge_deprecate)
     knowledge_check = knowledge_sub.add_parser("check")
     knowledge_check.add_argument("--repo-id", required=True)
     knowledge_check.add_argument("--include-candidates", action="store_true")
@@ -2226,6 +2258,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("--repo-id", required=True)
     knowledge_query.add_argument("--include-stale", action="store_true")
     knowledge_query.add_argument("--include-superseded", action="store_true")
+    knowledge_query.add_argument("--include-deprecated", action="store_true")
     knowledge_query.add_argument("--explain", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
     knowledge_query.add_argument("--json", action="store_true")

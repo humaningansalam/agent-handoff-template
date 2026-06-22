@@ -232,9 +232,10 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
                 candidate_warning_codes[code] = candidate_warning_codes.get(code, 0) + 1
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(records)
+    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     statuses: dict[str, int] = {}
     for record in records:
-        status = _derived_status(root, record, superseded_ids=superseded_ids)
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
         statuses[status] = statuses.get(status, 0) + 1
     record_problem_codes: dict[str, int] = {}
     record_problems: list[Problem] = []
@@ -565,6 +566,36 @@ def reject_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, r
     return {"event": event, "event_path": event_path.relative_to(root).as_posix()}, []
 
 
+def deprecate_knowledge_record(root: Path, *, repo_id: str, record_id: str, reason_file: Path) -> tuple[dict[str, Any], list[Problem]]:
+    record_data, problems = show_knowledge_record(root, record_id=record_id, repo_id=repo_id)
+    if problems:
+        return {}, problems
+    reason_path = reason_file if reason_file.is_absolute() else root / reason_file
+    if not reason_path.is_file():
+        return {}, [Problem("error", "knowledge_deprecate_reason_missing", "deprecation reason file is missing", reason_path.as_posix())]
+    reason = reason_path.read_text(encoding="utf-8").strip()
+    if not reason:
+        return {}, [Problem("error", "knowledge_deprecate_reason_empty", "deprecation reason file is empty", reason_path.as_posix())]
+    if record_id in _deprecated_ids(root, repo_id=repo_id):
+        return {}, [Problem("error", "knowledge_record_already_deprecated", "knowledge record is already deprecated", record_id)]
+    record = record_data["record"]
+    event = {
+        "schema": "repoctl.knowledge.event",
+        "schema_version": 1,
+        "id": _event_id("deprecated", record_id),
+        "type": "deprecated",
+        "repo_id": repo_id,
+        "record_id": record_id,
+        "record_digest": record.get("record_digest", ""),
+        "reason": reason,
+    }
+    event["event_digest"] = digest_data(event)
+    event_path = _event_dir(root) / f"{event['id']}.json"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {"event": event, "event_path": event_path.relative_to(root).as_posix()}, []
+
+
 def show_knowledge_record(root: Path, *, record_id: str, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
     if not re.fullmatch(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", record_id):
         return {}, [Problem("error", "invalid_knowledge_record_id", "record id must look like K-YYYYMMDDHHMMSSZ--slug")]
@@ -582,6 +613,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     records = [_read_candidate(path) for path in sorted(_record_dir(root).glob("K-*.json"))]
     selected = [record for record in records if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(selected)
+    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     for record in selected:
         problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
     problems.extend(_supersession_problems(selected))
@@ -594,7 +626,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
             {
                 "id": record.get("id", ""),
                 "kind": record.get("kind", ""),
-                "status": _derived_status(root, record, superseded_ids=superseded_ids),
+                "status": _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids),
                 "title": record.get("title", ""),
             }
             for record in selected
@@ -602,16 +634,17 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     }, problems
 
 
-def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, include_superseded: bool = False, limit: int = 10, explain: bool = False) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
+def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, include_superseded: bool = False, include_deprecated: bool = False, limit: int = 10, explain: bool = False) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
     problems: list[Problem] = []
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(records)
+    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     available_statuses: dict[str, int] = {}
     excluded_statuses: dict[str, int] = {}
     scored: list[dict[str, Any]] = []
     for record in records:
-        status = _derived_status(root, record, superseded_ids=superseded_ids)
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
         available_statuses[status] = available_statuses.get(status, 0) + 1
         if status == "stale" and not include_stale:
             excluded_statuses[status] = excluded_statuses.get(status, 0) + 1
@@ -621,7 +654,11 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
             excluded_statuses[status] = excluded_statuses.get(status, 0) + 1
             warnings.append(Problem("warning", "knowledge_superseded_record_excluded", "superseded knowledge record excluded from default query", str(record.get("id") or "")))
             continue
-        if status not in {"reviewed", "stale", "superseded"}:
+        if status == "deprecated" and not include_deprecated:
+            excluded_statuses[status] = excluded_statuses.get(status, 0) + 1
+            warnings.append(Problem("warning", "knowledge_deprecated_record_excluded", "deprecated knowledge record excluded from default query", str(record.get("id") or "")))
+            continue
+        if status not in {"reviewed", "stale", "superseded", "deprecated"}:
             continue
         score, breakdown, reasons = _record_score(query, record)
         if score <= 0:
@@ -638,6 +675,7 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
                 "source_ref_statuses": _source_ref_statuses(root, record),
                 "superseded": status == "superseded",
                 "stale": status == "stale",
+                "deprecated": status == "deprecated",
             }
         scored.append(item)
     scored.sort(key=lambda item: (-float(item["score"]), str(item["record"].get("id") or "")))
@@ -652,12 +690,12 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
         "schema": "repoctl.knowledge.query",
         "schema_version": 1,
         "repo_id": repo_id,
-        "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "explain": explain},
+        "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "include_deprecated": include_deprecated, "explain": explain},
         "lifecycle": {
             "available_statuses": dict(sorted(available_statuses.items())),
             "excluded_statuses": dict(sorted(excluded_statuses.items())),
             "returned_statuses": dict(sorted(returned_statuses.items())),
-            "default_excludes": ["stale", "superseded"],
+            "default_excludes": ["stale", "superseded", "deprecated"],
         },
         "results": returned,
         "result_count": len(returned),
@@ -970,6 +1008,16 @@ def _superseded_ids(records: list[dict[str, Any]]) -> set[str]:
     return values
 
 
+def _deprecated_ids(root: Path, *, repo_id: str) -> set[str]:
+    values: set[str] = set()
+    for event in _load_events(root, repo_id=repo_id):
+        if event.get("type") == "deprecated":
+            record_id = str(event.get("record_id") or "")
+            if record_id:
+                values.add(record_id)
+    return values
+
+
 def _supersession_problems(records: list[dict[str, Any]]) -> list[Problem]:
     problems: list[Problem] = []
     known = {str(record.get("id") or "") for record in records}
@@ -988,12 +1036,14 @@ def _supersession_problems(records: list[dict[str, Any]]) -> list[Problem]:
     return problems
 
 
-def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str]) -> str:
+def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str] | None = None) -> str:
     if _source_digest_problems(root, record):
         return "stale"
     record_id = str(record.get("id") or "")
     if record_id in superseded_ids:
         return "superseded"
+    if deprecated_ids and record_id in deprecated_ids:
+        return "deprecated"
     return str(record.get("status") or "")
 
 
@@ -1193,6 +1243,7 @@ def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[di
     repo_id = str(candidate.get("repo_id") or "")
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(records)
+    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     related: list[dict[str, str]] = []
     for record in records:
         if str(record.get("claim") or "").strip().casefold() != candidate_claim:
@@ -1200,7 +1251,7 @@ def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[di
         related.append(
             {
                 "record_id": str(record.get("id") or ""),
-                "status": _derived_status(root, record, superseded_ids=superseded_ids),
+                "status": _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids),
                 "relation": "same_claim",
             }
         )

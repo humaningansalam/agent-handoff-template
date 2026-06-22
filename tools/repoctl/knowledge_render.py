@@ -106,7 +106,7 @@ def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any
             by_kind[kind].append(record)
     pages: dict[str, str] = {"INDEX.md": _index_page(records, events, by_kind)}
     for kind, filename in PAGE_BY_KIND.items():
-        pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records), events)
+        pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records), _deprecated_ids(events), events)
     return pages
 
 
@@ -169,7 +169,7 @@ def _index_page(records: list[dict[str, Any]], events: list[dict[str, Any]], by_
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_ids: set[str], events: list[dict[str, Any]]) -> str:
+def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> str:
     title = kind.replace("_", " ").title()
     lines = [
         f"# {title}",
@@ -182,17 +182,17 @@ def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_
         return "\n".join(lines).rstrip() + "\n"
     events_by_record = _events_by_record(events)
     for record in sorted(records, key=lambda item: str(item.get("id") or "")):
-        lines.extend(_record_section(root, record, superseded_ids=superseded_ids, events=events_by_record.get(str(record.get("id") or ""), [])))
+        lines.extend(_record_section(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, events=events_by_record.get(str(record.get("id") or ""), [])))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[str], events: list[dict[str, Any]]) -> list[str]:
+def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> list[str]:
     record_id = str(record.get("id") or "")
     lines = [
         f"## {record.get('title', record.get('id', 'Untitled'))}",
         "",
         f"- Record: `{record_id}`",
-        f"- Status: `{_derived_status(root, record, superseded_ids=superseded_ids)}`",
+        f"- Status: `{_derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)}`",
         f"- Digest: `{record.get('record_digest', '')}`",
     ]
     if record.get("supersedes"):
@@ -311,11 +311,23 @@ def _superseded_ids(records: list[dict[str, Any]]) -> set[str]:
     return values
 
 
-def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str]) -> str:
+def _deprecated_ids(events: list[dict[str, Any]]) -> set[str]:
+    values: set[str] = set()
+    for event in events:
+        if event.get("type") == "deprecated":
+            record_id = str(event.get("record_id") or "")
+            if record_id:
+                values.add(record_id)
+    return values
+
+
+def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str]) -> str:
     if _has_digest_drift(root, record):
         return "stale"
     if str(record.get("id") or "") in superseded_ids:
         return "superseded"
+    if str(record.get("id") or "") in deprecated_ids:
+        return "deprecated"
     return str(record.get("status") or "")
 
 
