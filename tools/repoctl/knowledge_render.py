@@ -7,7 +7,7 @@ from typing import Any
 
 from .graph_model import digest_data
 from .io import atomic_write
-from .knowledge_candidates import _event_integrity_problems
+from .knowledge_candidates import event_integrity_problems
 from .tasks import Problem
 
 
@@ -28,7 +28,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         return {}, [Problem("error", "knowledge_render_output_outside_workspace", "render output must stay inside the workspace", output.as_posix())]
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
-    event_problems = _event_integrity_problems(root, repo_id=repo_id, records=records)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
     if event_problems:
         return {
             "schema": "repoctl.knowledge.render",

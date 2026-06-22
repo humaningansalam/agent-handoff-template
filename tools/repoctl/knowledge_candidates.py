@@ -242,7 +242,7 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     for record in records:
         record_problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
     record_problems.extend(_supersession_problems(records))
-    record_problems.extend(_event_integrity_problems(root, repo_id=repo_id, records=records))
+    record_problems.extend(event_integrity_problems(root, repo_id=repo_id, records=records))
     for problem in record_problems:
         record_problem_codes[problem.code] = record_problem_codes.get(problem.code, 0) + 1
     events = _load_events(root, repo_id=repo_id)
@@ -618,7 +618,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     for record in selected:
         problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
     problems.extend(_supersession_problems(selected))
-    problems.extend(_event_integrity_problems(root, repo_id=repo_id, records=selected))
+    problems.extend(event_integrity_problems(root, repo_id=repo_id, records=selected))
     return {
         "schema": "repoctl.knowledge.check",
         "schema_version": 1,
@@ -645,7 +645,7 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
-    event_problems = _event_integrity_problems(root, repo_id=repo_id, records=records)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
     if event_problems:
         return {
             "schema": "repoctl.knowledge.query",
@@ -1061,7 +1061,7 @@ def _supersession_problems(records: list[dict[str, Any]]) -> list[Problem]:
     return problems
 
 
-def _event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str, Any]]) -> list[Problem]:
+def event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str, Any]]) -> list[Problem]:
     problems: list[Problem] = []
     by_id = {str(record.get("id") or ""): record for record in records}
     for event in _load_events(root, repo_id=repo_id):
