@@ -225,6 +225,53 @@ def check_all_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[st
     return data, problems
 
 
+def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
+    if problems:
+        return {}, problems
+    old_candidate = candidate_data["candidate"]
+    if str(old_candidate.get("repo_id") or "") != repo_id:
+        return {}, [Problem("error", "knowledge_candidate_repo_mismatch", "candidate belongs to a different repo", candidate_id)]
+    kind = str(old_candidate.get("kind") or "")
+    derived_from = old_candidate.get("derived_from")
+    if isinstance(derived_from, dict) and derived_from.get("kind") == "completion_receipt":
+        task_id = str(derived_from.get("task_id") or "")
+        if not task_id:
+            return {}, [Problem("error", "knowledge_candidate_refresh_source_missing", "receipt-derived candidate is missing task_id", candidate_id)]
+        refreshed_data, refresh_problems = build_knowledge_candidate_from_receipt(root, task_id=task_id, repo_id=repo_id, kind=kind)
+    else:
+        source_path = _refresh_source_path(old_candidate)
+        if not source_path:
+            return {}, [Problem("error", "knowledge_candidate_refresh_source_missing", "candidate has no refreshable document source", candidate_id)]
+        refreshed_data, refresh_problems = build_knowledge_candidate(root, source=Path(source_path), repo_id=repo_id, kind=kind)
+    if refresh_problems:
+        return {}, refresh_problems
+
+    new_candidate = refreshed_data["candidate"]
+    event = {
+        "schema": "repoctl.knowledge.event",
+        "schema_version": 1,
+        "id": _unique_event_id(root, "refreshed-candidate", candidate_id),
+        "type": "refreshed_candidate",
+        "repo_id": repo_id,
+        "candidate_id": candidate_id,
+        "new_candidate_id": new_candidate.get("id", ""),
+        "candidate_digest": old_candidate.get("candidate_digest", ""),
+        "new_candidate_digest": new_candidate.get("candidate_digest", ""),
+    }
+    event["event_digest"] = digest_data(event)
+    event_path = _event_dir(root) / f"{event['id']}.json"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {
+        "candidate": new_candidate,
+        "path": refreshed_data["path"],
+        "refreshed_from": candidate_id,
+        "event": event,
+        "event_path": event_path.relative_to(root).as_posix(),
+    }, []
+
+
 def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, supersedes: list[str] | None = None) -> tuple[dict[str, Any], list[Problem]]:
     candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
     if problems:
@@ -539,6 +586,18 @@ def _event_id(kind: str, target_id: str) -> str:
     return f"E-{stamp}--{kind}-{slug[:48].strip('-')}"
 
 
+def _unique_event_id(root: Path, kind: str, target_id: str) -> str:
+    base = _event_id(kind, target_id)
+    directory = _event_dir(root)
+    if not (directory / f"{base}.json").exists():
+        return base
+    for index in range(2, 100):
+        candidate = f"{base}-{index}"
+        if not (directory / f"{candidate}.json").exists():
+            return candidate
+    raise RepoctlError("could not allocate unique knowledge event id")
+
+
 def _candidate_dir(root: Path, repo_id: str) -> Path:
     return root / ".repoctl-state/knowledge/candidates" / repo_id
 
@@ -726,6 +785,19 @@ def _source_ref_excluded(rel: str) -> bool:
     if rel.startswith("docs/knowledge/generated/"):
         return True
     return False
+
+
+def _refresh_source_path(candidate: dict[str, Any]) -> str:
+    refs = candidate.get("source_refs", [])
+    if not isinstance(refs, list):
+        return ""
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "")
+        if str(ref.get("kind") or "document") in {"document", "authority_document"} and rel.startswith(ALLOWED_SOURCE_PREFIXES) and not _source_ref_excluded(rel):
+            return rel
+    return ""
 
 
 def _duplicate_reviewed_claim(root: Path, candidate: dict[str, Any]) -> str:

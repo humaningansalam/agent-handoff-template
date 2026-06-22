@@ -13,7 +13,7 @@ from .context_benchmark import run_context_benchmark
 from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, query_knowledge_records, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, query_knowledge_records, refresh_knowledge_candidate, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -1422,6 +1422,32 @@ def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = refresh_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge candidate refresh",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "knowledge_candidate_refresh_creates_new_candidate",
+                "message": "refresh creates a new candidate and leaves the original candidate unchanged",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        candidate = data.get("candidate", {}) if data else {}
+        print(f"knowledge candidate refresh old={args.candidate_id} new={candidate.get('id', '')}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_knowledge_approve(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -1936,6 +1962,11 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_check.add_argument("--repo-id", required=True)
     knowledge_candidate_check.add_argument("--json", action="store_true")
     knowledge_candidate_check.set_defaults(func=cmd_knowledge_candidate_check)
+    knowledge_candidate_refresh = knowledge_candidate_sub.add_parser("refresh")
+    knowledge_candidate_refresh.add_argument("candidate_id")
+    knowledge_candidate_refresh.add_argument("--repo-id", required=True)
+    knowledge_candidate_refresh.add_argument("--json", action="store_true")
+    knowledge_candidate_refresh.set_defaults(func=cmd_knowledge_candidate_refresh)
     knowledge_status_parser = knowledge_sub.add_parser("status")
     knowledge_status_parser.add_argument("--repo-id", required=True)
     knowledge_status_parser.add_argument("--json", action="store_true")
