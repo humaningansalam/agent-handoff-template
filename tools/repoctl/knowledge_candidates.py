@@ -180,14 +180,37 @@ def show_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> 
     return {"candidate": _read_candidate(path), "path": path.relative_to(root).as_posix()}, []
 
 
+def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
+    if problems:
+        return {}, problems
+    candidate = data["candidate"]
+    check_problems = _candidate_quality_problems(root, candidate)
+    return {
+        "schema": "repoctl.knowledge.candidate_check",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "candidate_id": candidate_id,
+        "candidate_digest": candidate.get("candidate_digest", ""),
+        "passed": not any(problem.severity == "error" for problem in check_problems),
+        "checks": {
+            "schema_valid": not any(problem.code.startswith("knowledge_candidate_schema") for problem in check_problems),
+            "source_refs_valid": not any(problem.code.startswith("knowledge_candidate_source") for problem in check_problems),
+            "digest_current": not any(problem.code == "knowledge_source_digest_drift" for problem in check_problems),
+            "review_required": bool(candidate.get("review", {}).get("required")) if isinstance(candidate.get("review"), dict) else False,
+            "duplicate_reviewed_claim": any(problem.code == "knowledge_candidate_duplicate_reviewed_claim" for problem in check_problems),
+        },
+    }, check_problems
+
+
 def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, supersedes: list[str] | None = None) -> tuple[dict[str, Any], list[Problem]]:
     candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
     if problems:
         return {}, problems
     candidate = candidate_data["candidate"]
-    digest_problems = _source_digest_problems(root, candidate)
-    if digest_problems:
-        return {}, digest_problems
+    quality_problems = [problem for problem in _candidate_quality_problems(root, candidate) if problem.severity == "error"]
+    if quality_problems:
+        return {}, quality_problems
     supersedes = supersedes or []
     relation_problems = _validate_supersedes(root, repo_id=repo_id, supersedes=supersedes)
     if relation_problems:
@@ -589,6 +612,67 @@ def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str 
         if expected != actual:
             problems.append(Problem("error", "knowledge_source_digest_drift", "knowledge source digest changed", rel))
     return problems
+
+
+def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[Problem]:
+    problems: list[Problem] = []
+    candidate_id = str(candidate.get("id") or "")
+    if candidate.get("schema") != "repoctl.knowledge.candidate" or candidate.get("schema_version") != 1:
+        problems.append(Problem("error", "knowledge_candidate_schema_invalid", "candidate schema is invalid", candidate_id))
+    if candidate.get("authoritative") is not False:
+        problems.append(Problem("error", "knowledge_candidate_authoritative", "candidate must be non-authoritative", candidate_id))
+    if candidate.get("status") != "candidate":
+        problems.append(Problem("error", "knowledge_candidate_status_invalid", "candidate status must be candidate", candidate_id))
+    if str(candidate.get("kind") or "") not in ALLOWED_KINDS:
+        problems.append(Problem("error", "knowledge_candidate_kind_invalid", "candidate kind is invalid", candidate_id))
+    claim = str(candidate.get("claim") or "").strip()
+    if not claim:
+        problems.append(Problem("error", "knowledge_candidate_claim_missing", "candidate claim is missing", candidate_id))
+    if len(claim) > 300:
+        problems.append(Problem("error", "knowledge_candidate_claim_too_long", "candidate claim is too long", candidate_id))
+    review = candidate.get("review")
+    if not isinstance(review, dict) or review.get("required") is not True:
+        problems.append(Problem("error", "knowledge_candidate_review_not_required", "candidate must require explicit review", candidate_id))
+    refs = candidate.get("source_refs")
+    if not isinstance(refs, list) or not refs:
+        problems.append(Problem("error", "knowledge_candidate_source_refs_missing", "candidate source refs are missing", candidate_id))
+    else:
+        for ref in refs:
+            if not isinstance(ref, dict):
+                problems.append(Problem("error", "knowledge_candidate_source_ref_invalid", "candidate source ref is invalid", candidate_id))
+                continue
+            rel = str(ref.get("path") or "")
+            if _source_ref_excluded(rel):
+                problems.append(Problem("error", "knowledge_candidate_source_excluded", "candidate source is excluded from knowledge ingestion", rel))
+            if not str(ref.get("content_sha256") or "").startswith("sha256:"):
+                problems.append(Problem("error", "knowledge_candidate_source_hash_invalid", "candidate source hash is invalid", rel))
+    problems.extend(_source_digest_problems(root, candidate, record_id=candidate_id))
+    duplicate = _duplicate_reviewed_claim(root, candidate)
+    if duplicate:
+        problems.append(Problem("warning", "knowledge_candidate_duplicate_reviewed_claim", f"candidate claim already exists in reviewed record {duplicate}", duplicate))
+    return problems
+
+
+def _source_ref_excluded(rel: str) -> bool:
+    parts = set(Path(rel).parts)
+    if parts & EXCLUDED_SOURCE_PARTS:
+        return True
+    if rel.startswith("docs/knowledge/generated/"):
+        return True
+    return False
+
+
+def _duplicate_reviewed_claim(root: Path, candidate: dict[str, Any]) -> str:
+    candidate_claim = str(candidate.get("claim") or "").strip().casefold()
+    if not candidate_claim:
+        return ""
+    repo_id = str(candidate.get("repo_id") or "")
+    for record in _load_records(root):
+        if str(record.get("repo_id") or "") != repo_id:
+            continue
+        if str(record.get("claim") or "").strip().casefold() == candidate_claim:
+            return str(record.get("id") or "")
+    return ""
 
 
 def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:

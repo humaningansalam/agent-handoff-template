@@ -46,6 +46,11 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["data"]["candidate"]["candidate_digest"] == candidate["candidate_digest"]
 
+    assert main(["knowledge", "candidate", "check", candidate["id"], "--repo-id", "main", "--json"]) == 0
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["passed"] is True
+    assert check_payload["data"]["checks"]["source_refs_valid"] is True
+
     assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
     second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
     assert second_candidate["id"] != candidate["id"]
@@ -54,6 +59,50 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["candidate_count"] == 2
     assert status_payload["data"]["record_count"] == 0
+
+
+def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+
+    assert main(["knowledge", "candidate", "check", second_candidate, "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["passed"] is True
+    assert payload["warnings"][0]["code"] == "knowledge_candidate_duplicate_reviewed_claim"
+
+
+def test_knowledge_candidate_check_blocks_source_digest_drift(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "check", candidate_id, "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
+
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 1
+    approve_payload = json.loads(capsys.readouterr().out)
+    assert approve_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
 
 
 def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, capsys) -> None:
