@@ -132,6 +132,28 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
 
 
+def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+    output = tmp_path / ".repoctl-state/context-benchmark/result.json"
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    assert artifact == payload
+    assert payload["data"]["benchmark_digest"].startswith("sha256:")
+    assert payload["data"]["artifact"] == {
+        "path": ".repoctl-state/context-benchmark/result.json",
+        "benchmark_digest": payload["data"]["benchmark_digest"],
+    }
+
+
 def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

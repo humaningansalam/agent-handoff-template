@@ -6,6 +6,7 @@ from typing import Any
 
 from .context import build_context_bundle
 from .context_model import ContextBundle
+from .graph_model import digest_data
 from .repositories import require_repo_target
 from .tasks import Problem
 
@@ -53,7 +54,7 @@ def run_context_benchmark(
             require_knowledge_source_current=require_knowledge_source_current,
         )
     )
-    return {
+    data = {
         "fixture": fixture.as_posix(),
         "question_count": len(results),
         "results": results,
@@ -65,7 +66,9 @@ def run_context_benchmark(
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
         },
-    }, problems
+    }
+    data["benchmark_digest"] = digest_data(data)
+    return data, problems
 
 
 def _read_questions(path: Path) -> list[dict[str, Any]]:
