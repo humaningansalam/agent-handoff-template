@@ -1363,7 +1363,7 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
 def cmd_knowledge_approve(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = approve_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    data, problems = approve_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, supersedes=args.supersedes)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge approve",
@@ -1424,7 +1424,7 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
 def cmd_knowledge_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=args.include_stale, limit=args.limit)
+    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=args.include_stale, include_superseded=args.include_superseded, limit=args.limit)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge query",
@@ -1838,6 +1838,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_approve = knowledge_sub.add_parser("approve")
     knowledge_approve.add_argument("candidate_id")
     knowledge_approve.add_argument("--repo-id", required=True)
+    knowledge_approve.add_argument("--supersedes", action="append", default=[])
     knowledge_approve.add_argument("--json", action="store_true")
     knowledge_approve.set_defaults(func=cmd_knowledge_approve)
     knowledge_show = knowledge_sub.add_parser("show")
@@ -1852,6 +1853,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("query")
     knowledge_query.add_argument("--repo-id", required=True)
     knowledge_query.add_argument("--include-stale", action="store_true")
+    knowledge_query.add_argument("--include-superseded", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
     knowledge_query.add_argument("--json", action="store_true")
     knowledge_query.set_defaults(func=cmd_knowledge_query)

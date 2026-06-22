@@ -144,3 +144,50 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     context_payload = json.loads(capsys.readouterr().out)
     refs = [candidate["source_ref"]["path"] for candidate in context_payload["data"]["bundle"]["candidates"]]
     assert all(not path.startswith("docs/knowledge/generated/") for path in refs)
+
+
+def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
+    old_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", second_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 0
+    approve_payload = json.loads(capsys.readouterr().out)
+    new_record = approve_payload["data"]["record"]["id"]
+    assert approve_payload["data"]["record"]["supersedes"] == [old_record]
+    assert approve_payload["data"]["superseded_events"][0]["event"]["superseded_by"] == new_record
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    check_payload = json.loads(capsys.readouterr().out)
+    statuses = {record["id"]: record["status"] for record in check_payload["data"]["records"]}
+    assert statuses[old_record] == "superseded"
+    assert statuses[new_record] == "reviewed"
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 0
+    query_payload = json.loads(capsys.readouterr().out)
+    returned_ids = [item["record"]["id"] for item in query_payload["data"]["results"]]
+    assert old_record not in returned_ids
+    assert new_record in returned_ids
+    assert any(warning["code"] == "knowledge_superseded_record_excluded" for warning in query_payload["warnings"])
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-superseded", "--json"]) == 0
+    include_payload = json.loads(capsys.readouterr().out)
+    include_statuses = {item["record"]["id"]: item["record"]["status"] for item in include_payload["data"]["results"]}
+    assert include_statuses[old_record] == "superseded"
+    assert include_statuses[new_record] == "reviewed"
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
+    assert f"- Record: `{old_record}`" in decisions_text
+    assert "- Status: `superseded`" in decisions_text

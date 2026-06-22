@@ -92,7 +92,7 @@ def show_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> 
     return {"candidate": _read_candidate(path), "path": path.relative_to(root).as_posix()}, []
 
 
-def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
+def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, supersedes: list[str] | None = None) -> tuple[dict[str, Any], list[Problem]]:
     candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
     if problems:
         return {}, problems
@@ -100,7 +100,13 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
     digest_problems = _source_digest_problems(root, candidate)
     if digest_problems:
         return {}, digest_problems
+    supersedes = supersedes or []
+    relation_problems = _validate_supersedes(root, repo_id=repo_id, supersedes=supersedes)
+    if relation_problems:
+        return {}, relation_problems
     record_id = "K" + candidate_id[2:]
+    if record_id in supersedes:
+        return {}, [Problem("error", "knowledge_supersedes_self", "knowledge record cannot supersede itself", record_id)]
     record = {
         "schema": "repoctl.knowledge.record",
         "schema_version": 1,
@@ -112,7 +118,7 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
         "claim": candidate.get("claim", ""),
         "summary": candidate.get("summary", ""),
         "source_refs": candidate.get("source_refs", []),
-        "supersedes": [],
+        "supersedes": supersedes,
         "created_from": {"candidate_id": candidate_id, "candidate_digest": candidate.get("candidate_digest", "")},
         "review": {"status": "reviewed", "reviewed_by": "human"},
         "authoritative": True,
@@ -138,11 +144,28 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
     event_path = _event_dir(root) / f"{event['id']}.json"
     event_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    superseded_events = []
+    for superseded_id in supersedes:
+        superseded_event = {
+            "schema": "repoctl.knowledge.event",
+            "schema_version": 1,
+            "id": _event_id("superseded", superseded_id),
+            "type": "superseded",
+            "repo_id": repo_id,
+            "record_id": superseded_id,
+            "superseded_by": record_id,
+            "record_digest": record["record_digest"],
+        }
+        superseded_event["event_digest"] = digest_data(superseded_event)
+        superseded_path = _event_dir(root) / f"{superseded_event['id']}.json"
+        atomic_write(superseded_path, json.dumps(superseded_event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        superseded_events.append({"event": superseded_event, "event_path": superseded_path.relative_to(root).as_posix()})
     return {
         "record": record,
         "record_path": record_path.relative_to(root).as_posix(),
         "event": event,
         "event_path": event_path.relative_to(root).as_posix(),
+        "superseded_events": superseded_events,
     }, []
 
 
@@ -159,8 +182,10 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     problems: list[Problem] = []
     records = [_read_candidate(path) for path in sorted(_record_dir(root).glob("K-*.json"))]
     selected = [record for record in records if str(record.get("repo_id") or "") == repo_id]
+    superseded_ids = _superseded_ids(selected)
     for record in selected:
         problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
+    problems.extend(_supersession_problems(selected))
     return {
         "schema": "repoctl.knowledge.check",
         "schema_version": 1,
@@ -170,7 +195,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
             {
                 "id": record.get("id", ""),
                 "kind": record.get("kind", ""),
-                "status": "stale" if _source_digest_problems(root, record) else record.get("status", ""),
+                "status": _derived_status(root, record, superseded_ids=superseded_ids),
                 "title": record.get("title", ""),
             }
             for record in selected
@@ -178,18 +203,21 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     }, problems
 
 
-def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, limit: int = 10) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
+def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, include_superseded: bool = False, limit: int = 10) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
     problems: list[Problem] = []
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    superseded_ids = _superseded_ids(records)
     scored: list[dict[str, Any]] = []
     for record in records:
-        drift = _source_digest_problems(root, record, record_id=str(record.get("id") or ""))
-        status = "stale" if drift else str(record.get("status") or "")
+        status = _derived_status(root, record, superseded_ids=superseded_ids)
         if status == "stale" and not include_stale:
             warnings.append(Problem("warning", "knowledge_stale_record_excluded", "stale knowledge record excluded from default query", str(record.get("id") or "")))
             continue
-        if status != "reviewed" and not include_stale:
+        if status == "superseded" and not include_superseded:
+            warnings.append(Problem("warning", "knowledge_superseded_record_excluded", "superseded knowledge record excluded from default query", str(record.get("id") or "")))
+            continue
+        if status not in {"reviewed", "stale", "superseded"}:
             continue
         score, breakdown, reasons = _record_score(query, record)
         if score <= 0:
@@ -207,7 +235,7 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
         "schema": "repoctl.knowledge.query",
         "schema_version": 1,
         "repo_id": repo_id,
-        "query": {"text": query, "include_stale": include_stale},
+        "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded},
         "results": scored[:limit],
         "result_count": min(len(scored), limit),
         "available_record_count": len(records),
@@ -303,6 +331,60 @@ def _read_candidate(path: Path) -> dict[str, Any]:
 def _load_records(root: Path) -> list[dict[str, Any]]:
     directory = _record_dir(root)
     return [_read_candidate(path) for path in sorted(directory.glob("K-*.json"))] if directory.exists() else []
+
+
+def _validate_supersedes(root: Path, *, repo_id: str, supersedes: list[str]) -> list[Problem]:
+    problems: list[Problem] = []
+    records = {str(record.get("id") or ""): record for record in _load_records(root)}
+    seen: set[str] = set()
+    for record_id in supersedes:
+        if record_id in seen:
+            problems.append(Problem("error", "knowledge_supersedes_duplicate", "duplicate supersedes record id", record_id))
+            continue
+        seen.add(record_id)
+        record = records.get(record_id)
+        if record is None:
+            problems.append(Problem("error", "knowledge_supersedes_missing", "superseded record does not exist", record_id))
+            continue
+        if str(record.get("repo_id") or "") != repo_id:
+            problems.append(Problem("error", "knowledge_supersedes_repo_mismatch", "superseded record belongs to a different repo", record_id))
+    return problems
+
+
+def _superseded_ids(records: list[dict[str, Any]]) -> set[str]:
+    values: set[str] = set()
+    for record in records:
+        supersedes = record.get("supersedes", [])
+        if isinstance(supersedes, list):
+            values.update(str(item) for item in supersedes if str(item))
+    return values
+
+
+def _supersession_problems(records: list[dict[str, Any]]) -> list[Problem]:
+    problems: list[Problem] = []
+    known = {str(record.get("id") or "") for record in records}
+    for record in records:
+        record_id = str(record.get("id") or "")
+        supersedes = record.get("supersedes", [])
+        if not isinstance(supersedes, list):
+            problems.append(Problem("error", "knowledge_supersedes_invalid", "supersedes must be a list", record_id))
+            continue
+        for superseded_id in supersedes:
+            superseded = str(superseded_id)
+            if superseded == record_id:
+                problems.append(Problem("error", "knowledge_supersedes_self", "knowledge record cannot supersede itself", record_id))
+            if superseded and superseded not in known:
+                problems.append(Problem("error", "knowledge_supersedes_missing", "superseded record does not exist", superseded))
+    return problems
+
+
+def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str]) -> str:
+    if _source_digest_problems(root, record):
+        return "stale"
+    record_id = str(record.get("id") or "")
+    if record_id in superseded_ids:
+        return "superseded"
+    return str(record.get("status") or "")
 
 
 def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str = "") -> list[Problem]:

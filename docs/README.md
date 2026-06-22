@@ -47,6 +47,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Pack task startup context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
 - Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
 - Approve a candidate into reviewed knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --json`
+- Approve a replacement decision: `./scripts/repoctl knowledge approve KC-... --repo-id main --supersedes K-... --json`
 - Query reviewed knowledge: `./scripts/repoctl knowledge query "current auth decision" --repo-id main --json`
 - Check knowledge source drift: `./scripts/repoctl knowledge check --repo-id main --json`
 - Render non-authoritative knowledge pages: `./scripts/repoctl knowledge render --repo-id main --json`
@@ -69,5 +70,5 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; it does not create durable facts or change task scope.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
-- `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale records by default.
+- `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale and superseded records by default.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.
