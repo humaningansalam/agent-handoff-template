@@ -8,6 +8,7 @@ from typing import Any
 
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
+from .context import build_context_bundle
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
@@ -165,7 +166,7 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
 
 
 def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "upgrade_command") if getattr(args, name, None)]
+    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "context_command", "upgrade_command") if getattr(args, name, None)]
     return ".".join(parts) if parts else "repoctl"
 
 
@@ -1205,6 +1206,32 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(query_problems) else 0
 
 
+def cmd_context_query(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    target = require_repo_target(root, repo_id=args.repo_id)
+    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens)
+    payload = {
+        "ok": bundle is not None and not _has_errors(problems),
+        "command": "context query",
+        "data": {"bundle": bundle.to_dict() if bundle is not None else None, **meta},
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "context_not_authoritative",
+                "message": "context query returns a read-only evidence bundle; source authorities remain repo registry, source documents, Graph, .repometa, and task receipts",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        if bundle is not None:
+            print(f"context bundle {bundle.bundle_digest} repository={target.id} packed={len(bundle.packed_context)} candidates={len(bundle.candidates)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     data = plan_upgrade(root, source=args.source)
@@ -1533,6 +1560,15 @@ def build_parser() -> argparse.ArgumentParser:
     graph_query.add_argument("--import", dest="import_ref", default="")
     graph_query.add_argument("--json", action="store_true")
     graph_query.set_defaults(func=cmd_graph_query)
+
+    context = sub.add_parser("context")
+    context_sub = context.add_subparsers(dest="context_command", required=True, parser_class=RepoctlArgumentParser)
+    context_query = context_sub.add_parser("query")
+    context_query.add_argument("query")
+    context_query.add_argument("--repo-id")
+    context_query.add_argument("--budget-tokens", type=int, default=3000)
+    context_query.add_argument("--json", action="store_true")
+    context_query.set_defaults(func=cmd_context_query)
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)

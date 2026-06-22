@@ -1,0 +1,2 @@
+{"id":"Q-001","category":"authority","repo_id":"main","question":"Why is Graph non-authoritative?"}
+{"id":"Q-002","category":"contract","repo_id":"main","question":"What source authorities remain after context retrieval?"}

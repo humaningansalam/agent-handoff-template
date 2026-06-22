@@ -278,9 +278,13 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         ],
         completeness={
             "inventory_complete": True,
+            "identity_collisions": 0,
+            "metadata_store_valid": True,
+            "receipt_set_complete": True,
             "index_truncated": False,
             "code_facts_complete": parse_error_count == 0,
             "parse_error_count": parse_error_count,
+            "provider_failures": [],
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
