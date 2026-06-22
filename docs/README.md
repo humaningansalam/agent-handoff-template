@@ -58,6 +58,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Approve a replacement decision: `./scripts/repoctl knowledge approve KC-... --repo-id main --supersedes K-... --json`
 - Reject a candidate with review evidence: `./scripts/repoctl knowledge reject KC-... --repo-id main --reason-file /tmp/reason.md --json`
 - Query reviewed knowledge: `./scripts/repoctl knowledge query "current auth decision" --repo-id main --json`
+- Query with source-status explanation: `./scripts/repoctl knowledge query "current auth decision" --repo-id main --explain --json`
 - Check knowledge source drift: `./scripts/repoctl knowledge check --repo-id main --json`
 - Check records and candidates together: `./scripts/repoctl knowledge check --repo-id main --include-candidates --json`
 - Render non-authoritative knowledge pages: `./scripts/repoctl knowledge render --repo-id main --json`

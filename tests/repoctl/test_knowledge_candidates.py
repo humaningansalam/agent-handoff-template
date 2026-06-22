@@ -279,6 +279,15 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert query_payload["data"]["results"][0]["record"]["id"] == record["id"]
     assert query_payload["data"]["results"][0]["record"]["status"] == "reviewed"
 
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--explain", "--json"]) == 0
+    explain_payload = json.loads(capsys.readouterr().out)
+    explain = explain_payload["data"]["results"][0]["explain"]
+    assert explain["status"] == "reviewed"
+    assert explain["stale"] is False
+    assert explain["source_ref_statuses"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert explain["source_ref_statuses"][0]["exists"] is True
+    assert explain["source_ref_statuses"][0]["digest_matches"] is True
+
     source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
 
@@ -290,6 +299,12 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-stale", "--json"]) == 0
     stale_included = json.loads(capsys.readouterr().out)
     assert stale_included["data"]["results"][0]["record"]["status"] == "stale"
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--include-stale", "--explain", "--json"]) == 0
+    stale_explain = json.loads(capsys.readouterr().out)["data"]["results"][0]["explain"]
+    assert stale_explain["status"] == "stale"
+    assert stale_explain["stale"] is True
+    assert stale_explain["source_ref_statuses"][0]["digest_matches"] is False
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
     drift_payload = json.loads(capsys.readouterr().out)

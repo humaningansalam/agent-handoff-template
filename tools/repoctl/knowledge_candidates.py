@@ -465,7 +465,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     }, problems
 
 
-def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, include_superseded: bool = False, limit: int = 10) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
+def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, include_superseded: bool = False, limit: int = 10, explain: bool = False) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
     problems: list[Problem] = []
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
@@ -484,20 +484,26 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
         score, breakdown, reasons = _record_score(query, record)
         if score <= 0:
             continue
-        scored.append(
-            {
-                "record": _public_record(record, status=status),
-                "score": round(score, 6),
-                "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
-                "selection_reasons": reasons,
+        item = {
+            "record": _public_record(record, status=status),
+            "score": round(score, 6),
+            "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
+            "selection_reasons": reasons,
+        }
+        if explain:
+            item["explain"] = {
+                "status": status,
+                "source_ref_statuses": _source_ref_statuses(root, record),
+                "superseded": status == "superseded",
+                "stale": status == "stale",
             }
-        )
+        scored.append(item)
     scored.sort(key=lambda item: (-float(item["score"]), str(item["record"].get("id") or "")))
     return {
         "schema": "repoctl.knowledge.query",
         "schema_version": 1,
         "repo_id": repo_id,
-        "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded},
+        "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "explain": explain},
         "results": scored[:limit],
         "result_count": min(len(scored), limit),
         "available_record_count": len(records),
@@ -757,6 +763,35 @@ def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str 
         if expected != actual:
             problems.append(Problem("error", "knowledge_source_digest_drift", "knowledge source digest changed", rel))
     return problems
+
+
+def _source_ref_statuses(root: Path, data: dict[str, Any]) -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    refs = data.get("source_refs", [])
+    if not isinstance(refs, list):
+        return statuses
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "")
+        expected = str(ref.get("content_sha256") or "")
+        path = root / rel
+        exists = path.is_file()
+        actual = ""
+        if exists:
+            actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        statuses.append(
+            {
+                "path": rel,
+                "kind": str(ref.get("kind") or ""),
+                "section": str(ref.get("section") or ""),
+                "exists": exists,
+                "expected_sha256": expected,
+                "actual_sha256": actual,
+                "digest_matches": bool(expected) and expected == actual,
+            }
+        )
+    return statuses
 
 
 def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[Problem]:
