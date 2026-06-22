@@ -386,6 +386,12 @@ Explain why Graph remains non-authoritative.
     assert any(item["source_ref"]["path"] == "docs/adr/evidence-context-authority-v0.md" for item in data["groups"]["must_read"])
     assert data["groups"]["reviewed_knowledge"] == []
     assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
+    assert data["metrics"]["group_counts"]["must_read"] == len(data["groups"]["must_read"])
+    assert data["metrics"]["group_counts"]["reviewed_knowledge"] == 0
+    assert data["metrics"]["unique_must_read_source_count"] >= 1
+    assert data["metrics"]["estimated_tokens"] == data["bundle"]["budget"]["estimated_tokens"]
+    assert data["metrics"]["requested_tokens"] == 1200
+    assert any(ref["path"] == "docs/adr/evidence-context-authority-v0.md" for ref in data["metrics"]["must_read_source_refs"])
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
@@ -513,6 +519,8 @@ Use reviewed knowledge source authority.
     assert reviewed[0]["record"]["status"] == "reviewed"
     assert reviewed[0]["record"]["lifecycle_relations"]["supersedes"] == [old_record_id]
     assert reviewed[0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
+    assert payload["data"]["metrics"]["group_counts"]["reviewed_knowledge"] == 1
+    assert payload["data"]["metrics"]["group_estimated_tokens"]["reviewed_knowledge"] > 0
     assert payload["data"]["bundle"]["query"]["explain"] is True
     assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["available_statuses"] == {"reviewed": 1, "superseded": 1}
     assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
@@ -581,6 +589,8 @@ Use reviewed knowledge source authority.
     pass_payload = json.loads(capsys.readouterr().out)
     assert pass_payload["data"]["count_deltas"]["must_read"]["delta"] == 0
     assert pass_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] == 0
+    assert pass_payload["data"]["metric_deltas"]["unique_must_read_source_count"]["delta"] == 0
+    assert pass_payload["data"]["metric_deltas"]["estimated_tokens"]["delta"] == 0
     assert pass_payload["data"]["missing_must_read_refs"] == []
     assert pass_payload["data"]["missing_reviewed_knowledge_ids"] == []
     assert pass_payload["problems"] == []

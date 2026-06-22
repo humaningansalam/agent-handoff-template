@@ -6,6 +6,7 @@ from typing import Any
 
 from .context import build_context_bundle
 from .context_model import ContextCandidate
+from .context_pack import estimate_tokens
 from .graph_model import digest_data
 from .markdown import find_section
 from .repositories import RepoTarget
@@ -35,6 +36,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             "used_sections": _used_sections(task),
         },
         "groups": groups,
+        "metrics": _pack_metrics(groups, bundle),
         "bundle": bundle.to_dict() if bundle is not None else None,
         "warnings": _pack_warnings(bundle, task),
     }
@@ -60,6 +62,7 @@ def compare_task_context_packs(
         "verification_hints": _group_count_delta(baseline, candidate, "verification_hints"),
         "reviewed_knowledge": _group_count_delta(baseline, candidate, "reviewed_knowledge"),
     }
+    metric_deltas = _metric_deltas(baseline, candidate)
     missing_refs = _missing_group_refs(baseline, candidate, "must_read")
     missing_reviewed_ids = _missing_reviewed_knowledge_ids(baseline, candidate)
     regressions = _pack_regressions(count_deltas, missing_refs, missing_reviewed_ids, max_must_read_drop=max_must_read_drop, max_reviewed_knowledge_drop=max_reviewed_knowledge_drop)
@@ -70,6 +73,7 @@ def compare_task_context_packs(
         "baseline": _pack_identity(baseline_path, baseline),
         "candidate": _pack_identity(candidate_path, candidate),
         "count_deltas": count_deltas,
+        "metric_deltas": metric_deltas,
         "missing_must_read_refs": missing_refs,
         "missing_reviewed_knowledge_ids": missing_reviewed_ids,
         "regressions": [problem.to_dict() for problem in regressions],
@@ -144,6 +148,27 @@ def _group_count(data: dict[str, Any], group: str) -> int:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
     values = groups.get(group)
     return len(values) if isinstance(values, list) else 0
+
+
+def _metric_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, dict[str, int]]:
+    keys = (
+        "unique_must_read_source_count",
+        "unique_verification_source_count",
+        "packed_context_count",
+        "candidate_context_count",
+        "requested_tokens",
+        "estimated_tokens",
+    )
+    baseline_metrics = baseline.get("metrics") if isinstance(baseline.get("metrics"), dict) else {}
+    candidate_metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+    return {
+        key: {
+            "baseline": int(baseline_metrics.get(key) or 0),
+            "candidate": int(candidate_metrics.get(key) or 0),
+            "delta": int(candidate_metrics.get(key) or 0) - int(baseline_metrics.get(key) or 0),
+        }
+        for key in keys
+    }
 
 
 def _missing_group_refs(baseline: dict[str, Any], candidate: dict[str, Any], group: str) -> list[dict[str, str]]:
@@ -234,6 +259,48 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
         else:
             groups["maybe_relevant"].append(item)
     return groups
+
+
+def _pack_metrics(groups: dict[str, list[dict[str, Any]]], bundle: Any) -> dict[str, Any]:
+    group_counts = {name: len(items) for name, items in sorted(groups.items())}
+    group_estimated_tokens = {
+        name: sum(estimate_tokens(str(item.get("excerpt") or _knowledge_text(item))) for item in items)
+        for name, items in sorted(groups.items())
+    }
+    must_read_refs = _source_ref_keys(groups.get("must_read", []))
+    verification_refs = _source_ref_keys(groups.get("verification_hints", []))
+    budget = bundle.budget if bundle is not None else {}
+    return {
+        "group_counts": group_counts,
+        "group_estimated_tokens": group_estimated_tokens,
+        "must_read_source_refs": must_read_refs,
+        "verification_source_refs": verification_refs,
+        "unique_must_read_source_count": len({(ref["kind"], ref["path"], ref["section"]) for ref in must_read_refs}),
+        "unique_verification_source_count": len({(ref["kind"], ref["path"], ref["section"]) for ref in verification_refs}),
+        "packed_context_count": int(budget.get("packed_count") or 0),
+        "candidate_context_count": int(budget.get("candidate_count") or 0),
+        "requested_tokens": int(budget.get("requested_tokens") or 0),
+        "estimated_tokens": int(budget.get("estimated_tokens") or 0),
+    }
+
+
+def _source_ref_keys(items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    for item in items:
+        ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        refs.append(
+            {
+                "kind": str(ref.get("kind") or ""),
+                "path": str(ref.get("path") or ""),
+                "section": str(ref.get("section") or ""),
+            }
+        )
+    return sorted(refs, key=lambda ref: (ref["kind"], ref["path"], ref["section"]))
+
+
+def _knowledge_text(item: dict[str, Any]) -> str:
+    record = item.get("record") if isinstance(item.get("record"), dict) else {}
+    return "\n".join(str(record.get(key) or "") for key in ("title", "claim", "summary"))
 
 
 def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
