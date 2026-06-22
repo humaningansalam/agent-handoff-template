@@ -78,6 +78,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         if code == "missing_verification_file":
             add("Create verification evidence", command=f"cat > /tmp/{task_id}-verification.md")
             add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --verification-file /tmp/{task_id}-verification.md --json")
+            add("Reuse completed task Verification", command=f"./scripts/repoctl task finish {task_id} --use-task-verification --json")
         elif code == "verification_file_inside_repo":
             add("Move verification evidence outside repos/", command=f"cp {path or 'repos/...'} /tmp/{task_id}-verification.md")
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
@@ -127,6 +128,25 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "upgrade_plan_has_conflicts":
             add("Inspect plan conflicts before applying", path=path or "/tmp/repoctl-upgrade-plan.json")
     return actions
+
+
+def _repo_scoped_frontmatter(task: Any) -> bool:
+    area = str(task.frontmatter.get("area") or "")
+    return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
+
+
+def _discovery_guidance_actions(task_id: str, *, repo_path: str = "repos") -> list[dict[str, str]]:
+    candidate = f"{repo_path.rstrip('/')}/<path>"
+    return [
+        {
+            "label": "Record structured Discovery evidence",
+            "command": f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed {candidate} --chosen {candidate} --json",
+        },
+        {
+            "label": "Check finish readiness",
+            "command": f"./scripts/repoctl task doctor {task_id} --json",
+        },
+    ]
 
 
 def _has_errors(problems: list[Problem]) -> bool:
@@ -316,6 +336,12 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         },
         "problems": [],
         "warnings": [],
+        "next_actions": [
+            {
+                "label": "Check finish readiness",
+                "command": f"./scripts/repoctl task doctor {args.task_id} --json",
+            }
+        ],
     }
     if args.json:
         _json(payload)
@@ -452,6 +478,16 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             start_result = start_task(root, task.id, force_dirty=args.force_dirty)
             atomic_write(start_result["task"].path, start_result["text"])
     status = "doing" if start_result else task.status
+    next_actions: list[dict[str, str]] = []
+    if _repo_scoped_frontmatter(task):
+        repo_path = "repos"
+        try:
+            target = _repo_target_for_task_command(root, task)
+            if target is not None:
+                repo_path = target.display_path
+        except RepoctlError:
+            pass
+        next_actions = _discovery_guidance_actions(task.id, repo_path=repo_path)
     payload = {
         "ok": True,
         "command": "task.create",
@@ -472,6 +508,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         "started": bool(start_result),
         "problems": [],
         "warnings": [problem.to_dict() for problem in (start_result or {}).get("warnings", [])],
+        "next_actions": next_actions,
     }
     if args.json:
         _json(payload)
@@ -482,6 +519,8 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         print(f"Task ID: {task.id}")
         if start_result:
             print(f"Started: {task.id}")
+        if next_actions:
+            print(f"Next: {next_actions[0]['command']}")
     return 0
 
 
@@ -564,11 +603,23 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         atomic_write(result["task"].path, result["text"])
     delta = repo_changes_since_task_start(root, args.task_id)
     data = {"task_id": args.task_id, "status": "doing", "dirty": result["dirty"], "repo_changes": _repo_change_summary(delta)}
-    payload = {"ok": True, "command": "task.start", "data": data, **data, "problems": [], "warnings": [problem.to_dict() for problem in result.get("warnings", [])]}
+    next_actions: list[dict[str, str]] = []
+    if _repo_scoped_frontmatter(result["task"]):
+        repo_path = "repos"
+        try:
+            target = _repo_target_for_task_command(root, result["task"])
+            if target is not None:
+                repo_path = target.display_path
+        except RepoctlError:
+            pass
+        next_actions = _discovery_guidance_actions(args.task_id, repo_path=repo_path)
+    payload = {"ok": True, "command": "task.start", "data": data, **data, "problems": [], "warnings": [problem.to_dict() for problem in result.get("warnings", [])], "next_actions": next_actions}
     if args.json:
         _json(payload)
     else:
         print(f"Started: {args.task_id}")
+        if next_actions:
+            print(f"Next: {next_actions[0]['command']}")
     return 0
 
 
@@ -590,7 +641,12 @@ def _verification_file_arg(root: Path, task_id: str, *, verification_file: str |
     if use_task_verification:
         return _task_verification_file(root, task_id, suffix=suffix)
     if not verification_file:
-        raise RepoctlError(f"task {command} requires --verification-file. Example: ./scripts/repoctl task {command} {task_id} --verification-file /tmp/{task_id}-{suffix}.md --json", code="missing_verification_file")
+        raise RepoctlError(
+            f"task {command} requires external verification evidence outside repos/. "
+            f"Create /tmp/{task_id}-{suffix}.md and retry with --verification-file, "
+            "or use --use-task-verification only when ## Verification already contains final manager-run evidence.",
+            code="missing_verification_file",
+        )
     return Path(verification_file)
 
 

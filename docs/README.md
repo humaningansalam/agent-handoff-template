@@ -53,9 +53,10 @@ This directory contains the live task registry, task files, workflows, and archi
 - Read `docs/workflows/v0-foundation-field-test.md` before starting MCP, Graph, or llmwiki work.
 - Command examples use the workspace wrapper. If `repoctl` is installed on `PATH`, the shorter `repoctl ...` form is equivalent.
 - `scripts/repoctl` resolves the workspace root from the script location, so invoking it by explicit path from `repos/` or nested directories is also supported.
+- The workspace root may not be a usable Git worktree. Run product Git commands in `repos/` or `repos/<repo-id>/`, not from the workspace root.
 - Backlog text is free-form human planning text. repoctl manages backlog items as opaque raw blocks with content-hash IDs, but it does not infer files, scope, validation, metadata, or task body sections from that text.
 - For PRD or external-note triage, use `docs/workflows/prd-backlog-sequential.md` to list gaps as Backlog items and promote them one at a time.
-- `repoctl meta suggest` is a discovery aid only. The agent must inspect candidate files and write its own `## Discovery`; suggestions are not authoritative scope.
+- `repoctl meta suggest` is a discovery aid only. The agent must inspect candidate files and record structured `## Discovery` with `repoctl task discovery add`; suggestions are not authoritative scope.
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

@@ -1696,7 +1696,11 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
         if repo_id not in (None, "") and (not isinstance(repo_id, str) or not re.match(r"^[a-z][a-z0-9_-]*$", repo_id)):
             problems.append(Problem("error", "invalid_repo_id", "repo_id must be lowercase [a-z0-9_-] starting with a letter", task.rel_path))
         if _repo_scoped_task(task) and task.status in LIVE and not _discovery_recorded(task):
-            append_warning(task, "missing_discovery_evidence", "repo-scoped task should record Candidate query, Candidate files reviewed, and Chosen files in Discovery")
+            append_warning(
+                task,
+                "missing_discovery_evidence",
+                "repo-scoped task needs structured Discovery fields: Candidate query, Candidate files reviewed, and Chosen files. Prefer `repoctl task discovery add`; free-form prose is not enough.",
+            )
         root = _task_workspace_root(task)
         for context_path in _context_doc_paths(task):
             if not (root / context_path).exists():

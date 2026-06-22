@@ -5,7 +5,8 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 ## Workspace Contract
 
 - Root is the private workspace repo for agent operations, tasks, PRD, workflows, and repoctl tooling.
-- `repos/` is the product code repo boundary. Each product repo must have its own `.git`; root `.gitignore` must ignore `/repos/`.
+- `repos/` is the product code repo boundary. Each product repo must have its own `.git`; root `.git` may be absent or unusable, so run product `git` commands inside `repos/` or `repos/<repo-id>/`.
+- Root `.gitignore` must ignore `/repos/`.
 - Code work defaults to the selected product repo (`repos/`); root `tools/`, root `tests`, and `scripts/` are workspace/repoctl surfaces only.
 - Ambiguous product requests such as “add search”, “fix list”, or “improve the CLI” belong in the selected product repo unless repoctl/workspace tooling is explicitly named.
 - Submodules are not used.
@@ -107,7 +108,7 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - Full schema and operations live in `docs/workflows/repo-metadata.md`.
 - Use `repoctl meta ...`; do not directly edit `.repometa` in normal work.
 - `repoctl meta query` and `repoctl meta suggest` are read-only discovery hints. Inspect files directly before choosing scope.
-- Repo-scoped live tasks should fill `## Discovery` with candidate query, reviewed files, and chosen files; `repoctl check` warns when this evidence is missing.
+- Repo-scoped live tasks should fill `## Discovery` with structured candidate query, reviewed files, and chosen files. Prefer `./scripts/repoctl task discovery add ...`; hand-written prose is not enough unless it uses the exact structured fields.
 - When a task changes a product repo, `repoctl task finish` runs the changed-file metadata gate. If `repos/` exists but its git repository is missing/unusable, finish blocks.
 - If a task started with pre-existing dirty product repo state, finish separates baseline dirty files from task-new changes; pre-existing dirty state is not task scope.
 

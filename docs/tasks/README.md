@@ -8,9 +8,9 @@ Use `./scripts/repoctl backlog add/list/show/remove` to manage human-written Bac
 repoctl uses `TEMPLATE.md` or `PARENT_TEMPLATE.md` internally; these files are operational templates, not example tasks.
 
 Backlog text is free-form planning text. repoctl treats each backlog item as an opaque raw block; it must not infer `area`, likely files, expected behavior, validation, or task body sections from that text.
-Repo-scoped live tasks should fill in `## Discovery` with the inspected sources, candidate files, and selected files; `repoctl check` warns when this evidence is missing. The finish gate blocks placeholder discovery for Backlog-origin repo changes.
+Repo-scoped live tasks should fill in structured `## Discovery` with the inspected sources, candidate files, and selected files; `repoctl check` warns when this evidence is missing. The finish gate blocks placeholder discovery for Backlog-origin repo changes.
 Use `repoctl meta query` and `repoctl meta suggest` only as discovery aids; inspect the files yourself and keep the final task scope explicit.
-Use `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` to record structured Discovery without hand-editing the task file.
+Use `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` to record structured Discovery without hand-editing the task file. Free-form Discovery prose is not enough unless it preserves the exact `Candidate query`, `Candidate files reviewed`, and `Chosen files` fields.
 Use `./scripts/repoctl task show T-... --json` for task inspection and `./scripts/repoctl task log append T-... "message" --json` for timestamped execution log entries.
 Finish with a verification file outside `repos/`: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
 

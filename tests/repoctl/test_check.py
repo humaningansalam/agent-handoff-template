@@ -151,7 +151,9 @@ def test_check_warns_when_repo_scoped_task_omits_discovery_evidence(tmp_path: Pa
     assert main(["check", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert any(warning["code"] == "missing_discovery_evidence" for warning in payload["warnings"])
+    warning = next(warning for warning in payload["warnings"] if warning["code"] == "missing_discovery_evidence")
+    assert "structured Discovery fields" in warning["message"]
+    assert "repoctl task discovery add" in warning["message"]
 
 
 def test_check_accepts_structured_discovery_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -787,6 +789,20 @@ def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_
     assert payload["data"]["task_id"] == "T-20260609184046Z"
     assert payload["problems"][0]["code"] == "missing_verification_file"
     assert any(action["label"] == "Create verification evidence" for action in payload["next_actions"])
+    assert any(action["command"].endswith("--use-task-verification --json") for action in payload["next_actions"])
+
+
+def test_repo_scoped_task_create_reports_structured_discovery_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--area", "repo", "--repo-id", "main", "--slug", "repo-work", "Repo Work", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    commands = [action.get("command", "") for action in payload["next_actions"]]
+    assert any("task discovery add" in command for command in commands)
+    assert any("--reviewed repos/<path> --chosen repos/<path>" in command for command in commands)
 
 
 def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:

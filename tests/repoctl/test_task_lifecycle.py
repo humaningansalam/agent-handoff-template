@@ -173,6 +173,25 @@ def test_task_create_start_returns_started_task(tmp_path: Path, monkeypatch, cap
     assert "status: doing" in (tmp_path / payload["path"]).read_text(encoding="utf-8")
 
 
+def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.email", "a@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
+    text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    commands = [action.get("command", "") for action in payload["next_actions"]]
+    assert any("task discovery add T-20260609184046Z" in command for command in commands)
+    assert any("task doctor T-20260609184046Z" in command for command in commands)
+
+
 def test_task_create_blocks_when_repo_ref_uses_non_repo_area(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
