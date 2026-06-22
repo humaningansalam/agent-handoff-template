@@ -532,6 +532,32 @@ def test_knowledge_record_show_enforces_repo_namespace(tmp_path: Path, monkeypat
     assert api_payload["problems"][0]["code"] == "knowledge_record_repo_mismatch"
 
 
+def test_knowledge_candidate_ids_are_global_across_repos(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    (tmp_path / "docs/repoctl.json").write_text(
+        json.dumps({"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "web", "--json"]) == 0
+    web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "api", "--json"]) == 0
+    api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert api_candidate != web_candidate
+
+    assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
+    web_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
+    api_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert api_record != web_record
+
+
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

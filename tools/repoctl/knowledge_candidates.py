@@ -703,14 +703,21 @@ def _sha256_text(text: str) -> str:
 
 def _unique_candidate_id(root: Path, repo_id: str, title: str, source_digest: str) -> str:
     base = _candidate_id(title, source_digest)
-    directory = _candidate_dir(root, repo_id)
-    if not (directory / f"{base}.json").exists():
+    if not _knowledge_candidate_id_exists(root, base):
         return base
     for index in range(2, 100):
         candidate = f"{base}-{index}"
-        if not (directory / f"{candidate}.json").exists():
+        if not _knowledge_candidate_id_exists(root, candidate):
             return candidate
     raise RepoctlError("could not allocate unique knowledge candidate id")
+
+
+def _knowledge_candidate_id_exists(root: Path, candidate_id: str) -> bool:
+    state_root = root / ".repoctl-state/knowledge/candidates"
+    if state_root.exists() and any(path.is_file() for path in state_root.glob(f"*/{candidate_id}.json")):
+        return True
+    record_id = "K" + candidate_id[2:] if candidate_id.startswith("KC-") else candidate_id
+    return (_record_dir(root) / f"{record_id}.json").exists()
 
 
 def _candidate_id(title: str, source_digest: str) -> str:
