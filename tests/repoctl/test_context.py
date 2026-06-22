@@ -157,6 +157,43 @@ def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch
     assert q2["required_knowledge_found_at_5"][0]["section"] == "Decision"
 
 
+def test_context_benchmark_quality_gate_fails_without_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-knowledge-recall-at-5", "1.0", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["gates"]["min_knowledge_recall_at_5"] == 1.0
+    assert payload["problems"][0]["code"] == "context_benchmark_knowledge_gate_failed"
+
+
+def test_context_benchmark_quality_gate_passes_with_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-knowledge-recall-at-5", "1.0", "--require-source-integrity", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["summary"]["mean_knowledge_recall_at_5"] == 1.0
+    assert payload["problems"] == []
+
+
 def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

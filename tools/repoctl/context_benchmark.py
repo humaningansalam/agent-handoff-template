@@ -10,7 +10,17 @@ from .repositories import require_repo_target
 from .tasks import Problem
 
 
-def run_context_benchmark(root: Path, *, fixture: Path, repo_id: str = "", budget_tokens: int = 3000) -> tuple[dict[str, Any], list[Problem]]:
+def run_context_benchmark(
+    root: Path,
+    *,
+    fixture: Path,
+    repo_id: str = "",
+    budget_tokens: int = 3000,
+    min_recall_at_5: float | None = None,
+    min_precision_at_5: float | None = None,
+    min_knowledge_recall_at_5: float | None = None,
+    require_source_integrity: bool = False,
+) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
     problems: list[Problem] = []
@@ -32,11 +42,18 @@ def run_context_benchmark(root: Path, *, fixture: Path, repo_id: str = "", budge
         results.append(_score_question(question, spec, bundle))
 
     summary = _summarize(results)
+    problems.extend(_gate_problems(summary, min_recall_at_5=min_recall_at_5, min_precision_at_5=min_precision_at_5, min_knowledge_recall_at_5=min_knowledge_recall_at_5, require_source_integrity=require_source_integrity))
     return {
         "fixture": fixture.as_posix(),
         "question_count": len(results),
         "results": results,
         "summary": summary,
+        "gates": {
+            "min_recall_at_5": min_recall_at_5,
+            "min_precision_at_5": min_precision_at_5,
+            "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
+            "require_source_integrity": require_source_integrity,
+        },
     }, problems
 
 
@@ -161,3 +178,25 @@ def _mean(values: Any) -> float:
     if not items:
         return 0.0
     return round(sum(float(item) for item in items) / len(items), 6)
+
+
+def _gate_problems(
+    summary: dict[str, Any],
+    *,
+    min_recall_at_5: float | None,
+    min_precision_at_5: float | None,
+    min_knowledge_recall_at_5: float | None,
+    require_source_integrity: bool,
+) -> list[Problem]:
+    problems: list[Problem] = []
+    if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:
+        problems.append(Problem("error", "context_benchmark_recall_gate_failed", "context benchmark mean Recall@5 is below gate"))
+    if min_precision_at_5 is not None and float(summary.get("mean_precision_at_5") or 0.0) < min_precision_at_5:
+        problems.append(Problem("error", "context_benchmark_precision_gate_failed", "context benchmark mean Precision@5 is below gate"))
+    if min_knowledge_recall_at_5 is not None and float(summary.get("mean_knowledge_recall_at_5") or 0.0) < min_knowledge_recall_at_5:
+        problems.append(Problem("error", "context_benchmark_knowledge_gate_failed", "context benchmark mean knowledge Recall@5 is below gate"))
+    if require_source_integrity and not bool(summary.get("source_ref_integrity")):
+        problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
+    if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):
+        problems.append(Problem("error", "context_benchmark_knowledge_integrity_failed", "context benchmark knowledge source ref integrity failed"))
+    return problems

@@ -1241,7 +1241,16 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     fixture = Path(args.fixture)
     if not fixture.is_absolute():
         fixture = root / fixture
-    data, problems = run_context_benchmark(root, fixture=fixture, repo_id=args.repo_id or "", budget_tokens=args.budget_tokens)
+    data, problems = run_context_benchmark(
+        root,
+        fixture=fixture,
+        repo_id=args.repo_id or "",
+        budget_tokens=args.budget_tokens,
+        min_recall_at_5=args.min_recall_at_5,
+        min_precision_at_5=args.min_precision_at_5,
+        min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
+        require_source_integrity=args.require_source_integrity,
+    )
     payload = {
         "ok": not _has_errors(problems),
         "command": "context benchmark",
@@ -1828,6 +1837,10 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--fixture", default="tests/fixtures/context-benchmark")
     context_benchmark.add_argument("--repo-id")
     context_benchmark.add_argument("--budget-tokens", type=int, default=3000)
+    context_benchmark.add_argument("--min-recall-at-5", type=float)
+    context_benchmark.add_argument("--min-precision-at-5", type=float)
+    context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
+    context_benchmark.add_argument("--require-source-integrity", action="store_true")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)
     context_pack = context_sub.add_parser("pack")
