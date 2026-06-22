@@ -1213,7 +1213,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
 def cmd_context_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens)
+    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens, explain=args.explain)
     payload = {
         "ok": bundle is not None and not _has_errors(problems),
         "command": "context query",
@@ -1276,7 +1276,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
 def cmd_context_pack(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    data, problems, meta = build_task_context_pack(root, target=target, task_id=args.task, budget_tokens=args.budget_tokens)
+    data, problems, meta = build_task_context_pack(root, target=target, task_id=args.task, budget_tokens=args.budget_tokens, explain=args.explain)
     payload = {
         "ok": not _has_errors(problems),
         "command": "context pack",
@@ -1925,6 +1925,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_query.add_argument("query")
     context_query.add_argument("--repo-id")
     context_query.add_argument("--budget-tokens", type=int, default=3000)
+    context_query.add_argument("--explain", action="store_true")
     context_query.add_argument("--json", action="store_true")
     context_query.set_defaults(func=cmd_context_query)
     context_benchmark = context_sub.add_parser("benchmark")
@@ -1941,6 +1942,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack.add_argument("--task", required=True)
     context_pack.add_argument("--repo-id", required=True)
     context_pack.add_argument("--budget-tokens", type=int, default=5000)
+    context_pack.add_argument("--explain", action="store_true")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
 

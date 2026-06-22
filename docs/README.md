@@ -43,9 +43,11 @@ This directory contains the live task registry, task files, workflows, and archi
 - Build a read-only Graph snapshot: `./scripts/repoctl graph build --repo-id main --json`
 - Query the derived Graph snapshot: `./scripts/repoctl graph query --repo-id main --file src/app.py --json`
 - Query evidence context: `./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --json`
+- Query evidence context with knowledge source-status explanation: `./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --explain --json`
 - Benchmark context and reviewed-knowledge retrieval: `./scripts/repoctl context benchmark --repo-id main --json`
 - Enforce benchmark gates: `./scripts/repoctl context benchmark --repo-id main --min-recall-at-5 0.8 --min-knowledge-recall-at-5 1.0 --require-source-integrity --json`
 - Pack task startup context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
+- Pack task startup context with source-status explanation: `./scripts/repoctl context pack --task T-... --repo-id main --explain --json`
 - Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
 - Build a candidate from completed task evidence: `./scripts/repoctl knowledge candidate build --from-receipt T-... --repo-id main --kind invariant --json`
 - Check candidate quality before review: `./scripts/repoctl knowledge candidate check KC-... --repo-id main --json`

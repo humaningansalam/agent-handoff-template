@@ -10,10 +10,10 @@ from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task
 
 
-def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 5000) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
+def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 5000, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
     task = resolve_task(root, task_id)
     query = _task_seed_query(task)
-    bundle, problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens)
+    bundle, problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens, explain=explain)
     groups = _group_candidates(bundle.packed_context if bundle is not None else [])
     groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
     data = {

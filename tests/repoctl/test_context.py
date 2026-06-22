@@ -307,12 +307,14 @@ Use reviewed knowledge source authority.
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
 
-    assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--explain", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     reviewed = payload["data"]["groups"]["reviewed_knowledge"]
     assert reviewed[0]["record"]["id"] == record_id
     assert reviewed[0]["record"]["status"] == "reviewed"
+    assert reviewed[0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
+    assert payload["data"]["bundle"]["query"]["explain"] is True
 
 
 def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -328,12 +330,14 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
 
-    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--explain", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     bundle = payload["data"]["bundle"]
     assert bundle["knowledge_results"][0]["record"]["id"] == record_id
     assert bundle["knowledge_results"][0]["record"]["status"] == "reviewed"
+    assert bundle["knowledge_results"][0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
+    assert bundle["query"]["explain"] is True
     assert bundle["completeness"]["knowledge_result_count"] == 1
     assert all(candidate["source_ref"]["kind"] != "knowledge_record" for candidate in bundle["packed_context"])
 
