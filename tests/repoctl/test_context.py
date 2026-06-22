@@ -423,7 +423,7 @@ def test_context_benchmark_multi_repo_isolation_passes_for_selected_repo(tmp_pat
     assert payload["data"]["gates"]["require_no_cross_repo"] is True
 
 
-def test_context_benchmark_surfaces_import_impact_gap_by_category(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_benchmark_import_impact_passes_after_resolution(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -467,18 +467,18 @@ def test_context_benchmark_surfaces_import_impact_gap_by_category(tmp_path: Path
     payload = json.loads(capsys.readouterr().out)
     result = payload["data"]["results"][0]
     impact_summary = payload["data"]["summary"]["by_category"]["impact"]
-    assert result["metrics"]["recall_at_5"] < 1.0
+    assert result["metrics"]["recall_at_5"] == 1.0
     assert impact_summary["question_count"] == 1
     assert impact_summary["mean_recall_at_5"] == result["metrics"]["recall_at_5"]
-    assert {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"} in result["missing_required_at_10"]
+    assert {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"} in result["required_found_at_5"]
     assert payload["data"]["gates"]["min_category_recall_at_5"] == {}
 
-    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--json"]) == 1
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--json"]) == 0
 
     gated_payload = json.loads(capsys.readouterr().out)
     assert gated_payload["data"]["gates"]["min_category_recall_at_5"] == {"impact": 1.0}
-    assert gated_payload["problems"][0]["code"] == "context_benchmark_category_recall_gate_failed"
-    assert gated_payload["problems"][0]["path"] == "impact"
+    assert gated_payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
+    assert gated_payload["problems"] == []
 
 
 def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: Path, monkeypatch, capsys) -> None:

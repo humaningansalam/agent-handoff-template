@@ -6,6 +6,7 @@ from typing import Any
 from .code_index import CodeIndexEntry, build_code_index
 from .git import normalize_repo_path
 from .graph_code_provider import build_precise_symbols
+from .graph_import_resolver import resolve_python_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .repositories import RepoTarget
@@ -252,6 +253,34 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         add_edge(GraphEdge("DEFINES", file_node_id, symbol_node_id, "resolved", precise_symbol.provider))
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
 
+    import_resolutions = resolve_python_imports(entries)
+    for resolution in import_resolutions:
+        importer_node_id = file_id(repo_id, resolution.importer_path)
+        target_node_id = file_id(repo_id, resolution.target_path)
+        import_node_id = import_ref_id(repo_id, resolution.language, resolution.raw_import)
+        if importer_node_id not in nodes or target_node_id not in nodes or import_node_id not in nodes:
+            continue
+        add_edge(
+            GraphEdge(
+                "RESOLVES_TO",
+                import_node_id,
+                target_node_id,
+                "resolved",
+                resolution.provider,
+                {"importer_path": resolution.importer_path},
+            )
+        )
+        add_edge(
+            GraphEdge(
+                "IMPORTS_FILE",
+                importer_node_id,
+                target_node_id,
+                "resolved",
+                resolution.provider,
+                {"raw_import": resolution.raw_import},
+            )
+        )
+
     parse_error_count = int(summary.get("parse_error") or 0)
     source_payloads = {
         "code_index": [entry.to_dict() for entry in entries],
@@ -266,6 +295,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         ],
         "task_completion": task_receipts,
         "python_ast": [symbol.to_dict() for symbol in precise_symbols],
+        "python_import_resolver": [resolution.to_dict() for resolution in import_resolutions],
     }
     snapshot = GraphSnapshot(
         repository=target.to_dict(),
@@ -275,6 +305,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             {"kind": "repometa_policy", "assertion": "default", "digest": digest_data(source_payloads["repometa_policy"])},
             {"kind": "task_completion", "assertion": "recorded", "digest": digest_data(source_payloads["task_completion"])},
             {"kind": "python_ast", "assertion": "resolved", "digest": digest_data(source_payloads["python_ast"])},
+            {"kind": "python_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["python_import_resolver"])},
         ],
         completeness={
             "inventory_complete": True,
@@ -288,7 +319,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
-        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor"],
+        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution"],
     ).with_digest()
     return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta}
 

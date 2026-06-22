@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.2.82",
+  "version": "0.2.83",
   "replace_paths": [
     ".claude/agents/README.md",
     ".claude/agents/maintenance-cartographer.md",
@@ -121,6 +121,7 @@
     "tools/repoctl/git.py",
     "tools/repoctl/graph.py",
     "tools/repoctl/graph_code_provider.py",
+    "tools/repoctl/graph_import_resolver.py",
     "tools/repoctl/graph_model.py",
     "tools/repoctl/io.py",
     "tools/repoctl/knowledge_candidates.py",

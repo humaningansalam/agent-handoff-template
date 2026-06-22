@@ -31,16 +31,23 @@ STOPWORDS = {
     "after",
     "are",
     "does",
+    "file",
+    "files",
     "for",
     "from",
     "how",
     "if",
+    "impact",
+    "impacted",
     "is",
     "of",
     "the",
     "to",
     "what",
     "why",
+    "change",
+    "changed",
+    "changes",
 }
 
 

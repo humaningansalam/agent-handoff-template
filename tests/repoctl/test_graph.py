@@ -106,6 +106,40 @@ def test_graph_imports_are_raw_import_refs(tmp_path: Path, monkeypatch, capsys) 
     assert not any(node["kind"] in {"module", "package", "symbol"} for node in snapshot["nodes"])
 
 
+def test_graph_resolves_repo_local_python_imports(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "utils").mkdir()
+    (repo / "handlers").mkdir()
+    (repo / "utils/__init__.py").write_text("", encoding="utf-8")
+    (repo / "utils/tokens.py").write_text("def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n", encoding="utf-8")
+    (repo / "handlers/login.py").write_text(
+        "from utils.tokens import issue_token as make_session\n\n\ndef login(user_id: str) -> str:\n    return make_session(user_id)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    import_node_id = import_ref_id("main", "python", "utils.tokens.issue_token")
+    source_file_id = file_id("main", "handlers/login.py")
+    target_file_id = file_id("main", "utils/tokens.py")
+    assert "import_resolution" in snapshot["capabilities"]
+    assert any(source["kind"] == "python_import_resolver" and source["assertion"] == "resolved" for source in snapshot["sources"])
+    assert any(edge["kind"] == "DECLARES_IMPORT" and edge["from"] == source_file_id and edge["to"] == import_node_id for edge in snapshot["edges"])
+    assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id and edge["to"] == target_file_id for edge in snapshot["edges"])
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in snapshot["edges"])
+
+    assert main(["graph", "query", "--file", "utils/tokens.py", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(node["id"] == source_file_id for node in result["nodes"])
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in result["edges"])
+
+
 def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
