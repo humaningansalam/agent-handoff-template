@@ -332,13 +332,7 @@ def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) ->
         "candidate_id": candidate_id,
         "candidate_digest": candidate.get("candidate_digest", ""),
         "passed": not any(problem.severity == "error" for problem in check_problems),
-        "checks": {
-            "schema_valid": not any(problem.code.startswith("knowledge_candidate_schema") for problem in check_problems),
-            "source_refs_valid": not any(problem.code.startswith("knowledge_candidate_source") for problem in check_problems),
-            "digest_current": not any(problem.code == "knowledge_source_digest_drift" for problem in check_problems),
-            "review_required": bool(candidate.get("review", {}).get("required")) if isinstance(candidate.get("review"), dict) else False,
-            "duplicate_reviewed_claim": any(problem.code == "knowledge_candidate_duplicate_reviewed_claim" for problem in check_problems),
-        },
+        "checks": _candidate_check_flags(candidate, check_problems),
     }, check_problems
 
 
@@ -1093,6 +1087,17 @@ def _context_pack_provenance_warnings(root: Path, candidate: dict[str, Any]) -> 
     return []
 
 
+def _candidate_check_flags(candidate: dict[str, Any], problems: list[Problem]) -> dict[str, bool]:
+    return {
+        "schema_valid": not any(problem.code.startswith("knowledge_candidate_schema") for problem in problems),
+        "source_refs_valid": not any(problem.code.startswith("knowledge_candidate_source") for problem in problems),
+        "digest_current": not any(problem.code == "knowledge_source_digest_drift" for problem in problems),
+        "pack_provenance_current": not any(problem.code.startswith("knowledge_candidate_pack_provenance") for problem in problems),
+        "review_required": bool(candidate.get("review", {}).get("required")) if isinstance(candidate.get("review"), dict) else False,
+        "duplicate_reviewed_claim": any(problem.code == "knowledge_candidate_duplicate_reviewed_claim" for problem in problems),
+    }
+
+
 def _candidate_checks(root: Path, *, repo_id: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     error_count = 0
@@ -1111,6 +1116,7 @@ def _candidate_checks(root: Path, *, repo_id: str, candidates: list[dict[str, An
             {
                 "candidate_id": candidate_id,
                 "passed": passed,
+                "checks": _candidate_check_flags(candidate, problems),
                 "error_count": len(errors),
                 "warning_count": len(warnings),
                 "problems": errors,

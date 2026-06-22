@@ -771,6 +771,7 @@ Create a candidate from a context pack without making the pack an authority sour
 
     assert main(["knowledge", "candidate", "check", candidate["id"], "--repo-id", "main", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["checks"]["pack_provenance_current"] is True
     assert check_payload["warnings"] == []
 
     pack.unlink()
@@ -778,6 +779,7 @@ Create a candidate from a context pack without making the pack an authority sour
     missing_pack_payload = json.loads(capsys.readouterr().out)
     assert missing_pack_payload["ok"] is True
     assert missing_pack_payload["data"]["checks"]["source_refs_valid"] is True
+    assert missing_pack_payload["data"]["checks"]["pack_provenance_current"] is False
     assert missing_pack_payload["warnings"][0]["code"] == "knowledge_candidate_pack_provenance_missing"
 
 
