@@ -353,6 +353,12 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert drift_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
     assert drift_payload["data"]["records"][0]["status"] == "stale"
 
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    stale_decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
+    assert "- Status: `stale`" in stale_decisions_text
+    assert "status=`digest_mismatch`" in stale_decisions_text
+
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["data"]["record_statuses"] == {"stale": 1}
@@ -385,6 +391,7 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert "Non-authoritative generated view" in decisions_text
     assert f"- Lifecycle events: `{approved_event['id']}`" in decisions_text
+    assert "status=`current`" in decisions_text
     assert "docs/adr/evidence-context-authority-v0.md#Decision" in decisions_text
 
     assert main(["context", "query", "Knowledge Index", "--repo-id", "main", "--json"]) == 0

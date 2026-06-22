@@ -148,7 +148,8 @@ def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[s
                 continue
             section = f"#{ref.get('section')}" if ref.get("section") else ""
             digest = ref.get("content_sha256", "")
-            lines.append(f"- `{ref.get('path', '')}{section}` `{digest}`")
+            source_status = _source_ref_status(root, ref)
+            lines.append(f"- `{ref.get('path', '')}{section}` `{digest}` status=`{source_status}`")
     else:
         lines.append("- Missing source refs; do not treat this record as current knowledge.")
     lines.append("")
@@ -172,6 +173,18 @@ def _event_digest_basis(event: dict[str, Any]) -> dict[str, Any]:
         "candidate_id": event.get("candidate_id", ""),
         "superseded_by": event.get("superseded_by", ""),
     }
+
+
+def _source_ref_status(root: Path, ref: dict[str, Any]) -> str:
+    rel = str(ref.get("path") or "")
+    expected = str(ref.get("content_sha256") or "")
+    path = root / rel
+    if not path.is_file():
+        return "missing"
+    actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    if actual != expected:
+        return "digest_mismatch"
+    return "current"
 
 
 def _events_by_record(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
