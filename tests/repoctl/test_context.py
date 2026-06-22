@@ -259,6 +259,30 @@ def test_context_benchmark_compare_detects_source_digest_drift(tmp_path: Path, m
     assert any(item["code"] == "context_benchmark_artifact_source_digest_drift" for item in payload["data"]["source_drift"])
 
 
+def test_context_benchmark_compare_detects_missing_source_after_rename(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+    baseline = tmp_path / ".repoctl-state/context-benchmark/baseline.json"
+    candidate = tmp_path / ".repoctl-state/context-benchmark/candidate.json"
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.rename(tmp_path / "docs/adr/evidence-context-authority-renamed.md")
+
+    assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--require-current-sources", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "context_benchmark_artifact_source_missing" for problem in payload["problems"])
+    assert any(item["path"] == "docs/adr/evidence-context-authority-v0.md" for item in payload["data"]["source_drift"])
+
+
 def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
