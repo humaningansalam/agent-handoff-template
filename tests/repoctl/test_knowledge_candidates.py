@@ -340,6 +340,11 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert query_payload["data"]["result_count"] == 1
     assert query_payload["data"]["results"][0]["record"]["id"] == record["id"]
     assert query_payload["data"]["results"][0]["record"]["status"] == "reviewed"
+    breakdown = query_payload["data"]["results"][0]["score_breakdown"]
+    assert breakdown["exact_claim"] > 0
+    assert breakdown["exact_summary"] > 0
+    assert breakdown["authority"] == 0.5
+    assert "exact claim match" in query_payload["data"]["results"][0]["selection_reasons"]
 
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--explain", "--json"]) == 0
     explain_payload = json.loads(capsys.readouterr().out)

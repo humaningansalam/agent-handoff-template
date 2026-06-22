@@ -1046,27 +1046,44 @@ def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:
 
 
 def _record_score(query: str, record: dict[str, Any]) -> tuple[float, dict[str, float], list[str]]:
-    fields = [
-        str(record.get("id") or ""),
-        str(record.get("kind") or ""),
-        str(record.get("title") or ""),
-        str(record.get("claim") or ""),
-        str(record.get("summary") or ""),
-        json.dumps(record.get("source_refs", []), ensure_ascii=False, sort_keys=True),
-    ]
-    body = "\n".join(fields)
-    exact = _exact_score(query, body)
+    identity_text = "\n".join([str(record.get("id") or ""), str(record.get("kind") or "")])
+    title_text = str(record.get("title") or "")
+    claim_text = str(record.get("claim") or "")
+    summary_text = str(record.get("summary") or "")
+    source_text = json.dumps(record.get("source_refs", []), ensure_ascii=False, sort_keys=True)
+    exact_identity = _exact_score(query, identity_text)
+    exact_title = _exact_score(query, title_text)
+    exact_claim = _exact_score(query, claim_text)
+    exact_summary = _exact_score(query, summary_text)
+    exact_source = _exact_score(query, source_text)
+    body = "\n".join([identity_text, title_text, claim_text, summary_text, source_text])
     fts = _fts_score(query, body)
     authority = 0.5 if str(record.get("status") or "") == "reviewed" else 0.0
-    score = exact * 2.0 + fts * 1.2 + authority
+    score = exact_identity * 1.0 + exact_title * 2.4 + exact_claim * 2.0 + exact_summary * 1.2 + exact_source * 0.8 + fts * 1.2 + authority
     reasons: list[str] = []
-    if exact:
-        reasons.append("exact record field match")
+    if exact_identity:
+        reasons.append("exact record identity match")
+    if exact_title:
+        reasons.append("exact title match")
+    if exact_claim:
+        reasons.append("exact claim match")
+    if exact_summary:
+        reasons.append("exact summary match")
+    if exact_source:
+        reasons.append("exact source reference match")
     if fts:
         reasons.append("SQLite FTS record match")
     if authority:
         reasons.append("reviewed knowledge record")
-    return score, {"exact": exact, "fts": fts, "authority": authority}, reasons
+    return score, {
+        "exact_identity": exact_identity,
+        "exact_title": exact_title,
+        "exact_claim": exact_claim,
+        "exact_summary": exact_summary,
+        "exact_source": exact_source,
+        "fts": fts,
+        "authority": authority,
+    }, reasons
 
 
 def _exact_score(query: str, body: str) -> float:
