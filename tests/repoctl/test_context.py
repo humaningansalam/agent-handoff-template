@@ -18,7 +18,7 @@ def _write_context_docs(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "docs/adr/evidence-context-authority-v0.md").write_text(
-        "# ADR: Evidence Context Authority v0\n\n## Authority Rules\n\nEvidence Context is read-only and non-authoritative. Context retrieval does not replace Graph, task, Board, Backlog, or .repometa authority.\n",
+        "# ADR: Evidence Context Authority v0\n\n## Decision\n\nEvidence Context comes before reviewed knowledge and keeps source bundles separate.\n\n## Authority Rules\n\nEvidence Context is read-only and non-authoritative. Context retrieval does not replace Graph, task, Board, Backlog, or .repometa authority.\n",
         encoding="utf-8",
     )
     (root / "docs/contracts/repoctl-module-boundaries.md").write_text(
@@ -127,7 +127,34 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["question_count"] >= 2
     assert payload["data"]["summary"]["source_ref_integrity"] is True
     assert payload["data"]["summary"]["mean_recall_at_5"] > 0
+    assert payload["data"]["summary"]["knowledge_expected_questions"] >= 1
+    assert payload["data"]["summary"]["knowledge_result_questions"] == 0
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
+
+
+def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    q2 = next(result for result in payload["data"]["results"] if result["id"] == "Q-002")
+    assert payload["data"]["summary"]["knowledge_result_questions"] >= 1
+    assert payload["data"]["summary"]["mean_knowledge_recall_at_5"] == 1.0
+    assert q2["metrics"]["knowledge_recall_at_5"] == 1.0
+    assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert q2["required_knowledge_found_at_5"][0]["section"] == "Decision"
 
 
 def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
