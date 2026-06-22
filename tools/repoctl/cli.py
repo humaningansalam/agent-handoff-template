@@ -14,6 +14,7 @@ from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, check_knowledge_records, list_knowledge_candidates, query_knowledge_records, show_knowledge_candidate, show_knowledge_record
+from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
@@ -1440,6 +1441,31 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_knowledge_render(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = render_knowledge(root, repo_id=args.repo_id, output=Path(args.output))
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge render",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "knowledge_render_not_authoritative",
+                "message": "rendered knowledge pages are generated views and must not be ingested as source authority",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"knowledge render output={data.get('output', '')} records={data.get('record_count', 0)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     data = plan_upgrade(root, source=args.source)
@@ -1829,6 +1855,11 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("--limit", type=int, default=10)
     knowledge_query.add_argument("--json", action="store_true")
     knowledge_query.set_defaults(func=cmd_knowledge_query)
+    knowledge_render = knowledge_sub.add_parser("render")
+    knowledge_render.add_argument("--repo-id", required=True)
+    knowledge_render.add_argument("--output", default="docs/knowledge/generated")
+    knowledge_render.add_argument("--json", action="store_true")
+    knowledge_render.set_defaults(func=cmd_knowledge_render)
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)

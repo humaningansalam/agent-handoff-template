@@ -116,3 +116,31 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     drift_payload = json.loads(capsys.readouterr().out)
     assert drift_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
     assert drift_payload["data"]["records"][0]["status"] == "stale"
+
+
+def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    render_payload = json.loads(capsys.readouterr().out)
+    rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
+    assert "docs/knowledge/generated/INDEX.md" in rendered_paths
+    assert "docs/knowledge/generated/decisions.md" in rendered_paths
+    decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
+    assert "Non-authoritative generated view" in decisions_text
+    assert "docs/adr/evidence-context-authority-v0.md#Decision" in decisions_text
+
+    assert main(["context", "query", "Knowledge Index", "--repo-id", "main", "--json"]) == 0
+    context_payload = json.loads(capsys.readouterr().out)
+    refs = [candidate["source_ref"]["path"] for candidate in context_payload["data"]["bundle"]["candidates"]]
+    assert all(not path.startswith("docs/knowledge/generated/") for path in refs)

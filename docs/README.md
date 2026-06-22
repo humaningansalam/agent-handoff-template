@@ -49,6 +49,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Approve a candidate into reviewed knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --json`
 - Query reviewed knowledge: `./scripts/repoctl knowledge query "current auth decision" --repo-id main --json`
 - Check knowledge source drift: `./scripts/repoctl knowledge check --repo-id main --json`
+- Render non-authoritative knowledge pages: `./scripts/repoctl knowledge render --repo-id main --json`
 - Check changed-file metadata gate: `./scripts/repoctl meta check --changed --json`
 
 ## Notes
