@@ -140,6 +140,52 @@ def test_graph_resolves_repo_local_python_imports(tmp_path: Path, monkeypatch, c
     assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in result["edges"])
 
 
+def test_graph_resolves_relative_python_imports(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "handlers").mkdir()
+    (repo / "handlers/__init__.py").write_text("", encoding="utf-8")
+    (repo / "handlers/tokens.py").write_text("def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n", encoding="utf-8")
+    (repo / "handlers/login.py").write_text(
+        "from .tokens import issue_token as make_session\n\n\ndef login(user_id: str) -> str:\n    return make_session(user_id)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    import_node_id = import_ref_id("main", "python", ".tokens.issue_token")
+    source_file_id = file_id("main", "handlers/login.py")
+    target_file_id = file_id("main", "handlers/tokens.py")
+    assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id and edge["to"] == target_file_id for edge in snapshot["edges"])
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in snapshot["edges"])
+
+
+def test_graph_skips_ambiguous_python_import_resolution(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "pkg/mod").mkdir(parents=True)
+    (repo / "consumer").mkdir()
+    (repo / "pkg/__init__.py").write_text("", encoding="utf-8")
+    (repo / "pkg/mod.py").write_text("VALUE = 'module'\n", encoding="utf-8")
+    (repo / "pkg/mod/__init__.py").write_text("VALUE = 'package'\n", encoding="utf-8")
+    (repo / "consumer/app.py").write_text("from pkg.mod import VALUE\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    import_node_id = import_ref_id("main", "python", "pkg.mod.VALUE")
+    assert any(edge["kind"] == "DECLARES_IMPORT" and edge["to"] == import_node_id for edge in snapshot["edges"])
+    assert not any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id for edge in snapshot["edges"])
+    assert not any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == file_id("main", "consumer/app.py") for edge in snapshot["edges"])
+
+
 def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
