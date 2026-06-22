@@ -702,6 +702,148 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert "pytest tests/repoctl/test_knowledge_candidates.py" in candidate["summary"]
 
 
+def test_knowledge_candidate_builds_from_context_pack_authority_source(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622070707Z--pack-backed.md"
+    task_path.write_text(
+        """---
+id: T-20260622070707Z
+title: "Promote context pack authority"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T070707Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622070707Z - Promote context pack authority
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: Evidence Context authority
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Create a candidate from a context pack without making the pack an authority source.
+
+## Handoff
+
+- Next exact step: inspect the candidate.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622070707Z.json --repo-id main --json`
+- Done when: candidate source refs point at authority docs.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    pack = tmp_path / ".repoctl-state/context-pack/T-20260622070707Z.json"
+
+    assert main(["context", "pack", "--task", "T-20260622070707Z", "--repo-id", "main", "--output", pack.as_posix(), "--json"]) == 0
+    pack_payload = json.loads(capsys.readouterr().out)
+
+    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    candidate = payload["data"]["candidate"]
+    assert candidate["authoritative"] is False
+    assert candidate["source_refs"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert candidate["source_refs"][0]["content_sha256"].startswith("sha256:")
+    assert candidate["derived_from"] == {
+        "kind": "context_pack",
+        "path": ".repoctl-state/context-pack/T-20260622070707Z.json",
+        "pack_digest": pack_payload["data"]["pack_digest"],
+    }
+    assert "context pack was used only to select authority source refs" in candidate["review"]["checklist"]
+    assert all(not ref["path"].startswith(".repoctl-state/") for ref in candidate["source_refs"])
+
+
+def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622080808Z--pack-drift.md"
+    task_path.write_text(
+        """---
+id: T-20260622080808Z
+title: "Reject stale context pack"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T080808Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622080808Z - Reject stale context pack
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: Evidence Context authority
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Reject stale context pack inputs.
+
+## Handoff
+
+- Next exact step: inspect drift rejection.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622080808Z.json --repo-id main --json`
+- Done when: stale pack source refs are rejected.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    pack = tmp_path / ".repoctl-state/context-pack/T-20260622080808Z.json"
+
+    assert main(["context", "pack", "--task", "T-20260622080808Z", "--repo-id", "main", "--output", pack.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    outside_pack = tmp_path.parent / f"{tmp_path.name}-outside-pack.json"
+    outside_pack.write_text(pack.read_text(encoding="utf-8"), encoding="utf-8")
+    assert main(["knowledge", "candidate", "build", "--from-pack", outside_pack.as_posix(), "--repo-id", "main", "--json"]) == 1
+    outside_payload = json.loads(capsys.readouterr().out)
+    assert outside_payload["problems"][0]["code"] == "knowledge_candidate_pack_outside_workspace"
+
+    generated_pack = tmp_path / "docs/knowledge/generated/pack.json"
+    generated_pack.parent.mkdir(parents=True, exist_ok=True)
+    generated_pack.write_text(pack.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--from-pack", generated_pack.as_posix(), "--repo-id", "main", "--json"]) == 1
+    generated_payload = json.loads(capsys.readouterr().out)
+    assert generated_payload["problems"][0]["code"] == "knowledge_candidate_pack_generated"
+
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged after pack.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--json"]) == 1
+    drift_payload = json.loads(capsys.readouterr().out)
+    assert drift_payload["problems"][0]["code"] == "knowledge_candidate_pack_source_drift"
+    assert drift_payload["problems"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+
+
 def test_knowledge_candidate_build_requires_one_source_mode(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

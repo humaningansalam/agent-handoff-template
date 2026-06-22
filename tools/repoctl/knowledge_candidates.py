@@ -33,6 +33,56 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
     if not chunks:
         return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", rel)]
     primary = _primary_chunk(chunks, kind)
+    return _write_candidate_from_chunk(root, repo_id=repo_id, kind=kind, primary=primary)
+
+
+def build_knowledge_candidate_from_pack(root: Path, *, pack: Path, repo_id: str, kind: str) -> tuple[dict[str, Any], list[Problem]]:
+    if kind not in ALLOWED_KINDS:
+        return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
+    pack_path = pack if pack.is_absolute() else root / pack
+    pack_data, pack_problems = _read_context_pack_artifact(root, pack_path)
+    if pack_problems:
+        return {}, pack_problems
+    task = pack_data.get("task") if isinstance(pack_data.get("task"), dict) else {}
+    pack_repo_id = str(task.get("repo_id") or "")
+    if pack_repo_id and pack_repo_id != repo_id:
+        return {}, [Problem("error", "knowledge_candidate_pack_repo_mismatch", "context pack repo_id does not match candidate repo_id", pack_repo_id)]
+    source_ref, source_problem = _pack_authority_source_ref(root, pack_data, kind)
+    if source_problem is not None:
+        return {}, [source_problem]
+    rel = str(source_ref.get("path") or "")
+    chunks = chunk_markdown_file(root, root / rel)
+    if not chunks:
+        return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", rel)]
+    primary = _primary_chunk(chunks, kind)
+    return _write_candidate_from_chunk(
+        root,
+        repo_id=repo_id,
+        kind=kind,
+        primary=primary,
+        derived_from={
+            "kind": "context_pack",
+            "path": pack_path.relative_to(root).as_posix() if pack_path.is_relative_to(root) else pack_path.as_posix(),
+            "pack_digest": str(pack_data.get("pack_digest") or ""),
+        },
+        checklist=[
+            "context pack was used only to select authority source refs",
+            "source refs resolve to current content digests",
+            "claim does not come from generated/context/candidate output",
+            "candidate should not replace task, Board, Graph, or .repometa authority",
+        ],
+    )
+
+
+def _write_candidate_from_chunk(
+    root: Path,
+    *,
+    repo_id: str,
+    kind: str,
+    primary: Any,
+    derived_from: dict[str, Any] | None = None,
+    checklist: list[str] | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
     candidate_id = _unique_candidate_id(root, repo_id, primary.title, primary.source_ref.content_sha256)
     candidate = {
         "schema": "repoctl.knowledge.candidate",
@@ -49,7 +99,8 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
         "review": {
             "required": True,
             "status": "pending",
-            "checklist": [
+            "checklist": checklist
+            or [
                 "source refs resolve to current content digests",
                 "claim does not come from generated/context/candidate output",
                 "candidate should not replace task, Board, Graph, or .repometa authority",
@@ -57,6 +108,8 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
         },
         "conflict_detected": False,
     }
+    if derived_from:
+        candidate["derived_from"] = derived_from
     candidate["candidate_digest"] = digest_data(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -604,6 +657,65 @@ def _source_rel(root: Path, source: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError as exc:
         raise RepoctlError("knowledge candidate source must be inside the workspace") from exc
+
+
+def _read_context_pack_artifact(root: Path, path: Path) -> tuple[dict[str, Any], list[Problem]]:
+    if not path.is_file():
+        return {}, [Problem("error", "knowledge_candidate_pack_missing", "context pack artifact is missing", path.as_posix())]
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return {}, [Problem("error", "knowledge_candidate_pack_outside_workspace", "context pack artifact must be inside the workspace", path.as_posix())]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}, [Problem("error", "knowledge_candidate_pack_invalid_json", "context pack artifact is not valid JSON", path.as_posix())]
+    if not isinstance(payload, dict):
+        return {}, [Problem("error", "knowledge_candidate_pack_invalid", "context pack artifact must be an object", path.as_posix())]
+    data = payload.get("data") if str(payload.get("command") or "") == "context pack" else payload
+    if not isinstance(data, dict) or not isinstance(data.get("groups"), dict):
+        return {}, [Problem("error", "knowledge_candidate_pack_invalid_data", "context pack artifact is missing groups", path.as_posix())]
+    expected_digest = str(data.get("pack_digest") or "")
+    digest_basis = {key: value for key, value in data.items() if key not in {"pack_digest", "artifact", "repository", "graph"}}
+    actual_digest = digest_data(digest_basis)
+    if expected_digest != actual_digest:
+        return {}, [Problem("error", "knowledge_candidate_pack_digest_mismatch", "context pack artifact digest does not match its content", path.as_posix())]
+    if path.resolve().is_relative_to((root / "docs/knowledge/generated").resolve()):
+        return {}, [Problem("error", "knowledge_candidate_pack_generated", "generated wiki output cannot be used as a context pack artifact", path.as_posix())]
+    return data, []
+
+
+def _pack_authority_source_ref(root: Path, pack_data: dict[str, Any], kind: str) -> tuple[dict[str, Any], Problem | None]:
+    groups = pack_data.get("groups") if isinstance(pack_data.get("groups"), dict) else {}
+    must_read = groups.get("must_read")
+    if not isinstance(must_read, list):
+        return {}, Problem("error", "knowledge_candidate_pack_sources_missing", "context pack has no must_read sources")
+    candidates: list[dict[str, Any]] = []
+    for item in must_read:
+        if not isinstance(item, dict):
+            continue
+        ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        rel = str(ref.get("path") or "")
+        if _validate_source(root, rel) is not None:
+            continue
+        if str(ref.get("kind") or "document") not in {"document", "authority_document"}:
+            continue
+        expected = str(ref.get("content_sha256") or "")
+        path = root / rel
+        if expected != _sha256_text(path.read_text(encoding="utf-8")):
+            return {}, Problem("error", "knowledge_candidate_pack_source_drift", "context pack source ref digest no longer matches source file", rel)
+        candidates.append(ref)
+    if not candidates:
+        return {}, Problem("error", "knowledge_candidate_pack_authority_source_missing", "context pack has no eligible authority source refs")
+    preferred_sections = {
+        "decision": {"Decision", "Authority Rules"},
+        "invariant": {"Invariant", "Invariants", "Authority Rules"},
+        "failure_mode": {"Failure Mode", "Failure Modes", "Known failure modes"},
+    }[kind]
+    for ref in candidates:
+        if str(ref.get("section") or "") in preferred_sections:
+            return ref, None
+    return candidates[0], None
 
 
 def _validate_source(root: Path, rel: str) -> Problem | None:

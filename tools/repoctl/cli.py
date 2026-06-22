@@ -13,7 +13,7 @@ from .context_benchmark import compare_context_benchmarks, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compare_task_context_packs
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -1392,11 +1392,14 @@ def cmd_context_pack_compare(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    if bool(args.source) == bool(args.from_receipt):
+    source_modes = [bool(args.source), bool(args.from_receipt), bool(args.from_pack)]
+    if sum(1 for enabled in source_modes if enabled) != 1:
         data: dict[str, Any] = {}
-        problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source or --from-receipt")]
+        problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, or --from-pack")]
     elif args.from_receipt:
         data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind)
+    elif args.from_pack:
+        data, problems = build_knowledge_candidate_from_pack(root, pack=Path(args.from_pack), repo_id=args.repo_id, kind=args.kind)
     else:
         data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind)
     payload = {
@@ -2117,6 +2120,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_build = knowledge_candidate_sub.add_parser("build")
     knowledge_candidate_build.add_argument("--source")
     knowledge_candidate_build.add_argument("--from-receipt")
+    knowledge_candidate_build.add_argument("--from-pack")
     knowledge_candidate_build.add_argument("--repo-id", required=True)
     knowledge_candidate_build.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
     knowledge_candidate_build.add_argument("--json", action="store_true")
