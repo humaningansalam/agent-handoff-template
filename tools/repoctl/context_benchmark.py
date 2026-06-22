@@ -20,6 +20,7 @@ def run_context_benchmark(
     min_precision_at_5: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
     require_source_integrity: bool = False,
+    require_knowledge_source_current: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
@@ -39,10 +40,19 @@ def run_context_benchmark(
         bundle, bundle_problems, _meta = build_context_bundle(root, target=target, query=str(question.get("question") or ""), budget_tokens=budget_tokens, explain=True)
         problems.extend(bundle_problems)
         spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
-        results.append(_score_question(question, spec, bundle))
+        results.append(_score_question(question, spec, bundle, bundle_problems))
 
     summary = _summarize(results)
-    problems.extend(_gate_problems(summary, min_recall_at_5=min_recall_at_5, min_precision_at_5=min_precision_at_5, min_knowledge_recall_at_5=min_knowledge_recall_at_5, require_source_integrity=require_source_integrity))
+    problems.extend(
+        _gate_problems(
+            summary,
+            min_recall_at_5=min_recall_at_5,
+            min_precision_at_5=min_precision_at_5,
+            min_knowledge_recall_at_5=min_knowledge_recall_at_5,
+            require_source_integrity=require_source_integrity,
+            require_knowledge_source_current=require_knowledge_source_current,
+        )
+    )
     return {
         "fixture": fixture.as_posix(),
         "question_count": len(results),
@@ -53,6 +63,7 @@ def run_context_benchmark(
             "min_precision_at_5": min_precision_at_5,
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
             "require_source_integrity": require_source_integrity,
+            "require_knowledge_source_current": require_knowledge_source_current,
         },
     }, problems
 
@@ -69,7 +80,7 @@ def _read_questions(path: Path) -> list[dict[str, Any]]:
     return questions
 
 
-def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None) -> dict[str, Any]:
+def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem]) -> dict[str, Any]:
     required = _refs(spec.get("required_source_refs"))
     required_knowledge = _refs(spec.get("required_knowledge_source_refs"))
     optional = _refs(spec.get("acceptable_optional_refs"))
@@ -79,6 +90,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     knowledge_refs = _knowledge_refs(bundle)
     knowledge_score_results = _knowledge_score_results(bundle)
     knowledge_source_statuses = _knowledge_source_statuses(bundle)
+    problem_codes = [problem.code for problem in problems]
+    stale_knowledge_excluded = problem_codes.count("knowledge_stale_record_excluded")
 
     top5 = candidate_refs[:5]
     top10 = candidate_refs[:10]
@@ -108,7 +121,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "required_knowledge_count": len(required_knowledge),
             "knowledge_result_count": len(knowledge_refs),
             "knowledge_score_breakdown_present": all(result["has_field_breakdown"] for result in knowledge_score_results),
-            "knowledge_source_status_current": all(status.get("digest_matches") is True for status in knowledge_source_statuses),
+            "knowledge_source_status_current": stale_knowledge_excluded == 0 and all(status.get("digest_matches") is True for status in knowledge_source_statuses),
+            "knowledge_stale_record_excluded": stale_knowledge_excluded,
         },
         "required_found_at_5": required_top5,
         "required_found_at_10": required_top10,
@@ -120,6 +134,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "top_knowledge_refs": knowledge_top5,
         "knowledge_score_results": knowledge_score_results,
         "knowledge_source_statuses": knowledge_source_statuses,
+        "problem_codes": problem_codes,
     }
 
 
@@ -136,6 +151,7 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_result_questions": sum(1 for metric in metrics if metric["knowledge_result_count"]),
         "knowledge_score_breakdown_integrity": all(metric["knowledge_score_breakdown_present"] for metric in metrics),
         "knowledge_source_status_current": all(metric["knowledge_source_status_current"] for metric in metrics),
+        "knowledge_stale_record_excluded": sum(int(metric["knowledge_stale_record_excluded"]) for metric in metrics),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
     }
 
@@ -226,6 +242,7 @@ def _gate_problems(
     min_precision_at_5: float | None,
     min_knowledge_recall_at_5: float | None,
     require_source_integrity: bool,
+    require_knowledge_source_current: bool,
 ) -> list[Problem]:
     problems: list[Problem] = []
     if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:
@@ -238,4 +255,6 @@ def _gate_problems(
         problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
     if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):
         problems.append(Problem("error", "context_benchmark_knowledge_integrity_failed", "context benchmark knowledge source ref integrity failed"))
+    if require_knowledge_source_current and not bool(summary.get("knowledge_source_status_current")):
+        problems.append(Problem("error", "context_benchmark_knowledge_source_stale", "context benchmark knowledge source status is not current"))
     return problems

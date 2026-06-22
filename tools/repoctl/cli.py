@@ -1250,6 +1250,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         min_precision_at_5=args.min_precision_at_5,
         min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
         require_source_integrity=args.require_source_integrity,
+        require_knowledge_source_current=args.require_knowledge_source_current,
     )
     payload = {
         "ok": not _has_errors(problems),
@@ -1986,6 +1987,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--min-precision-at-5", type=float)
     context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
     context_benchmark.add_argument("--require-source-integrity", action="store_true")
+    context_benchmark.add_argument("--require-knowledge-source-current", action="store_true")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)
     context_pack = context_sub.add_parser("pack")
