@@ -130,6 +130,19 @@ def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[s
         lines.append(f"- Superseded by: `{', '.join(superseded_by)}`")
     if events:
         lines.append(f"- Lifecycle events: `{', '.join(str(event.get('id') or '') for event in events)}`")
+    approval_context = _approval_context(record)
+    if approval_context:
+        lines.append(f"- Approved from candidate: `{approval_context['candidate_id']}`")
+        if approval_context["warning_codes"]:
+            lines.append(f"- Candidate warnings: `{', '.join(approval_context['warning_codes'])}`")
+        if approval_context["related_records"]:
+            related = ", ".join(
+                f"{item.get('record_id', '')} status={item.get('status', '')} relation={item.get('relation', '')}"
+                for item in approval_context["related_records"]
+                if isinstance(item, dict)
+            )
+            if related:
+                lines.append(f"- Related at approval: `{related}`")
     lines.extend([
         "",
         "### Claim",
@@ -174,6 +187,22 @@ def _event_digest_basis(event: dict[str, Any]) -> dict[str, Any]:
         "record_id": event.get("record_id", ""),
         "candidate_id": event.get("candidate_id", ""),
         "superseded_by": event.get("superseded_by", ""),
+    }
+
+
+def _approval_context(record: dict[str, Any]) -> dict[str, Any]:
+    created_from = record.get("created_from")
+    if not isinstance(created_from, dict):
+        return {}
+    candidate_check = created_from.get("candidate_check")
+    if not isinstance(candidate_check, dict):
+        candidate_check = {}
+    warning_codes = candidate_check.get("warning_codes")
+    related_records = candidate_check.get("related_records")
+    return {
+        "candidate_id": str(created_from.get("candidate_id") or ""),
+        "warning_codes": warning_codes if isinstance(warning_codes, list) else [],
+        "related_records": related_records if isinstance(related_records, list) else [],
     }
 
 

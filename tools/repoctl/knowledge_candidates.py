@@ -1190,7 +1190,7 @@ def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[di
 
 
 def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:
-    return {
+    public = {
         "id": record.get("id", ""),
         "repo_id": record.get("repo_id", ""),
         "kind": record.get("kind", ""),
@@ -1200,6 +1200,27 @@ def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:
         "summary": record.get("summary", ""),
         "source_refs": record.get("source_refs", []),
         "record_digest": record.get("record_digest", ""),
+    }
+    approval_context = _approval_context(record)
+    if approval_context:
+        public["approval_context"] = approval_context
+    return public
+
+
+def _approval_context(record: dict[str, Any]) -> dict[str, Any]:
+    created_from = record.get("created_from")
+    if not isinstance(created_from, dict):
+        return {}
+    candidate_check = created_from.get("candidate_check")
+    if not isinstance(candidate_check, dict):
+        candidate_check = {}
+    warning_codes = candidate_check.get("warning_codes")
+    related_records = candidate_check.get("related_records")
+    return {
+        "candidate_id": created_from.get("candidate_id", ""),
+        "candidate_digest": created_from.get("candidate_digest", ""),
+        "warning_codes": warning_codes if isinstance(warning_codes, list) else [],
+        "related_records": related_records if isinstance(related_records, list) else [],
     }
 
 

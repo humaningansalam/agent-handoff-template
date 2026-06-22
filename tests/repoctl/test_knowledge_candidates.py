@@ -381,6 +381,12 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert query_payload["data"]["result_count"] == 1
     assert query_payload["data"]["results"][0]["record"]["id"] == record["id"]
     assert query_payload["data"]["results"][0]["record"]["status"] == "reviewed"
+    assert query_payload["data"]["results"][0]["record"]["approval_context"] == {
+        "candidate_id": candidate_id,
+        "candidate_digest": record["created_from"]["candidate_digest"],
+        "warning_codes": [],
+        "related_records": [],
+    }
     breakdown = query_payload["data"]["results"][0]["score_breakdown"]
     assert breakdown["exact_claim"] > 0
     assert breakdown["exact_summary"] > 0
@@ -553,6 +559,7 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     new_record = approve_payload["data"]["record"]["id"]
     assert approve_payload["data"]["record"]["supersedes"] == [old_record]
     assert approve_payload["data"]["superseded_events"][0]["event"]["superseded_by"] == new_record
+    assert approve_payload["data"]["record"]["created_from"]["candidate_check"]["related_records"][0]["record_id"] == old_record
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
@@ -577,6 +584,9 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     include_statuses = {item["record"]["id"]: item["record"]["status"] for item in include_payload["data"]["results"]}
     assert include_statuses[old_record] == "superseded"
     assert include_statuses[new_record] == "reviewed"
+    new_query_record = next(item["record"] for item in include_payload["data"]["results"] if item["record"]["id"] == new_record)
+    assert new_query_record["approval_context"]["related_records"][0]["record_id"] == old_record
+    assert new_query_record["approval_context"]["related_records"][0]["status"] == "reviewed"
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
@@ -587,6 +597,8 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     assert f"- Superseded by: `{new_record}`" in decisions_text
     assert f"- Supersedes: `{old_record}`" in decisions_text
     assert "- Lifecycle events: `" in decisions_text
+    assert f"- Approved from candidate: `{second_candidate}`" in decisions_text
+    assert f"- Related at approval: `{old_record} status=reviewed relation=same_claim`" in decisions_text
 
 
 def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -827,6 +839,12 @@ Create a candidate from a context pack without making the pack an authority sour
     approve_payload = json.loads(capsys.readouterr().out)
     assert approve_payload["warnings"][0]["code"] == "knowledge_candidate_pack_provenance_missing"
     assert approve_payload["data"]["record"]["created_from"]["candidate_check"]["warning_codes"] == ["knowledge_candidate_pack_provenance_missing"]
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
+    assert f"- Approved from candidate: `{candidate['id']}`" in decisions_text
+    assert "- Candidate warnings: `knowledge_candidate_pack_provenance_missing`" in decisions_text
 
 
 def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(tmp_path: Path, monkeypatch, capsys) -> None:
