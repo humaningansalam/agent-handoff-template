@@ -146,6 +146,31 @@ def list_knowledge_candidates(root: Path, *, repo_id: str) -> dict[str, Any]:
     }
 
 
+def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
+    candidates = list_knowledge_candidates(root, repo_id=repo_id)["candidates"]
+    records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    superseded_ids = _superseded_ids(records)
+    statuses: dict[str, int] = {}
+    for record in records:
+        status = _derived_status(root, record, superseded_ids=superseded_ids)
+        statuses[status] = statuses.get(status, 0) + 1
+    events = _load_events(root, repo_id=repo_id)
+    event_types: dict[str, int] = {}
+    for event in events:
+        event_type = str(event.get("type") or "")
+        event_types[event_type] = event_types.get(event_type, 0) + 1
+    return {
+        "schema": "repoctl.knowledge.status",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "candidate_count": len(candidates),
+        "record_count": len(records),
+        "record_statuses": dict(sorted(statuses.items())),
+        "event_count": len(events),
+        "event_types": dict(sorted(event_types.items())),
+    }
+
+
 def show_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
     if not re.fullmatch(r"KC-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", candidate_id):
         return {}, [Problem("error", "invalid_knowledge_candidate_id", "candidate id must look like KC-YYYYMMDDHHMMSSZ--slug")]
@@ -481,6 +506,14 @@ def _read_candidate(path: Path) -> dict[str, Any]:
 def _load_records(root: Path) -> list[dict[str, Any]]:
     directory = _record_dir(root)
     return [_read_candidate(path) for path in sorted(directory.glob("K-*.json"))] if directory.exists() else []
+
+
+def _load_events(root: Path, *, repo_id: str) -> list[dict[str, Any]]:
+    directory = _event_dir(root)
+    if not directory.exists():
+        return []
+    events = [_read_candidate(path) for path in sorted(directory.glob("E-*.json"))]
+    return [event for event in events if str(event.get("repo_id") or "") == repo_id]
 
 
 def _validate_supersedes(root: Path, *, repo_id: str, supersedes: list[str]) -> list[Problem]:

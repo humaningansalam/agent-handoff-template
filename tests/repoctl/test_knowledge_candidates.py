@@ -50,6 +50,11 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
     assert second_candidate["id"] != candidate["id"]
 
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["candidate_count"] == 2
+    assert status_payload["data"]["record_count"] == 0
+
 
 def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -174,6 +179,11 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     assert statuses[old_record] == "superseded"
     assert statuses[new_record] == "reviewed"
 
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["record_statuses"] == {"reviewed": 1, "superseded": 1}
+    assert status_payload["data"]["event_types"] == {"approved": 2, "superseded": 1}
+
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 0
     query_payload = json.loads(capsys.readouterr().out)
     returned_ids = [item["record"]["id"] for item in query_payload["data"]["results"]]
@@ -220,6 +230,10 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     query_payload = json.loads(capsys.readouterr().out)
     assert query_payload["data"]["available_record_count"] == 0
     assert query_payload["data"]["results"] == []
+
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["event_types"] == {"rejected_candidate": 1}
 
 
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
