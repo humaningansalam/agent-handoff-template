@@ -208,7 +208,8 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
     if problems:
         return {}, problems
     candidate = candidate_data["candidate"]
-    quality_problems = [problem for problem in _candidate_quality_problems(root, candidate) if problem.severity == "error"]
+    quality_results = _candidate_quality_problems(root, candidate)
+    quality_problems = [problem for problem in quality_results if problem.severity == "error"]
     if quality_problems:
         return {}, quality_problems
     supersedes = supersedes or []
@@ -230,7 +231,14 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
         "summary": candidate.get("summary", ""),
         "source_refs": candidate.get("source_refs", []),
         "supersedes": supersedes,
-        "created_from": {"candidate_id": candidate_id, "candidate_digest": candidate.get("candidate_digest", "")},
+        "created_from": {
+            "candidate_id": candidate_id,
+            "candidate_digest": candidate.get("candidate_digest", ""),
+            "candidate_check": {
+                "passed": True,
+                "warning_codes": sorted(problem.code for problem in quality_results if problem.severity == "warning"),
+            },
+        },
         "review": {"status": "reviewed", "reviewed_by": "human"},
         "authoritative": True,
     }

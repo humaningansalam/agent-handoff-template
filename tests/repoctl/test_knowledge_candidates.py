@@ -137,6 +137,7 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert record["status"] == "reviewed"
     assert record["authoritative"] is True
     assert record["id"].startswith("K-")
+    assert record["created_from"]["candidate_check"] == {"passed": True, "warning_codes": []}
     assert approve_payload["data"]["event"]["type"] == "approved"
     assert record["id"].lower().replace("--", "-") in approve_payload["data"]["event"]["id"]
 
