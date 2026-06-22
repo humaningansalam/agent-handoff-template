@@ -104,7 +104,7 @@ def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any
         kind = str(record.get("kind") or "")
         if kind in by_kind:
             by_kind[kind].append(record)
-    pages: dict[str, str] = {"INDEX.md": _index_page(records, events, by_kind)}
+    pages: dict[str, str] = {"INDEX.md": _index_page(root, records, events, by_kind)}
     for kind, filename in PAGE_BY_KIND.items():
         pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records), _deprecated_ids(events), events)
     return pages
@@ -150,7 +150,7 @@ def _event_belongs_to_page(name: str, event: dict[str, Any], records: list[dict[
     return str(event.get("record_id") or "") in record_ids or str(event.get("superseded_by") or "") in record_ids
 
 
-def _index_page(records: list[dict[str, Any]], events: list[dict[str, Any]], by_kind: dict[str, list[dict[str, Any]]]) -> str:
+def _index_page(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any]], by_kind: dict[str, list[dict[str, Any]]]) -> str:
     lines = [
         "# Knowledge Index",
         "",
@@ -161,12 +161,46 @@ def _index_page(records: list[dict[str, Any]], events: list[dict[str, Any]], by_
     ]
     for kind, filename in PAGE_BY_KIND.items():
         lines.append(f"- [{kind.replace('_', ' ').title()}]({filename}) - {len(by_kind[kind])} records")
+    status_groups = _records_by_status(root, records, events)
+    lines.extend(["", "## Lifecycle", ""])
+    for status in ("reviewed", "stale", "superseded", "deprecated"):
+        lines.append(f"- {status}: {len(status_groups.get(status, []))}")
+    for status in ("reviewed", "stale", "superseded", "deprecated"):
+        items = status_groups.get(status, [])
+        if not items:
+            continue
+        lines.extend(["", f"### {status.title()}", ""])
+        for record in items:
+            kind = str(record.get("kind") or "")
+            filename = PAGE_BY_KIND.get(kind, "")
+            title = str(record.get("title") or record.get("id") or "Untitled")
+            record_id = str(record.get("id") or "")
+            link = f"{filename}#{_markdown_anchor(title)}" if filename else ""
+            suffix = f" ([{record_id}]({link}))" if link else f" (`{record_id}`)"
+            lines.append(f"- {title}{suffix}")
     lines.extend(["", "## Source Bundle", ""])
     lines.append(f"- Records: {len(records)}")
     lines.append(f"- Events: {len(events)}")
     lines.append(f"- Records digest: {digest_data([_record_digest_basis(record) for record in records])}")
     lines.append(f"- Events digest: {digest_data([_event_digest_basis(event) for event in events])}")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _records_by_status(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    superseded_ids = _superseded_ids(records)
+    deprecated_ids = _deprecated_ids(events)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        groups.setdefault(status, []).append(record)
+    for status in groups:
+        groups[status] = sorted(groups[status], key=lambda item: str(item.get("id") or ""))
+    return groups
+
+
+def _markdown_anchor(title: str) -> str:
+    anchor = "".join(char.lower() if char.isalnum() or char in {" ", "-"} else "" for char in title.strip())
+    return "-".join(anchor.split())
 
 
 def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> str:

@@ -518,6 +518,12 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     index_text = (tmp_path / "docs/knowledge/generated/INDEX.md").read_text(encoding="utf-8")
     assert "- Events: 1" in index_text
     assert "- Events digest: sha256:" in index_text
+    assert "## Lifecycle" in index_text
+    assert "- reviewed: 1" in index_text
+    assert "- stale: 0" in index_text
+    assert "- superseded: 0" in index_text
+    assert "- deprecated: 0" in index_text
+    assert "### Reviewed" in index_text
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert "Non-authoritative generated view" in decisions_text
     assert f"- Lifecycle events: `{approved_event['id']}`" in decisions_text
@@ -740,6 +746,10 @@ def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatc
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
+    index_text = (tmp_path / "docs/knowledge/generated/INDEX.md").read_text(encoding="utf-8")
+    assert "- reviewed: 0" in index_text
+    assert "- deprecated: 1" in index_text
+    assert "### Deprecated" in index_text
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert "- Status: `deprecated`" in decisions_text
 
