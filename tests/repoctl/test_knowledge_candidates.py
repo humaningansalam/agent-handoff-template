@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.graph_model import digest_data
 from tests.repoctl.test_check import write_workspace
 from tests.repoctl.test_meta_check import write_repometa
 from tests.repoctl.test_repositories import init_repo
@@ -18,6 +19,17 @@ def _write_knowledge_docs(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "docs/plans/private-plan.md").write_text("# Private Plan\n\nDo not ingest this.\n", encoding="utf-8")
+
+
+def _read_event(root: Path, event_id: str) -> dict:
+    return json.loads((root / "docs/knowledge/events" / f"{event_id}.json").read_text(encoding="utf-8"))
+
+
+def _write_event(root: Path, event: dict) -> None:
+    (root / "docs/knowledge/events" / f"{event['id']}.json").write_text(
+        json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -444,6 +456,103 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert status_payload["data"]["record_statuses"] == {"stale": 1}
     assert status_payload["data"]["record_checks"]["error_count"] == 1
     assert status_payload["data"]["record_checks"]["problem_codes"] == {"knowledge_source_digest_drift": 1}
+
+
+def test_knowledge_check_reports_event_digest_mismatch(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
+    event = _read_event(tmp_path, approved_event["id"])
+    event["record_id"] = "K-20260622000000Z--missing"
+    _write_event(tmp_path, event)
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["event_count"] == 1
+    assert check_payload["data"]["event_checks"]["error_count"] == 1
+    assert check_payload["problems"][0]["code"] == "knowledge_event_digest_mismatch"
+
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["record_checks"]["problem_codes"]["knowledge_event_digest_mismatch"] == 1
+
+
+def test_knowledge_check_reports_event_missing_record_with_valid_digest(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
+    event = _read_event(tmp_path, approved_event["id"])
+    event["record_id"] = "K-20260622000000Z--missing"
+    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
+    _write_event(tmp_path, event)
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_event_record_missing"
+
+
+def test_knowledge_check_reports_event_record_digest_mismatch(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
+    event = _read_event(tmp_path, approved_event["id"])
+    event["record_digest"] = "sha256:" + "0" * 64
+    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
+    _write_event(tmp_path, event)
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_event_record_digest_mismatch"
+
+
+def test_knowledge_check_reports_superseded_event_missing_replacement(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
+    old_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", second_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 0
+    superseded_event = json.loads(capsys.readouterr().out)["data"]["superseded_events"][0]["event"]
+    event = _read_event(tmp_path, superseded_event["id"])
+    event["superseded_by"] = "K-20260622000000Z--missing"
+    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
+    _write_event(tmp_path, event)
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_event_superseded_by_missing"
 
 
 def test_knowledge_query_ranks_more_specific_record_first(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -242,6 +242,7 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     for record in records:
         record_problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
     record_problems.extend(_supersession_problems(records))
+    record_problems.extend(_event_integrity_problems(root, repo_id=repo_id, records=records))
     for problem in record_problems:
         record_problem_codes[problem.code] = record_problem_codes.get(problem.code, 0) + 1
     events = _load_events(root, repo_id=repo_id)
@@ -617,11 +618,13 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     for record in selected:
         problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
     problems.extend(_supersession_problems(selected))
+    problems.extend(_event_integrity_problems(root, repo_id=repo_id, records=selected))
     return {
         "schema": "repoctl.knowledge.check",
         "schema_version": 1,
         "repo_id": repo_id,
         "record_count": len(selected),
+        "event_count": len(_load_events(root, repo_id=repo_id)),
         "records": [
             {
                 "id": record.get("id", ""),
@@ -631,6 +634,9 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
             }
             for record in selected
         ],
+        "event_checks": {
+            "error_count": len([problem for problem in problems if problem.code.startswith("knowledge_event_")]),
+        },
     }, problems
 
 
@@ -1034,6 +1040,42 @@ def _supersession_problems(records: list[dict[str, Any]]) -> list[Problem]:
                 problems.append(Problem("error", "knowledge_supersedes_self", "knowledge record cannot supersede itself", record_id))
             if superseded and superseded not in known:
                 problems.append(Problem("error", "knowledge_supersedes_missing", "superseded record does not exist", superseded))
+    return problems
+
+
+def _event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str, Any]]) -> list[Problem]:
+    problems: list[Problem] = []
+    by_id = {str(record.get("id") or ""): record for record in records}
+    for event in _load_events(root, repo_id=repo_id):
+        event_id = str(event.get("id") or "")
+        expected_digest = str(event.get("event_digest") or "")
+        actual_digest = digest_data({key: value for key, value in event.items() if key != "event_digest"})
+        if expected_digest != actual_digest:
+            problems.append(Problem("error", "knowledge_event_digest_mismatch", "knowledge event digest does not match event content", event_id))
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type in {"approved", "deprecated"}:
+            record_id = str(event.get("record_id") or "")
+            record = by_id.get(record_id)
+            if record is None:
+                problems.append(Problem("error", "knowledge_event_record_missing", "knowledge event references a missing record", record_id or event_id))
+                continue
+            if str(event.get("record_digest") or "") != str(record.get("record_digest") or ""):
+                problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge event record digest does not match current record", record_id))
+        elif event_type == "superseded":
+            record_id = str(event.get("record_id") or "")
+            superseded_by = str(event.get("superseded_by") or "")
+            if record_id not in by_id:
+                problems.append(Problem("error", "knowledge_event_record_missing", "knowledge superseded event references a missing record", record_id or event_id))
+            replacement = by_id.get(superseded_by)
+            if replacement is None:
+                problems.append(Problem("error", "knowledge_event_superseded_by_missing", "knowledge superseded event references a missing replacement record", superseded_by or event_id))
+            elif str(event.get("record_digest") or "") != str(replacement.get("record_digest") or ""):
+                problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge superseded event digest does not match replacement record", superseded_by))
+        elif event_type in {"rejected_candidate", "refreshed_candidate"}:
+            continue
+        else:
+            problems.append(Problem("error", "knowledge_event_type_unknown", "knowledge event type is unknown", event_id))
     return problems
 
 
