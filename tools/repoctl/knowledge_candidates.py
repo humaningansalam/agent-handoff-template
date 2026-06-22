@@ -272,6 +272,48 @@ def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
     }, []
 
 
+def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    directory = _candidate_dir(root, repo_id)
+    candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    refreshed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    problems: list[Problem] = []
+    for candidate in candidates:
+        candidate_id = str(candidate.get("id") or "")
+        quality_problems = _candidate_quality_problems(root, candidate)
+        has_drift = any(problem.code == "knowledge_source_digest_drift" for problem in quality_problems)
+        hard_errors = [problem for problem in quality_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
+        if not has_drift:
+            skipped.append({"candidate_id": candidate_id, "reason": "not_stale"})
+            continue
+        if hard_errors:
+            skipped.append({"candidate_id": candidate_id, "reason": "blocked_by_non_drift_errors"})
+            problems.extend(hard_errors)
+            continue
+        refreshed_data, refresh_problems = refresh_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
+        if refresh_problems:
+            skipped.append({"candidate_id": candidate_id, "reason": "refresh_failed"})
+            problems.extend(refresh_problems)
+            continue
+        refreshed.append(
+            {
+                "candidate_id": candidate_id,
+                "new_candidate_id": refreshed_data["candidate"].get("id", ""),
+                "event_id": refreshed_data["event"].get("id", ""),
+            }
+        )
+    return {
+        "schema": "repoctl.knowledge.candidate_refresh_all_stale",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "candidate_count": len(candidates),
+        "refreshed_count": len(refreshed),
+        "skipped_count": len(skipped),
+        "refreshed": refreshed,
+        "skipped": skipped,
+    }, problems
+
+
 def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, supersedes: list[str] | None = None) -> tuple[dict[str, Any], list[Problem]]:
     candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
     if problems:

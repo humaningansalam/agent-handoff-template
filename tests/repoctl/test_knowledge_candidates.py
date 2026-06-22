@@ -143,6 +143,44 @@ def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tm
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
 
+def test_knowledge_candidate_refresh_all_stale_only_refreshes_drifted_candidates(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    (tmp_path / "docs/contracts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "docs/contracts/context-contract.md").write_text(
+        "# Context Contract\n\n## Invariant\n\nContext bundles must keep source references resolvable.\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    stale_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/context-contract.md", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+    current_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\n## Update\n\nThe decision source changed.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["candidate_count"] == 2
+    assert payload["data"]["refreshed_count"] == 1
+    assert payload["data"]["skipped_count"] == 1
+    assert payload["data"]["refreshed"][0]["candidate_id"] == stale_candidate
+    assert payload["data"]["refreshed"][0]["new_candidate_id"] != stale_candidate
+    assert payload["data"]["skipped"] == [{"candidate_id": current_candidate, "reason": "not_stale"}]
+
+    assert main(["knowledge", "candidate", "check", payload["data"]["refreshed"][0]["new_candidate_id"], "--repo-id", "main", "--json"]) == 0
+    refreshed_check = json.loads(capsys.readouterr().out)
+    assert refreshed_check["data"]["passed"] is True
+    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["data"]["candidate_count"] == 3
+    assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
+
+
 def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)
