@@ -36,6 +36,21 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
             }
         )
     rendered = sorted(rendered, key=lambda item: item["path"])
+    render_digest = digest_data({"rendered": rendered})
+    manifest = {
+        "schema": "repoctl.knowledge.render_manifest",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "authoritative": False,
+        "output": output_dir.relative_to(root).as_posix(),
+        "record_count": len(records),
+        "event_count": len(events),
+        "render_digest": render_digest,
+        "rendered": rendered,
+    }
+    manifest_digest = digest_data(manifest)
+    manifest_path = output_dir / "manifest.json"
+    atomic_write(manifest_path, json.dumps({**manifest, "manifest_digest": manifest_digest}, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return {
         "schema": "repoctl.knowledge.render",
         "schema_version": 1,
@@ -44,7 +59,11 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         "output": output_dir.relative_to(root).as_posix(),
         "record_count": len(records),
         "event_count": len(events),
-        "render_digest": digest_data({"rendered": rendered}),
+        "render_digest": render_digest,
+        "manifest": {
+            "path": manifest_path.relative_to(root).as_posix(),
+            "digest": manifest_digest,
+        },
         "rendered": rendered,
     }, []
 

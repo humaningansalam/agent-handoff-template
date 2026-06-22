@@ -489,6 +489,12 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
     assert render_payload["data"]["event_count"] == 1
+    manifest_path = tmp_path / render_payload["data"]["manifest"]["path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema"] == "repoctl.knowledge.render_manifest"
+    assert manifest["render_digest"] == render_payload["data"]["render_digest"]
+    assert manifest["manifest_digest"] == render_payload["data"]["manifest"]["digest"]
+    assert manifest["rendered"] == render_payload["data"]["rendered"]
     rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
     assert "docs/knowledge/generated/INDEX.md" in rendered_paths
     assert "docs/knowledge/generated/decisions.md" in rendered_paths
