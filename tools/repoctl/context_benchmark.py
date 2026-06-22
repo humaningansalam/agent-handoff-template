@@ -36,7 +36,7 @@ def run_context_benchmark(
         question_id = str(question.get("id") or "")
         target_repo_id = repo_id or str(question.get("repo_id") or "")
         target = require_repo_target(root, repo_id=target_repo_id or None)
-        bundle, bundle_problems, _meta = build_context_bundle(root, target=target, query=str(question.get("question") or ""), budget_tokens=budget_tokens)
+        bundle, bundle_problems, _meta = build_context_bundle(root, target=target, query=str(question.get("question") or ""), budget_tokens=budget_tokens, explain=True)
         problems.extend(bundle_problems)
         spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
         results.append(_score_question(question, spec, bundle))
@@ -77,6 +77,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     candidate_refs = _bundle_refs(bundle, field="candidates")
     packed_refs = _bundle_refs(bundle, field="packed_context")
     knowledge_refs = _knowledge_refs(bundle)
+    knowledge_score_results = _knowledge_score_results(bundle)
+    knowledge_source_statuses = _knowledge_source_statuses(bundle)
 
     top5 = candidate_refs[:5]
     top10 = candidate_refs[:10]
@@ -105,6 +107,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "knowledge_recall_at_5": _ratio(len(required_knowledge_top5), len(required_knowledge)) if required_knowledge else 0.0,
             "required_knowledge_count": len(required_knowledge),
             "knowledge_result_count": len(knowledge_refs),
+            "knowledge_score_breakdown_present": all(result["has_field_breakdown"] for result in knowledge_score_results),
+            "knowledge_source_status_current": all(status.get("digest_matches") is True for status in knowledge_source_statuses),
         },
         "required_found_at_5": required_top5,
         "required_found_at_10": required_top10,
@@ -114,6 +118,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "selected_forbidden": selected_forbidden,
         "top_refs": top5,
         "top_knowledge_refs": knowledge_top5,
+        "knowledge_score_results": knowledge_score_results,
+        "knowledge_source_statuses": knowledge_source_statuses,
     }
 
 
@@ -128,6 +134,8 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_knowledge_recall_at_5": _mean(metric["knowledge_recall_at_5"] for metric in metrics if metric["required_knowledge_count"]),
         "knowledge_expected_questions": sum(1 for metric in metrics if metric["required_knowledge_count"]),
         "knowledge_result_questions": sum(1 for metric in metrics if metric["knowledge_result_count"]),
+        "knowledge_score_breakdown_integrity": all(metric["knowledge_score_breakdown_present"] for metric in metrics),
+        "knowledge_source_status_current": all(metric["knowledge_source_status_current"] for metric in metrics),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
     }
 
@@ -150,6 +158,37 @@ def _knowledge_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
             if isinstance(ref, dict):
                 refs.append(ref)
     return refs
+
+
+def _knowledge_score_results(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+    if bundle is None:
+        return []
+    results: list[dict[str, Any]] = []
+    required_keys = {"exact_claim", "exact_summary", "exact_source", "fts", "authority"}
+    for item in bundle.knowledge_results:
+        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+        record = item.get("record") if isinstance(item.get("record"), dict) else {}
+        results.append(
+            {
+                "record_id": str(record.get("id") or ""),
+                "has_field_breakdown": required_keys.issubset(set(str(key) for key in breakdown)),
+                "score_breakdown_keys": sorted(str(key) for key in breakdown),
+            }
+        )
+    return results
+
+
+def _knowledge_source_statuses(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+    if bundle is None:
+        return []
+    statuses: list[dict[str, Any]] = []
+    for item in bundle.knowledge_results:
+        explain = item.get("explain") if isinstance(item.get("explain"), dict) else {}
+        source_statuses = explain.get("source_ref_statuses") if isinstance(explain.get("source_ref_statuses"), list) else []
+        for status in source_statuses:
+            if isinstance(status, dict):
+                statuses.append(status)
+    return statuses
 
 
 def _refs(value: Any) -> list[dict[str, Any]]:

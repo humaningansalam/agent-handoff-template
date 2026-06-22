@@ -152,9 +152,16 @@ def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch
     q2 = next(result for result in payload["data"]["results"] if result["id"] == "Q-002")
     assert payload["data"]["summary"]["knowledge_result_questions"] >= 1
     assert payload["data"]["summary"]["mean_knowledge_recall_at_5"] == 1.0
+    assert payload["data"]["summary"]["knowledge_score_breakdown_integrity"] is True
+    assert payload["data"]["summary"]["knowledge_source_status_current"] is True
     assert q2["metrics"]["knowledge_recall_at_5"] == 1.0
+    assert q2["metrics"]["knowledge_score_breakdown_present"] is True
+    assert q2["metrics"]["knowledge_source_status_current"] is True
     assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
     assert q2["required_knowledge_found_at_5"][0]["section"] == "Decision"
+    assert q2["knowledge_score_results"][0]["has_field_breakdown"] is True
+    assert "exact_claim" in q2["knowledge_score_results"][0]["score_breakdown_keys"]
+    assert q2["knowledge_source_statuses"][0]["digest_matches"] is True
 
 
 def test_context_benchmark_quality_gate_fails_without_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
