@@ -238,6 +238,9 @@ def _compare_regressions(
             delta = float(item.get("metrics", {}).get("recall_at_5", {}).get("delta") or 0.0)
             if delta < -abs(max_question_recall_at_5_drop):
                 problems.append(Problem("error", "context_benchmark_question_recall_regressed", "context benchmark question Recall@5 dropped more than allowed", str(item.get("id") or "")))
+    for item in question_deltas:
+        if bool(item.get("present_in_baseline")) and not bool(item.get("present_in_candidate")):
+            problems.append(Problem("error", "context_benchmark_question_missing", "candidate context benchmark artifact is missing a baseline question", str(item.get("id") or "")))
     for key, code in {
         "source_ref_integrity": "context_benchmark_source_integrity_regressed",
         "knowledge_source_ref_integrity": "context_benchmark_knowledge_integrity_regressed",

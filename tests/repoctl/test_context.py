@@ -193,6 +193,19 @@ def test_context_benchmark_compare_artifacts(tmp_path: Path, monkeypatch, capsys
     assert any(problem["code"] == "context_benchmark_recall_regressed" for problem in fail_payload["problems"])
     assert any(problem["code"] == "context_benchmark_question_recall_regressed" for problem in fail_payload["problems"])
 
+    missing = json.loads(baseline.read_text(encoding="utf-8"))
+    missing_question_id = missing["data"]["results"][0]["id"]
+    missing["data"]["results"] = missing["data"]["results"][1:]
+    digest_basis = {key: value for key, value in missing["data"].items() if key not in {"benchmark_digest", "artifact"}}
+    missing["data"]["benchmark_digest"] = digest_data(digest_basis)
+    missing["data"]["artifact"]["benchmark_digest"] = missing["data"]["benchmark_digest"]
+    candidate.write_text(json.dumps(missing, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--json"]) == 1
+
+    missing_payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "context_benchmark_question_missing" and problem["path"] == missing_question_id for problem in missing_payload["problems"])
+
 
 def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
