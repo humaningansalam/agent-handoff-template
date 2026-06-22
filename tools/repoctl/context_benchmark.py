@@ -78,6 +78,7 @@ def compare_context_benchmarks(
     max_recall_at_5_drop: float | None = None,
     max_precision_at_5_drop: float | None = None,
     max_knowledge_recall_at_5_drop: float | None = None,
+    max_question_recall_at_5_drop: float | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
     problems: list[Problem] = []
     baseline = _read_benchmark_artifact(baseline_path, problems, label="baseline")
@@ -91,13 +92,16 @@ def compare_context_benchmarks(
         "mean_precision_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_precision_at_5"),
         "mean_knowledge_recall_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_knowledge_recall_at_5"),
     }
+    question_deltas = _question_deltas(baseline, candidate)
     regressions = _compare_regressions(
         baseline_summary,
         candidate_summary,
         metric_deltas,
+        question_deltas,
         max_recall_at_5_drop=max_recall_at_5_drop,
         max_precision_at_5_drop=max_precision_at_5_drop,
         max_knowledge_recall_at_5_drop=max_knowledge_recall_at_5_drop,
+        max_question_recall_at_5_drop=max_question_recall_at_5_drop,
     )
     problems.extend(regressions)
     return {
@@ -106,11 +110,13 @@ def compare_context_benchmarks(
         "baseline": _artifact_identity(baseline_path, baseline),
         "candidate": _artifact_identity(candidate_path, candidate),
         "metric_deltas": metric_deltas,
+        "question_deltas": question_deltas,
         "summary_regressions": [problem.to_dict() for problem in regressions],
         "gates": {
             "max_recall_at_5_drop": max_recall_at_5_drop,
             "max_precision_at_5_drop": max_precision_at_5_drop,
             "max_knowledge_recall_at_5_drop": max_knowledge_recall_at_5_drop,
+            "max_question_recall_at_5_drop": max_question_recall_at_5_drop,
         },
     }, problems
 
@@ -175,19 +181,63 @@ def _metric_delta(baseline_summary: dict[str, Any], candidate_summary: dict[str,
     }
 
 
+def _question_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    baseline_by_id = _results_by_id(baseline.get("results"))
+    candidate_by_id = _results_by_id(candidate.get("results"))
+    deltas: list[dict[str, Any]] = []
+    for question_id in sorted(set(baseline_by_id) | set(candidate_by_id)):
+        baseline_result = baseline_by_id.get(question_id, {})
+        candidate_result = candidate_by_id.get(question_id, {})
+        baseline_metrics = baseline_result.get("metrics") if isinstance(baseline_result.get("metrics"), dict) else {}
+        candidate_metrics = candidate_result.get("metrics") if isinstance(candidate_result.get("metrics"), dict) else {}
+        deltas.append(
+            {
+                "id": question_id,
+                "category": str(candidate_result.get("category") or baseline_result.get("category") or ""),
+                "present_in_baseline": bool(baseline_result),
+                "present_in_candidate": bool(candidate_result),
+                "metrics": {
+                    "recall_at_5": _metric_delta(baseline_metrics, candidate_metrics, "recall_at_5"),
+                    "precision_at_5": _metric_delta(baseline_metrics, candidate_metrics, "precision_at_5"),
+                    "knowledge_recall_at_5": _metric_delta(baseline_metrics, candidate_metrics, "knowledge_recall_at_5"),
+                },
+            }
+        )
+    return deltas
+
+
+def _results_by_id(value: Any) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    if not isinstance(value, list):
+        return results
+    for item in value:
+        if isinstance(item, dict):
+            question_id = str(item.get("id") or "")
+            if question_id:
+                results[question_id] = item
+    return results
+
+
 def _compare_regressions(
     baseline_summary: dict[str, Any],
     candidate_summary: dict[str, Any],
     metric_deltas: dict[str, dict[str, float]],
+    question_deltas: list[dict[str, Any]],
     *,
     max_recall_at_5_drop: float | None,
     max_precision_at_5_drop: float | None,
     max_knowledge_recall_at_5_drop: float | None,
+    max_question_recall_at_5_drop: float | None,
 ) -> list[Problem]:
     problems: list[Problem] = []
     _append_drop_regression(problems, metric_deltas, "mean_recall_at_5", max_recall_at_5_drop, "context_benchmark_recall_regressed")
     _append_drop_regression(problems, metric_deltas, "mean_precision_at_5", max_precision_at_5_drop, "context_benchmark_precision_regressed")
     _append_drop_regression(problems, metric_deltas, "mean_knowledge_recall_at_5", max_knowledge_recall_at_5_drop, "context_benchmark_knowledge_recall_regressed")
+    if max_question_recall_at_5_drop is not None:
+        for item in question_deltas:
+            delta = float(item.get("metrics", {}).get("recall_at_5", {}).get("delta") or 0.0)
+            if delta < -abs(max_question_recall_at_5_drop):
+                problems.append(Problem("error", "context_benchmark_question_recall_regressed", "context benchmark question Recall@5 dropped more than allowed", str(item.get("id") or "")))
     for key, code in {
         "source_ref_integrity": "context_benchmark_source_integrity_regressed",
         "knowledge_source_ref_integrity": "context_benchmark_knowledge_integrity_regressed",
