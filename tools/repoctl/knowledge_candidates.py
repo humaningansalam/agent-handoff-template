@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,6 +91,92 @@ def show_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> 
     return {"candidate": _read_candidate(path), "path": path.relative_to(root).as_posix()}, []
 
 
+def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
+    if problems:
+        return {}, problems
+    candidate = candidate_data["candidate"]
+    digest_problems = _source_digest_problems(root, candidate)
+    if digest_problems:
+        return {}, digest_problems
+    record_id = "K" + candidate_id[2:]
+    record = {
+        "schema": "repoctl.knowledge.record",
+        "schema_version": 1,
+        "id": record_id,
+        "repo_id": repo_id,
+        "kind": candidate.get("kind", ""),
+        "status": "reviewed",
+        "title": candidate.get("title", ""),
+        "claim": candidate.get("claim", ""),
+        "summary": candidate.get("summary", ""),
+        "source_refs": candidate.get("source_refs", []),
+        "supersedes": [],
+        "created_from": {"candidate_id": candidate_id, "candidate_digest": candidate.get("candidate_digest", "")},
+        "review": {"status": "reviewed", "reviewed_by": "human"},
+        "authoritative": True,
+    }
+    record["record_digest"] = digest_data(record)
+    record_path = _record_dir(root) / f"{record_id}.json"
+    if record_path.exists():
+        return {}, [Problem("error", "knowledge_record_exists", f"knowledge record already exists: {record_id}", record_path.relative_to(root).as_posix())]
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(record_path, json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+    event = {
+        "schema": "repoctl.knowledge.event",
+        "schema_version": 1,
+        "id": _event_id("approved"),
+        "type": "approved",
+        "repo_id": repo_id,
+        "record_id": record_id,
+        "candidate_id": candidate_id,
+        "record_digest": record["record_digest"],
+    }
+    event["event_digest"] = digest_data(event)
+    event_path = _event_dir(root) / f"{event['id']}.json"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {
+        "record": record,
+        "record_path": record_path.relative_to(root).as_posix(),
+        "event": event,
+        "event_path": event_path.relative_to(root).as_posix(),
+    }, []
+
+
+def show_knowledge_record(root: Path, *, record_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    if not re.fullmatch(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", record_id):
+        return {}, [Problem("error", "invalid_knowledge_record_id", "record id must look like K-YYYYMMDDHHMMSSZ--slug")]
+    path = _record_dir(root) / f"{record_id}.json"
+    if not path.is_file():
+        return {}, [Problem("error", "knowledge_record_not_found", f"knowledge record not found: {record_id}", path.relative_to(root).as_posix())]
+    return {"record": _read_candidate(path), "path": path.relative_to(root).as_posix()}, []
+
+
+def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    records = [_read_candidate(path) for path in sorted(_record_dir(root).glob("K-*.json"))]
+    selected = [record for record in records if str(record.get("repo_id") or "") == repo_id]
+    for record in selected:
+        problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
+    return {
+        "schema": "repoctl.knowledge.check",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "record_count": len(selected),
+        "records": [
+            {
+                "id": record.get("id", ""),
+                "kind": record.get("kind", ""),
+                "status": "stale" if _source_digest_problems(root, record) else record.get("status", ""),
+                "title": record.get("title", ""),
+            }
+            for record in selected
+        ],
+    }, problems
+
+
 def _source_rel(root: Path, source: Path) -> str:
     path = source if source.is_absolute() else root / source
     try:
@@ -140,10 +227,44 @@ def _candidate_id(title: str) -> str:
     return f"KC-{stamp}--{slug[:60].strip('-')}"
 
 
+def _event_id(kind: str) -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%SZ")
+    return f"E-{stamp}--{kind}"
+
+
 def _candidate_dir(root: Path, repo_id: str) -> Path:
     return root / ".repoctl-state/knowledge/candidates" / repo_id
+
+
+def _record_dir(root: Path) -> Path:
+    return root / "docs/knowledge/records"
+
+
+def _event_dir(root: Path) -> Path:
+    return root / "docs/knowledge/events"
 
 
 def _read_candidate(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
+
+
+def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str = "") -> list[Problem]:
+    problems: list[Problem] = []
+    refs = data.get("source_refs", [])
+    if not isinstance(refs, list) or not refs:
+        problems.append(Problem("error", "knowledge_source_refs_missing", "knowledge item has no source refs", str(record_id)))
+        return problems
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "")
+        expected = str(ref.get("content_sha256") or "")
+        path = root / rel
+        if not path.is_file():
+            problems.append(Problem("error", "knowledge_source_missing", "knowledge source file is missing", rel))
+            continue
+        actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        if expected != actual:
+            problems.append(Problem("error", "knowledge_source_digest_drift", "knowledge source digest changed", rel))
+    return problems

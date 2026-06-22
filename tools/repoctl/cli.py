@@ -13,7 +13,7 @@ from .context_benchmark import run_context_benchmark
 from .context_task_pack import build_task_context_pack
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import build_knowledge_candidate, list_knowledge_candidates, show_knowledge_candidate
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, check_knowledge_records, list_knowledge_candidates, show_knowledge_candidate, show_knowledge_record
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
@@ -1359,6 +1359,67 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_knowledge_approve(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = approve_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge approve",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        record = data.get("record", {}) if data else {}
+        print(f"knowledge record {record.get('id', '')} path={data.get('record_path', '')}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
+def cmd_knowledge_show(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    data, problems = show_knowledge_record(root, record_id=args.record_id)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge show",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        record = data.get("record", {}) if data else {}
+        print(f"knowledge record {record.get('id', args.record_id)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
+def cmd_knowledge_check(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    require_repo_target(root, repo_id=args.repo_id)
+    data, problems = check_knowledge_records(root, repo_id=args.repo_id)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge check",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"knowledge check repo_id={args.repo_id} records={data.get('record_count', 0)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     data = plan_upgrade(root, source=args.source)
@@ -1728,6 +1789,19 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_show.add_argument("--repo-id", required=True)
     knowledge_candidate_show.add_argument("--json", action="store_true")
     knowledge_candidate_show.set_defaults(func=cmd_knowledge_candidate_show)
+    knowledge_approve = knowledge_sub.add_parser("approve")
+    knowledge_approve.add_argument("candidate_id")
+    knowledge_approve.add_argument("--repo-id", required=True)
+    knowledge_approve.add_argument("--json", action="store_true")
+    knowledge_approve.set_defaults(func=cmd_knowledge_approve)
+    knowledge_show = knowledge_sub.add_parser("show")
+    knowledge_show.add_argument("record_id")
+    knowledge_show.add_argument("--json", action="store_true")
+    knowledge_show.set_defaults(func=cmd_knowledge_show)
+    knowledge_check = knowledge_sub.add_parser("check")
+    knowledge_check.add_argument("--repo-id", required=True)
+    knowledge_check.add_argument("--json", action="store_true")
+    knowledge_check.set_defaults(func=cmd_knowledge_check)
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)

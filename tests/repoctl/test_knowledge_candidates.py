@@ -58,3 +58,41 @@ def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, c
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_source_excluded"
+
+
+def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    approve_payload = json.loads(capsys.readouterr().out)
+    record = approve_payload["data"]["record"]
+    assert record["schema"] == "repoctl.knowledge.record"
+    assert record["status"] == "reviewed"
+    assert record["authoritative"] is True
+    assert record["id"].startswith("K-")
+    assert approve_payload["data"]["event"]["type"] == "approved"
+
+    assert main(["knowledge", "show", record["id"], "--json"]) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["data"]["record"]["record_digest"] == record["record_digest"]
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["record_count"] == 1
+    assert check_payload["problems"] == []
+
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    drift_payload = json.loads(capsys.readouterr().out)
+    assert drift_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
+    assert drift_payload["data"]["records"][0]["status"] == "stale"
