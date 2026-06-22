@@ -977,6 +977,30 @@ def _blocked_handoff(task_path: str, task_id: str, *, copy: dict[str, Any]) -> s
     )
 
 
+def _updated_child_receipt_write(root: Path, child: Task, child_new_path: str, child_archive_text: str) -> tuple[Path, str] | None:
+    child_receipt_path = _completion_receipt_path(root, child.id)
+    if not child_receipt_path.is_file():
+        return None
+    child_receipt_rel = child_receipt_path.relative_to(root).as_posix()
+    try:
+        child_receipt = json.loads(child_receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RepoctlError(f"task completion receipt is unreadable: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel) from exc
+    if not isinstance(child_receipt, dict):
+        raise RepoctlError(f"task completion receipt has invalid schema: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel)
+    _validate_completion_receipt(child_receipt_path, root, child_receipt)
+    child_hash = _sha256_text(child_archive_text)
+    child_receipt["task_path"] = child_new_path
+    child_receipt["archive_path"] = child_new_path
+    child_receipt["content_sha256"] = child_hash
+    verification = child_receipt.get("verification")
+    if isinstance(verification, dict):
+        verification["task_path"] = child_new_path
+        verification["archive_path"] = child_new_path
+        verification["content_sha256"] = child_hash
+    return child_receipt_path, json.dumps(child_receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
 def validate_verification_file(root: Path, verification_file: Path) -> None:
     resolved_verification = verification_file.resolve()
     layout = repo_layout(root)
@@ -1075,26 +1099,9 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
                     child_archive_text = replace_section(child_text, "Handoff", _done_handoff(child_new_path, copy=copy))
                     archive_texts[child_archive_target] = child_archive_text
                     moves.append((child.path, child_archive_target))
-                    child_receipt_path = _completion_receipt_path(root, child.id)
-                    if child_receipt_path.is_file():
-                        child_receipt_rel = child_receipt_path.relative_to(root).as_posix()
-                        try:
-                            child_receipt = json.loads(child_receipt_path.read_text(encoding="utf-8"))
-                        except (OSError, json.JSONDecodeError) as exc:
-                            raise RepoctlError(f"task completion receipt is unreadable: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel) from exc
-                        if not isinstance(child_receipt, dict):
-                            raise RepoctlError(f"task completion receipt has invalid schema: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel)
-                        _validate_completion_receipt(child_receipt_path, root, child_receipt)
-                        child_hash = _sha256_text(child_archive_text)
-                        child_receipt["task_path"] = child_new_path
-                        child_receipt["archive_path"] = child_new_path
-                        child_receipt["content_sha256"] = child_hash
-                        verification = child_receipt.get("verification")
-                        if isinstance(verification, dict):
-                            verification["task_path"] = child_new_path
-                            verification["archive_path"] = child_new_path
-                            verification["content_sha256"] = child_hash
-                        receipt_writes.append((child_receipt_path, json.dumps(child_receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"))
+                    child_receipt_write = _updated_child_receipt_write(root, child, child_new_path, child_archive_text)
+                    if child_receipt_write is not None:
+                        receipt_writes.append(child_receipt_write)
     text = replace_section(text, "Handoff", _done_handoff(new_path, copy=copy))
     if moves:
         archive_texts[root / new_path] = text
@@ -1174,6 +1181,7 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     new_path = old_path
     moves: list[tuple[Path, Path]] = []
     archive_texts: dict[Path, str] = {}
+    receipt_writes: list[tuple[Path, str]] = []
     if is_parent or not is_child:
         archived = True
         new_path = f"docs/archive/tasks/{task.path.name}"
@@ -1185,8 +1193,12 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
                     target = root / child_new_path
                     child_text = child.path.read_text(encoding="utf-8")
                     child_text = append_section_entry(child_text, "Execution Log", f"- {utc_stamp()}: task archived with canceled parent `{task.id}`.")
-                    archive_texts[target] = replace_section(child_text, "Handoff", _canceled_handoff(child_new_path, copy=copy))
+                    child_archive_text = replace_section(child_text, "Handoff", _canceled_handoff(child_new_path, copy=copy))
+                    archive_texts[target] = child_archive_text
                     moves.append((child.path, target))
+                    child_receipt_write = _updated_child_receipt_write(root, child, child_new_path, child_archive_text)
+                    if child_receipt_write is not None:
+                        receipt_writes.append(child_receipt_write)
     text = replace_section(text, "Handoff", _canceled_handoff(new_path, copy=copy))
     if moves:
         archive_texts[root / new_path] = text
@@ -1199,6 +1211,7 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         "moves": moves,
         "archive_texts": archive_texts,
         "truncated": truncated,
+        "receipt_writes": receipt_writes,
     }
 
 

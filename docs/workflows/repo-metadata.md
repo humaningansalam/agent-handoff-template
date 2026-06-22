@@ -273,21 +273,22 @@ Discovery output is evidence, not authority:
 - Bad: create a task or choose files solely because `meta suggest` returned them.
 - Forbidden: parse Backlog or PRD prose inside repoctl to infer area, files, validation, or task metadata.
 
-## Path Normalization
+## Path Identity
 
-Before hashing or storing keys, paths are normalized to repo-relative forward-slash form:
+Before hashing or storing keys, paths are normalized only enough to remove `./` and the selected repository prefix:
 
 ```text
 ./frontend/src/api.ts
 repos/frontend/src/api.ts
-frontend\src\api.ts
 ```
 
-all route to:
+route to:
 
 ```text
 frontend/src/api.ts
 ```
+
+Backslashes, leading spaces, and trailing spaces are treated as literal filename characters, not alternate separators. Use forward slash `/` for path separators.
 
 Paths with `..` are invalid.
 

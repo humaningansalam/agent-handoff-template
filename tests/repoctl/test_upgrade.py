@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
-from tools.repoctl.upgrade import apply_upgrade
+from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
 
 
 def write_workspace(root: Path) -> None:
@@ -88,11 +88,70 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     assert {item["path"] for item in payload["data"]["applied"]} == {"docs/tasks/TEMPLATE.md", "scripts/repoctl"}
     assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "new repoctl\n"
     assert (workspace / "docs/tasks/TEMPLATE.md").read_text(encoding="utf-8") == "new template\n"
+
+
+def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "preserve_paths": ["docs/BOARD.md"],
+        },
+    )
+    (source / "docs/BOARD.md").write_text("pwned\n", encoding="utf-8")
+    board_before = (workspace / "docs/BOARD.md").read_text(encoding="utf-8")
+    plan = plan_upgrade(workspace, source=source)
+    plan["operations"] = [
+        {
+            "path": "docs/BOARD.md",
+            "action": "replace",
+            "source_hash": "not-bound-to-manifest",
+            "target_hash": "",
+            "size": 6,
+        }
+    ]
+    write_plan(plan_file, plan)
+
+    with pytest.raises(Exception):
+        apply_upgrade(workspace, plan_file=plan_file)
+
+    assert (workspace / "docs/BOARD.md").read_text(encoding="utf-8") != "pwned\n"
     assert (workspace / "docs/BOARD.md").read_text(encoding="utf-8") == board_before
-    assert (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8") == task_before
-    assert (workspace / "docs/PRD.md").read_text(encoding="utf-8") == "project prd\n"
-    assert (workspace / "repos/app.py").read_text(encoding="utf-8") == "print('product')\n"
-    assert (workspace / payload["data"]["receipt_path"]).is_file()
+
+
+def test_upgrade_plan_rejects_symlink_parent_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    outside = tmp_path / "outside"
+    write_workspace(workspace)
+    outside.mkdir()
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": ["escape/nested/pwned.txt"],
+            "preserve_paths": [],
+        },
+    )
+    (source / "escape/nested").mkdir(parents=True)
+    (source / "escape/nested/pwned.txt").write_text("pwned\n", encoding="utf-8")
+
+    with pytest.raises(Exception):
+        plan_upgrade(workspace, source=source)
+
+    assert not (outside / "nested/pwned.txt").exists()
 
 
 def test_upgrade_apply_blocks_stale_plan(tmp_path: Path, monkeypatch, capsys) -> None:

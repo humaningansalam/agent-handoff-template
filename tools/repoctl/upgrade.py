@@ -53,6 +53,33 @@ def _safe_rel(value: str) -> str:
     return rel.as_posix()
 
 
+def _assert_contained_path(root: Path, rel: str, *, code: str, require_file: bool = False) -> Path:
+    safe_rel = _safe_rel(rel)
+    root_resolved = root.resolve()
+    current = root
+    parts = Path(safe_rel).parts
+    for part in parts[:-1]:
+        current = current / part
+        if current.exists() or current.is_symlink():
+            if current.is_symlink():
+                raise RepoctlError(f"upgrade path parent must not be a symlink: {safe_rel}", code=code, path=safe_rel)
+            try:
+                current.resolve().relative_to(root_resolved)
+            except ValueError as exc:
+                raise RepoctlError(f"upgrade path escapes workspace: {safe_rel}", code=code, path=safe_rel) from exc
+    target = root / safe_rel
+    if target.exists() or target.is_symlink():
+        if target.is_symlink():
+            raise RepoctlError(f"upgrade path must not be a symlink: {safe_rel}", code=code, path=safe_rel)
+        try:
+            target.resolve().relative_to(root_resolved)
+        except ValueError as exc:
+            raise RepoctlError(f"upgrade path escapes workspace: {safe_rel}", code=code, path=safe_rel) from exc
+    if require_file and not target.is_file():
+        raise RepoctlError(f"upgrade path is not a file: {safe_rel}", code=code, path=safe_rel)
+    return target
+
+
 def _load_manifest(source_root: Path) -> dict[str, Any]:
     manifest_path = source_root / MANIFEST_REL
     if not manifest_path.is_file():
@@ -112,14 +139,21 @@ def _plan_payload(root: Path, source_root: Path, manifest: dict[str, Any], opera
     return data
 
 
+def _canonical_plan_hash(plan: dict[str, Any]) -> str:
+    data = dict(plan)
+    data.pop("plan_sha256", None)
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _hash_bytes(encoded)
+
+
 def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
     source_root = _source_root(source)
     manifest = _load_manifest(source_root)
     operations: list[UpgradeOperation] = []
     conflicts: list[dict[str, str]] = []
     for rel in manifest["replace_paths"]:
-        source_path = source_root / rel
-        target_path = root / rel
+        source_path = _assert_contained_path(source_root, rel, code="invalid_upgrade_source")
+        target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
         if not source_path.is_file():
             conflicts.append({"code": "managed_source_missing", "path": rel, "message": "managed source file is missing"})
             continue
@@ -141,8 +175,8 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
             )
         )
     for rel in manifest["create_paths"]:
-        source_path = source_root / rel
-        target_path = root / rel
+        source_path = _assert_contained_path(source_root, rel, code="invalid_upgrade_source")
+        target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
         if not source_path.is_file():
             conflicts.append({"code": "managed_source_missing", "path": rel, "message": "managed source file is missing"})
             continue
@@ -186,10 +220,10 @@ def _rollback_applied(root: Path, applied: list[dict[str, str]], backups: list[d
     rolled_back: list[dict[str, str]] = []
     for operation in reversed(applied):
         rel = _safe_rel(str(operation["path"]))
-        target = root / rel
+        target = _assert_contained_path(root, rel, code="upgrade_rollback_failed")
         backup_rel = backup_by_path.get(rel, "")
         if backup_rel:
-            backup_path = root / backup_rel
+            backup_path = _assert_contained_path(root, backup_rel, code="upgrade_rollback_failed", require_file=True)
             if not backup_path.is_file():
                 raise RepoctlError(f"upgrade rollback backup is missing: {backup_rel}", code="upgrade_rollback_failed", path=backup_rel)
             _atomic_copy_file(backup_path, target)
@@ -213,7 +247,49 @@ def _load_plan(path: Path) -> dict[str, Any]:
         raise RepoctlError(f"invalid upgrade plan JSON: {error}", code="invalid_upgrade_plan", path=str(path)) from error
     if not isinstance(payload, dict) or not isinstance(payload.get("operations"), list):
         raise RepoctlError("invalid upgrade plan shape", code="invalid_upgrade_plan", path=str(path))
+    expected_digest = _canonical_plan_hash(payload)
+    if str(payload.get("plan_sha256") or "") != expected_digest:
+        raise RepoctlError("upgrade plan digest mismatch", code="invalid_upgrade_plan", path=str(path))
     return payload
+
+
+def _operation_dicts(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for operation in plan.get("operations", []):
+        result.append(
+            {
+                "path": _safe_rel(str(operation.get("path", ""))),
+                "action": str(operation.get("action") or ""),
+                "source_hash": str(operation.get("source_hash") or ""),
+                "target_hash": str(operation.get("target_hash") or ""),
+                "size": int(operation.get("size") or 0),
+            }
+        )
+    return sorted(result, key=lambda item: (item["path"], item["action"], item["source_hash"], item["target_hash"], item["size"]))
+
+
+def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, Any]) -> None:
+    manifest = _load_manifest(source_root)
+    if str(plan.get("package") or "") != str(manifest.get("package") or "agent-workspace-control-plane"):
+        raise RepoctlError("upgrade plan package does not match source manifest", code="invalid_upgrade_plan")
+    if str(plan.get("source_version") or "") != str(manifest.get("version") or ""):
+        raise RepoctlError("upgrade plan version does not match source manifest", code="invalid_upgrade_plan")
+    for key in ("replace_paths", "create_paths", "preserve_paths"):
+        if sorted(plan.get(key) or []) != manifest[key]:
+            raise RepoctlError(f"upgrade plan {key} does not match source manifest", code="invalid_upgrade_plan")
+    managed = set(manifest["replace_paths"]) | set(manifest["create_paths"])
+    preserved = manifest["preserve_paths"]
+    for operation in plan["operations"]:
+        rel = _safe_rel(str(operation.get("path", "")))
+        if rel not in managed:
+            raise RepoctlError(f"upgrade plan contains unmanaged path: {rel}", code="invalid_upgrade_plan", path=rel)
+        if _is_preserved(rel, preserved):
+            raise RepoctlError(f"upgrade plan attempts to modify preserved path: {rel}", code="invalid_upgrade_plan", path=rel)
+    expected = plan_upgrade(root, source=source_root)
+    if expected.get("conflicts"):
+        raise RepoctlError("upgrade source has conflicts; recreate the plan", code="upgrade_plan_stale")
+    if _operation_dicts(plan) != _operation_dicts(expected):
+        raise RepoctlError("upgrade plan operations do not match current source manifest and workspace state", code="upgrade_plan_stale")
 
 
 def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
@@ -221,7 +297,7 @@ def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
         raise RepoctlError("upgrade plan belongs to a different workspace", code="upgrade_plan_workspace_mismatch")
     for operation in plan["operations"]:
         rel = _safe_rel(str(operation.get("path", "")))
-        target = root / rel
+        target = _assert_contained_path(root, rel, code="invalid_upgrade_target")
         expected = str(operation.get("target_hash") or "")
         current = _hash_file(target) if target.is_file() else ""
         if current != expected:
@@ -242,11 +318,12 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
     backup_root = root / UPGRADE_STATE_REL / run_id / "backup"
     with repoctl_lock(root):
         _verify_plan_fresh(root, plan)
+        _verify_plan_bound_to_source(root, source_root, plan)
         try:
             for operation in plan["operations"]:
                 rel = _safe_rel(str(operation["path"]))
-                source_path = source_root / rel
-                target_path = root / rel
+                source_path = _assert_contained_path(source_root, rel, code="invalid_upgrade_source", require_file=True)
+                target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
                 if not source_path.is_file():
                     raise RepoctlError(f"managed source file disappeared: {rel}", code="managed_source_missing", path=rel)
                 source_hash = _hash_file(source_path)
@@ -254,6 +331,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                     raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
                 if target_path.is_file():
                     backup_path = backup_root / rel
+                    _assert_contained_path(root, backup_path.relative_to(root).as_posix(), code="invalid_upgrade_target")
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target_path, backup_path)
                     backups.append({"path": rel, "backup_path": backup_path.relative_to(root).as_posix()})

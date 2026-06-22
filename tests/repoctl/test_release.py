@@ -132,3 +132,14 @@ def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path)
             check=False,
         )
         assert result.returncode == 0, f"{module}: {result.stderr}"
+
+
+def test_release_workflow_pins_actions_and_verifies_existing_tag() -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    workflow = (source_root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    mutable_uses = re.findall(r"uses:\s+[^@\s]+@v\d+", workflow)
+
+    assert mutable_uses == []
+    assert "steps.existing.outputs.tag_exists == 'true' && steps.existing.outputs.release_exists == 'false'" in workflow
+    assert "git rev-list -n 1" in workflow
+    assert 'test "$TAG_SHA" = "$GITHUB_SHA"' in workflow

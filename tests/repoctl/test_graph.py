@@ -242,9 +242,10 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     assert any(node["id"] == file_id("main", "src/app.py") for node in result["nodes"])
     assert any(edge["kind"] == "CONTAINS" and edge["to"] == file_id("main", "src/app.py") for edge in result["edges"])
 
-    assert main(["graph", "query", "--file", "./src\\app.py", "--json"]) == 0
-    normalized = json.loads(capsys.readouterr().out)["data"]["result"]
-    assert normalized["query"] == {"type": "file", "path": "src/app.py"}
+    assert main(["graph", "query", "--file", "./src\\app.py", "--json"]) == 1
+    not_found = json.loads(capsys.readouterr().out)
+    assert not_found["problems"][0]["code"] == "graph_query_not_found"
+    assert not_found["problems"][0]["path"] == "src\\app.py"
 
 
 def test_graph_query_topic_returns_matching_files(tmp_path: Path, monkeypatch, capsys) -> None:

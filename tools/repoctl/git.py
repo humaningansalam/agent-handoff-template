@@ -71,7 +71,7 @@ def repo_git_head(root: Path, target: RepoTarget | None = None) -> tuple[str, Re
 
 
 def normalize_repo_path(path: str | Path) -> str:
-    raw = str(path).strip().replace("\\", "/")
+    raw = str(path)
     while raw.startswith("./"):
         raw = raw[2:]
     raw = raw.strip("/")

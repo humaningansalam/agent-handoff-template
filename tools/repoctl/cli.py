@@ -433,50 +433,55 @@ def cmd_task_doctor(args: argparse.Namespace) -> int:
 
 def cmd_task_create(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    task: Any | None = None
+    original_board_text = ""
     with repoctl_lock(root):
         board_path = root / "docs/BOARD.md"
-        board_text = board_path.read_text(encoding="utf-8")
-        board_paths = parse_board(board_text)
-        title = args.title
-        area = args.area or ""
-        repo_ref = args.repo_ref or ""
-        repo_id = args.repo_id or ""
-        if not title:
-            raise RepoctlError("task title is required")
-        if args.backlog_id:
-            resolve_backlog_item(board_text, args.backlog_id)
-            if not args.slug:
-                raise RepoctlError("Backlog promotion requires explicit --slug", code="missing_slug")
-            if not area:
-                raise RepoctlError("Backlog promotion requires explicit --area", code="missing_area")
-        task = create_task_file(
-            root,
-            title=title,
-            task_type=args.type,
-            slug=args.slug,
-            area=area,
-            owner=args.owner,
-            parent=args.parent or "",
-            repo_ref=repo_ref,
-            repo_id=repo_id,
-            backlog_id=args.backlog_id or "",
-        )
-        if args.backlog_id:
-            board_text, _removed = remove_backlog_item(board_text, args.backlog_id)
+        original_board_text = board_path.read_text(encoding="utf-8")
+        try:
+            board_text = original_board_text
             board_paths = parse_board(board_text)
-        if task.rel_path not in board_paths:
-            board_paths.append(task.rel_path)
-            try:
+            title = args.title
+            area = args.area or ""
+            repo_ref = args.repo_ref or ""
+            repo_id = args.repo_id or ""
+            if not title:
+                raise RepoctlError("task title is required")
+            if args.backlog_id:
+                resolve_backlog_item(board_text, args.backlog_id)
+                if not args.slug:
+                    raise RepoctlError("Backlog promotion requires explicit --slug", code="missing_slug")
+                if not area:
+                    raise RepoctlError("Backlog promotion requires explicit --area", code="missing_area")
+            task = create_task_file(
+                root,
+                title=title,
+                task_type=args.type,
+                slug=args.slug,
+                area=area,
+                owner=args.owner,
+                parent=args.parent or "",
+                repo_ref=repo_ref,
+                repo_id=repo_id,
+                backlog_id=args.backlog_id or "",
+            )
+            if args.backlog_id:
+                board_text, _removed = remove_backlog_item(board_text, args.backlog_id)
+                board_paths = parse_board(board_text)
+            if task.rel_path not in board_paths:
+                board_paths.append(task.rel_path)
                 fixed = render_board(board_text, board_paths)
                 atomic_write(board_path, fixed)
-            except Exception:
-                if task.path.exists() and task.path.is_file():
-                    task.path.unlink()
-                raise
-        start_result = None
-        if args.start:
-            start_result = start_task(root, task.id, force_dirty=args.force_dirty)
-            atomic_write(start_result["task"].path, start_result["text"])
+            start_result = None
+            if args.start:
+                start_result = start_task(root, task.id, force_dirty=args.force_dirty)
+                atomic_write(start_result["task"].path, start_result["text"])
+        except Exception:
+            if task is not None and task.path.exists() and task.path.is_file():
+                task.path.unlink()
+            if original_board_text:
+                atomic_write(board_path, original_board_text)
+            raise
     status = "doing" if start_result else task.status
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(task):
@@ -753,6 +758,18 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
     written_archives: list[Path] = []
     original_task_text = ""
     task_written = False
+    original_sources: dict[Path, str] = {}
+
+    def restore_removed_sources() -> None:
+        for source, text in original_sources.items():
+            if not source.exists():
+                atomic_write(source, text)
+
+    def remove_written_archives() -> None:
+        for target in written_archives:
+            if target.exists() and target.is_file():
+                target.unlink()
+
     if result["archived"]:
         try:
             for _source, target in result["moves"]:
@@ -763,9 +780,7 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
                 atomic_write(target, archive_text)
                 written_archives.append(target)
         except Exception:
-            for target in written_archives:
-                if target.exists() and target.is_file():
-                    target.unlink()
+            remove_written_archives()
             raise
     else:
         original_task_text = result["task"].path.read_text(encoding="utf-8")
@@ -793,11 +808,20 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
                 atomic_write(receipt_path, str(receipt_text))
         except Exception:
             restore_receipts()
-            for target in written_archives:
-                if target.exists() and target.is_file():
-                    target.unlink()
+            remove_written_archives()
             if task_written:
                 atomic_write(result["task"].path, original_task_text)
+            raise
+    if result["archived"]:
+        try:
+            for source, _target in result["moves"]:
+                if source.exists():
+                    original_sources[source] = source.read_text(encoding="utf-8")
+                    source.unlink()
+        except Exception:
+            restore_removed_sources()
+            restore_receipts()
+            remove_written_archives()
             raise
     board_path = root / "docs/BOARD.md"
     board_text = board_path.read_text(encoding="utf-8")
@@ -811,17 +835,12 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
     try:
         atomic_write(board_path, render_board(board_text, kept))
     except Exception:
+        restore_removed_sources()
         restore_receipts()
-        for target in written_archives:
-            if target.exists() and target.is_file():
-                target.unlink()
+        remove_written_archives()
         if task_written:
             atomic_write(result["task"].path, original_task_text)
         raise
-    if result["archived"]:
-        for source, _target in result["moves"]:
-            if source.exists():
-                source.unlink()
 
 
 def cmd_task_finish(args: argparse.Namespace) -> int:

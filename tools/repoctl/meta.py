@@ -224,7 +224,7 @@ def _annotations_dir(repo: Path) -> Path:
 
 
 def normalize_repo_path(path: str | Path, *, target: RepoTarget | None = None) -> str:
-    raw = str(path).strip().replace("\\", "/")
+    raw = str(path)
     while raw.startswith("./"):
         raw = raw[2:]
     if target is not None and raw.startswith(f"{target.display_path}/"):
@@ -576,6 +576,10 @@ def _changed_git_problem(root: Path, target: RepoTarget | None = None) -> Proble
     )
 
 
+def _is_repometa_path(path: str) -> bool:
+    return path == ".repometa" or path.startswith(".repometa/")
+
+
 def _validate_policy(policy: dict[str, Any], *, location: str = "repos/.repometa/policy.json") -> list[Problem]:
     problems: list[Problem] = []
     if policy.get("schema_version") != 1:
@@ -810,10 +814,12 @@ def check_meta(root: Path, *, changed: bool = False, changes: list[ChangedEntry]
     if git_problem:
         return [git_problem]
     changed_related: set[str] = set()
+    metadata_store_changed = False
     if changed:
         changed_files = changes if changes is not None else _changed_files(root, target)
         if not changed_files:
             return []
+        metadata_store_changed = any(_is_repometa_path(path) or (old_path and _is_repometa_path(old_path)) for _change, path, old_path in changed_files)
         for change, path, old_path in changed_files:
             changed_related.add(path)
             if old_path:
@@ -824,7 +830,7 @@ def check_meta(root: Path, *, changed: bool = False, changes: list[ChangedEntry]
     annotations, exclusions, annotation_shards, exclusion_shards = _load_all_annotations(repo, problems, root=root)
     existing = set(_list_repo_files(repo, policy))
     for path, shards in sorted(annotation_shards.items()):
-        if changed and path not in changed_related:
+        if changed and not metadata_store_changed and path not in changed_related:
             continue
         expected = shard_for_path(path)
         workspace_path = _workspace_path(root, repo, path)
@@ -834,7 +840,7 @@ def check_meta(root: Path, *, changed: bool = False, changes: list[ChangedEntry]
             if shard != expected:
                 problems.append(Problem("error", "wrong_annotation_shard", f"annotation belongs in shard {expected}.json", _workspace_path(root, repo, f".repometa/annotations/{shard}.json")))
     for path, shards in sorted(exclusion_shards.items()):
-        if changed and path not in changed_related:
+        if changed and not metadata_store_changed and path not in changed_related:
             continue
         expected = shard_for_path(path)
         workspace_path = _workspace_path(root, repo, path)
@@ -844,11 +850,11 @@ def check_meta(root: Path, *, changed: bool = False, changes: list[ChangedEntry]
             if shard != expected:
                 problems.append(Problem("error", "wrong_exclusion_shard", f"exclusion belongs in shard {expected}.json", _workspace_path(root, repo, f".repometa/annotations/{shard}.json")))
     for path, data in sorted(annotations.items()):
-        if changed and path not in changed_related:
+        if changed and not metadata_store_changed and path not in changed_related:
             continue
         problems.extend(_validate_annotation(path, data, policy, workspace_path=_workspace_path(root, repo, path)))
     for path, data in sorted(exclusions.items()):
-        if changed and path not in changed_related:
+        if changed and not metadata_store_changed and path not in changed_related:
             continue
         allowed = {"reason", "excluded_by"}
         unknown = sorted(set(data) - allowed)

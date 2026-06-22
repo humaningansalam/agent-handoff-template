@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 from hashlib import sha256
 from pathlib import Path
@@ -689,6 +690,25 @@ def test_task_create_rolls_back_task_file_when_board_write_fails(tmp_path: Path,
     assert "Add discount support" in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
 
 
+def test_task_create_start_rolls_back_task_board_and_backlog_when_start_fails(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "dirty.py").write_text("print('dirty')\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["backlog", "add", "Add discount support", "--json"]) == 0
+    backlog_id = json.loads(capsys.readouterr().out)["data"]["item"]["id"]
+    board_before = (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
+
+    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "repo", "--repo-id", "main", "--start", "Add discount support", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repo_dirty"
+    assert not list((tmp_path / "docs/tasks").glob("T-*--discount-support.md"))
+    assert (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8") == board_before
+
+
 def test_task_create_validates_board_before_writing_task_file(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Backlog\n", encoding="utf-8")
@@ -824,6 +844,18 @@ def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Pa
     assert any(action["label"] == "Record task discovery evidence" for action in payload["next_actions"])
     after = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert after == before
+
+
+def test_repoctl_lock_recovers_dead_owner_on_same_host(tmp_path: Path) -> None:
+    write_workspace(tmp_path)
+    lock_dir = tmp_path / "docs/tasks/.repoctl.lock.d"
+    lock_dir.mkdir()
+    (lock_dir / "owner.json").write_text(json.dumps({"pid": 999999999, "hostname": socket.gethostname(), "created_at": "2026-06-22T00:00:00Z"}) + "\n", encoding="utf-8")
+
+    with repoctl_lock(tmp_path, timeout=0.1, interval=0.01):
+        assert lock_dir.exists()
+
+    assert not lock_dir.exists()
 
 
 def test_task_create_rejects_invalid_parent_id(tmp_path: Path, monkeypatch, capsys) -> None:

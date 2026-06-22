@@ -373,6 +373,25 @@ def test_meta_check_changed_handles_unicode_git_paths(tmp_path: Path, monkeypatc
     assert any(problem["code"] == "annotation_required" and problem["path"] == f"repos/{rel}" for problem in payload["problems"])
 
 
+def test_meta_check_changed_preserves_leading_space_filename_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    init_repo(repo)
+    policy = {**BASE_POLICY, "coverage": {"require_annotations": ["*.py"]}}
+    write_repometa(repo, policy=policy, annotations={"foo.py": {"role": "service", "purpose": "normal file", "topics": ["auth"]}})
+    (repo / "foo.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / " foo.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo)
+    (repo / " foo.py").write_text("x = 2\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["meta", "check", "--changed", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "annotation_required" and problem["path"] == "repos/ foo.py" for problem in payload["problems"])
+
+
 def test_meta_move_handles_cross_shard_without_loss(tmp_path: Path, monkeypatch) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -394,7 +413,7 @@ def test_meta_move_handles_cross_shard_without_loss(tmp_path: Path, monkeypatch)
     assert new in new_data["annotations"]
 
 
-def test_path_normalization_routes_repo_prefix_and_backslashes(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_path_normalization_routes_repo_prefix(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     repo.mkdir()
@@ -406,7 +425,7 @@ def test_path_normalization_routes_repo_prefix_and_backslashes(tmp_path: Path, m
     write_repometa(repo)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "set", "repos/frontend\\src\\api\\client.ts", "--role", "adapter", "--purpose", "call API", "--topic", "api", "--json"]) == 0
+    assert main(["meta", "set", "repos/frontend/src/api/client.ts", "--role", "adapter", "--purpose", "call API", "--topic", "api", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["path"] == rel
@@ -761,3 +780,23 @@ def test_meta_check_changed_skips_policy_validation_when_no_repo_changes(tmp_pat
     assert payload["ok"] is True
     assert payload["problems"] == []
     assert payload["data"]["scope"] == "changed"
+
+
+def test_meta_check_changed_validates_changed_repometa_store(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    init_repo(repo)
+    write_repometa(repo, annotations={"app.py": {"role": "service", "purpose": "app", "topics": ["auth"]}})
+    (repo / "app.py").write_text("print('app')\n", encoding="utf-8")
+    commit_all(repo)
+    shard = repo / ".repometa" / "annotations" / f"{shard_for_path('app.py')}.json"
+    data = json.loads(shard.read_text(encoding="utf-8"))
+    data["annotations"]["app.py"]["path"] = "app.py"
+    write_json(shard, data)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["meta", "check", "--changed", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "forbidden_annotation_field" for problem in payload["problems"])
