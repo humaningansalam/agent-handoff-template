@@ -333,6 +333,7 @@ def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) ->
         "candidate_digest": candidate.get("candidate_digest", ""),
         "passed": not any(problem.severity == "error" for problem in check_problems),
         "checks": _candidate_check_flags(candidate, check_problems),
+        "related_records": _candidate_related_records(root, candidate),
     }, check_problems
 
 
@@ -1117,6 +1118,7 @@ def _candidate_checks(root: Path, *, repo_id: str, candidates: list[dict[str, An
                 "candidate_id": candidate_id,
                 "passed": passed,
                 "checks": _candidate_check_flags(candidate, problems),
+                "related_records": _candidate_related_records(root, candidate),
                 "error_count": len(errors),
                 "warning_count": len(warnings),
                 "problems": errors,
@@ -1158,16 +1160,32 @@ def _refresh_source_path(candidate: dict[str, Any]) -> str:
 
 
 def _duplicate_reviewed_claim(root: Path, candidate: dict[str, Any]) -> str:
+    related = _candidate_related_records(root, candidate)
+    for item in related:
+        if item.get("relation") == "same_claim":
+            return str(item.get("record_id") or "")
+    return ""
+
+
+def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[dict[str, str]]:
     candidate_claim = str(candidate.get("claim") or "").strip().casefold()
     if not candidate_claim:
-        return ""
+        return []
     repo_id = str(candidate.get("repo_id") or "")
-    for record in _load_records(root):
-        if str(record.get("repo_id") or "") != repo_id:
+    records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    superseded_ids = _superseded_ids(records)
+    related: list[dict[str, str]] = []
+    for record in records:
+        if str(record.get("claim") or "").strip().casefold() != candidate_claim:
             continue
-        if str(record.get("claim") or "").strip().casefold() == candidate_claim:
-            return str(record.get("id") or "")
-    return ""
+        related.append(
+            {
+                "record_id": str(record.get("id") or ""),
+                "status": _derived_status(root, record, superseded_ids=superseded_ids),
+                "relation": "same_claim",
+            }
+        )
+    return sorted(related, key=lambda item: (item["status"], item["record_id"]))
 
 
 def _public_record(record: dict[str, Any], *, status: str) -> dict[str, Any]:

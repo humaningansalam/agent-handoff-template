@@ -85,7 +85,43 @@ def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: P
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["passed"] is True
+    assert payload["data"]["related_records"][0]["status"] == "reviewed"
+    assert payload["data"]["related_records"][0]["relation"] == "same_claim"
     assert payload["warnings"][0]["code"] == "knowledge_candidate_duplicate_reviewed_claim"
+
+
+def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
+    old_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", second_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    third_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+
+    assert main(["knowledge", "candidate", "check", third_candidate, "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    related = {item["record_id"]: item["status"] for item in payload["data"]["related_records"]}
+    assert related[old_record] == "superseded"
+    assert "reviewed" in set(related.values())
+
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged after approval.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "check", third_candidate, "--repo-id", "main", "--json"]) == 1
+    stale_payload = json.loads(capsys.readouterr().out)
+    assert any(item["status"] == "stale" for item in stale_payload["data"]["related_records"])
 
 
 def test_knowledge_candidate_check_blocks_source_digest_drift(tmp_path: Path, monkeypatch, capsys) -> None:
