@@ -434,6 +434,88 @@ Use reviewed knowledge source authority.
     assert payload["data"]["bundle"]["query"]["explain"] is True
 
 
+def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622030303Z--pack-compare.md"
+    task_path.write_text(
+        """---
+id: T-20260622030303Z
+title: "Compare context pack artifacts"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T030303Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622030303Z - Compare context pack artifacts
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: source authority knowledge
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Use reviewed knowledge source authority.
+
+## Handoff
+
+- Next exact step: inspect context pack compare.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260622030303Z --repo-id main --json`
+- Done when: pack compare catches regressions.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    baseline = tmp_path / ".repoctl-state/context-pack/baseline.json"
+    candidate = tmp_path / ".repoctl-state/context-pack/candidate.json"
+
+    assert main(["context", "pack", "--task", "T-20260622030303Z", "--repo-id", "main", "--explain", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--max-reviewed-knowledge-drop", "0", "--json"]) == 0
+
+    pass_payload = json.loads(capsys.readouterr().out)
+    assert pass_payload["data"]["count_deltas"]["must_read"]["delta"] == 0
+    assert pass_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] == 0
+    assert pass_payload["problems"] == []
+
+    regressed = json.loads(candidate.read_text(encoding="utf-8"))
+    regressed["data"]["groups"]["must_read"] = []
+    regressed["data"]["groups"]["reviewed_knowledge"] = []
+    digest_basis = {key: value for key, value in regressed["data"].items() if key not in {"pack_digest", "artifact", "repository", "graph"}}
+    regressed["data"]["pack_digest"] = digest_data(digest_basis)
+    regressed["data"]["artifact"]["pack_digest"] = regressed["data"]["pack_digest"]
+    candidate.write_text(json.dumps(regressed, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--max-reviewed-knowledge-drop", "0", "--json"]) == 1
+
+    fail_payload = json.loads(capsys.readouterr().out)
+    assert fail_payload["data"]["count_deltas"]["must_read"]["delta"] < 0
+    assert fail_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] < 0
+    assert any(problem["code"] == "context_pack_must_read_regressed" for problem in fail_payload["problems"])
+    assert any(problem["code"] == "context_pack_reviewed_knowledge_regressed" for problem in fail_payload["problems"])
+
+
 def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

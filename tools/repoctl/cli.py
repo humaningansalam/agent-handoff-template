@@ -10,7 +10,7 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .context import build_context_bundle
 from .context_benchmark import compare_context_benchmarks, run_context_benchmark
-from .context_task_pack import build_task_context_pack
+from .context_task_pack import build_task_context_pack, compare_task_context_packs
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
@@ -1356,6 +1356,39 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_pack_compare(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    baseline = Path(args.baseline)
+    candidate = Path(args.candidate)
+    if not baseline.is_absolute():
+        baseline = root / baseline
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    data, problems = compare_task_context_packs(
+        baseline_path=baseline,
+        candidate_path=candidate,
+        max_must_read_drop=args.max_must_read_drop,
+        max_reviewed_knowledge_drop=args.max_reviewed_knowledge_drop,
+    )
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context pack-compare",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        deltas = data.get("count_deltas", {}) if data else {}
+        must_read = deltas.get("must_read", {}).get("delta", 0)
+        reviewed = deltas.get("reviewed_knowledge", {}).get("delta", 0)
+        print(f"context pack compare must_read_delta={must_read} reviewed_knowledge_delta={reviewed}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -2069,6 +2102,13 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack.add_argument("--output")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
+    context_pack_compare = context_sub.add_parser("pack-compare")
+    context_pack_compare.add_argument("--baseline", required=True)
+    context_pack_compare.add_argument("--candidate", required=True)
+    context_pack_compare.add_argument("--max-must-read-drop", type=int)
+    context_pack_compare.add_argument("--max-reviewed-knowledge-drop", type=int)
+    context_pack_compare.add_argument("--json", action="store_true")
+    context_pack_compare.set_defaults(func=cmd_context_pack_compare)
 
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
