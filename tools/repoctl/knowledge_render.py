@@ -23,11 +23,18 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
     events = _load_events(root, repo_id=repo_id)
     rendered: list[dict[str, Any]] = []
     pages = _pages(root, records, events)
+    page_records = _page_records(records)
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, content in pages.items():
         path = output_dir / name
         atomic_write(path, content)
-        rendered.append({"path": path.relative_to(root).as_posix(), "digest": digest_data({"content": content})})
+        rendered.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "digest": digest_data({"content": content}),
+                "source_bundle": _page_source_bundle(name, page_records.get(name, []), events),
+            }
+        )
     rendered = sorted(rendered, key=lambda item: item["path"])
     return {
         "schema": "repoctl.knowledge.render",
@@ -76,6 +83,46 @@ def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any
     for kind, filename in PAGE_BY_KIND.items():
         pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records), events)
     return pages
+
+
+def _page_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_page: dict[str, list[dict[str, Any]]] = {"INDEX.md": sorted(records, key=lambda item: str(item.get("id") or ""))}
+    for kind, filename in PAGE_BY_KIND.items():
+        by_page[filename] = sorted([record for record in records if str(record.get("kind") or "") == kind], key=lambda item: str(item.get("id") or ""))
+    return by_page
+
+
+def _page_source_bundle(name: str, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, Any]:
+    refs = _unique_source_refs(records)
+    event_ids = [str(event.get("id") or "") for event in events if _event_belongs_to_page(name, event, records)]
+    bundle = {
+        "record_ids": [str(record.get("id") or "") for record in records],
+        "source_refs": refs,
+        "event_ids": sorted(event_ids),
+    }
+    bundle["source_bundle_digest"] = digest_data(bundle)
+    return bundle
+
+
+def _unique_source_refs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    for record in records:
+        source_refs = record.get("source_refs", [])
+        if not isinstance(source_refs, list):
+            continue
+        for ref in source_refs:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(ref, ensure_ascii=False, sort_keys=True)
+            refs[key] = ref
+    return [refs[key] for key in sorted(refs)]
+
+
+def _event_belongs_to_page(name: str, event: dict[str, Any], records: list[dict[str, Any]]) -> bool:
+    if name == "INDEX.md":
+        return True
+    record_ids = {str(record.get("id") or "") for record in records}
+    return str(event.get("record_id") or "") in record_ids or str(event.get("superseded_by") or "") in record_ids
 
 
 def _index_page(records: list[dict[str, Any]], events: list[dict[str, Any]], by_kind: dict[str, list[dict[str, Any]]]) -> str:

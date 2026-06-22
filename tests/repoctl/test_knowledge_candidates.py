@@ -492,6 +492,15 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
     assert "docs/knowledge/generated/INDEX.md" in rendered_paths
     assert "docs/knowledge/generated/decisions.md" in rendered_paths
+    rendered_by_path = {item["path"]: item for item in render_payload["data"]["rendered"]}
+    decisions_bundle = rendered_by_path["docs/knowledge/generated/decisions.md"]["source_bundle"]
+    assert decisions_bundle["record_ids"]
+    assert decisions_bundle["source_refs"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert decisions_bundle["event_ids"] == [approved_event["id"]]
+    assert decisions_bundle["source_bundle_digest"].startswith("sha256:")
+    index_bundle = rendered_by_path["docs/knowledge/generated/INDEX.md"]["source_bundle"]
+    assert index_bundle["record_ids"] == decisions_bundle["record_ids"]
+    assert index_bundle["event_ids"] == [approved_event["id"]]
     index_text = (tmp_path / "docs/knowledge/generated/INDEX.md").read_text(encoding="utf-8")
     assert "- Events: 1" in index_text
     assert "- Events digest: sha256:" in index_text
