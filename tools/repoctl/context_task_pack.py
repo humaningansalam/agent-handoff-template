@@ -15,6 +15,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     query = _task_seed_query(task)
     bundle, problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens)
     groups = _group_candidates(bundle.packed_context if bundle is not None else [])
+    groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
     data = {
         "schema": "repoctl.context.task_pack",
         "schema_version": 1,

@@ -250,8 +250,69 @@ Explain why Graph remains non-authoritative.
     assert data["authoritative"] is False
     assert data["seed"]["source"] == "task_fields_for_retrieval_only"
     assert any(item["source_ref"]["path"] == "docs/adr/evidence-context-authority-v0.md" for item in data["groups"]["must_read"])
+    assert data["groups"]["reviewed_knowledge"] == []
     assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
+
+
+def test_context_pack_groups_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622020202Z--knowledge-pack.md"
+    task_path.write_text(
+        """---
+id: T-20260622020202Z
+title: "Use reviewed knowledge for source authority"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T020202Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622020202Z - Use reviewed knowledge for source authority
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: source authority knowledge
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Use reviewed knowledge source authority.
+
+## Handoff
+
+- Next exact step: inspect reviewed knowledge.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260622020202Z --repo-id main --json`
+- Done when: reviewed knowledge is visible.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    reviewed = payload["data"]["groups"]["reviewed_knowledge"]
+    assert reviewed[0]["record"]["id"] == record_id
+    assert reviewed[0]["record"]["status"] == "reviewed"
 
 
 def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:
