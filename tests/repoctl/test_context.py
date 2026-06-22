@@ -223,6 +223,16 @@ def test_context_benchmark_compare_artifacts(tmp_path: Path, monkeypatch, capsys
     missing_payload = json.loads(capsys.readouterr().out)
     assert any(problem["code"] == "context_benchmark_question_missing" and problem["path"] == missing_question_id for problem in missing_payload["problems"])
 
+    failed_artifact = json.loads(baseline.read_text(encoding="utf-8"))
+    failed_artifact["ok"] = False
+    failed_artifact["problems"] = [{"severity": "error", "code": "synthetic_failure", "message": "failed"}]
+    candidate.write_text(json.dumps(failed_artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--json"]) == 1
+
+    failed_payload = json.loads(capsys.readouterr().out)
+    assert failed_payload["problems"][0]["code"] == "context_benchmark_artifact_failed"
+
 
 def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
