@@ -191,3 +191,31 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert f"- Record: `{old_record}`" in decisions_text
     assert "- Status: `superseded`" in decisions_text
+
+
+def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    reason = tmp_path / "reject.md"
+    reason.write_text("Candidate is too broad for reviewed knowledge.\n", encoding="utf-8")
+
+    assert main(["knowledge", "reject", candidate_id, "--repo-id", "main", "--reason-file", reason.as_posix(), "--json"]) == 0
+
+    reject_payload = json.loads(capsys.readouterr().out)
+    event = reject_payload["data"]["event"]
+    assert event["type"] == "rejected_candidate"
+    assert event["candidate_id"] == candidate_id
+    assert event["reason"] == "Candidate is too broad for reviewed knowledge."
+    assert Path(tmp_path / reject_payload["data"]["event_path"]).is_file()
+
+    assert main(["knowledge", "query", "broad reviewed knowledge", "--repo-id", "main", "--json"]) == 0
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload["data"]["available_record_count"] == 0
+    assert query_payload["data"]["results"] == []

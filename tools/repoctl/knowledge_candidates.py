@@ -169,6 +169,34 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
     }, []
 
 
+def reject_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, reason_file: Path) -> tuple[dict[str, Any], list[Problem]]:
+    candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
+    if problems:
+        return {}, problems
+    reason_path = reason_file if reason_file.is_absolute() else root / reason_file
+    if not reason_path.is_file():
+        return {}, [Problem("error", "knowledge_reject_reason_missing", "reject reason file is missing", reason_path.as_posix())]
+    reason = reason_path.read_text(encoding="utf-8").strip()
+    if not reason:
+        return {}, [Problem("error", "knowledge_reject_reason_empty", "reject reason file is empty", reason_path.as_posix())]
+    candidate = candidate_data["candidate"]
+    event = {
+        "schema": "repoctl.knowledge.event",
+        "schema_version": 1,
+        "id": _event_id("rejected-candidate", candidate_id),
+        "type": "rejected_candidate",
+        "repo_id": repo_id,
+        "candidate_id": candidate_id,
+        "candidate_digest": candidate.get("candidate_digest", ""),
+        "reason": reason,
+    }
+    event["event_digest"] = digest_data(event)
+    event_path = _event_dir(root) / f"{event['id']}.json"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {"event": event, "event_path": event_path.relative_to(root).as_posix()}, []
+
+
 def show_knowledge_record(root: Path, *, record_id: str) -> tuple[dict[str, Any], list[Problem]]:
     if not re.fullmatch(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*", record_id):
         return {}, [Problem("error", "invalid_knowledge_record_id", "record id must look like K-YYYYMMDDHHMMSSZ--slug")]
