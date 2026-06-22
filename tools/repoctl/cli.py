@@ -1755,7 +1755,10 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
 def cmd_knowledge_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=args.include_stale, include_superseded=args.include_superseded, include_deprecated=args.include_deprecated, limit=args.limit, explain=args.explain)
+    include_stale = args.include_stale or args.include_history
+    include_superseded = args.include_superseded or args.include_history
+    include_deprecated = args.include_deprecated or args.include_history
+    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=include_stale, include_superseded=include_superseded, include_deprecated=include_deprecated, limit=args.limit, explain=args.explain)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge query",
@@ -2259,6 +2262,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("--include-stale", action="store_true")
     knowledge_query.add_argument("--include-superseded", action="store_true")
     knowledge_query.add_argument("--include-deprecated", action="store_true")
+    knowledge_query.add_argument("--include-history", action="store_true")
     knowledge_query.add_argument("--explain", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
     knowledge_query.add_argument("--json", action="store_true")
