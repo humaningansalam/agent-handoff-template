@@ -174,6 +174,8 @@ def test_context_benchmark_fixture_corpus_gate_fails_when_not_applied(tmp_path: 
     assert payload["data"]["fixture_corpus"]["present"] is True
     assert payload["data"]["fixture_corpus"]["missing_count"] >= 1
     assert any(problem["code"] == "context_benchmark_corpus_file_missing" for problem in payload["problems"])
+    assert any(action["label"] == "Apply the declared benchmark corpus before running this gate" for action in payload["next_actions"])
+    assert any(action.get("path") == "tests/fixtures/context-benchmark/corpus.json" for action in payload["next_actions"])
 
 
 def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:

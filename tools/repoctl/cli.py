@@ -147,6 +147,8 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Regenerate the upgrade plan", command="./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --output /tmp/repoctl-upgrade-plan.json --json")
         elif code == "upgrade_plan_has_conflicts":
             add("Inspect plan conflicts before applying", path=path or "/tmp/repoctl-upgrade-plan.json")
+        elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
+            add("Apply the declared benchmark corpus before running this gate", path="tests/fixtures/context-benchmark/corpus.json")
     return actions
 
 
