@@ -55,7 +55,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
             {
                 "path": path.relative_to(root).as_posix(),
                 "digest": digest_data({"content": content}),
-                "source_bundle": _page_source_bundle(name, page_records.get(name, []), events),
+                "source_bundle": _page_source_bundle(root, name, page_records.get(name, []), events),
             }
         )
     rendered = sorted(rendered, key=lambda item: item["path"])
@@ -180,16 +180,41 @@ def _page_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     return by_page
 
 
-def _page_source_bundle(name: str, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, Any]:
+def _page_source_bundle(root: Path, name: str, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, Any]:
     refs = _unique_source_refs(records)
     event_ids = [str(event.get("id") or "") for event in events if _event_belongs_to_page(name, event, records)]
+    source_statuses = _source_statuses(root, refs)
     bundle = {
         "record_ids": [str(record.get("id") or "") for record in records],
         "source_refs": refs,
+        "source_statuses": source_statuses,
+        "source_status_counts": _source_status_counts(source_statuses),
         "event_ids": sorted(event_ids),
     }
     bundle["source_bundle_digest"] = digest_data(bundle)
     return bundle
+
+
+def _source_statuses(root: Path, refs: list[dict[str, Any]]) -> list[dict[str, str]]:
+    statuses: list[dict[str, str]] = []
+    for ref in refs:
+        statuses.append(
+            {
+                "path": str(ref.get("path") or ""),
+                "section": str(ref.get("section") or ""),
+                "content_sha256": str(ref.get("content_sha256") or ""),
+                "status": _source_ref_status(root, ref),
+            }
+        )
+    return sorted(statuses, key=lambda item: (item["path"], item["section"], item["content_sha256"]))
+
+
+def _source_status_counts(statuses: list[dict[str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in statuses:
+        status = item["status"]
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _unique_source_refs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

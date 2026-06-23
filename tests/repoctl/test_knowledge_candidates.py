@@ -446,7 +446,11 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert drift_payload["data"]["records"][0]["status"] == "stale"
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    render_payload = json.loads(capsys.readouterr().out)
+    rendered_by_path = {item["path"]: item for item in render_payload["data"]["rendered"]}
+    stale_bundle = rendered_by_path["docs/knowledge/generated/decisions.md"]["source_bundle"]
+    assert stale_bundle["source_status_counts"] == {"digest_mismatch": 1}
+    assert stale_bundle["source_statuses"][0]["status"] == "digest_mismatch"
     stale_decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert "- Status: `stale`" in stale_decisions_text
     assert "status=`digest_mismatch`" in stale_decisions_text
@@ -669,6 +673,15 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     decisions_bundle = rendered_by_path["docs/knowledge/generated/decisions.md"]["source_bundle"]
     assert decisions_bundle["record_ids"]
     assert decisions_bundle["source_refs"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert decisions_bundle["source_statuses"] == [
+        {
+            "path": "docs/adr/evidence-context-authority-v0.md",
+            "section": "Decision",
+            "content_sha256": decisions_bundle["source_refs"][0]["content_sha256"],
+            "status": "current",
+        }
+    ]
+    assert decisions_bundle["source_status_counts"] == {"current": 1}
     assert decisions_bundle["event_ids"] == [approved_event["id"]]
     assert decisions_bundle["source_bundle_digest"].startswith("sha256:")
     index_bundle = rendered_by_path["docs/knowledge/generated/INDEX.md"]["source_bundle"]
