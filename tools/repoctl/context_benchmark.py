@@ -25,6 +25,7 @@ def run_context_benchmark(
     min_precision_at_5: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
     min_category_recall_at_5: dict[str, float] | None = None,
+    min_category_knowledge_recall_at_5: dict[str, float] | None = None,
     min_category_graph_edge_recall: dict[str, float] | None = None,
     min_category_packed_recall: dict[str, float] | None = None,
     require_source_integrity: bool = False,
@@ -66,6 +67,7 @@ def run_context_benchmark(
             min_precision_at_5=min_precision_at_5,
             min_knowledge_recall_at_5=min_knowledge_recall_at_5,
             min_category_recall_at_5=min_category_recall_at_5 or {},
+            min_category_knowledge_recall_at_5=min_category_knowledge_recall_at_5 or {},
             min_category_graph_edge_recall=min_category_graph_edge_recall or {},
             min_category_packed_recall=min_category_packed_recall or {},
             require_source_integrity=require_source_integrity,
@@ -85,6 +87,7 @@ def run_context_benchmark(
             "min_precision_at_5": min_precision_at_5,
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
             "min_category_recall_at_5": dict(sorted((min_category_recall_at_5 or {}).items())),
+            "min_category_knowledge_recall_at_5": dict(sorted((min_category_knowledge_recall_at_5 or {}).items())),
             "min_category_graph_edge_recall": dict(sorted((min_category_graph_edge_recall or {}).items())),
             "min_category_packed_recall": dict(sorted((min_category_packed_recall or {}).items())),
             "require_source_integrity": require_source_integrity,
@@ -415,6 +418,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     knowledge_source_statuses = _knowledge_source_statuses(bundle)
     problem_codes = [problem.code for problem in problems]
     stale_knowledge_excluded = problem_codes.count("knowledge_stale_record_excluded")
+    superseded_knowledge_excluded = problem_codes.count("knowledge_superseded_record_excluded")
+    deprecated_knowledge_excluded = problem_codes.count("knowledge_deprecated_record_excluded")
 
     top5 = candidate_refs[:5]
     top10 = candidate_refs[:10]
@@ -454,6 +459,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "knowledge_score_breakdown_present": all(result["has_field_breakdown"] for result in knowledge_score_results),
             "knowledge_source_status_current": stale_knowledge_excluded == 0 and all(status.get("digest_matches") is True for status in knowledge_source_statuses),
             "knowledge_stale_record_excluded": stale_knowledge_excluded,
+            "knowledge_superseded_record_excluded": superseded_knowledge_excluded,
+            "knowledge_deprecated_record_excluded": deprecated_knowledge_excluded,
         },
         "required_found_at_5": required_top5,
         "required_found_at_10": required_top10,
@@ -489,6 +496,8 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_score_breakdown_integrity": all(metric["knowledge_score_breakdown_present"] for metric in metrics),
         "knowledge_source_status_current": all(metric["knowledge_source_status_current"] for metric in metrics),
         "knowledge_stale_record_excluded": sum(int(metric["knowledge_stale_record_excluded"]) for metric in metrics),
+        "knowledge_superseded_record_excluded": sum(int(metric["knowledge_superseded_record_excluded"]) for metric in metrics),
+        "knowledge_deprecated_record_excluded": sum(int(metric["knowledge_deprecated_record_excluded"]) for metric in metrics),
         "mean_graph_edge_recall": _mean(metric["graph_edge_recall"] for metric in metrics if metric["required_graph_edge_count"]),
         "graph_edge_expected_questions": sum(1 for metric in metrics if metric["required_graph_edge_count"]),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
@@ -511,10 +520,15 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
             "mean_recall_at_10": _mean(metric.get("recall_at_10", 0.0) for metric in items),
             "mean_precision_at_5": _mean(metric.get("precision_at_5", 0.0) for metric in items),
             "mean_packed_recall": _mean(metric.get("packed_recall", 0.0) for metric in items),
+            "mean_knowledge_recall_at_5": _mean(metric.get("knowledge_recall_at_5", 0.0) for metric in items if metric.get("required_knowledge_count", 0)),
+            "knowledge_expected_questions": sum(1 for metric in items if metric.get("required_knowledge_count", 0)),
             "mean_graph_edge_recall": _mean(metric.get("graph_edge_recall", 1.0) for metric in items if metric.get("required_graph_edge_count", 0)),
             "graph_edge_expected_questions": sum(1 for metric in items if metric.get("required_graph_edge_count", 0)),
             "forbidden_selected": sum(int(metric.get("forbidden_selected") or 0) for metric in items),
             "cross_repo_ref_count": sum(int(metric.get("cross_repo_ref_count") or 0) for metric in items),
+            "knowledge_stale_record_excluded": sum(int(metric.get("knowledge_stale_record_excluded") or 0) for metric in items),
+            "knowledge_superseded_record_excluded": sum(int(metric.get("knowledge_superseded_record_excluded") or 0) for metric in items),
+            "knowledge_deprecated_record_excluded": sum(int(metric.get("knowledge_deprecated_record_excluded") or 0) for metric in items),
         }
     return summary
 
@@ -652,6 +666,7 @@ def _gate_problems(
     min_precision_at_5: float | None,
     min_knowledge_recall_at_5: float | None,
     min_category_recall_at_5: dict[str, float],
+    min_category_knowledge_recall_at_5: dict[str, float],
     min_category_graph_edge_recall: dict[str, float],
     min_category_packed_recall: dict[str, float],
     require_source_integrity: bool,
@@ -673,6 +688,11 @@ def _gate_problems(
         recall = float(category_summary.get("mean_recall_at_5") or 0.0)
         if recall < threshold:
             problems.append(Problem("error", "context_benchmark_category_recall_gate_failed", f"context benchmark {category} Recall@5 is below gate", category))
+    for category, threshold in sorted(min_category_knowledge_recall_at_5.items()):
+        category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
+        recall = float(category_summary.get("mean_knowledge_recall_at_5") or 0.0)
+        if recall < threshold:
+            problems.append(Problem("error", "context_benchmark_category_knowledge_gate_failed", f"context benchmark {category} knowledge Recall@5 is below gate", category))
     for category, threshold in sorted(min_category_graph_edge_recall.items()):
         category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
         recall = float(category_summary.get("mean_graph_edge_recall") or 0.0)

@@ -421,6 +421,10 @@ def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch
     assert q2["metrics"]["knowledge_recall_at_5"] == 1.0
     assert q2["metrics"]["knowledge_score_breakdown_present"] is True
     assert q2["metrics"]["knowledge_source_status_current"] is True
+    assert q2["metrics"]["knowledge_stale_record_excluded"] == 0
+    assert q2["metrics"]["knowledge_superseded_record_excluded"] == 0
+    assert payload["data"]["summary"]["by_category"]["contract"]["mean_knowledge_recall_at_5"] == 1.0
+    assert payload["data"]["summary"]["by_category"]["contract"]["knowledge_expected_questions"] == 1
     assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
     assert q2["required_knowledge_found_at_5"][0]["section"] == "Decision"
     assert q2["knowledge_score_results"][0]["has_field_breakdown"] is True
@@ -466,6 +470,13 @@ def test_context_benchmark_quality_gate_passes_with_knowledge(tmp_path: Path, mo
     assert payload["data"]["summary"]["knowledge_source_status_current"] is True
     assert payload["data"]["gates"]["require_knowledge_source_current"] is True
     assert payload["problems"] == []
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-knowledge-recall-at-5", "contract=1.0", "--json"]) == 0
+
+    category_payload = json.loads(capsys.readouterr().out)
+    assert category_payload["data"]["gates"]["min_category_knowledge_recall_at_5"] == {"contract": 1.0}
+    assert category_payload["data"]["summary"]["by_category"]["contract"]["mean_knowledge_recall_at_5"] == 1.0
+    assert category_payload["problems"] == []
 
 
 def test_context_benchmark_forbidden_gate_fails_on_forbidden_source(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -683,8 +694,27 @@ def test_context_benchmark_knowledge_source_current_gate_fails_on_stale_record(t
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["summary"]["knowledge_source_status_current"] is False
     assert payload["data"]["summary"]["knowledge_stale_record_excluded"] >= 1
+    assert payload["data"]["summary"]["knowledge_superseded_record_excluded"] == 0
     assert payload["data"]["gates"]["require_knowledge_source_current"] is True
     assert any(problem["code"] == "context_benchmark_knowledge_source_stale" for problem in payload["problems"])
+
+
+def test_context_benchmark_category_knowledge_gate_fails_without_reviewed_record(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-knowledge-recall-at-5", "contract=1.0", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["gates"]["min_category_knowledge_recall_at_5"] == {"contract": 1.0}
+    assert payload["data"]["summary"]["by_category"]["contract"]["mean_knowledge_recall_at_5"] == 0.0
+    assert payload["problems"][0]["code"] == "context_benchmark_category_knowledge_gate_failed"
 
 
 def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
