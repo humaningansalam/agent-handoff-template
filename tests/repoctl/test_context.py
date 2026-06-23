@@ -50,6 +50,18 @@ def _write_context_benchmark_collection_corpus(root: Path, fixture: Path) -> Non
             path.write_text(item["content"], encoding="utf-8")
 
 
+def _approve_superseded_context_knowledge(capsys) -> tuple[str, str]:
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    first_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate_id, "--repo-id", "main", "--json"]) == 0
+    old_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    replacement_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
+    new_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    return old_record_id, new_record_id
+
+
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -697,6 +709,37 @@ def test_context_benchmark_knowledge_source_current_gate_fails_on_stale_record(t
     assert payload["data"]["summary"]["knowledge_superseded_record_excluded"] == 0
     assert payload["data"]["gates"]["require_knowledge_source_current"] is True
     assert any(problem["code"] == "context_benchmark_knowledge_source_stale" for problem in payload["problems"])
+
+
+def test_context_benchmark_counts_superseded_knowledge_exclusion(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    old_record_id, new_record_id = _approve_superseded_context_knowledge(capsys)
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-knowledge-recall-at-5", "contract=1.0", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    contract = payload["data"]["summary"]["by_category"]["contract"]
+    assert payload["data"]["summary"]["knowledge_superseded_record_excluded"] >= 1
+    assert contract["knowledge_superseded_record_excluded"] >= 1
+    assert contract["mean_knowledge_recall_at_5"] == 1.0
+    q2 = next(result for result in payload["data"]["results"] if result["id"] == "Q-002")
+    assert q2["metrics"]["knowledge_superseded_record_excluded"] >= 1
+    assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+
+    assert main(["knowledge", "query", "source authorities remain after context retrieval", "--repo-id", "main", "--include-superseded", "--json"]) == 0
+
+    query_payload = json.loads(capsys.readouterr().out)
+    statuses = {item["record"]["id"]: item["record"]["status"] for item in query_payload["data"]["results"]}
+    assert statuses[old_record_id] == "superseded"
+    assert statuses[new_record_id] == "reviewed"
 
 
 def test_context_benchmark_category_knowledge_gate_fails_without_reviewed_record(tmp_path: Path, monkeypatch, capsys) -> None:
