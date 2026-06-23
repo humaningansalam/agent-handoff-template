@@ -53,6 +53,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Compare context pack benchmark artifacts: `./scripts/repoctl context pack-benchmark-compare --baseline .repoctl-state/context-pack-benchmark/baseline.json --candidate .repoctl-state/context-pack-benchmark/candidate.json --max-mean-must-read-recall-drop 0 --json`
 - Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
 - Build a candidate from completed task evidence: `./scripts/repoctl knowledge candidate build --from-receipt T-... --repo-id main --kind invariant --json`
+- Build a candidate from a current context pack: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-....json --repo-id main --kind decision --json`
 - Check candidate quality before review: `./scripts/repoctl knowledge candidate check KC-... --repo-id main --json`
 - Check all pending candidates: `./scripts/repoctl knowledge candidate check --all --repo-id main --json`
 - Check candidates across all lifecycle states: `./scripts/repoctl knowledge candidate check --all --all-states --repo-id main --json`
@@ -95,6 +96,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
 - `repoctl context pack-benchmark` and `pack-benchmark-compare` are retrieval/packing gates for field tests; they measure required source recall and do not validate task scope or generated answers.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
+- `repoctl knowledge candidate build --from-pack` uses the pack only to select current authority source refs; the pack artifact itself does not become a canonical knowledge source.
 - `repoctl knowledge candidate refresh` creates a new candidate plus an event; it does not edit the stale candidate in place.
 - `repoctl knowledge candidate list` and `knowledge status` derive candidate review state from append-only events.
 - `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale and superseded records by default.
