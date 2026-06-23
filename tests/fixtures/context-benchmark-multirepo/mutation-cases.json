@@ -1,0 +1,11 @@
+{
+  "schema": "repoctl.context.benchmark.mutations",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "same-basename-topic-symbol",
+      "kind": "multi_repo_isolation",
+      "description": "same basename and symbol in web/api repositories must not leak across explicit repo_id"
+    }
+  ]
+}

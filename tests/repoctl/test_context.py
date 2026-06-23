@@ -41,6 +41,15 @@ def _write_context_benchmark_corpus(root: Path, fixture: Path | None = None) -> 
         path.write_text(item["content"], encoding="utf-8")
 
 
+def _write_context_benchmark_collection_corpus(root: Path, fixture: Path) -> None:
+    corpus = json.loads((fixture / "corpus.json").read_text(encoding="utf-8"))
+    for repo_id, repo_corpus in corpus["repositories"].items():
+        for item in repo_corpus["files"]:
+            path = root / "repos" / repo_id / item["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(item["content"], encoding="utf-8")
+
+
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -125,6 +134,20 @@ def test_context_benchmark_fixture_has_source_refs() -> None:
     for question in questions:
         assert question["id"] in expected
         assert expected[question["id"]]["required_source_refs"]
+
+
+def test_context_benchmark_multirepo_fixture_has_source_refs() -> None:
+    fixture = Path("tests/fixtures/context-benchmark-multirepo")
+    questions = [json.loads(line) for line in (fixture / "questions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    expected = json.loads((fixture / "expected-sources.json").read_text(encoding="utf-8"))
+    corpus = json.loads((fixture / "corpus.json").read_text(encoding="utf-8"))
+
+    assert {question["category"] for question in questions} == {"multi-repo-isolation"}
+    assert sorted(corpus["repositories"]) == ["api", "web"]
+    for question in questions:
+        assert question["id"] in expected
+        assert expected[question["id"]]["required_source_refs"]
+        assert expected[question["id"]]["forbidden_refs"]
 
 
 def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -511,6 +534,31 @@ def test_context_benchmark_multi_repo_isolation_passes_for_selected_repo(tmp_pat
     assert payload["data"]["summary"]["cross_repo_ref_count"] == 0
     assert payload["data"]["results"][0]["cross_repo_refs"] == []
     assert payload["data"]["gates"]["require_no_cross_repo"] is True
+
+
+def test_context_benchmark_multirepo_fixture_gates_isolation(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    fixture = Path("tests/fixtures/context-benchmark-multirepo").resolve()
+    _write_context_benchmark_collection_corpus(tmp_path, fixture)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--require-fixture-corpus", "--require-no-cross-repo", "--require-no-forbidden", "--min-category-packed-recall", "multi-repo-isolation=1.0", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    result = payload["data"]["results"][0]
+    assert result["repo_id"] == "web"
+    assert result["metrics"]["packed_recall"] == 1.0
+    assert result["selected_forbidden"] == []
+    assert result["cross_repo_refs"] == []
+    assert payload["data"]["fixture_corpus"]["missing_count"] == 0
+    assert payload["data"]["summary"]["by_category"]["multi-repo-isolation"]["cross_repo_ref_count"] == 0
+    assert payload["problems"] == []
 
 
 def test_context_benchmark_import_impact_passes_after_resolution(tmp_path: Path, monkeypatch, capsys) -> None:

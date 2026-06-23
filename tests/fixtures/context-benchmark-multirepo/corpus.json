@@ -1,0 +1,22 @@
+{
+  "schema": "repoctl.context.benchmark.corpus",
+  "schema_version": 1,
+  "repositories": {
+    "api": {
+      "files": [
+        {
+          "path": "app.py",
+          "content": "def auth() -> str:\n    return 'api'\n"
+        }
+      ]
+    },
+    "web": {
+      "files": [
+        {
+          "path": "app.py",
+          "content": "def auth() -> str:\n    return 'web'\n"
+        }
+      ]
+    }
+  }
+}

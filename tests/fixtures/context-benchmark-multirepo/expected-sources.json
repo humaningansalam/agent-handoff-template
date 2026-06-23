@@ -1,0 +1,16 @@
+{
+  "Q-MR-001": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:web:file:app.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:api:file:app.py>"
+      }
+    ]
+  }
+}
