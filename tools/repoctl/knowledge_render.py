@@ -26,6 +26,8 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         output_rel = output_real.relative_to(root_real).as_posix()
     except ValueError:
         return {}, [Problem("error", "knowledge_render_output_outside_workspace", "render output must stay inside the workspace", output.as_posix())]
+    if not _is_generated_output_path(root=root, output_dir=output_dir):
+        return {}, [Problem("error", "knowledge_render_output_not_generated", "render output must stay under docs/knowledge/generated so generated views cannot become context sources", output.as_posix())]
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
     event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
@@ -88,6 +90,15 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
         "removed": removed,
         "rendered": rendered,
     }, []
+
+
+def _is_generated_output_path(*, root: Path, output_dir: Path) -> bool:
+    generated_root = root / "docs/knowledge/generated"
+    try:
+        output_dir.resolve().relative_to(generated_root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _remove_stale_rendered_files(*, root: Path, output_dir: Path, next_page_names: set[str]) -> list[str]:

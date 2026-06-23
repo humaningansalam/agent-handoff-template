@@ -595,7 +595,7 @@ def test_knowledge_render_rejects_invalid_lifecycle_events(tmp_path: Path, monke
     event["record_digest"] = "sha256:" + "2" * 64
     event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
     _write_event(tmp_path, event)
-    output = tmp_path / "docs/knowledge/generated-invalid"
+    output = tmp_path / "docs/knowledge/generated/invalid"
 
     assert main(["knowledge", "render", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
@@ -790,6 +790,27 @@ def test_knowledge_render_rejects_output_outside_workspace(tmp_path: Path, monke
     symlink_payload = json.loads(capsys.readouterr().out)
     assert symlink_payload["problems"][0]["code"] == "knowledge_render_output_outside_workspace"
     assert not (escape / "INDEX.md").exists()
+
+
+def test_knowledge_render_rejects_context_source_output_path(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    output = tmp_path / "docs/knowledge/rendered"
+    assert main(["knowledge", "render", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_render_output_not_generated"
+    assert not output.exists()
+
+    safe_output = tmp_path / "docs/knowledge/generated/snapshot"
+    assert main(["knowledge", "render", "--repo-id", "main", "--output", safe_output.as_posix(), "--json"]) == 0
+    safe_payload = json.loads(capsys.readouterr().out)
+    assert safe_payload["data"]["output"] == "docs/knowledge/generated/snapshot"
+    assert (safe_output / "INDEX.md").is_file()
 
 
 def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
