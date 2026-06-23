@@ -1259,6 +1259,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     if not fixture.is_absolute():
         fixture = root / fixture
     category_gates, category_gate_problems = _parse_category_recall_gates(args.min_category_recall_at_5 or [])
+    edge_category_gates, edge_category_gate_problems = _parse_category_recall_gates(args.min_category_graph_edge_recall or [])
     data, problems = run_context_benchmark(
         root,
         fixture=fixture,
@@ -1268,13 +1269,14 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         min_precision_at_5=args.min_precision_at_5,
         min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
         min_category_recall_at_5=category_gates,
+        min_category_graph_edge_recall=edge_category_gates,
         require_source_integrity=args.require_source_integrity,
         require_knowledge_source_current=args.require_knowledge_source_current,
         require_no_forbidden=args.require_no_forbidden,
         require_no_cross_repo=args.require_no_cross_repo,
         require_fixture_corpus=args.require_fixture_corpus,
     )
-    problems = [*category_gate_problems, *problems]
+    problems = [*category_gate_problems, *edge_category_gate_problems, *problems]
     payload = {
         "ok": not _has_errors(problems),
         "command": "context benchmark",
@@ -2178,6 +2180,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--min-precision-at-5", type=float)
     context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
     context_benchmark.add_argument("--min-category-recall-at-5", action="append", default=[])
+    context_benchmark.add_argument("--min-category-graph-edge-recall", action="append", default=[])
     context_benchmark.add_argument("--require-source-integrity", action="store_true")
     context_benchmark.add_argument("--require-knowledge-source-current", action="store_true")
     context_benchmark.add_argument("--require-no-forbidden", action="store_true")

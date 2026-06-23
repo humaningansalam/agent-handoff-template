@@ -21,6 +21,11 @@
       "id": "import-impact-resolution",
       "kind": "code_impact_resolution",
       "description": "repo-local Python and JS/TS imports should surface importer files in impact questions"
+    },
+    {
+      "id": "same-file-reference-impact",
+      "kind": "reference_impact_resolution",
+      "description": "same-file caller symbols should be measured separately from import impact before Graph v0.3 REFERENCES/CALLS work"
     }
   ]
 }

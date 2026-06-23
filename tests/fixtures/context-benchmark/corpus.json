@@ -35,6 +35,10 @@
         {
           "path": "frontend/src/client.ts",
           "content": "import { issueToken } from './api/tokens';\n\nexport const login = () => issueToken();\n"
+        },
+        {
+          "path": "auth/flow.py",
+          "content": "def validate_token(token: str) -> bool:\n    return token == \"ok\"\n\n\ncheck_token = validate_token\n\n\ndef login(token: str) -> str:\n    if check_token(token):\n        return \"ok\"\n    return \"denied\"\n"
         }
       ]
     }

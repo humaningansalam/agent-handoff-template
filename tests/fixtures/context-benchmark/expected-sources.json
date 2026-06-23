@@ -68,5 +68,31 @@
     "required_knowledge_source_refs": [],
     "acceptable_optional_refs": [],
     "forbidden_refs": []
+  },
+  "Q-006": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "acceptable_optional_refs": [
+      {
+        "path": "<graph:repo:main:file:auth%2Fflow.py>"
+      }
+    ],
+    "forbidden_refs": [],
+    "required_graph_edges": [
+      {
+        "kind": "CALLS",
+        "from": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19",
+        "to": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24",
+        "assertion": "resolved",
+        "source": "python_ast"
+      }
+    ]
   }
 }

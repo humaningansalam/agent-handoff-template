@@ -3,3 +3,4 @@
 {"id":"Q-003","category":"impact","repo_id":"main","question":"What files are impacted if utils/tokens.py changes?"}
 {"id":"Q-004","category":"impact","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
 {"id":"Q-005","category":"impact","repo_id":"main","question":"What files are impacted if frontend/src/api/tokens.ts changes?"}
+{"id":"Q-006","category":"reference-impact","repo_id":"main","question":"What functions are impacted if validate_token changes?"}

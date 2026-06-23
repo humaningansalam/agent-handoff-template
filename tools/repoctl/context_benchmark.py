@@ -8,6 +8,8 @@ from urllib.parse import unquote
 
 from .context import build_context_bundle
 from .context_model import ContextBundle
+from .graph import build_graph
+from .graph_model import GraphSnapshot
 from .graph_model import digest_data
 from .repositories import require_repo_target
 from .tasks import Problem
@@ -23,6 +25,7 @@ def run_context_benchmark(
     min_precision_at_5: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
     min_category_recall_at_5: dict[str, float] | None = None,
+    min_category_graph_edge_recall: dict[str, float] | None = None,
     require_source_integrity: bool = False,
     require_knowledge_source_current: bool = False,
     require_no_forbidden: bool = False,
@@ -48,9 +51,11 @@ def run_context_benchmark(
         target_repo_id = repo_id or str(question.get("repo_id") or "")
         target = require_repo_target(root, repo_id=target_repo_id or None)
         bundle, bundle_problems, _meta = build_context_bundle(root, target=target, query=str(question.get("question") or ""), budget_tokens=budget_tokens, explain=True)
+        snapshot, graph_problems, _graph_meta = build_graph(root, target=target)
         problems.extend(bundle_problems)
+        problems.extend(graph_problems)
         spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
-        results.append(_score_question(question, spec, bundle, bundle_problems))
+        results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems], snapshot))
 
     summary = _summarize(results)
     problems.extend(
@@ -60,6 +65,7 @@ def run_context_benchmark(
             min_precision_at_5=min_precision_at_5,
             min_knowledge_recall_at_5=min_knowledge_recall_at_5,
             min_category_recall_at_5=min_category_recall_at_5 or {},
+            min_category_graph_edge_recall=min_category_graph_edge_recall or {},
             require_source_integrity=require_source_integrity,
             require_knowledge_source_current=require_knowledge_source_current,
             require_no_forbidden=require_no_forbidden,
@@ -77,6 +83,7 @@ def run_context_benchmark(
             "min_precision_at_5": min_precision_at_5,
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
             "min_category_recall_at_5": dict(sorted((min_category_recall_at_5 or {}).items())),
+            "min_category_graph_edge_recall": dict(sorted((min_category_graph_edge_recall or {}).items())),
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
             "require_no_forbidden": require_no_forbidden,
@@ -392,9 +399,10 @@ def _append_drop_regression(problems: list[Problem], metric_deltas: dict[str, di
         problems.append(Problem("error", code, f"context benchmark {key} dropped more than allowed"))
 
 
-def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem]) -> dict[str, Any]:
+def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem], snapshot: GraphSnapshot | None = None) -> dict[str, Any]:
     required = _refs(spec.get("required_source_refs"))
     required_knowledge = _refs(spec.get("required_knowledge_source_refs"))
+    required_edges = _refs(spec.get("required_graph_edges"))
     optional = _refs(spec.get("acceptable_optional_refs"))
     forbidden = _refs(spec.get("forbidden_refs"))
     candidate_refs = _bundle_refs(bundle, field="candidates")
@@ -411,6 +419,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     required_top5 = [ref for ref in required if _contains_ref(top5, ref)]
     required_top10 = [ref for ref in required if _contains_ref(top10, ref)]
     required_knowledge_top5 = [ref for ref in required_knowledge if _contains_ref(knowledge_top5, ref)]
+    graph_edges = _graph_edges(snapshot)
+    required_edges_found = [edge for edge in required_edges if _contains_edge(graph_edges, edge)]
     selected_forbidden = [ref for ref in forbidden if _contains_ref(candidate_refs, ref) or _contains_ref(packed_refs, ref)]
     cross_repo_refs = _cross_repo_refs([*candidate_refs, *packed_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
     relevant_top5 = sum(1 for ref in top5 if _matches_any_expected(ref, [*required, *optional]))
@@ -432,6 +442,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "cross_repo_ref_count": len(cross_repo_refs),
             "packed_required_found": sum(1 for ref in required if _contains_ref(packed_refs, ref)),
             "knowledge_recall_at_5": _ratio(len(required_knowledge_top5), len(required_knowledge)) if required_knowledge else 0.0,
+            "graph_edge_recall": _ratio(len(required_edges_found), len(required_edges)) if required_edges else 1.0,
+            "required_graph_edge_count": len(required_edges),
             "required_knowledge_count": len(required_knowledge),
             "knowledge_result_count": len(knowledge_refs),
             "knowledge_score_breakdown_present": all(result["has_field_breakdown"] for result in knowledge_score_results),
@@ -443,6 +455,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "missing_required_at_10": [ref for ref in required if not _contains_ref(top10, ref)],
         "required_knowledge_found_at_5": required_knowledge_top5,
         "missing_required_knowledge_at_5": [ref for ref in required_knowledge if not _contains_ref(knowledge_top5, ref)],
+        "required_graph_edges_found": required_edges_found,
+        "missing_required_graph_edges": [edge for edge in required_edges if not _contains_edge(graph_edges, edge)],
         "selected_forbidden": selected_forbidden,
         "cross_repo_refs": cross_repo_refs,
         "top_refs": top5,
@@ -467,6 +481,8 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_score_breakdown_integrity": all(metric["knowledge_score_breakdown_present"] for metric in metrics),
         "knowledge_source_status_current": all(metric["knowledge_source_status_current"] for metric in metrics),
         "knowledge_stale_record_excluded": sum(int(metric["knowledge_stale_record_excluded"]) for metric in metrics),
+        "mean_graph_edge_recall": _mean(metric["graph_edge_recall"] for metric in metrics if metric["required_graph_edge_count"]),
+        "graph_edge_expected_questions": sum(1 for metric in metrics if metric["required_graph_edge_count"]),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
         "cross_repo_ref_count": sum(int(metric["cross_repo_ref_count"]) for metric in metrics),
         "by_category": _summarize_by_category(results),
@@ -486,6 +502,8 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
             "mean_recall_at_5": _mean(metric.get("recall_at_5", 0.0) for metric in items),
             "mean_recall_at_10": _mean(metric.get("recall_at_10", 0.0) for metric in items),
             "mean_precision_at_5": _mean(metric.get("precision_at_5", 0.0) for metric in items),
+            "mean_graph_edge_recall": _mean(metric.get("graph_edge_recall", 1.0) for metric in items if metric.get("required_graph_edge_count", 0)),
+            "graph_edge_expected_questions": sum(1 for metric in items if metric.get("required_graph_edge_count", 0)),
             "forbidden_selected": sum(int(metric.get("forbidden_selected") or 0) for metric in items),
             "cross_repo_ref_count": sum(int(metric.get("cross_repo_ref_count") or 0) for metric in items),
         }
@@ -562,6 +580,30 @@ def _matches_any_expected(ref: dict[str, Any], expected: list[dict[str, Any]]) -
     return any(_contains_ref([ref], item) for item in expected)
 
 
+def _graph_edges(snapshot: GraphSnapshot | None) -> list[dict[str, Any]]:
+    if snapshot is None:
+        return []
+    return [edge.to_dict() for edge in snapshot.edges]
+
+
+def _contains_edge(haystack: list[dict[str, Any]], needle: dict[str, Any]) -> bool:
+    for item in haystack:
+        if str(item.get("kind") or "") != str(needle.get("kind") or ""):
+            continue
+        if str(item.get("from") or "") != str(needle.get("from") or ""):
+            continue
+        if str(item.get("to") or "") != str(needle.get("to") or ""):
+            continue
+        assertion = str(needle.get("assertion") or "")
+        if assertion and str(item.get("assertion") or "") != assertion:
+            continue
+        source = str(needle.get("source") or "")
+        if source and str(item.get("source") or "") != source:
+            continue
+        return True
+    return False
+
+
 def _cross_repo_refs(refs: list[dict[str, Any]], *, expected_repo_id: str) -> list[dict[str, Any]]:
     if not expected_repo_id:
         return []
@@ -601,6 +643,7 @@ def _gate_problems(
     min_precision_at_5: float | None,
     min_knowledge_recall_at_5: float | None,
     min_category_recall_at_5: dict[str, float],
+    min_category_graph_edge_recall: dict[str, float],
     require_source_integrity: bool,
     require_knowledge_source_current: bool,
     require_no_forbidden: bool,
@@ -620,6 +663,11 @@ def _gate_problems(
         recall = float(category_summary.get("mean_recall_at_5") or 0.0)
         if recall < threshold:
             problems.append(Problem("error", "context_benchmark_category_recall_gate_failed", f"context benchmark {category} Recall@5 is below gate", category))
+    for category, threshold in sorted(min_category_graph_edge_recall.items()):
+        category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
+        recall = float(category_summary.get("mean_graph_edge_recall") or 0.0)
+        if recall < threshold:
+            problems.append(Problem("error", "context_benchmark_category_graph_edge_gate_failed", f"context benchmark {category} graph edge recall is below gate", category))
     if require_source_integrity and not bool(summary.get("source_ref_integrity")):
         problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
     if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):

@@ -35,6 +35,8 @@ STOPWORDS = {
     "files",
     "for",
     "from",
+    "function",
+    "functions",
     "how",
     "if",
     "impact",
