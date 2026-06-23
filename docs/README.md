@@ -48,6 +48,9 @@ This directory contains the live task registry, task files, workflows, and archi
 - Enforce benchmark gates: `./scripts/repoctl context benchmark --repo-id main --min-recall-at-5 0.8 --min-knowledge-recall-at-5 1.0 --require-source-integrity --json`
 - Pack task startup context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
 - Pack task startup context with source-status explanation: `./scripts/repoctl context pack --task T-... --repo-id main --explain --json`
+- Compare task context pack artifacts: `./scripts/repoctl context pack-compare --baseline .repoctl-state/context-pack/baseline.json --candidate .repoctl-state/context-pack/candidate.json --json`
+- Benchmark task startup context packs: `./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id main --output .repoctl-state/context-pack-benchmark/result.json --json`
+- Compare context pack benchmark artifacts: `./scripts/repoctl context pack-benchmark-compare --baseline .repoctl-state/context-pack-benchmark/baseline.json --candidate .repoctl-state/context-pack-benchmark/candidate.json --max-mean-must-read-recall-drop 0 --json`
 - Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
 - Build a candidate from completed task evidence: `./scripts/repoctl knowledge candidate build --from-receipt T-... --repo-id main --kind invariant --json`
 - Check candidate quality before review: `./scripts/repoctl knowledge candidate check KC-... --repo-id main --json`
@@ -71,6 +74,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Check knowledge source drift: `./scripts/repoctl knowledge check --repo-id main --json`
 - Check records and candidates together: `./scripts/repoctl knowledge check --repo-id main --include-candidates --json`
 - Render non-authoritative knowledge pages: `./scripts/repoctl knowledge render --repo-id main --json`
+- Check rendered knowledge pages without rewriting them: `./scripts/repoctl knowledge render --repo-id main --check --json`
 - Check changed-file metadata gate: `./scripts/repoctl meta check --changed --json`
 
 ## Notes
@@ -89,8 +93,10 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
+- `repoctl context pack-benchmark` and `pack-benchmark-compare` are retrieval/packing gates for field tests; they measure required source recall and do not validate task scope or generated answers.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
 - `repoctl knowledge candidate refresh` creates a new candidate plus an event; it does not edit the stale candidate in place.
 - `repoctl knowledge candidate list` and `knowledge status` derive candidate review state from append-only events.
 - `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale and superseded records by default.
+- `repoctl knowledge render` writes ignored non-authoritative pages under `docs/knowledge/generated/`; `knowledge render --check` verifies those pages are current without rewriting them.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.
