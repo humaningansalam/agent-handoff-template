@@ -249,6 +249,26 @@ def test_graph_resolves_same_file_python_calls(tmp_path: Path, monkeypatch, caps
     assert any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == validate_id and edge["facts"]["scope"] == "same_file" for edge in snapshot["edges"])
 
 
+def test_graph_resolves_same_class_python_method_calls(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "auth").mkdir()
+    (repo / "auth/method_flow.py").write_text(
+        'class TokenFlow:\n    def validate(self, token: str) -> bool:\n        return token == "ok"\n\n    def login(self, token: str) -> str:\n        if self.validate(token):\n            return "ok"\n        return "denied"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    validate_id = symbol_id("main", "python_ast", "python_ast:auth/method_flow.py:TokenFlow.validate:method:2:4:3:28")
+    login_id = symbol_id("main", "python_ast", "python_ast:auth/method_flow.py:TokenFlow.login:method:5:4:8:23")
+    assert any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == validate_id and edge["facts"]["scope"] == "same_file" for edge in snapshot["edges"])
+
+
 def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

@@ -138,6 +138,7 @@ def _python_calls(path: str, text: str, symbols: list[PreciseSymbol]) -> list[Pr
     except SyntaxError:
         return []
     module_symbols = {symbol.name: symbol for symbol in symbols if symbol.path == path and symbol.kind == "function" and "." not in symbol.qualified_name}
+    class_method_symbols = _class_method_symbols(path, symbols)
     aliases = _module_function_aliases(tree, module_symbols)
     calls: list[PreciseCall] = []
     for node in tree.body:
@@ -166,7 +167,46 @@ def _python_calls(path: str, text: str, symbols: list[PreciseSymbol]) -> list[Pr
                     anchor=_anchor_for(path, child),
                 )
             )
+    for class_node in [node for node in tree.body if isinstance(node, ast.ClassDef)]:
+        methods = class_method_symbols.get(class_node.name, {})
+        for node in class_node.body:
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            caller = methods.get(node.name)
+            if caller is None:
+                continue
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Call):
+                    continue
+                callee_name = _self_method_call_name(child.func)
+                if not callee_name:
+                    continue
+                callee = methods.get(callee_name)
+                if callee is None or callee.provider_symbol_id == caller.provider_symbol_id:
+                    continue
+                calls.append(
+                    PreciseCall(
+                        path=path,
+                        provider="python_ast",
+                        caller_provider_symbol_id=caller.provider_symbol_id,
+                        callee_provider_symbol_id=callee.provider_symbol_id,
+                        language="python",
+                        anchor=_anchor_for(path, child),
+                    )
+                )
     return sorted(calls, key=lambda item: (item.caller_provider_symbol_id, item.callee_provider_symbol_id, item.anchor.start_line, item.anchor.start_col))
+
+
+def _class_method_symbols(path: str, symbols: list[PreciseSymbol]) -> dict[str, dict[str, PreciseSymbol]]:
+    result: dict[str, dict[str, PreciseSymbol]] = {}
+    for symbol in symbols:
+        if symbol.path != path or symbol.kind != "method" or "." not in symbol.qualified_name:
+            continue
+        class_name, method_name = symbol.qualified_name.rsplit(".", 1)
+        if "." in class_name:
+            continue
+        result.setdefault(class_name, {})[method_name] = symbol
+    return result
 
 
 def _module_function_aliases(tree: ast.Module, symbols: dict[str, PreciseSymbol]) -> dict[str, str]:
@@ -185,6 +225,12 @@ def _module_function_aliases(tree: ast.Module, symbols: dict[str, PreciseSymbol]
 def _call_name(node: ast.AST) -> str:
     if isinstance(node, ast.Name):
         return node.id
+    return ""
+
+
+def _self_method_call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+        return node.attr
     return ""
 
 

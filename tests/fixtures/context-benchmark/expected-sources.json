@@ -94,5 +94,31 @@
         "source": "python_ast"
       }
     ]
+  },
+  "Q-007": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "acceptable_optional_refs": [
+      {
+        "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
+      }
+    ],
+    "forbidden_refs": [],
+    "required_graph_edges": [
+      {
+        "kind": "CALLS",
+        "from": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23",
+        "to": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28",
+        "assertion": "resolved",
+        "source": "python_ast"
+      }
+    ]
   }
 }

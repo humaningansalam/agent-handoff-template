@@ -39,6 +39,10 @@
         {
           "path": "auth/flow.py",
           "content": "def validate_token(token: str) -> bool:\n    return token == \"ok\"\n\n\ncheck_token = validate_token\n\n\ndef login(token: str) -> str:\n    if check_token(token):\n        return \"ok\"\n    return \"denied\"\n"
+        },
+        {
+          "path": "auth/method_flow.py",
+          "content": "class TokenFlow:\n    def validate(self, token: str) -> bool:\n        return token == \"ok\"\n\n    def login(self, token: str) -> str:\n        if self.validate(token):\n            return \"ok\"\n        return \"denied\"\n"
         }
       ]
     }
