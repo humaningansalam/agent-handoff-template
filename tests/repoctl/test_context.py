@@ -115,6 +115,46 @@ Use evidence context authority for task startup.
 """,
         encoding="utf-8",
     )
+    contract_task_path = root / "docs/tasks/T-20260624030303Z--pack-benchmark-contract.md"
+    contract_task_path.write_text(
+        """---
+id: T-20260624030303Z
+title: "Benchmark context pack contract recall"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260624T030303Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260624030303Z - Benchmark context pack contract recall
+
+## Context Docs
+
+- `docs/contracts/repoctl-module-boundaries.md`
+
+## Discovery
+
+- Candidate query: context authority boundaries
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Preserve repoctl module boundaries while preparing context packs.
+
+## Handoff
+
+- Next exact step: inspect module boundary contract.
+- First file to open: `docs/contracts/repoctl-module-boundaries.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260624030303Z --repo-id main --json`
+- Done when: contract source refs are packed.
+""",
+        encoding="utf-8",
+    )
 
 
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1336,9 +1376,14 @@ def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, m
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "context pack-benchmark"
-    assert payload["data"]["case_count"] == 1
+    assert payload["data"]["case_count"] == 2
     assert payload["data"]["summary"]["mean_must_read_recall"] == 1.0
-    assert payload["data"]["results"][0]["required_must_read_found"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    found_paths = {
+        ref["path"]
+        for result in payload["data"]["results"]
+        for ref in result["required_must_read_found"]
+    }
+    assert found_paths == {"docs/adr/evidence-context-authority-v0.md", "docs/contracts/repoctl-module-boundaries.md"}
     assert payload["data"]["gates"]["min_must_read_recall"] == 1.0
     assert payload["warnings"][0]["code"] == "context_pack_benchmark_retrieval_only"
 

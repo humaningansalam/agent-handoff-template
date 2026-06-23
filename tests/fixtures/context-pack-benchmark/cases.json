@@ -11,6 +11,16 @@
           "path": "docs/adr/evidence-context-authority-v0.md"
         }
       ]
+    },
+    {
+      "id": "CP-002",
+      "task_id": "T-20260624030303Z",
+      "required_must_read_refs": [
+        {
+          "kind": "document",
+          "path": "docs/contracts/repoctl-module-boundaries.md"
+        }
+      ]
     }
   ]
 }
