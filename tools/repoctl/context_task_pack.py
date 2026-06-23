@@ -147,6 +147,43 @@ def run_task_context_pack_benchmark(
     return payload, problems
 
 
+def compare_task_context_pack_benchmarks(
+    *,
+    baseline_path: Path,
+    candidate_path: Path,
+    max_mean_must_read_recall_drop: float | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    baseline = _read_pack_benchmark_artifact(baseline_path, problems, label="baseline")
+    candidate = _read_pack_benchmark_artifact(candidate_path, problems, label="candidate")
+    if not baseline or not candidate:
+        return {}, problems
+    baseline_summary = baseline.get("summary") if isinstance(baseline.get("summary"), dict) else {}
+    candidate_summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
+    metric_deltas = {
+        "mean_must_read_recall": _float_metric_delta(baseline_summary, candidate_summary, "mean_must_read_recall"),
+        "required_must_read_count": _int_metric_delta(baseline_summary, candidate_summary, "required_must_read_count"),
+        "warning_count": _int_metric_delta(baseline_summary, candidate_summary, "warning_count"),
+    }
+    case_deltas = _pack_benchmark_case_deltas(baseline, candidate)
+    regressions = _pack_benchmark_regressions(
+        metric_deltas,
+        case_deltas,
+        max_mean_must_read_recall_drop=max_mean_must_read_recall_drop,
+    )
+    problems.extend(regressions)
+    return {
+        "schema": "repoctl.context.task_pack.benchmark.compare",
+        "schema_version": 1,
+        "baseline": _pack_benchmark_identity(baseline_path, baseline),
+        "candidate": _pack_benchmark_identity(candidate_path, candidate),
+        "metric_deltas": metric_deltas,
+        "case_deltas": case_deltas,
+        "regressions": [problem.to_dict() for problem in regressions],
+        "gates": {"max_mean_must_read_recall_drop": max_mean_must_read_recall_drop},
+    }, problems
+
+
 def _task_seed_query(task: Task) -> str:
     parts = [
         str(task.frontmatter.get("title") or ""),
@@ -197,6 +234,45 @@ def _pack_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         "path": path.as_posix(),
         "pack_digest": str(data.get("pack_digest") or ""),
         "task_id": str(task.get("id") or ""),
+    }
+
+
+def _read_pack_benchmark_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        problems.append(Problem("error", "context_pack_benchmark_artifact_missing", f"{label} context pack benchmark artifact is missing", path.as_posix()))
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        problems.append(Problem("error", "context_pack_benchmark_artifact_invalid_json", f"{label} context pack benchmark artifact is not valid JSON", path.as_posix()))
+        return {}
+    if not isinstance(payload, dict):
+        problems.append(Problem("error", "context_pack_benchmark_artifact_invalid", f"{label} context pack benchmark artifact must be an object", path.as_posix()))
+        return {}
+    if str(payload.get("command") or "") == "context pack-benchmark" and payload.get("ok") is False:
+        problems.append(Problem("error", "context_pack_benchmark_artifact_failed", f"{label} context pack benchmark artifact was produced by a failed command", path.as_posix()))
+        return {}
+    data = payload.get("data") if str(payload.get("command") or "") == "context pack-benchmark" else payload
+    if not isinstance(data, dict):
+        problems.append(Problem("error", "context_pack_benchmark_artifact_missing_data", f"{label} context pack benchmark artifact is missing data", path.as_posix()))
+        return {}
+    if str(data.get("schema") or "") != "repoctl.context.task_pack.benchmark":
+        problems.append(Problem("error", "context_pack_benchmark_artifact_wrong_schema", f"{label} artifact is not a context pack benchmark", path.as_posix()))
+        return {}
+    expected_digest = str(data.get("benchmark_digest") or "")
+    digest_basis = {key: value for key, value in data.items() if key not in {"benchmark_digest", "artifact"}}
+    actual_digest = digest_data(digest_basis)
+    if expected_digest != actual_digest:
+        problems.append(Problem("error", "context_pack_benchmark_artifact_digest_mismatch", f"{label} context pack benchmark artifact digest does not match its content", path.as_posix()))
+        return {}
+    return data
+
+
+def _pack_benchmark_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": path.as_posix(),
+        "benchmark_digest": str(data.get("benchmark_digest") or ""),
+        "case_count": int(data.get("case_count") or 0),
     }
 
 
@@ -265,6 +341,78 @@ def _mean(values: Any) -> float:
     if not items:
         return 0.0
     return round(sum(float(item) for item in items) / len(items), 6)
+
+
+def _float_metric_delta(baseline: dict[str, Any], candidate: dict[str, Any], key: str) -> dict[str, float]:
+    baseline_value = float(baseline.get(key) or 0.0)
+    candidate_value = float(candidate.get(key) or 0.0)
+    return {
+        "baseline": round(baseline_value, 6),
+        "candidate": round(candidate_value, 6),
+        "delta": round(candidate_value - baseline_value, 6),
+    }
+
+
+def _int_metric_delta(baseline: dict[str, Any], candidate: dict[str, Any], key: str) -> dict[str, int]:
+    baseline_value = int(baseline.get(key) or 0)
+    candidate_value = int(candidate.get(key) or 0)
+    return {
+        "baseline": baseline_value,
+        "candidate": candidate_value,
+        "delta": candidate_value - baseline_value,
+    }
+
+
+def _pack_benchmark_case_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    baseline_cases = _pack_benchmark_cases_by_id(baseline)
+    candidate_cases = _pack_benchmark_cases_by_id(candidate)
+    deltas: list[dict[str, Any]] = []
+    for case_id in sorted(set(baseline_cases) | set(candidate_cases)):
+        baseline_case = baseline_cases.get(case_id, {})
+        candidate_case = candidate_cases.get(case_id, {})
+        baseline_metrics = baseline_case.get("metrics") if isinstance(baseline_case.get("metrics"), dict) else {}
+        candidate_metrics = candidate_case.get("metrics") if isinstance(candidate_case.get("metrics"), dict) else {}
+        deltas.append(
+            {
+                "id": case_id,
+                "present_in_baseline": bool(baseline_case),
+                "present_in_candidate": bool(candidate_case),
+                "task_id": str(candidate_case.get("task_id") or baseline_case.get("task_id") or ""),
+                "must_read_recall": _float_metric_delta(baseline_metrics, candidate_metrics, "must_read_recall"),
+                "required_must_read_count": _int_metric_delta(baseline_metrics, candidate_metrics, "required_must_read_count"),
+                "warning_count": _int_metric_delta(baseline_metrics, candidate_metrics, "warning_count"),
+            }
+        )
+    return deltas
+
+
+def _pack_benchmark_cases_by_id(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    results = data.get("results")
+    if not isinstance(results, list):
+        return {}
+    cases: dict[str, dict[str, Any]] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        case_id = str(item.get("id") or "")
+        if case_id:
+            cases[case_id] = item
+    return cases
+
+
+def _pack_benchmark_regressions(
+    metric_deltas: dict[str, dict[str, Any]],
+    case_deltas: list[dict[str, Any]],
+    *,
+    max_mean_must_read_recall_drop: float | None,
+) -> list[Problem]:
+    problems: list[Problem] = []
+    if max_mean_must_read_recall_drop is not None and float(metric_deltas["mean_must_read_recall"]["delta"]) < -abs(max_mean_must_read_recall_drop):
+        problems.append(Problem("error", "context_pack_benchmark_must_read_recall_regressed", "context pack benchmark mean must_read recall dropped more than allowed"))
+    for item in case_deltas:
+        if bool(item["present_in_baseline"]) and not bool(item["present_in_candidate"]):
+            problems.append(Problem("error", "context_pack_benchmark_case_missing", "candidate context pack benchmark artifact is missing a baseline case", str(item["id"])))
+    return problems
 
 
 def _group_count_delta(baseline: dict[str, Any], candidate: dict[str, Any], group: str) -> dict[str, int]:

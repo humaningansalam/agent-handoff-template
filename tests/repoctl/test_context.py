@@ -1384,6 +1384,62 @@ def test_context_pack_benchmark_rejects_output_outside_workspace(tmp_path: Path,
     assert not outside.exists()
 
 
+def test_context_pack_benchmark_compare_reports_metric_deltas(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+    baseline = tmp_path / ".repoctl-state/context-pack-benchmark/baseline.json"
+    candidate = tmp_path / ".repoctl-state/context-pack-benchmark/candidate.json"
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert main(["context", "pack-benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-mean-must-read-recall-drop", "0", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "context pack-benchmark-compare"
+    assert payload["data"]["metric_deltas"]["mean_must_read_recall"] == {"baseline": 1.0, "candidate": 1.0, "delta": 0.0}
+    assert payload["data"]["case_deltas"][0]["id"] == "CP-001"
+    assert payload["data"]["regressions"] == []
+
+
+def test_context_pack_benchmark_compare_gates_recall_regression(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+    baseline = tmp_path / ".repoctl-state/context-pack-benchmark/baseline.json"
+    candidate = tmp_path / ".repoctl-state/context-pack-benchmark/candidate.json"
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    candidate_payload = json.loads(baseline.read_text(encoding="utf-8"))
+    candidate_data = candidate_payload["data"]
+    candidate_data["summary"]["mean_must_read_recall"] = 0.0
+    candidate_data["results"][0]["metrics"]["must_read_recall"] = 0.0
+    candidate_data["results"][0]["required_must_read_found"] = []
+    candidate_data["results"][0]["missing_required_must_read"] = [{"kind": "document", "path": "docs/adr/evidence-context-authority-v0.md", "section": "Decision"}]
+    candidate_data["benchmark_digest"] = digest_data({key: value for key, value in candidate_data.items() if key not in {"benchmark_digest", "artifact"}})
+    candidate.write_text(json.dumps(candidate_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "pack-benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-mean-must-read-recall-drop", "0.1", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["metric_deltas"]["mean_must_read_recall"] == {"baseline": 1.0, "candidate": 0.0, "delta": -1.0}
+    assert payload["problems"][0]["code"] == "context_pack_benchmark_must_read_recall_regressed"
+
+
 def test_context_pack_benchmark_gate_fails_missing_required_ref(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

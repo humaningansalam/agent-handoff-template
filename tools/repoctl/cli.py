@@ -10,7 +10,7 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .context import build_context_bundle
 from .context_benchmark import compare_context_benchmarks, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compare_task_context_packs, run_task_context_pack_benchmark
+from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
@@ -1495,6 +1495,32 @@ def cmd_context_pack_benchmark(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_pack_benchmark_compare(args: argparse.Namespace) -> int:
+    baseline = Path(args.baseline)
+    candidate = Path(args.candidate)
+    data, problems = compare_task_context_pack_benchmarks(
+        baseline_path=baseline,
+        candidate_path=candidate,
+        max_mean_must_read_recall_drop=args.max_mean_must_read_recall_drop,
+    )
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context pack-benchmark-compare",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        deltas = data.get("metric_deltas", {}) if data else {}
+        recall = deltas.get("mean_must_read_recall", {}).get("delta", 0)
+        print(f"context pack benchmark compare mean_must_read_recall_delta={recall}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -2281,6 +2307,12 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_benchmark.add_argument("--output")
     context_pack_benchmark.add_argument("--json", action="store_true")
     context_pack_benchmark.set_defaults(func=cmd_context_pack_benchmark)
+    context_pack_benchmark_compare = context_sub.add_parser("pack-benchmark-compare")
+    context_pack_benchmark_compare.add_argument("--baseline", required=True)
+    context_pack_benchmark_compare.add_argument("--candidate", required=True)
+    context_pack_benchmark_compare.add_argument("--max-mean-must-read-recall-drop", type=float)
+    context_pack_benchmark_compare.add_argument("--json", action="store_true")
+    context_pack_benchmark_compare.set_defaults(func=cmd_context_pack_benchmark_compare)
 
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
