@@ -147,7 +147,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["summary"]["mean_recall_at_5"] > 0
     assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
-    assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] < 1.0
+    assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
     assert payload["data"]["summary"]["knowledge_expected_questions"] >= 1
     assert payload["data"]["summary"]["knowledge_result_questions"] == 0
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
@@ -161,15 +161,14 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert gated_payload["problems"] == []
 
     reference_result = next(result for result in payload["data"]["results"] if result["id"] == "Q-006")
-    assert reference_result["metrics"]["graph_edge_recall"] == 0.0
-    assert reference_result["missing_required_graph_edges"][0]["kind"] == "CALLS"
+    assert reference_result["metrics"]["graph_edge_recall"] == 1.0
+    assert reference_result["required_graph_edges_found"][0]["kind"] == "CALLS"
 
-    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-graph-edge-recall", "reference-impact=1.0", "--require-fixture-corpus", "--json"]) == 1
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-graph-edge-recall", "reference-impact=1.0", "--require-fixture-corpus", "--json"]) == 0
 
     reference_payload = json.loads(capsys.readouterr().out)
-    assert reference_payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 0.0
-    assert reference_payload["problems"][0]["code"] == "context_benchmark_category_graph_edge_gate_failed"
-    assert reference_payload["problems"][0]["path"] == "reference-impact"
+    assert reference_payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
+    assert reference_payload["problems"] == []
 
 
 def test_context_benchmark_fixture_corpus_gate_fails_when_not_applied(tmp_path: Path, monkeypatch, capsys) -> None:

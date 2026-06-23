@@ -7,7 +7,7 @@ from pathlib import Path
 from tools.repoctl.code_index import CodeIndexEntry
 from tools.repoctl.cli import main
 from tools.repoctl.graph import build_graph
-from tools.repoctl.graph_model import canonical_json, file_id, import_ref_id, topic_id
+from tools.repoctl.graph_model import canonical_json, file_id, import_ref_id, symbol_id, topic_id
 from tools.repoctl.repositories import require_repo_target
 from tools.repoctl.tasks import Problem
 from tests.repoctl.test_check import add_task, task_text, write_workspace
@@ -225,6 +225,28 @@ def test_graph_skips_ambiguous_js_ts_relative_import_resolution(tmp_path: Path, 
     assert any(edge["kind"] == "DECLARES_IMPORT" and edge["to"] == import_node_id for edge in snapshot["edges"])
     assert not any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id for edge in snapshot["edges"])
     assert not any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == file_id("main", "frontend/src/client.ts") for edge in snapshot["edges"])
+
+
+def test_graph_resolves_same_file_python_calls(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "auth").mkdir()
+    (repo / "auth/flow.py").write_text(
+        'def validate_token(token: str) -> bool:\n    return token == "ok"\n\n\ncheck_token = validate_token\n\n\ndef login(token: str) -> str:\n    if check_token(token):\n        return "ok"\n    return "denied"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    validate_id = symbol_id("main", "python_ast", "python_ast:auth/flow.py:validate_token:function:1:0:2:24")
+    login_id = symbol_id("main", "python_ast", "python_ast:auth/flow.py:login:function:8:0:11:19")
+    assert "same_file_calls" in snapshot["capabilities"]
+    assert any(source["kind"] == "python_ast_calls" and source["assertion"] == "resolved" for source in snapshot["sources"])
+    assert any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == validate_id and edge["facts"]["scope"] == "same_file" for edge in snapshot["edges"])
 
 
 def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monkeypatch, capsys) -> None:

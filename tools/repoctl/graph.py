@@ -5,7 +5,7 @@ from typing import Any
 
 from .code_index import CodeIndexEntry, build_code_index
 from .git import normalize_repo_path
-from .graph_code_provider import build_precise_symbols
+from .graph_code_provider import build_precise_calls, build_precise_symbols
 from .graph_import_resolver import resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .meta import RepoMetadataFacts, read_metadata_facts
@@ -217,6 +217,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
                 add_edge(GraphEdge("CHANGE_AFFECTED_FILE", change_node_id, old_file_id, "recorded", "task_completion", {"role": "old_path"}))
 
     precise_symbols, precise_meta = build_precise_symbols(root, target=target, paths=[entry.path for entry in entries])
+    precise_symbol_node_ids: dict[str, str] = {}
     for precise_symbol in precise_symbols:
         file_node_id = file_id(repo_id, precise_symbol.path)
         if file_node_id not in nodes:
@@ -252,6 +253,24 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         )
         add_edge(GraphEdge("DEFINES", file_node_id, symbol_node_id, "resolved", precise_symbol.provider))
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
+        precise_symbol_node_ids[precise_symbol.provider_symbol_id] = symbol_node_id
+
+    precise_calls, precise_call_meta = build_precise_calls(root, target=target, paths=[entry.path for entry in entries], symbols=precise_symbols)
+    for precise_call in precise_calls:
+        caller_node_id = precise_symbol_node_ids.get(precise_call.caller_provider_symbol_id)
+        callee_node_id = precise_symbol_node_ids.get(precise_call.callee_provider_symbol_id)
+        if not caller_node_id or not callee_node_id:
+            continue
+        add_edge(
+            GraphEdge(
+                "CALLS",
+                caller_node_id,
+                callee_node_id,
+                "resolved",
+                precise_call.provider,
+                {"scope": "same_file", "anchor": precise_call.anchor.to_dict()},
+            )
+        )
 
     import_resolutions = resolve_code_imports(entries)
     for resolution in import_resolutions:
@@ -295,6 +314,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         ],
         "task_completion": task_receipts,
         "python_ast": [symbol.to_dict() for symbol in precise_symbols],
+        "python_ast_calls": [call.to_dict() for call in precise_calls],
         "python_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "python_import_resolver"],
         "js_ts_relative_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "js_ts_relative_import_resolver"],
     }
@@ -306,6 +326,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             {"kind": "repometa_policy", "assertion": "default", "digest": digest_data(source_payloads["repometa_policy"])},
             {"kind": "task_completion", "assertion": "recorded", "digest": digest_data(source_payloads["task_completion"])},
             {"kind": "python_ast", "assertion": "resolved", "digest": digest_data(source_payloads["python_ast"])},
+            {"kind": "python_ast_calls", "assertion": "resolved", "digest": digest_data(source_payloads["python_ast_calls"])},
             {"kind": "python_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["python_import_resolver"])},
             {"kind": "js_ts_relative_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["js_ts_relative_import_resolver"])},
         ],
@@ -321,9 +342,9 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
-        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution"],
+        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls"],
     ).with_digest()
-    return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta}
+    return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta, "precise_calls": precise_call_meta}
 
 
 def _node_by_id(snapshot: GraphSnapshot) -> dict[str, GraphNode]:

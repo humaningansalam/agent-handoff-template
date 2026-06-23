@@ -49,6 +49,26 @@ class PreciseSymbol:
         }
 
 
+@dataclass(frozen=True)
+class PreciseCall:
+    path: str
+    provider: str
+    caller_provider_symbol_id: str
+    callee_provider_symbol_id: str
+    language: str
+    anchor: SourceAnchor
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "provider": self.provider,
+            "caller_provider_symbol_id": self.caller_provider_symbol_id,
+            "callee_provider_symbol_id": self.callee_provider_symbol_id,
+            "language": self.language,
+            "anchor": self.anchor.to_dict(),
+        }
+
+
 def _anchor_for(path: str, node: ast.AST) -> SourceAnchor:
     return SourceAnchor(
         path=path,
@@ -112,6 +132,62 @@ def _python_symbols(path: str, text: str) -> list[PreciseSymbol]:
     return sorted(visitor.symbols, key=lambda item: item.provider_symbol_id)
 
 
+def _python_calls(path: str, text: str, symbols: list[PreciseSymbol]) -> list[PreciseCall]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    module_symbols = {symbol.name: symbol for symbol in symbols if symbol.path == path and symbol.kind == "function" and "." not in symbol.qualified_name}
+    aliases = _module_function_aliases(tree, module_symbols)
+    calls: list[PreciseCall] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        caller = module_symbols.get(node.name)
+        if caller is None:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            call_name = _call_name(child.func)
+            if not call_name:
+                continue
+            callee_name = aliases.get(call_name, call_name)
+            callee = module_symbols.get(callee_name)
+            if callee is None or callee.provider_symbol_id == caller.provider_symbol_id:
+                continue
+            calls.append(
+                PreciseCall(
+                    path=path,
+                    provider="python_ast",
+                    caller_provider_symbol_id=caller.provider_symbol_id,
+                    callee_provider_symbol_id=callee.provider_symbol_id,
+                    language="python",
+                    anchor=_anchor_for(path, child),
+                )
+            )
+    return sorted(calls, key=lambda item: (item.caller_provider_symbol_id, item.callee_provider_symbol_id, item.anchor.start_line, item.anchor.start_col))
+
+
+def _module_function_aliases(tree: ast.Module, symbols: dict[str, PreciseSymbol]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or not isinstance(node.value, ast.Name):
+            continue
+        if node.value.id in symbols:
+            aliases[target.id] = node.value.id
+    return aliases
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    return ""
+
+
 def build_precise_symbols(root: Path, *, target: RepoTarget, paths: list[str]) -> tuple[list[PreciseSymbol], dict[str, object]]:
     symbols: list[PreciseSymbol] = []
     for rel in sorted(set(paths)):
@@ -129,3 +205,23 @@ def build_precise_symbols(root: Path, *, target: RepoTarget, paths: list[str]) -
         "symbol_count": len(symbols),
     }
     return symbols, meta
+
+
+def build_precise_calls(root: Path, *, target: RepoTarget, paths: list[str], symbols: list[PreciseSymbol]) -> tuple[list[PreciseCall], dict[str, object]]:
+    calls: list[PreciseCall] = []
+    for rel in sorted(set(paths)):
+        if Path(rel).suffix.lower() != ".py":
+            continue
+        path = target.root_path / rel
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        calls.extend(_python_calls(rel, text, symbols))
+    meta = {
+        "provider": "python_ast",
+        "languages": ["python"],
+        "call_count": len(calls),
+        "scope": "same_file",
+    }
+    return calls, meta
