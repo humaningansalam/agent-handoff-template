@@ -1424,6 +1424,7 @@ def cmd_context_pack_compare(args: argparse.Namespace) -> int:
         candidate_path=candidate,
         max_must_read_drop=args.max_must_read_drop,
         max_reviewed_knowledge_drop=args.max_reviewed_knowledge_drop,
+        require_warning_stability=args.require_warning_stability,
     )
     payload = {
         "ok": not _has_errors(problems),
@@ -2218,6 +2219,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_compare.add_argument("--candidate", required=True)
     context_pack_compare.add_argument("--max-must-read-drop", type=int)
     context_pack_compare.add_argument("--max-reviewed-knowledge-drop", type=int)
+    context_pack_compare.add_argument("--require-warning-stability", action="store_true")
     context_pack_compare.add_argument("--json", action="store_true")
     context_pack_compare.set_defaults(func=cmd_context_pack_compare)
 

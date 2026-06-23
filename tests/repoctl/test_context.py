@@ -1195,9 +1195,32 @@ Use reviewed knowledge source authority.
     assert pass_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] == 0
     assert pass_payload["data"]["metric_deltas"]["unique_must_read_source_count"]["delta"] == 0
     assert pass_payload["data"]["metric_deltas"]["estimated_tokens"]["delta"] == 0
+    assert pass_payload["data"]["warning_deltas"]["missing_codes"] == []
+    assert pass_payload["data"]["warning_deltas"]["added_codes"] == []
+    assert "context_pack_not_authoritative" in pass_payload["data"]["warning_deltas"]["baseline_codes"]
     assert pass_payload["data"]["missing_must_read_refs"] == []
     assert pass_payload["data"]["missing_reviewed_knowledge_ids"] == []
     assert pass_payload["problems"] == []
+
+    changed_warnings = json.loads(baseline.read_text(encoding="utf-8"))
+    original_warning_code = changed_warnings["data"]["warnings"][0]["code"]
+    changed_warnings["data"]["warnings"] = []
+    digest_basis = {key: value for key, value in changed_warnings["data"].items() if key not in {"pack_digest", "artifact", "repository", "graph"}}
+    changed_warnings["data"]["pack_digest"] = digest_data(digest_basis)
+    changed_warnings["data"]["artifact"]["pack_digest"] = changed_warnings["data"]["pack_digest"]
+    candidate.write_text(json.dumps(changed_warnings, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--json"]) == 0
+
+    warning_info_payload = json.loads(capsys.readouterr().out)
+    assert original_warning_code in warning_info_payload["data"]["warning_deltas"]["missing_codes"]
+    assert warning_info_payload["problems"] == []
+
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--require-warning-stability", "--json"]) == 1
+
+    warning_gate_payload = json.loads(capsys.readouterr().out)
+    assert warning_gate_payload["data"]["gates"]["require_warning_stability"] is True
+    assert any(problem["code"] == "context_pack_warning_missing" and problem["path"] == original_warning_code for problem in warning_gate_payload["problems"])
 
     swapped_knowledge = json.loads(baseline.read_text(encoding="utf-8"))
     original_record_id = swapped_knowledge["data"]["groups"]["reviewed_knowledge"][0]["record"]["id"]
