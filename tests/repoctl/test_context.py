@@ -679,6 +679,44 @@ def test_context_benchmark_multirepo_fixture_gates_isolation(tmp_path: Path, mon
     assert payload["problems"] == []
 
 
+def test_context_multirepo_field_loop_keeps_context_and_knowledge_namespaced(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    fixture = Path("tests/fixtures/context-benchmark-multirepo").resolve()
+    _write_context_benchmark_collection_corpus(tmp_path, fixture)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "web", "--json"]) == 0
+    web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
+    web_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "api", "--json"]) == 0
+    api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
+    api_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--require-fixture-corpus", "--require-no-cross-repo", "--require-no-forbidden", "--min-category-packed-recall", "multi-repo-isolation=1.0", "--json"]) == 0
+    benchmark_payload = json.loads(capsys.readouterr().out)
+    assert benchmark_payload["data"]["summary"]["cross_repo_ref_count"] == 0
+
+    assert main(["knowledge", "query", "context returns source bundles", "--repo-id", "web", "--json"]) == 0
+    web_query = json.loads(capsys.readouterr().out)
+    assert web_query["data"]["results"][0]["record"]["id"] == web_record
+    assert all(item["record"]["id"] != api_record for item in web_query["data"]["results"])
+
+    assert main(["knowledge", "render", "--repo-id", "web", "--json"]) == 0
+    web_render = json.loads(capsys.readouterr().out)
+    assert main(["knowledge", "render", "--repo-id", "api", "--json"]) == 0
+    api_render = json.loads(capsys.readouterr().out)
+    assert web_render["data"]["output"] == "docs/knowledge/generated/web"
+    assert api_render["data"]["output"] == "docs/knowledge/generated/api"
+
+
 def test_context_benchmark_import_impact_passes_after_resolution(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
