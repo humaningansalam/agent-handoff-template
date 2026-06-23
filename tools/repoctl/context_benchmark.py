@@ -26,6 +26,7 @@ def run_context_benchmark(
     min_knowledge_recall_at_5: float | None = None,
     min_category_recall_at_5: dict[str, float] | None = None,
     min_category_graph_edge_recall: dict[str, float] | None = None,
+    min_category_packed_recall: dict[str, float] | None = None,
     require_source_integrity: bool = False,
     require_knowledge_source_current: bool = False,
     require_no_forbidden: bool = False,
@@ -66,6 +67,7 @@ def run_context_benchmark(
             min_knowledge_recall_at_5=min_knowledge_recall_at_5,
             min_category_recall_at_5=min_category_recall_at_5 or {},
             min_category_graph_edge_recall=min_category_graph_edge_recall or {},
+            min_category_packed_recall=min_category_packed_recall or {},
             require_source_integrity=require_source_integrity,
             require_knowledge_source_current=require_knowledge_source_current,
             require_no_forbidden=require_no_forbidden,
@@ -84,6 +86,7 @@ def run_context_benchmark(
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
             "min_category_recall_at_5": dict(sorted((min_category_recall_at_5 or {}).items())),
             "min_category_graph_edge_recall": dict(sorted((min_category_graph_edge_recall or {}).items())),
+            "min_category_packed_recall": dict(sorted((min_category_packed_recall or {}).items())),
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
             "require_no_forbidden": require_no_forbidden,
@@ -416,6 +419,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     top5 = candidate_refs[:5]
     top10 = candidate_refs[:10]
     knowledge_top5 = knowledge_refs[:5]
+    packed_required = [ref for ref in required if _contains_ref(packed_refs, ref)]
     required_top5 = [ref for ref in required if _contains_ref(top5, ref)]
     required_top10 = [ref for ref in required if _contains_ref(top10, ref)]
     required_knowledge_top5 = [ref for ref in required_knowledge if _contains_ref(knowledge_top5, ref)]
@@ -436,11 +440,12 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "recall_at_5": _ratio(len(required_top5), len(required)),
             "recall_at_10": _ratio(len(required_top10), len(required)),
             "precision_at_5": _ratio(relevant_top5, len(top5)),
+            "packed_recall": _ratio(len(packed_required), len(required)),
             "source_ref_integrity": len(integrity_failures) == 0,
             "knowledge_source_ref_integrity": len(knowledge_integrity_failures) == 0,
             "forbidden_selected": len(selected_forbidden),
             "cross_repo_ref_count": len(cross_repo_refs),
-            "packed_required_found": sum(1 for ref in required if _contains_ref(packed_refs, ref)),
+            "packed_required_found": len(packed_required),
             "knowledge_recall_at_5": _ratio(len(required_knowledge_top5), len(required_knowledge)) if required_knowledge else 0.0,
             "graph_edge_recall": _ratio(len(required_edges_found), len(required_edges)) if required_edges else 1.0,
             "required_graph_edge_count": len(required_edges),
@@ -453,6 +458,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "required_found_at_5": required_top5,
         "required_found_at_10": required_top10,
         "missing_required_at_10": [ref for ref in required if not _contains_ref(top10, ref)],
+        "packed_required_found_refs": packed_required,
+        "missing_required_from_packed": [ref for ref in required if not _contains_ref(packed_refs, ref)],
         "required_knowledge_found_at_5": required_knowledge_top5,
         "missing_required_knowledge_at_5": [ref for ref in required_knowledge if not _contains_ref(knowledge_top5, ref)],
         "required_graph_edges_found": required_edges_found,
@@ -473,6 +480,7 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_recall_at_5": _mean(metric["recall_at_5"] for metric in metrics),
         "mean_recall_at_10": _mean(metric["recall_at_10"] for metric in metrics),
         "mean_precision_at_5": _mean(metric["precision_at_5"] for metric in metrics),
+        "mean_packed_recall": _mean(metric["packed_recall"] for metric in metrics),
         "source_ref_integrity": all(metric["source_ref_integrity"] for metric in metrics),
         "knowledge_source_ref_integrity": all(metric["knowledge_source_ref_integrity"] for metric in metrics),
         "mean_knowledge_recall_at_5": _mean(metric["knowledge_recall_at_5"] for metric in metrics if metric["required_knowledge_count"]),
@@ -502,6 +510,7 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
             "mean_recall_at_5": _mean(metric.get("recall_at_5", 0.0) for metric in items),
             "mean_recall_at_10": _mean(metric.get("recall_at_10", 0.0) for metric in items),
             "mean_precision_at_5": _mean(metric.get("precision_at_5", 0.0) for metric in items),
+            "mean_packed_recall": _mean(metric.get("packed_recall", 0.0) for metric in items),
             "mean_graph_edge_recall": _mean(metric.get("graph_edge_recall", 1.0) for metric in items if metric.get("required_graph_edge_count", 0)),
             "graph_edge_expected_questions": sum(1 for metric in items if metric.get("required_graph_edge_count", 0)),
             "forbidden_selected": sum(int(metric.get("forbidden_selected") or 0) for metric in items),
@@ -644,6 +653,7 @@ def _gate_problems(
     min_knowledge_recall_at_5: float | None,
     min_category_recall_at_5: dict[str, float],
     min_category_graph_edge_recall: dict[str, float],
+    min_category_packed_recall: dict[str, float],
     require_source_integrity: bool,
     require_knowledge_source_current: bool,
     require_no_forbidden: bool,
@@ -668,6 +678,11 @@ def _gate_problems(
         recall = float(category_summary.get("mean_graph_edge_recall") or 0.0)
         if recall < threshold:
             problems.append(Problem("error", "context_benchmark_category_graph_edge_gate_failed", f"context benchmark {category} graph edge recall is below gate", category))
+    for category, threshold in sorted(min_category_packed_recall.items()):
+        category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
+        recall = float(category_summary.get("mean_packed_recall") or 0.0)
+        if recall < threshold:
+            problems.append(Problem("error", "context_benchmark_category_packed_recall_gate_failed", f"context benchmark {category} packed recall is below gate", category))
     if require_source_integrity and not bool(summary.get("source_ref_integrity")):
         problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
     if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):

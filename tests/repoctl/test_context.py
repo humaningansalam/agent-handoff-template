@@ -145,6 +145,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["question_count"] >= 2
     assert payload["data"]["summary"]["source_ref_integrity"] is True
     assert payload["data"]["summary"]["mean_recall_at_5"] > 0
+    assert payload["data"]["summary"]["by_category"]["authority"]["mean_packed_recall"] == 1.0
     assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
@@ -170,6 +171,14 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     reference_payload = json.loads(capsys.readouterr().out)
     assert reference_payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
     assert reference_payload["problems"] == []
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-packed-recall", "authority=1.0", "--require-fixture-corpus", "--json"]) == 0
+
+    authority_payload = json.loads(capsys.readouterr().out)
+    authority_result = next(result for result in authority_payload["data"]["results"] if result["id"] == "Q-001")
+    assert authority_result["metrics"]["packed_recall"] == 1.0
+    assert len(authority_result["packed_required_found_refs"]) == 2
+    assert authority_payload["problems"] == []
 
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-graph-edge-recall", "method-impact=1.0", "--require-fixture-corpus", "--json"]) == 0
 
