@@ -27,6 +27,7 @@ def run_context_benchmark(
     require_knowledge_source_current: bool = False,
     require_no_forbidden: bool = False,
     require_no_cross_repo: bool = False,
+    require_fixture_corpus: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
@@ -38,6 +39,9 @@ def run_context_benchmark(
 
     questions = _read_questions(questions_path)
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    corpus_status, corpus_problems = _fixture_corpus_status(root, fixture, repo_id=repo_id)
+    if require_fixture_corpus:
+        problems.extend(corpus_problems)
     results: list[dict[str, Any]] = []
     for question in questions:
         question_id = str(question.get("id") or "")
@@ -60,6 +64,7 @@ def run_context_benchmark(
             require_knowledge_source_current=require_knowledge_source_current,
             require_no_forbidden=require_no_forbidden,
             require_no_cross_repo=require_no_cross_repo,
+            require_fixture_corpus=require_fixture_corpus,
         )
     )
     data = {
@@ -76,7 +81,9 @@ def run_context_benchmark(
             "require_knowledge_source_current": require_knowledge_source_current,
             "require_no_forbidden": require_no_forbidden,
             "require_no_cross_repo": require_no_cross_repo,
+            "require_fixture_corpus": require_fixture_corpus,
         },
+        "fixture_corpus": corpus_status,
     }
     data["benchmark_digest"] = digest_data(data)
     return data, problems
@@ -154,6 +161,71 @@ def _read_questions(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path}:{line_number}: question must be an object")
         questions.append(data)
     return questions
+
+
+def _fixture_corpus_status(root: Path, fixture: Path, *, repo_id: str = "") -> tuple[dict[str, Any], list[Problem]]:
+    corpus_path = fixture / "corpus.json"
+    if not corpus_path.is_file():
+        return {"present": False, "repositories": {}, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, []
+    try:
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {"present": True, "invalid": True, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, [
+            Problem("error", "context_benchmark_corpus_invalid_json", f"context benchmark corpus.json is invalid: {exc}", corpus_path.as_posix())
+        ]
+    repositories = corpus.get("repositories") if isinstance(corpus, dict) else {}
+    if not isinstance(repositories, dict):
+        return {"present": True, "invalid": True, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, [
+            Problem("error", "context_benchmark_corpus_invalid", "context benchmark corpus repositories must be an object", corpus_path.as_posix())
+        ]
+
+    wanted_repo_ids = [repo_id] if repo_id else sorted(str(key) for key in repositories)
+    status_repos: dict[str, Any] = {}
+    problems: list[Problem] = []
+    file_count = 0
+    missing_count = 0
+    digest_drift_count = 0
+    for wanted_repo_id in wanted_repo_ids:
+        repo_corpus = repositories.get(wanted_repo_id)
+        if not isinstance(repo_corpus, dict):
+            continue
+        target = require_repo_target(root, repo_id=wanted_repo_id or None)
+        repo_status = {"file_count": 0, "missing": [], "digest_drift": []}
+        files = repo_corpus.get("files") if isinstance(repo_corpus.get("files"), list) else []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            rel = str(item.get("path") or "")
+            expected_content = str(item.get("content") or "")
+            if not rel:
+                continue
+            file_count += 1
+            repo_status["file_count"] += 1
+            path = target.root_path / rel
+            if not path.is_file():
+                missing_count += 1
+                repo_status["missing"].append(rel)
+                problems.append(Problem("error", "context_benchmark_corpus_file_missing", "context benchmark corpus file is missing from workspace", rel))
+                continue
+            actual = path.read_text(encoding="utf-8")
+            expected_digest = _text_digest(expected_content)
+            actual_digest = _text_digest(actual)
+            if actual_digest != expected_digest:
+                digest_drift_count += 1
+                repo_status["digest_drift"].append(rel)
+                problems.append(Problem("error", "context_benchmark_corpus_file_digest_drift", "context benchmark corpus file content differs from fixture", rel))
+        status_repos[wanted_repo_id] = repo_status
+    return {
+        "present": True,
+        "repositories": status_repos,
+        "file_count": file_count,
+        "missing_count": missing_count,
+        "digest_drift_count": digest_drift_count,
+    }, problems
+
+
+def _text_digest(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _read_benchmark_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
@@ -533,6 +605,7 @@ def _gate_problems(
     require_knowledge_source_current: bool,
     require_no_forbidden: bool,
     require_no_cross_repo: bool,
+    require_fixture_corpus: bool,
 ) -> list[Problem]:
     problems: list[Problem] = []
     if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:

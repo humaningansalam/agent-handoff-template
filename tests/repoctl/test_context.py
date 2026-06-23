@@ -150,11 +150,30 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["summary"]["knowledge_result_questions"] == 0
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
 
-    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--json"]) == 0
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--require-fixture-corpus", "--json"]) == 0
 
     gated_payload = json.loads(capsys.readouterr().out)
     assert gated_payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
+    assert gated_payload["data"]["fixture_corpus"]["missing_count"] == 0
+    assert gated_payload["data"]["fixture_corpus"]["digest_drift_count"] == 0
     assert gated_payload["problems"] == []
+
+
+def test_context_benchmark_fixture_corpus_gate_fails_when_not_applied(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--require-fixture-corpus", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["fixture_corpus"]["present"] is True
+    assert payload["data"]["fixture_corpus"]["missing_count"] >= 1
+    assert any(problem["code"] == "context_benchmark_corpus_file_missing" for problem in payload["problems"])
 
 
 def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
