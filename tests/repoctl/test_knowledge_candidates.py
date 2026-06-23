@@ -1152,6 +1152,47 @@ def test_knowledge_candidate_ids_are_global_across_repos(tmp_path: Path, monkeyp
     assert api_record != web_record
 
 
+def test_knowledge_render_defaults_to_repo_namespaced_output_for_multirepo(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    (tmp_path / "docs/repoctl.json").write_text(
+        json.dumps({"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "web", "--json"]) == 0
+    web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "api", "--json"]) == 0
+    api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "render", "--repo-id", "web", "--json"]) == 0
+    web_render = json.loads(capsys.readouterr().out)
+    assert main(["knowledge", "render", "--repo-id", "api", "--json"]) == 0
+    api_render = json.loads(capsys.readouterr().out)
+
+    assert web_render["data"]["output"] == "docs/knowledge/generated/web"
+    assert api_render["data"]["output"] == "docs/knowledge/generated/api"
+    assert (tmp_path / "docs/knowledge/generated/web/manifest.json").is_file()
+    assert (tmp_path / "docs/knowledge/generated/api/manifest.json").is_file()
+    web_manifest = json.loads((tmp_path / "docs/knowledge/generated/web/manifest.json").read_text(encoding="utf-8"))
+    api_manifest = json.loads((tmp_path / "docs/knowledge/generated/api/manifest.json").read_text(encoding="utf-8"))
+    assert web_manifest["repo_id"] == "web"
+    assert api_manifest["repo_id"] == "api"
+
+    assert main(["knowledge", "render", "--repo-id", "web", "--check", "--json"]) == 0
+    web_check = json.loads(capsys.readouterr().out)
+    assert web_check["data"]["check"]["current"] is True
+
+
 def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

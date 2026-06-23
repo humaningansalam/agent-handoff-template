@@ -1893,7 +1893,8 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
 def cmd_knowledge_render(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = render_knowledge(root, repo_id=args.repo_id, output=Path(args.output), check=args.check)
+    output = Path(args.output) if args.output else _default_knowledge_render_output(args.repo_id)
+    data, problems = render_knowledge(root, repo_id=args.repo_id, output=output, check=args.check)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge render",
@@ -1913,6 +1914,12 @@ def cmd_knowledge_render(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _default_knowledge_render_output(repo_id: str) -> Path:
+    if repo_id == "main":
+        return Path("docs/knowledge/generated")
+    return Path("docs/knowledge/generated") / repo_id
 
 
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
@@ -2408,7 +2415,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.set_defaults(func=cmd_knowledge_query)
     knowledge_render = knowledge_sub.add_parser("render")
     knowledge_render.add_argument("--repo-id", required=True)
-    knowledge_render.add_argument("--output", default="docs/knowledge/generated")
+    knowledge_render.add_argument("--output")
     knowledge_render.add_argument("--check", action="store_true")
     knowledge_render.add_argument("--json", action="store_true")
     knowledge_render.set_defaults(func=cmd_knowledge_render)
