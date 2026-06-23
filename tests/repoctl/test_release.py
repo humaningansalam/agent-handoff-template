@@ -143,3 +143,29 @@ def test_release_workflow_pins_actions_and_verifies_existing_tag() -> None:
     assert "steps.existing.outputs.tag_exists == 'true' && steps.existing.outputs.release_exists == 'false'" in workflow
     assert "git rev-list -n 1" in workflow
     assert 'test "$TAG_SHA" = "$GITHUB_SHA"' in workflow
+
+
+def test_generated_knowledge_views_are_ignored_but_records_are_tracked() -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=source_root,
+        input="docs/knowledge/generated/INDEX.md\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert ignored.returncode == 0, ignored.stderr
+    assert ignored.stdout.strip() == "docs/knowledge/generated/INDEX.md"
+
+    tracked = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=source_root,
+        input="docs/knowledge/records/K-example.json\ndocs/knowledge/events/E-example.json\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert tracked.returncode == 1, tracked.stdout

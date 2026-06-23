@@ -8,6 +8,7 @@ docs/tasks/.repoctl-state/
 .repoctl-state/
 docs/**/.*.tmp
 docs/plans/
+docs/knowledge/generated/
 
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,jetbrains,macos,windows,linux
