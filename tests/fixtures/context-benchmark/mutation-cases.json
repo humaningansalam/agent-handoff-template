@@ -2,8 +2,25 @@
   "schema": "repoctl.context.benchmark.mutations",
   "schema_version": 1,
   "cases": [
-    {"id": "rename-source", "kind": "rename", "description": "source refs must detect renamed documents"},
-    {"id": "digest-drift", "kind": "source_digest_drift", "description": "source refs must surface changed content digests"},
-    {"id": "multi-repo-topic-collision", "kind": "multi_repo_isolation", "description": "same topic text in two repos must not merge"}
+    {
+      "id": "rename-source",
+      "kind": "rename",
+      "description": "source refs must detect renamed documents"
+    },
+    {
+      "id": "digest-drift",
+      "kind": "source_digest_drift",
+      "description": "source refs must surface changed content digests"
+    },
+    {
+      "id": "multi-repo-topic-collision",
+      "kind": "multi_repo_isolation",
+      "description": "same topic text in two repos must not merge"
+    },
+    {
+      "id": "import-impact-resolution",
+      "kind": "code_impact_resolution",
+      "description": "repo-local Python and JS/TS imports should surface importer files in impact questions"
+    }
   ]
 }

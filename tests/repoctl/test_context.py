@@ -30,6 +30,17 @@ def _write_context_docs(root: Path) -> None:
     (root / "docs/workflows/generated.md").write_text("# Workflow\n\nGenerated output is not an authority.\n", encoding="utf-8")
 
 
+def _write_context_benchmark_corpus(root: Path, fixture: Path | None = None) -> None:
+    fixture = fixture or Path("tests/fixtures/context-benchmark")
+    corpus = json.loads((fixture / "corpus.json").read_text(encoding="utf-8"))
+    repo = root / "repos"
+    main = corpus["repositories"]["main"]
+    for item in main["files"]:
+        path = repo / item["path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(item["content"], encoding="utf-8")
+
+
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -105,8 +116,12 @@ def test_context_benchmark_fixture_has_source_refs() -> None:
     fixture = Path("tests/fixtures/context-benchmark")
     questions = [json.loads(line) for line in (fixture / "questions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     expected = json.loads((fixture / "expected-sources.json").read_text(encoding="utf-8"))
+    corpus = json.loads((fixture / "corpus.json").read_text(encoding="utf-8"))
 
-    assert len(questions) >= 2
+    assert len(questions) >= 5
+    assert {question["category"] for question in questions} >= {"authority", "contract", "impact"}
+    assert corpus["schema"] == "repoctl.context.benchmark.corpus"
+    assert len(corpus["repositories"]["main"]["files"]) >= 8
     for question in questions:
         assert question["id"] in expected
         assert expected[question["id"]]["required_source_refs"]
@@ -118,6 +133,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     fixture = Path("tests/fixtures/context-benchmark").resolve()
@@ -129,9 +145,16 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["question_count"] >= 2
     assert payload["data"]["summary"]["source_ref_integrity"] is True
     assert payload["data"]["summary"]["mean_recall_at_5"] > 0
+    assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["knowledge_expected_questions"] >= 1
     assert payload["data"]["summary"]["knowledge_result_questions"] == 0
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--json"]) == 0
+
+    gated_payload = json.loads(capsys.readouterr().out)
+    assert gated_payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
+    assert gated_payload["problems"] == []
 
 
 def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -140,6 +163,7 @@ def test_context_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, c
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
     output = tmp_path / ".repoctl-state/context-benchmark/result.json"
@@ -162,6 +186,7 @@ def test_context_benchmark_rejects_output_outside_workspace(tmp_path: Path, monk
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
     outside = tmp_path.parent / f"{tmp_path.name}-context-benchmark.json"
@@ -179,6 +204,7 @@ def test_context_benchmark_compare_artifacts(tmp_path: Path, monkeypatch, capsys
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
     baseline = tmp_path / ".repoctl-state/context-benchmark/baseline.json"
@@ -241,6 +267,7 @@ def test_context_benchmark_compare_detects_source_digest_drift(tmp_path: Path, m
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
     baseline = tmp_path / ".repoctl-state/context-benchmark/baseline.json"
@@ -266,6 +293,7 @@ def test_context_benchmark_compare_detects_missing_source_after_rename(tmp_path:
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
     baseline = tmp_path / ".repoctl-state/context-benchmark/baseline.json"
@@ -290,6 +318,7 @@ def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
 
@@ -322,6 +351,7 @@ def test_context_benchmark_quality_gate_fails_without_knowledge(tmp_path: Path, 
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    _write_context_benchmark_corpus(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     fixture = Path("tests/fixtures/context-benchmark").resolve()
 

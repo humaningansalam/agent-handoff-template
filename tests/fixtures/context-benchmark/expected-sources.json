@@ -1,8 +1,14 @@
 {
   "Q-001": {
     "required_source_refs": [
-      {"path": "docs/adr/repoctl-graph-v0.md", "section": "Decision"},
-      {"path": "docs/contracts/repoctl-module-boundaries.md", "section": "Future layer rules"}
+      {
+        "path": "docs/adr/repoctl-graph-v0.md",
+        "section": "Decision"
+      },
+      {
+        "path": "docs/contracts/repoctl-module-boundaries.md",
+        "section": "Future layer rules"
+      }
     ],
     "required_knowledge_source_refs": [],
     "acceptable_optional_refs": [],
@@ -10,11 +16,56 @@
   },
   "Q-002": {
     "required_source_refs": [
-      {"path": "docs/adr/evidence-context-authority-v0.md", "section": "Authority Rules"}
+      {
+        "path": "docs/adr/evidence-context-authority-v0.md",
+        "section": "Authority Rules"
+      }
     ],
     "required_knowledge_source_refs": [
-      {"path": "docs/adr/evidence-context-authority-v0.md", "section": "Decision"}
+      {
+        "path": "docs/adr/evidence-context-authority-v0.md",
+        "section": "Decision"
+      }
     ],
+    "acceptable_optional_refs": [],
+    "forbidden_refs": []
+  },
+  "Q-003": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
+      },
+      {
+        "path": "<graph:repo:main:file:handlers%2Flogin.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "acceptable_optional_refs": [],
+    "forbidden_refs": []
+  },
+  "Q-004": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
+      },
+      {
+        "path": "<graph:repo:main:file:handlers%2Fsession_login.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "acceptable_optional_refs": [],
+    "forbidden_refs": []
+  },
+  "Q-005": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
+      },
+      {
+        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
     "acceptable_optional_refs": [],
     "forbidden_refs": []
   }

@@ -1,0 +1,42 @@
+{
+  "schema": "repoctl.context.benchmark.corpus",
+  "schema_version": 1,
+  "repositories": {
+    "main": {
+      "files": [
+        {
+          "path": "utils/__init__.py",
+          "content": ""
+        },
+        {
+          "path": "utils/tokens.py",
+          "content": "def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n"
+        },
+        {
+          "path": "handlers/__init__.py",
+          "content": ""
+        },
+        {
+          "path": "handlers/login.py",
+          "content": "from utils.tokens import issue_token as make_session\n\n\ndef login(user_id: str) -> str:\n    return make_session(user_id)\n"
+        },
+        {
+          "path": "handlers/session_tokens.py",
+          "content": "def issue_session(user_id: str) -> str:\n    return f'session:{user_id}'\n"
+        },
+        {
+          "path": "handlers/session_login.py",
+          "content": "from .session_tokens import issue_session as make_session\n\n\ndef login(user_id: str) -> str:\n    return make_session(user_id)\n"
+        },
+        {
+          "path": "frontend/src/api/tokens.ts",
+          "content": "export const issueToken = () => 'token';\n"
+        },
+        {
+          "path": "frontend/src/client.ts",
+          "content": "import { issueToken } from './api/tokens';\n\nexport const login = () => issueToken();\n"
+        }
+      ]
+    }
+  }
+}
