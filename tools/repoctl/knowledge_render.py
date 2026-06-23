@@ -45,6 +45,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
     pages = _pages(root, records, events)
     page_records = _page_records(records)
     output_dir.mkdir(parents=True, exist_ok=True)
+    removed = _remove_stale_rendered_files(root=root, output_dir=output_dir, next_page_names=set(pages))
     for name, content in pages.items():
         path = output_dir / name
         atomic_write(path, content)
@@ -84,8 +85,45 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
             "path": manifest_path.relative_to(root).as_posix(),
             "digest": manifest_digest,
         },
+        "removed": removed,
         "rendered": rendered,
     }, []
+
+
+def _remove_stale_rendered_files(*, root: Path, output_dir: Path, next_page_names: set[str]) -> list[str]:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    rendered = manifest.get("rendered")
+    if not isinstance(rendered, list):
+        return []
+    root_real = root.resolve()
+    output_real = output_dir.resolve()
+    removed: list[str] = []
+    next_reals = {(output_dir / name).resolve() for name in next_page_names}
+    for item in rendered:
+        if not isinstance(item, dict):
+            continue
+        rel_path = str(item.get("path") or "")
+        if not rel_path:
+            continue
+        stale_path = root / rel_path
+        try:
+            stale_real = stale_path.resolve()
+            stale_real.relative_to(root_real)
+            stale_real.relative_to(output_real)
+        except ValueError:
+            continue
+        if stale_real in next_reals:
+            continue
+        if stale_path.is_file():
+            stale_path.unlink()
+            removed.append(stale_path.relative_to(root).as_posix())
+    return sorted(removed)
 
 
 def _load_records(root: Path) -> list[dict[str, Any]]:

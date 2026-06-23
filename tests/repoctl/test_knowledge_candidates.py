@@ -727,6 +727,45 @@ def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) 
     assert first_files == second_files
 
 
+def test_knowledge_render_removes_manifest_owned_stale_pages_only(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+    manifest_path = tmp_path / first_payload["data"]["manifest"]["path"]
+    generated_dir = manifest_path.parent
+    stale_page = generated_dir / "old-decisions.md"
+    stale_page.write_text("# Old generated page\n", encoding="utf-8")
+    unowned_note = generated_dir / "operator-note.md"
+    unowned_note.write_text("local note\n", encoding="utf-8")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["rendered"].append(
+        {
+            "path": "docs/knowledge/generated/old-decisions.md",
+            "digest": "sha256:old",
+            "source_bundle": {"record_ids": [], "source_refs": [], "event_ids": []},
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["data"]["removed"] == ["docs/knowledge/generated/old-decisions.md"]
+    assert not stale_page.exists()
+    assert unowned_note.read_text(encoding="utf-8") == "local note\n"
+
+
 def test_knowledge_render_rejects_output_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)
