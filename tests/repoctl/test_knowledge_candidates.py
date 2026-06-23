@@ -779,6 +779,50 @@ def test_knowledge_render_removes_manifest_owned_stale_pages_only(tmp_path: Path
     assert unowned_note.read_text(encoding="utf-8") == "local note\n"
 
 
+def test_knowledge_render_check_detects_current_and_stale_outputs_without_writing(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 1
+    missing_payload = json.loads(capsys.readouterr().out)
+    assert missing_payload["data"]["mode"] == "check"
+    assert missing_payload["problems"][0]["code"] == "knowledge_render_manifest_missing"
+    assert not (tmp_path / "docs/knowledge/generated").exists()
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 0
+    current_payload = json.loads(capsys.readouterr().out)
+    assert current_payload["data"]["check"] == {
+        "current": True,
+        "missing_pages": [],
+        "stale_pages": [],
+        "stale_owned_pages": [],
+    }
+
+    decisions_path = tmp_path / "docs/knowledge/generated/decisions.md"
+    original_decisions = decisions_path.read_text(encoding="utf-8")
+    (tmp_path / "docs/adr/evidence-context-authority-v0.md").write_text("# Changed\n\n## Decision\n\nChanged source.\n", encoding="utf-8")
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 1
+    stale_payload = json.loads(capsys.readouterr().out)
+    problem_codes = {problem["code"] for problem in stale_payload["problems"]}
+    assert "knowledge_render_manifest_stale" in problem_codes
+    assert "knowledge_render_page_stale" in problem_codes
+    assert stale_payload["data"]["check"]["current"] is False
+    assert stale_payload["data"]["check"]["stale_pages"] == ["docs/knowledge/generated/INDEX.md", "docs/knowledge/generated/decisions.md"]
+    assert decisions_path.read_text(encoding="utf-8") == original_decisions
+
+
 def test_knowledge_render_rejects_output_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)

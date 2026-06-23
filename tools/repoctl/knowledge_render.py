@@ -18,7 +18,7 @@ PAGE_BY_KIND = {
 }
 
 
-def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[str, Any], list[Problem]]:
+def render_knowledge(root: Path, *, repo_id: str, output: Path, check: bool = False) -> tuple[dict[str, Any], list[Problem]]:
     output_dir = output if output.is_absolute() else root / output
     root_real = root.resolve()
     output_real = output_dir.resolve()
@@ -43,36 +43,37 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
             "event_checks": {"error_count": len(event_problems)},
             "rendered": [],
         }, event_problems
-    rendered: list[dict[str, Any]] = []
     pages = _pages(root, records, events)
     page_records = _page_records(records)
+    rendered = _rendered_page_entries(root=root, output_dir=output_dir, pages=pages, page_records=page_records, events=events)
+    rendered = sorted(rendered, key=lambda item: item["path"])
+    render_digest = digest_data({"rendered": rendered})
+    manifest, manifest_digest = _render_manifest(repo_id=repo_id, output_rel=output_rel, record_count=len(records), event_count=len(events), render_digest=render_digest, rendered=rendered)
+    manifest_path = output_dir / "manifest.json"
+    if check:
+        check_problems, check_data = _check_rendered_output(root=root, output_dir=output_dir, manifest_path=manifest_path, manifest={**manifest, "manifest_digest": manifest_digest}, pages=pages)
+        return {
+            "schema": "repoctl.knowledge.render",
+            "schema_version": 1,
+            "repo_id": repo_id,
+            "authoritative": False,
+            "mode": "check",
+            "output": output_rel,
+            "record_count": len(records),
+            "event_count": len(events),
+            "render_digest": render_digest,
+            "manifest": {
+                "path": manifest_path.relative_to(root).as_posix(),
+                "digest": manifest_digest,
+            },
+            "rendered": rendered,
+            "check": check_data,
+        }, check_problems
     output_dir.mkdir(parents=True, exist_ok=True)
     removed = _remove_stale_rendered_files(root=root, output_dir=output_dir, next_page_names=set(pages))
     for name, content in pages.items():
         path = output_dir / name
         atomic_write(path, content)
-        rendered.append(
-            {
-                "path": path.relative_to(root).as_posix(),
-                "digest": digest_data({"content": content}),
-                "source_bundle": _page_source_bundle(root, name, page_records.get(name, []), events),
-            }
-        )
-    rendered = sorted(rendered, key=lambda item: item["path"])
-    render_digest = digest_data({"rendered": rendered})
-    manifest = {
-        "schema": "repoctl.knowledge.render_manifest",
-        "schema_version": 1,
-        "repo_id": repo_id,
-        "authoritative": False,
-        "output": output_rel,
-        "record_count": len(records),
-        "event_count": len(events),
-        "render_digest": render_digest,
-        "rendered": rendered,
-    }
-    manifest_digest = digest_data(manifest)
-    manifest_path = output_dir / "manifest.json"
     atomic_write(manifest_path, json.dumps({**manifest, "manifest_digest": manifest_digest}, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return {
         "schema": "repoctl.knowledge.render",
@@ -92,6 +93,69 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path) -> tuple[dict[st
     }, []
 
 
+def _rendered_page_entries(*, root: Path, output_dir: Path, pages: dict[str, str], page_records: dict[str, list[dict[str, Any]]], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": (output_dir / name).relative_to(root).as_posix(),
+            "digest": digest_data({"content": content}),
+            "source_bundle": _page_source_bundle(root, name, page_records.get(name, []), events),
+        }
+        for name, content in pages.items()
+    ]
+
+
+def _render_manifest(*, repo_id: str, output_rel: str, record_count: int, event_count: int, render_digest: str, rendered: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    manifest = {
+        "schema": "repoctl.knowledge.render_manifest",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "authoritative": False,
+        "output": output_rel,
+        "record_count": record_count,
+        "event_count": event_count,
+        "render_digest": render_digest,
+        "rendered": rendered,
+    }
+    return manifest, digest_data(manifest)
+
+
+def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path, manifest: dict[str, Any], pages: dict[str, str]) -> tuple[list[Problem], dict[str, Any]]:
+    problems: list[Problem] = []
+    current_manifest: dict[str, Any] = {}
+    if not manifest_path.is_file():
+        problems.append(Problem("error", "knowledge_render_manifest_missing", "render manifest is missing", manifest_path.relative_to(root).as_posix()))
+    else:
+        try:
+            current_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            problems.append(Problem("error", "knowledge_render_manifest_invalid", str(exc), manifest_path.relative_to(root).as_posix()))
+    if current_manifest and current_manifest.get("manifest_digest") != manifest.get("manifest_digest"):
+        problems.append(Problem("error", "knowledge_render_manifest_stale", "render manifest does not match current knowledge records", manifest_path.relative_to(root).as_posix()))
+    missing_pages: list[str] = []
+    stale_pages: list[str] = []
+    for name, content in pages.items():
+        page_path = output_dir / name
+        page_rel = page_path.relative_to(root).as_posix()
+        if not page_path.is_file():
+            missing_pages.append(page_rel)
+            problems.append(Problem("error", "knowledge_render_page_missing", "rendered knowledge page is missing", page_rel))
+            continue
+        current_digest = digest_data({"content": page_path.read_text(encoding="utf-8")})
+        expected_digest = digest_data({"content": content})
+        if current_digest != expected_digest:
+            stale_pages.append(page_rel)
+            problems.append(Problem("error", "knowledge_render_page_stale", "rendered knowledge page does not match current knowledge records", page_rel))
+    stale_owned_pages = _stale_rendered_files(root=root, output_dir=output_dir, next_page_names=set(pages))
+    for page in stale_owned_pages:
+        problems.append(Problem("error", "knowledge_render_stale_page", "render output contains a stale page owned by the previous manifest", page))
+    return problems, {
+        "current": not problems,
+        "missing_pages": missing_pages,
+        "stale_pages": stale_pages,
+        "stale_owned_pages": stale_owned_pages,
+    }
+
+
 def _is_generated_output_path(*, root: Path, output_dir: Path) -> bool:
     generated_root = root / "docs/knowledge/generated"
     try:
@@ -102,6 +166,13 @@ def _is_generated_output_path(*, root: Path, output_dir: Path) -> bool:
 
 
 def _remove_stale_rendered_files(*, root: Path, output_dir: Path, next_page_names: set[str]) -> list[str]:
+    stale_pages = _stale_rendered_files(root=root, output_dir=output_dir, next_page_names=next_page_names)
+    for rel_path in stale_pages:
+        (root / rel_path).unlink()
+    return stale_pages
+
+
+def _stale_rendered_files(*, root: Path, output_dir: Path, next_page_names: set[str]) -> list[str]:
     manifest_path = output_dir / "manifest.json"
     if not manifest_path.is_file():
         return []
@@ -114,7 +185,7 @@ def _remove_stale_rendered_files(*, root: Path, output_dir: Path, next_page_name
         return []
     root_real = root.resolve()
     output_real = output_dir.resolve()
-    removed: list[str] = []
+    stale_pages: list[str] = []
     next_reals = {(output_dir / name).resolve() for name in next_page_names}
     for item in rendered:
         if not isinstance(item, dict):
@@ -132,9 +203,8 @@ def _remove_stale_rendered_files(*, root: Path, output_dir: Path, next_page_name
         if stale_real in next_reals:
             continue
         if stale_path.is_file():
-            stale_path.unlink()
-            removed.append(stale_path.relative_to(root).as_posix())
-    return sorted(removed)
+            stale_pages.append(stale_path.relative_to(root).as_posix())
+    return sorted(stale_pages)
 
 
 def _load_records(root: Path) -> list[dict[str, Any]]:

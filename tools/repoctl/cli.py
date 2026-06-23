@@ -1853,7 +1853,7 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
 def cmd_knowledge_render(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = render_knowledge(root, repo_id=args.repo_id, output=Path(args.output))
+    data, problems = render_knowledge(root, repo_id=args.repo_id, output=Path(args.output), check=args.check)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge render",
@@ -2362,6 +2362,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_render = knowledge_sub.add_parser("render")
     knowledge_render.add_argument("--repo-id", required=True)
     knowledge_render.add_argument("--output", default="docs/knowledge/generated")
+    knowledge_render.add_argument("--check", action="store_true")
     knowledge_render.add_argument("--json", action="store_true")
     knowledge_render.set_defaults(func=cmd_knowledge_render)
 
