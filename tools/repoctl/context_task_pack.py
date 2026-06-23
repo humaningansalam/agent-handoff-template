@@ -321,4 +321,42 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
                 "message": f"task repo_id is {task_repo_id}, but context pack used {bundle.repository.get('id')}",
             }
         )
+    if bundle is None:
+        return warnings
+    completeness = bundle.completeness if isinstance(bundle.completeness, dict) else {}
+    if completeness.get("graph_available") is False:
+        warnings.append(
+            {
+                "code": "context_pack_graph_unavailable",
+                "message": "context pack was built without a Graph snapshot; graph-backed file and symbol evidence may be incomplete",
+            }
+        )
+    graph_completeness = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
+    parse_error_count = int(graph_completeness.get("parse_error_count") or 0)
+    if parse_error_count > 0 or graph_completeness.get("code_facts_complete") is False:
+        warnings.append(
+            {
+                "code": "context_pack_graph_code_facts_incomplete",
+                "message": f"Graph code facts are incomplete; parse_error_count={parse_error_count}",
+            }
+        )
+    provider_failures = graph_completeness.get("provider_failures")
+    if isinstance(provider_failures, list) and provider_failures:
+        warnings.append(
+            {
+                "code": "context_pack_graph_provider_failures",
+                "message": f"Graph provider failures are present; count={len(provider_failures)}",
+            }
+        )
+    knowledge_lifecycle = completeness.get("knowledge_lifecycle") if isinstance(completeness.get("knowledge_lifecycle"), dict) else {}
+    excluded_statuses = knowledge_lifecycle.get("excluded_statuses") if isinstance(knowledge_lifecycle.get("excluded_statuses"), dict) else {}
+    for status in ("stale", "superseded", "deprecated"):
+        count = int(excluded_statuses.get(status) or 0)
+        if count > 0:
+            warnings.append(
+                {
+                    "code": f"context_pack_knowledge_{status}_excluded",
+                    "message": f"context pack excluded {count} {status} knowledge record(s) from default reviewed knowledge",
+                }
+            )
     return warnings

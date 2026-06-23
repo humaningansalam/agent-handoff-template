@@ -877,6 +877,62 @@ Explain why Graph remains non-authoritative.
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
+def test_context_pack_warns_on_incomplete_graph_code_facts(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+    task_path = tmp_path / "docs/tasks/T-20260622010102Z--context-pack-parse-warning.md"
+    task_path.write_text(
+        """---
+id: T-20260622010102Z
+title: "Inspect parse warning context"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T010102Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622010102Z - Inspect parse warning context
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: parse warning
+- Candidate files reviewed: `repos/broken.py`
+- Chosen files: `repos/broken.py`
+
+## Goal
+
+Inspect parse warning context.
+
+## Handoff
+
+- Next exact step: inspect graph completeness.
+- First file to open: `repos/broken.py`
+- First command to run: `./scripts/repoctl context pack --task T-20260622010102Z --repo-id main --json`
+- Done when: parse warning is visible.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["context", "pack", "--task", "T-20260622010102Z", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["bundle"]["completeness"]["graph_completeness"]["parse_error_count"] == 1
+    assert any(warning["code"] == "context_pack_graph_code_facts_incomplete" for warning in payload["warnings"])
+
+
 def test_context_pack_rejects_output_symlink_escape(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -1071,6 +1127,7 @@ Use reviewed knowledge source authority.
     assert payload["data"]["bundle"]["query"]["explain"] is True
     assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["available_statuses"] == {"reviewed": 1, "superseded": 1}
     assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
+    assert any(warning["code"] == "context_pack_knowledge_superseded_excluded" for warning in payload["warnings"])
 
 
 def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
