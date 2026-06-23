@@ -1471,6 +1471,20 @@ def cmd_context_pack_benchmark(args: argparse.Namespace) -> int:
             }
         ],
     }
+    if args.output:
+        output, output_problem = _workspace_output_path(root, args.output, code="context_pack_benchmark_output_outside_workspace")
+        if output_problem is not None:
+            problems.append(output_problem)
+            payload["ok"] = False
+            payload["problems"] = [problem.to_dict() for problem in problems]
+        else:
+            if data:
+                data["artifact"] = {
+                    "path": output.relative_to(root).as_posix(),
+                    "benchmark_digest": data.get("benchmark_digest", ""),
+                }
+            _complete_json_envelope(payload)
+            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     if args.json:
         _json(payload)
     else:
@@ -2264,6 +2278,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_benchmark.add_argument("--budget-tokens", type=int, default=5000)
     context_pack_benchmark.add_argument("--explain", action="store_true")
     context_pack_benchmark.add_argument("--min-must-read-recall", type=float)
+    context_pack_benchmark.add_argument("--output")
     context_pack_benchmark.add_argument("--json", action="store_true")
     context_pack_benchmark.set_defaults(func=cmd_context_pack_benchmark)
 

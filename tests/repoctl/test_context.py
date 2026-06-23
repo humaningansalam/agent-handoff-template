@@ -1343,6 +1343,47 @@ def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, m
     assert payload["warnings"][0]["code"] == "context_pack_benchmark_retrieval_only"
 
 
+def test_context_pack_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+    output = tmp_path / ".repoctl-state/context-pack-benchmark/result.json"
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    assert artifact["command"] == "context pack-benchmark"
+    assert artifact["data"]["artifact"] == {
+        "path": ".repoctl-state/context-pack-benchmark/result.json",
+        "benchmark_digest": payload["data"]["benchmark_digest"],
+    }
+    assert artifact["data"]["benchmark_digest"] == payload["data"]["benchmark_digest"]
+
+
+def test_context_pack_benchmark_rejects_output_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+    outside = tmp_path.parent / f"{tmp_path.name}-pack-benchmark.json"
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", outside.as_posix(), "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "context_pack_benchmark_output_outside_workspace"
+    assert not outside.exists()
+
+
 def test_context_pack_benchmark_gate_fails_missing_required_ref(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
