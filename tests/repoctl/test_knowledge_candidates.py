@@ -806,6 +806,7 @@ def test_knowledge_render_check_detects_current_and_stale_outputs_without_writin
         "current": True,
         "missing_pages": [],
         "stale_pages": [],
+        "unreadable_pages": [],
         "stale_owned_pages": [],
     }
 
@@ -821,6 +822,26 @@ def test_knowledge_render_check_detects_current_and_stale_outputs_without_writin
     assert stale_payload["data"]["check"]["current"] is False
     assert stale_payload["data"]["check"]["stale_pages"] == ["docs/knowledge/generated/INDEX.md", "docs/knowledge/generated/decisions.md"]
     assert decisions_path.read_text(encoding="utf-8") == original_decisions
+
+
+def test_knowledge_render_check_reports_unreadable_generated_page(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    bad_page = tmp_path / "docs/knowledge/generated/invariants.md"
+    bad_page.write_bytes(b"\xff\xfe\xfd")
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_render_page_unreadable"
+    assert payload["data"]["check"]["unreadable_pages"] == ["docs/knowledge/generated/invariants.md"]
+    assert bad_page.read_bytes() == b"\xff\xfe\xfd"
 
 
 def test_knowledge_render_rejects_output_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:

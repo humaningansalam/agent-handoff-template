@@ -127,12 +127,13 @@ def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path,
     else:
         try:
             current_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             problems.append(Problem("error", "knowledge_render_manifest_invalid", str(exc), manifest_path.relative_to(root).as_posix()))
     if current_manifest and current_manifest.get("manifest_digest") != manifest.get("manifest_digest"):
         problems.append(Problem("error", "knowledge_render_manifest_stale", "render manifest does not match current knowledge records", manifest_path.relative_to(root).as_posix()))
     missing_pages: list[str] = []
     stale_pages: list[str] = []
+    unreadable_pages: list[str] = []
     for name, content in pages.items():
         page_path = output_dir / name
         page_rel = page_path.relative_to(root).as_posix()
@@ -140,7 +141,13 @@ def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path,
             missing_pages.append(page_rel)
             problems.append(Problem("error", "knowledge_render_page_missing", "rendered knowledge page is missing", page_rel))
             continue
-        current_digest = digest_data({"content": page_path.read_text(encoding="utf-8")})
+        try:
+            current_text = page_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            unreadable_pages.append(page_rel)
+            problems.append(Problem("error", "knowledge_render_page_unreadable", str(exc), page_rel))
+            continue
+        current_digest = digest_data({"content": current_text})
         expected_digest = digest_data({"content": content})
         if current_digest != expected_digest:
             stale_pages.append(page_rel)
@@ -152,6 +159,7 @@ def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path,
         "current": not problems,
         "missing_pages": missing_pages,
         "stale_pages": stale_pages,
+        "unreadable_pages": unreadable_pages,
         "stale_owned_pages": stale_owned_pages,
     }
 
@@ -178,7 +186,7 @@ def _stale_rendered_files(*, root: Path, output_dir: Path, next_page_names: set[
         return []
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return []
     rendered = manifest.get("rendered")
     if not isinstance(rendered, list):
