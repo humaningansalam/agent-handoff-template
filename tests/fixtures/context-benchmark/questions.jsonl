@@ -5,3 +5,4 @@
 {"id":"Q-005","category":"impact","repo_id":"main","question":"What files are impacted if frontend/src/api/tokens.ts changes?"}
 {"id":"Q-006","category":"reference-impact","repo_id":"main","question":"What functions are impacted if validate_token changes?"}
 {"id":"Q-007","category":"method-impact","repo_id":"main","question":"What methods are impacted if TokenFlow.validate changes?"}
+{"id":"Q-008","category":"cross-file-call-impact","repo_id":"main","question":"What functions are impacted if issue_token changes?"}

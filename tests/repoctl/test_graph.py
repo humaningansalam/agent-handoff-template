@@ -269,6 +269,58 @@ def test_graph_resolves_same_class_python_method_calls(tmp_path: Path, monkeypat
     assert any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == validate_id and edge["facts"]["scope"] == "same_file" for edge in snapshot["edges"])
 
 
+def test_graph_resolves_cross_file_python_imported_function_calls(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "services").mkdir()
+    (repo / "handlers").mkdir()
+    (repo / "services/token_service.py").write_text(
+        "def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n",
+        encoding="utf-8",
+    )
+    (repo / "handlers/cross_login.py").write_text(
+        "from services.token_service import issue_token\n\n\ndef login(user_id: str) -> str:\n    return issue_token(user_id)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    issue_id = symbol_id("main", "python_ast", "python_ast:services/token_service.py:issue_token:function:1:0:2:29")
+    login_id = symbol_id("main", "python_ast", "python_ast:handlers/cross_login.py:login:function:4:0:5:31")
+    assert "cross_file_import_calls" in snapshot["capabilities"]
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == file_id("main", "handlers/cross_login.py") and edge["to"] == file_id("main", "services/token_service.py") for edge in snapshot["edges"])
+    assert any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == issue_id and edge["facts"]["scope"] == "cross_file_import" for edge in snapshot["edges"])
+
+
+def test_graph_skips_shadowed_cross_file_python_imported_function_calls(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "services").mkdir()
+    (repo / "handlers").mkdir()
+    (repo / "services/token_service.py").write_text(
+        "def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n",
+        encoding="utf-8",
+    )
+    (repo / "handlers/cross_login.py").write_text(
+        "from services.token_service import issue_token\n\n\ndef login(issue_token) -> str:\n    return issue_token()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    issue_id = symbol_id("main", "python_ast", "python_ast:services/token_service.py:issue_token:function:1:0:2:29")
+    login_id = symbol_id("main", "python_ast", "python_ast:handlers/cross_login.py:login:function:4:0:5:24")
+    assert not any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == issue_id for edge in snapshot["edges"])
+
+
 def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

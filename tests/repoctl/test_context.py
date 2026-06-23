@@ -150,6 +150,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
     assert payload["data"]["summary"]["by_category"]["method-impact"]["mean_graph_edge_recall"] == 1.0
+    assert payload["data"]["summary"]["by_category"]["cross-file-call-impact"]["mean_graph_edge_recall"] == 1.0
     assert payload["data"]["summary"]["knowledge_expected_questions"] >= 1
     assert payload["data"]["summary"]["knowledge_result_questions"] == 0
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
@@ -187,6 +188,14 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert method_result["metrics"]["graph_edge_recall"] == 1.0
     assert method_result["required_graph_edges_found"][0]["kind"] == "CALLS"
     assert method_payload["problems"] == []
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-graph-edge-recall", "cross-file-call-impact=1.0", "--require-fixture-corpus", "--json"]) == 0
+
+    cross_file_payload = json.loads(capsys.readouterr().out)
+    cross_file_result = next(result for result in cross_file_payload["data"]["results"] if result["id"] == "Q-008")
+    assert cross_file_result["metrics"]["graph_edge_recall"] == 1.0
+    assert cross_file_result["required_graph_edges_found"][0]["kind"] == "CALLS"
+    assert cross_file_payload["problems"] == []
 
 
 def test_context_benchmark_fixture_corpus_gate_fails_when_not_applied(tmp_path: Path, monkeypatch, capsys) -> None:

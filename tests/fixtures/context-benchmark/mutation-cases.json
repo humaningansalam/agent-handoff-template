@@ -31,6 +31,11 @@
       "id": "same-class-method-impact",
       "kind": "method_call_impact_resolution",
       "description": "same-class self.method calls should be measured separately from module-level function calls"
+    },
+    {
+      "id": "cross-file-imported-call-impact",
+      "kind": "cross_file_call_impact_resolution",
+      "description": "cross-file imported function calls should be measured only after import resolution and stable symbol identity exist"
     }
   ]
 }

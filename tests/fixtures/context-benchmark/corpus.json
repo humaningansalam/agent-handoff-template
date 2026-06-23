@@ -43,6 +43,14 @@
         {
           "path": "auth/method_flow.py",
           "content": "class TokenFlow:\n    def validate(self, token: str) -> bool:\n        return token == \"ok\"\n\n    def login(self, token: str) -> str:\n        if self.validate(token):\n            return \"ok\"\n        return \"denied\"\n"
+        },
+        {
+          "path": "services/token_service.py",
+          "content": "def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n"
+        },
+        {
+          "path": "handlers/cross_login.py",
+          "content": "from services.token_service import issue_token\n\n\ndef login(user_id: str) -> str:\n    return issue_token(user_id)\n"
         }
       ]
     }

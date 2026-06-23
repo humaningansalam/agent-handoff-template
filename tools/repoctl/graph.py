@@ -255,7 +255,15 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
         precise_symbol_node_ids[precise_symbol.provider_symbol_id] = symbol_node_id
 
-    precise_calls, precise_call_meta = build_precise_calls(root, target=target, paths=[entry.path for entry in entries], symbols=precise_symbols)
+    import_resolutions = resolve_code_imports(entries)
+
+    precise_calls, precise_call_meta = build_precise_calls(
+        root,
+        target=target,
+        paths=[entry.path for entry in entries],
+        symbols=precise_symbols,
+        import_resolutions=import_resolutions,
+    )
     for precise_call in precise_calls:
         caller_node_id = precise_symbol_node_ids.get(precise_call.caller_provider_symbol_id)
         callee_node_id = precise_symbol_node_ids.get(precise_call.callee_provider_symbol_id)
@@ -268,11 +276,10 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
                 callee_node_id,
                 "resolved",
                 precise_call.provider,
-                {"scope": "same_file", "anchor": precise_call.anchor.to_dict()},
+                {"scope": precise_call.scope, "anchor": precise_call.anchor.to_dict()},
             )
         )
 
-    import_resolutions = resolve_code_imports(entries)
     for resolution in import_resolutions:
         importer_node_id = file_id(repo_id, resolution.importer_path)
         target_node_id = file_id(repo_id, resolution.target_path)
@@ -342,7 +349,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
-        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls"],
+        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls", "cross_file_import_calls"],
     ).with_digest()
     return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta, "precise_calls": precise_call_meta}
 

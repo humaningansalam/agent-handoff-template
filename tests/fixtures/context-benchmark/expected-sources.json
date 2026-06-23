@@ -120,5 +120,34 @@
         "source": "python_ast"
       }
     ]
+  },
+  "Q-008": {
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "acceptable_optional_refs": [
+      {
+        "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
+      },
+      {
+        "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
+      }
+    ],
+    "forbidden_refs": [],
+    "required_graph_edges": [
+      {
+        "kind": "CALLS",
+        "from": "repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31",
+        "to": "repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29",
+        "assertion": "resolved",
+        "source": "python_ast"
+      }
+    ]
   }
 }
