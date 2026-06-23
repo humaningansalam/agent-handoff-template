@@ -1290,6 +1290,82 @@ Create a candidate from a context pack without making the pack an authority sour
     assert "- Candidate warnings: `knowledge_candidate_pack_provenance_missing`" in decisions_text
 
 
+def test_context_pack_promotes_to_reviewed_knowledge_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_path = tmp_path / "docs/tasks/T-20260622090909Z--pack-clean.md"
+    task_path.write_text(
+        """---
+id: T-20260622090909Z
+title: "Promote clean context pack"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T090909Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622090909Z - Promote clean context pack
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: Evidence Context authority
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Promote a current context pack into reviewed knowledge.
+
+## Handoff
+
+- Next exact step: approve the generated candidate.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622090909Z.json --repo-id main --json`
+- Done when: reviewed knowledge is queryable and render output is current.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    pack = tmp_path / ".repoctl-state/context-pack/T-20260622090909Z.json"
+
+    assert main(["context", "pack", "--task", "T-20260622090909Z", "--repo-id", "main", "--output", pack.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
+
+    assert main(["knowledge", "candidate", "check", candidate["id"], "--repo-id", "main", "--json"]) == 0
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["warnings"] == []
+    assert check_payload["data"]["checks"]["pack_provenance_current"] is True
+
+    assert main(["knowledge", "approve", candidate["id"], "--repo-id", "main", "--json"]) == 0
+    approve_payload = json.loads(capsys.readouterr().out)
+    record = approve_payload["data"]["record"]
+    assert approve_payload["warnings"] == []
+    assert record["created_from"]["candidate_check"]["warning_codes"] == []
+
+    assert main(["knowledge", "query", "context returns source bundles", "--repo-id", "main", "--json"]) == 0
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload["data"]["results"][0]["record"]["id"] == record["id"]
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 0
+    render_check = json.loads(capsys.readouterr().out)
+    assert render_check["data"]["check"]["current"] is True
+
+
 def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_knowledge_docs(tmp_path)
