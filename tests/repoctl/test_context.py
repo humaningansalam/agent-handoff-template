@@ -1485,6 +1485,39 @@ def test_context_pack_benchmark_compare_gates_recall_regression(tmp_path: Path, 
     assert payload["problems"][0]["code"] == "context_pack_benchmark_must_read_recall_regressed"
 
 
+def test_context_field_loop_runs_pack_benchmark_compare_and_render_check(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+    baseline = tmp_path / ".repoctl-state/context-pack-benchmark/baseline.json"
+    candidate = tmp_path / ".repoctl-state/context-pack-benchmark/candidate.json"
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 0
+    render_check = json.loads(capsys.readouterr().out)
+    assert render_check["data"]["check"]["current"] is True
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-must-read-recall", "1.0", "--output", baseline.as_posix(), "--json"]) == 0
+    baseline_payload = json.loads(capsys.readouterr().out)
+    candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
+    assert main(["context", "pack-benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-mean-must-read-recall-drop", "0", "--json"]) == 0
+    compare_payload = json.loads(capsys.readouterr().out)
+
+    assert baseline_payload["data"]["summary"]["mean_must_read_recall"] == 1.0
+    assert compare_payload["data"]["metric_deltas"]["mean_must_read_recall"]["delta"] == 0.0
+    assert compare_payload["data"]["case_deltas"][0]["present_in_candidate"] is True
+
+
 def test_context_pack_benchmark_gate_fails_missing_required_ref(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
