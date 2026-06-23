@@ -74,6 +74,49 @@ def _approve_deprecated_context_knowledge(tmp_path: Path, capsys) -> str:
     return record_id
 
 
+def _write_pack_benchmark_task(root: Path) -> None:
+    task_path = root / "docs/tasks/T-20260624020202Z--pack-benchmark.md"
+    task_path.write_text(
+        """---
+id: T-20260624020202Z
+title: "Benchmark context pack must read recall"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260624T020202Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260624020202Z - Benchmark context pack must read recall
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: evidence context authority
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Use evidence context authority for task startup.
+
+## Handoff
+
+- Next exact step: inspect evidence context authority.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260624020202Z --repo-id main --json`
+- Done when: mandatory source refs are packed.
+""",
+        encoding="utf-8",
+    )
+
+
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -1277,6 +1320,65 @@ Use reviewed knowledge source authority.
     assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--json"]) == 1
     failed_artifact_payload = json.loads(capsys.readouterr().out)
     assert failed_artifact_payload["problems"][0]["code"] == "context_pack_artifact_failed"
+
+
+def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-must-read-recall", "1.0", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "context pack-benchmark"
+    assert payload["data"]["case_count"] == 1
+    assert payload["data"]["summary"]["mean_must_read_recall"] == 1.0
+    assert payload["data"]["results"][0]["required_must_read_found"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert payload["data"]["gates"]["min_must_read_recall"] == 1.0
+    assert payload["warnings"][0]["code"] == "context_pack_benchmark_retrieval_only"
+
+
+def test_context_pack_benchmark_gate_fails_missing_required_ref(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_pack_benchmark_task(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = tmp_path / "pack-fixture"
+    fixture.mkdir()
+    (fixture / "cases.json").write_text(
+        json.dumps(
+            {
+                "schema": "repoctl.context.task_pack.benchmark.cases",
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "id": "CP-MISSING",
+                        "task_id": "T-20260624020202Z",
+                        "required_must_read_refs": [{"kind": "document", "path": "docs/adr/missing.md"}],
+                    }
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-must-read-recall", "1.0", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["summary"]["mean_must_read_recall"] == 0.0
+    assert payload["data"]["results"][0]["missing_required_must_read"][0]["path"] == "docs/adr/missing.md"
+    assert payload["problems"][0]["code"] == "context_pack_benchmark_must_read_recall_failed"
 
 
 def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:

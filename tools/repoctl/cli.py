@@ -10,7 +10,7 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .context import build_context_bundle
 from .context_benchmark import compare_context_benchmarks, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compare_task_context_packs
+from .context_task_pack import build_task_context_pack, compare_task_context_packs, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
@@ -1445,6 +1445,42 @@ def cmd_context_pack_compare(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_pack_benchmark(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    target = require_repo_target(root, repo_id=args.repo_id)
+    fixture = Path(args.fixture)
+    if not fixture.is_absolute():
+        fixture = root / fixture
+    data, problems = run_task_context_pack_benchmark(
+        root,
+        target=target,
+        fixture=fixture,
+        budget_tokens=args.budget_tokens,
+        explain=args.explain,
+        min_must_read_recall=args.min_must_read_recall,
+    )
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context pack-benchmark",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "context_pack_benchmark_retrieval_only",
+                "message": "context pack benchmark measures source pack recall only; it does not validate generated answers or task scope",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        summary = data.get("summary", {}) if data else {}
+        print(f"context pack benchmark cases={data.get('case_count', 0) if data else 0} must_read_recall={summary.get('mean_must_read_recall', 0)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -2222,6 +2258,14 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_compare.add_argument("--require-warning-stability", action="store_true")
     context_pack_compare.add_argument("--json", action="store_true")
     context_pack_compare.set_defaults(func=cmd_context_pack_compare)
+    context_pack_benchmark = context_sub.add_parser("pack-benchmark")
+    context_pack_benchmark.add_argument("--fixture", default="tests/fixtures/context-pack-benchmark")
+    context_pack_benchmark.add_argument("--repo-id", required=True)
+    context_pack_benchmark.add_argument("--budget-tokens", type=int, default=5000)
+    context_pack_benchmark.add_argument("--explain", action="store_true")
+    context_pack_benchmark.add_argument("--min-must-read-recall", type=float)
+    context_pack_benchmark.add_argument("--json", action="store_true")
+    context_pack_benchmark.set_defaults(func=cmd_context_pack_benchmark)
 
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)

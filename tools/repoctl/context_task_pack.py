@@ -96,6 +96,57 @@ def compare_task_context_packs(
     }, problems
 
 
+def run_task_context_pack_benchmark(
+    root: Path,
+    *,
+    target: RepoTarget,
+    fixture: Path,
+    budget_tokens: int = 5000,
+    explain: bool = False,
+    min_must_read_recall: float | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    cases_path = fixture / "cases.json"
+    if not cases_path.is_file():
+        return {}, [Problem("error", "context_pack_benchmark_cases_missing", "context pack benchmark cases.json is missing", cases_path.as_posix())]
+    try:
+        data = json.loads(cases_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, [Problem("error", "context_pack_benchmark_cases_invalid_json", f"context pack benchmark cases.json is invalid: {exc}", cases_path.as_posix())]
+    cases = data.get("cases") if isinstance(data, dict) else None
+    if not isinstance(cases, list):
+        return {}, [Problem("error", "context_pack_benchmark_cases_invalid", "context pack benchmark cases must be a list", cases_path.as_posix())]
+
+    results: list[dict[str, Any]] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        task_id = str(case.get("task_id") or "")
+        if not task_id:
+            problems.append(Problem("error", "context_pack_benchmark_task_missing", "context pack benchmark case is missing task_id", str(case.get("id") or "")))
+            continue
+        pack, pack_problems, _meta = build_task_context_pack(root, target=target, task_id=task_id, budget_tokens=budget_tokens, explain=explain)
+        problems.extend(pack_problems)
+        result = _score_pack_case(case, pack, pack_problems)
+        results.append(result)
+
+    summary = _pack_benchmark_summary(results)
+    if min_must_read_recall is not None and float(summary.get("mean_must_read_recall") or 0.0) < min_must_read_recall:
+        problems.append(Problem("error", "context_pack_benchmark_must_read_recall_failed", "context pack benchmark must_read recall is below gate"))
+    payload = {
+        "schema": "repoctl.context.task_pack.benchmark",
+        "schema_version": 1,
+        "fixture": fixture.as_posix(),
+        "repository": target.to_dict(),
+        "case_count": len(results),
+        "results": results,
+        "summary": summary,
+        "gates": {"min_must_read_recall": min_must_read_recall},
+    }
+    payload["benchmark_digest"] = digest_data(payload)
+    return payload, problems
+
+
 def _task_seed_query(task: Task) -> str:
     parts = [
         str(task.frontmatter.get("title") or ""),
@@ -147,6 +198,73 @@ def _pack_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         "pack_digest": str(data.get("pack_digest") or ""),
         "task_id": str(task.get("id") or ""),
     }
+
+
+def _score_pack_case(case: dict[str, Any], pack: dict[str, Any], problems: list[Problem]) -> dict[str, Any]:
+    required = _expected_refs(case.get("required_must_read_refs"))
+    must_read_refs = _group_refs(pack, "must_read")
+    found = [ref for ref in required if _contains_expected_ref(must_read_refs, ref)]
+    warning_codes = [str(warning.get("code") or "") for warning in pack.get("warnings", []) if isinstance(warning, dict) and warning.get("code")]
+    return {
+        "id": str(case.get("id") or ""),
+        "task_id": str(case.get("task_id") or ""),
+        "metrics": {
+            "must_read_recall": _ratio(len(found), len(required)),
+            "required_must_read_count": len(required),
+            "warning_count": len(warning_codes),
+        },
+        "required_must_read_found": found,
+        "missing_required_must_read": [ref for ref in required if not _contains_expected_ref(must_read_refs, ref)],
+        "warning_codes": sorted(warning_codes),
+        "problem_codes": [problem.code for problem in problems],
+        "pack_digest": str(pack.get("pack_digest") or ""),
+    }
+
+
+def _pack_benchmark_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "mean_must_read_recall": _mean(result.get("metrics", {}).get("must_read_recall", 0.0) for result in results),
+        "required_must_read_count": sum(int(result.get("metrics", {}).get("required_must_read_count") or 0) for result in results),
+        "warning_count": sum(int(result.get("metrics", {}).get("warning_count") or 0) for result in results),
+    }
+
+
+def _expected_refs(value: Any) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    if not isinstance(value, list):
+        return refs
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        refs.append({"kind": str(item.get("kind") or ""), "path": str(item.get("path") or ""), "section": str(item.get("section") or "")})
+    return refs
+
+
+def _contains_expected_ref(haystack: list[dict[str, str]], needle: dict[str, str]) -> bool:
+    for item in haystack:
+        if str(item.get("path") or "") != str(needle.get("path") or ""):
+            continue
+        kind = str(needle.get("kind") or "")
+        if kind and str(item.get("kind") or "") != kind:
+            continue
+        section = str(needle.get("section") or "")
+        if section and str(item.get("section") or "") != section:
+            continue
+        return True
+    return False
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 1.0
+    return round(numerator / denominator, 6)
+
+
+def _mean(values: Any) -> float:
+    items = list(values)
+    if not items:
+        return 0.0
+    return round(sum(float(item) for item in items) / len(items), 6)
 
 
 def _group_count_delta(baseline: dict[str, Any], candidate: dict[str, Any], group: str) -> dict[str, int]:

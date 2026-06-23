@@ -1,0 +1,16 @@
+{
+  "schema": "repoctl.context.task_pack.benchmark.cases",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "CP-001",
+      "task_id": "T-20260624020202Z",
+      "required_must_read_refs": [
+        {
+          "kind": "document",
+          "path": "docs/adr/evidence-context-authority-v0.md"
+        }
+      ]
+    }
+  ]
+}
