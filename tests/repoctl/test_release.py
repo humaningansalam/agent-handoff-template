@@ -8,6 +8,7 @@ import tarfile
 from pathlib import Path
 
 from tools.repoctl.release import build_release_archive
+from tests.repoctl.test_meta_check import write_repometa
 
 
 def test_build_release_archive_uses_manifest_managed_paths(tmp_path: Path) -> None:
@@ -94,6 +95,65 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
         )
         assert result.returncode == 0, result.stderr
         assert expected in result.stdout
+
+
+def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
+    archive_path = build_release_archive(source_root, tmp_path / "dist")
+    extract_dir = tmp_path / "extract-field-gate"
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(extract_dir)
+    package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
+    (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
+    (package_root / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
+    (package_root / "repos").mkdir(exist_ok=True)
+    subprocess.run(["git", "init"], cwd=package_root / "repos", stdout=subprocess.DEVNULL, check=True)
+    write_repometa(package_root / "repos")
+
+    env = {**os.environ, "UV_CACHE_DIR": str(tmp_path / "uv-cache")}
+    materialize = subprocess.run(
+        ["./scripts/repoctl", "context", "benchmark-materialize", "--fixture", "tests/fixtures/context-benchmark", "--repo-id", "main", "--json"],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert materialize.returncode == 0, materialize.stderr
+    materialize_payload = json.loads(materialize.stdout)
+    assert materialize_payload["data"]["totals"]["created"] >= 10
+    assert materialize_payload["data"]["totals"]["conflict"] == 0
+
+    benchmark = subprocess.run(
+        [
+            "./scripts/repoctl",
+            "context",
+            "benchmark",
+            "--fixture",
+            "tests/fixtures/context-benchmark",
+            "--repo-id",
+            "main",
+            "--min-recall-at-5",
+            "0.85",
+            "--require-source-integrity",
+            "--require-fixture-corpus",
+            "--require-no-forbidden",
+            "--json",
+        ],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert benchmark.returncode == 0, benchmark.stderr
+    benchmark_payload = json.loads(benchmark.stdout)
+    assert benchmark_payload["data"]["question_count"] == 24
+    assert benchmark_payload["data"]["summary"]["mean_recall_at_5"] >= 0.85
+    assert benchmark_payload["problems"] == []
 
 
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:
