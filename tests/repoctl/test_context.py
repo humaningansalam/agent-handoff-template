@@ -1760,6 +1760,60 @@ def test_field_gate_compare_detects_gate_regression_and_digest_tamper(tmp_path: 
     assert tamper_payload["problems"][0]["code"] == "field_gate_artifact_digest_mismatch"
 
 
+def test_field_gate_cleanup_removes_only_recorded_created_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    artifact = tmp_path / ".repoctl-state/field-gates/release-candidate.json"
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", artifact.as_posix(), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    cleanup_count = sum(len(gate.get("cleanup", [])) for gate in payload["data"]["gates"])
+    assert cleanup_count == 17
+    assert (tmp_path / "repos/auth/flow.py").is_file()
+    assert (tmp_path / "docs/archive/tasks/T-20260624020202Z--pack-benchmark.md").is_file()
+
+    assert main(["field-gate", "cleanup", "--artifact", artifact.as_posix(), "--json"]) == 0
+    cleanup_payload = json.loads(capsys.readouterr().out)
+    assert cleanup_payload["data"]["removed_count"] == 17
+    assert not (tmp_path / "repos/auth/flow.py").exists()
+    assert not (tmp_path / "repos/auth").exists()
+    assert not (tmp_path / "docs/archive/tasks/T-20260624020202Z--pack-benchmark.md").exists()
+    assert (tmp_path / "docs/archive/tasks").is_dir()
+
+    assert main(["field-gate", "cleanup", "--artifact", artifact.as_posix(), "--json"]) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["data"]["removed_count"] == 0
+    assert second_payload["data"]["skipped_count"] == 17
+
+
+def test_field_gate_cleanup_refuses_changed_created_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    artifact = tmp_path / ".repoctl-state/field-gates/release-candidate.json"
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", artifact.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    (tmp_path / "repos/auth/flow.py").write_text("user changed file\n", encoding="utf-8")
+
+    assert main(["field-gate", "cleanup", "--artifact", artifact.as_posix(), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "field_gate_cleanup_digest_mismatch" and problem["path"] == "repos/auth/flow.py" for problem in payload["problems"])
+    assert (tmp_path / "repos/auth/flow.py").read_text(encoding="utf-8") == "user changed file\n"
+
+
 def test_context_pack_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

@@ -12,6 +12,43 @@ from tools.repoctl.release import build_release_archive
 from tests.repoctl.test_meta_check import write_repometa
 
 
+def _remove_empty_parents_for_test(path: Path, *, stop_at: Path) -> None:
+    current = path
+    while current != stop_at and current.is_dir():
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _remove_materialized_context_files_for_test(root: Path, materialize_data: dict) -> None:
+    repositories = materialize_data.get("repositories") if isinstance(materialize_data.get("repositories"), dict) else {}
+    for repo_id, result in repositories.items():
+        if not isinstance(result, dict):
+            continue
+        repo_root = root / "repos" if repo_id == "main" else root / "repos" / str(repo_id)
+        for rel in result.get("created", []) if isinstance(result.get("created"), list) else []:
+            if not isinstance(rel, str):
+                continue
+            path = repo_root / rel
+            if path.is_file():
+                path.unlink()
+                _remove_empty_parents_for_test(path.parent, stop_at=repo_root)
+
+
+def _remove_materialized_pack_files_for_test(root: Path, materialize_data: dict) -> None:
+    stop_at = root / "docs/archive/tasks"
+    created = materialize_data.get("created") if isinstance(materialize_data.get("created"), list) else []
+    for rel in created:
+        if not isinstance(rel, str):
+            continue
+        path = root / rel
+        if path.is_file():
+            path.unlink()
+            _remove_empty_parents_for_test(path.parent, stop_at=stop_at)
+
+
 def test_build_release_archive_uses_manifest_managed_paths(tmp_path: Path) -> None:
     root = tmp_path / "source"
     out = tmp_path / "dist"
@@ -83,6 +120,7 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
         (["./scripts/repoctl", "context", "--help"], "pack-benchmark-materialize"),
         (["./scripts/repoctl", "field-gate", "run", "--help"], "release-candidate"),
         (["./scripts/repoctl", "field-gate", "compare", "--help"], "--require-no-gate-regressions"),
+        (["./scripts/repoctl", "field-gate", "cleanup", "--help"], "--artifact"),
         (["./scripts/repoctl", "knowledge", "--help"], "render"),
         (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
     ]
@@ -197,6 +235,8 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert pack_benchmark_payload["data"]["case_count"] == 5
     assert pack_benchmark_payload["data"]["summary"]["mean_must_read_recall"] == 1.0
     assert pack_benchmark_payload["problems"] == []
+    _remove_materialized_context_files_for_test(package_root, materialize_payload["data"])
+    _remove_materialized_pack_files_for_test(package_root, pack_materialize_payload["data"])
 
     field_gate_output = ".repoctl-state/field-gates/release-candidate.json"
     field_gate = subprocess.run(
@@ -213,6 +253,8 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert field_gate_payload["data"]["failed_count"] == 0
     assert field_gate_payload["data"]["artifact"]["path"] == field_gate_output
     assert (package_root / field_gate_output).is_file()
+    cleanup_entry_count = sum(len(gate.get("cleanup", [])) for gate in field_gate_payload["data"]["gates"])
+    assert cleanup_entry_count >= 17
 
     field_gate_compare = subprocess.run(
         [
@@ -239,6 +281,21 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert field_gate_compare.returncode == 0, field_gate_compare.stderr
     field_gate_compare_payload = json.loads(field_gate_compare.stdout)
     assert field_gate_compare_payload["data"]["failed_count_delta"]["delta"] == 0
+
+    field_gate_cleanup = subprocess.run(
+        ["./scripts/repoctl", "field-gate", "cleanup", "--artifact", field_gate_output, "--json"],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert field_gate_cleanup.returncode == 0, field_gate_cleanup.stderr
+    field_gate_cleanup_payload = json.loads(field_gate_cleanup.stdout)
+    assert field_gate_cleanup_payload["data"]["removed_count"] == cleanup_entry_count
+    assert not (package_root / "repos/auth").exists()
+    assert (package_root / "docs/archive/tasks").is_dir()
 
     shutil.rmtree(package_root / "repos")
     (package_root / "repos/web").mkdir(parents=True)

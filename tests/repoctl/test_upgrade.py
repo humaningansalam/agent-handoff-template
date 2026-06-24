@@ -321,6 +321,7 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
         (["./scripts/repoctl", "context", "--help"], ["benchmark-materialize", "pack-benchmark-materialize", "pack-benchmark-compare"]),
         (["./scripts/repoctl", "field-gate", "run", "--help"], ["release-candidate"]),
         (["./scripts/repoctl", "field-gate", "compare", "--help"], ["--require-no-gate-regressions"]),
+        (["./scripts/repoctl", "field-gate", "cleanup", "--help"], ["--artifact"]),
         (["./scripts/repoctl", "knowledge", "--help"], ["render"]),
         (["./scripts/repoctl", "knowledge", "render", "--help"], ["--check"]),
     ]

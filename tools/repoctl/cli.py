@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -264,6 +265,62 @@ def _problems_from_dicts(items: list[dict[str, str]]) -> list[Problem]:
     ]
 
 
+def _file_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _cleanup_entry(root: Path, path: Path, *, stop_at: Path) -> dict[str, str] | None:
+    if not path.is_file():
+        return None
+    try:
+        root_resolved = root.resolve()
+        path.resolve().relative_to(root_resolved)
+        stop_at.resolve().relative_to(root_resolved)
+        rel = path.relative_to(root).as_posix()
+        stop_rel = stop_at.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    return {
+        "kind": "created_file",
+        "path": rel,
+        "content_sha256": _file_digest(path),
+        "stop_at": stop_rel,
+    }
+
+
+def _context_materialize_cleanup_entries(root: Path, data: dict[str, Any]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    repositories = data.get("repositories") if isinstance(data.get("repositories"), dict) else {}
+    for repo_id, result in sorted(repositories.items()):
+        if not isinstance(result, dict):
+            continue
+        try:
+            target = require_repo_target(root, repo_id=str(repo_id))
+        except RepoctlError:
+            continue
+        created = result.get("created") if isinstance(result.get("created"), list) else []
+        for rel in created:
+            if not isinstance(rel, str) or not rel:
+                continue
+            entry = _cleanup_entry(root, target.root_path / rel, stop_at=target.root_path)
+            if entry is not None:
+                entries.append(entry)
+    return entries
+
+
+def _pack_materialize_cleanup_entries(root: Path, data: dict[str, Any]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    created = data.get("created") if isinstance(data.get("created"), list) else []
+    stop_at = root / "docs/archive/tasks"
+    for rel in created:
+        if not isinstance(rel, str) or not rel:
+            continue
+        entry = _cleanup_entry(root, root / rel, stop_at=stop_at)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
 def _release_candidate_gate_result(
     *,
     name: str,
@@ -273,6 +330,7 @@ def _release_candidate_gate_result(
     problems: list[Problem],
     warnings: list[dict[str, str]] | None = None,
     summary: dict[str, Any] | None = None,
+    cleanup: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -280,6 +338,7 @@ def _release_candidate_gate_result(
         "ok": not _has_errors(problems),
         "mutates_workspace": mutates_workspace,
         "summary": summary or {},
+        "cleanup": cleanup or [],
         "data_digest": digest_data(data) if data else "",
         "problems": _problem_dicts(problems),
         "warnings": warnings or [],
@@ -367,6 +426,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 problems=context_materialize_problems,
                 warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
                 summary=context_materialize.get("totals", {}) if context_materialize else {},
+                cleanup=_context_materialize_cleanup_entries(root, context_materialize),
             )
         )
         if not _has_errors(context_materialize_problems):
@@ -407,6 +467,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                     problems=pack_materialize_problems,
                     warnings=[{"code": "context_pack_benchmark_materialize_mutates_workspace", "message": "context pack benchmark materialize writes archived fixture tasks for controlled startup-pack tests"}],
                     summary=pack_materialize.get("totals", {}) if pack_materialize else {},
+                    cleanup=_pack_materialize_cleanup_entries(root, pack_materialize),
                 )
             )
         else:
@@ -441,6 +502,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 problems=multi_materialize_problems,
                 warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
                 summary=multi_materialize.get("totals", {}) if multi_materialize else {},
+                cleanup=_context_materialize_cleanup_entries(root, multi_materialize),
             )
         )
         if not _has_errors(multi_materialize_problems):
@@ -501,7 +563,7 @@ def _release_candidate_payload(*, repo_id: str, gates: list[dict[str, Any]]) -> 
     return data
 
 
-def _read_field_gate_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
+def _read_field_gate_artifact(path: Path, problems: list[Problem], *, label: str, allow_failed: bool = False) -> dict[str, Any]:
     if not path.is_file():
         problems.append(Problem("error", "field_gate_artifact_missing", f"{label} field gate artifact is missing", path.as_posix()))
         return {}
@@ -513,7 +575,7 @@ def _read_field_gate_artifact(path: Path, problems: list[Problem], *, label: str
     if not isinstance(payload, dict):
         problems.append(Problem("error", "field_gate_artifact_invalid", f"{label} field gate artifact must be an object", path.as_posix()))
         return {}
-    if str(payload.get("command") or "") == "field-gate run" and payload.get("ok") is False:
+    if str(payload.get("command") or "") == "field-gate run" and payload.get("ok") is False and not allow_failed:
         problems.append(Problem("error", "field_gate_artifact_failed", f"{label} field gate artifact was produced by a failed command", path.as_posix()))
         return {}
     data = payload.get("data") if str(payload.get("command") or "") == "field-gate run" else payload
@@ -600,6 +662,93 @@ def _compare_field_gate_runs(
     }
     data["compare_digest"] = digest_data(data)
     return data, problems
+
+
+def _cleanup_field_gate_run(root: Path, *, artifact_path: Path) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    artifact = _read_field_gate_artifact(artifact_path, problems, label="cleanup", allow_failed=True)
+    if not artifact:
+        return {}, problems
+    cleanup_entries = _field_gate_cleanup_entries(artifact)
+    removed: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for entry in cleanup_entries:
+        kind = str(entry.get("kind") or "")
+        rel = str(entry.get("path") or "")
+        expected_digest = str(entry.get("content_sha256") or "")
+        stop_rel = str(entry.get("stop_at") or "")
+        if kind != "created_file" or not rel or not expected_digest.startswith("sha256:") or not stop_rel:
+            problems.append(Problem("error", "field_gate_cleanup_entry_invalid", "field gate cleanup entry is invalid", rel or artifact_path.as_posix()))
+            continue
+        path = root / rel
+        stop_at = root / stop_rel
+        try:
+            path.resolve().relative_to(root.resolve())
+            stop_at.resolve().relative_to(root.resolve())
+        except ValueError:
+            problems.append(Problem("error", "field_gate_cleanup_path_outside_workspace", "field gate cleanup path must stay inside workspace", rel))
+            continue
+        if not path.exists():
+            skipped.append({"path": rel, "reason": "missing"})
+            continue
+        if not path.is_file():
+            problems.append(Problem("error", "field_gate_cleanup_not_file", "field gate cleanup path is not a file", rel))
+            continue
+        actual_digest = _file_digest(path)
+        if actual_digest != expected_digest:
+            problems.append(Problem("error", "field_gate_cleanup_digest_mismatch", "field gate cleanup file digest no longer matches artifact", rel))
+            continue
+        path.unlink()
+        removed.append({"path": rel, "content_sha256": expected_digest})
+        _remove_empty_parents(path.parent, stop_at=stop_at, root=root)
+    data = {
+        "schema": "repoctl.field_gate.cleanup",
+        "schema_version": 1,
+        "artifact": _field_gate_identity(artifact_path, artifact),
+        "cleanup_entry_count": len(cleanup_entries),
+        "removed_count": len(removed),
+        "skipped_count": len(skipped),
+        "removed": removed,
+        "skipped": skipped,
+    }
+    data["cleanup_digest"] = digest_data(data)
+    return data, problems
+
+
+def _field_gate_cleanup_entries(data: dict[str, Any]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    gates = data.get("gates") if isinstance(data.get("gates"), list) else []
+    for gate in gates:
+        if not isinstance(gate, dict):
+            continue
+        cleanup = gate.get("cleanup") if isinstance(gate.get("cleanup"), list) else []
+        for entry in cleanup:
+            if not isinstance(entry, dict):
+                continue
+            key = (str(entry.get("kind") or ""), str(entry.get("path") or ""), str(entry.get("content_sha256") or ""), str(entry.get("stop_at") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({str(k): str(v) for k, v in entry.items() if isinstance(k, str)})
+    return entries
+
+
+def _remove_empty_parents(path: Path, *, stop_at: Path, root: Path) -> None:
+    try:
+        stop = stop_at.resolve()
+        current = path.resolve()
+        root_resolved = root.resolve()
+        current.relative_to(root_resolved)
+        stop.relative_to(root_resolved)
+    except ValueError:
+        return
+    while current != stop and current != root_resolved:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
 
 
 def _field_gates_by_name(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -809,6 +958,25 @@ def cmd_field_gate_compare(args: argparse.Namespace) -> int:
     else:
         delta = data.get("failed_count_delta", {}) if data else {}
         print(f"field gate compare failed_count_delta={delta.get('delta', 0)} missing={len(data.get('missing_gates', [])) if data else 0} new={len(data.get('new_gates', [])) if data else 0}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
+def cmd_field_gate_cleanup(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    data, problems = _cleanup_field_gate_run(root, artifact_path=Path(args.artifact))
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "field-gate cleanup",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"field gate cleanup removed={data.get('removed_count', 0) if data else 0} skipped={data.get('skipped_count', 0) if data else 0}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -2694,6 +2862,10 @@ def build_parser() -> argparse.ArgumentParser:
     field_gate_compare.add_argument("--require-no-gate-regressions", action="store_true")
     field_gate_compare.add_argument("--json", action="store_true")
     field_gate_compare.set_defaults(func=cmd_field_gate_compare)
+    field_gate_cleanup = field_gate_sub.add_parser("cleanup")
+    field_gate_cleanup.add_argument("--artifact", required=True)
+    field_gate_cleanup.add_argument("--json", action="store_true")
+    field_gate_cleanup.set_defaults(func=cmd_field_gate_cleanup)
 
     repo = sub.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True, parser_class=RepoctlArgumentParser)
