@@ -68,6 +68,34 @@ def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path
     assert payload["command"] == "repo.list"
 
 
+def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
+    archive_path = build_release_archive(source_root, tmp_path / "dist")
+    extract_dir = tmp_path / "extract-context"
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(extract_dir)
+    package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
+
+    checks = [
+        (["./scripts/repoctl", "context", "--help"], "pack-benchmark-compare"),
+        (["./scripts/repoctl", "knowledge", "--help"], "render"),
+        (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
+    ]
+    for command, expected in checks:
+        result = subprocess.run(
+            command,
+            cwd=package_root,
+            env={**os.environ, "UV_CACHE_DIR": str(tmp_path / "uv-cache")},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert expected in result.stdout
+
+
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:
     source_root = Path(__file__).resolve().parents[2]
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
