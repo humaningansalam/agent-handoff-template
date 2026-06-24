@@ -101,7 +101,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
 - `repoctl field-gate run release-candidate` is an explicit mutating runner for release-candidate field tests; it records per-gate summaries and digests without parsing human output, checks knowledge source drift, and includes multi-repo isolation gates when `web` and `api` repositories are configured.
 - `repoctl field-gate cleanup` removes only artifact-recorded `created_file` entries whose current digest matches the recorded digest, then prunes empty parents only up to the recorded boundary.
-- `repoctl field-gate compare` validates field-gate artifact digests before comparing gate sets, failed counts, per-gate status, and numeric summary deltas.
+- `repoctl field-gate compare` validates field-gate artifact digests before comparing gate sets, failed counts, per-gate status, and numeric summary deltas; valid failed run artifacts remain comparable for regression triage.
 - `repoctl context benchmark-materialize` is the explicit mutating setup step for controlled benchmark fixtures; `context benchmark` itself remains read-only.
 - `repoctl context pack-benchmark-materialize` is the explicit mutating setup step for archived fixture tasks; `context pack-benchmark` itself remains read-only.
 - `repoctl context pack-benchmark` and `pack-benchmark-compare` are retrieval/packing gates for field tests; they measure required source recall and do not validate task scope or generated answers.

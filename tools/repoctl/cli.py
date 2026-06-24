@@ -606,8 +606,8 @@ def _compare_field_gate_runs(
     require_no_gate_regressions: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     problems: list[Problem] = []
-    baseline = _read_field_gate_artifact(baseline_path, problems, label="baseline")
-    candidate = _read_field_gate_artifact(candidate_path, problems, label="candidate")
+    baseline = _read_field_gate_artifact(baseline_path, problems, label="baseline", allow_failed=True)
+    candidate = _read_field_gate_artifact(candidate_path, problems, label="candidate", allow_failed=True)
     if not baseline or not candidate:
         return {}, problems
     baseline_gates = _field_gates_by_name(baseline)

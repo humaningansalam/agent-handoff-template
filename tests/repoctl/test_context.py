@@ -1783,6 +1783,48 @@ def test_field_gate_compare_detects_gate_regression_and_digest_tamper(tmp_path: 
     assert tamper_payload["problems"][0]["code"] == "field_gate_artifact_digest_mismatch"
 
 
+def test_field_gate_compare_accepts_failed_run_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    baseline = tmp_path / ".repoctl-state/field-gates/baseline.json"
+    candidate = tmp_path / ".repoctl-state/field-gates/candidate.json"
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["field-gate", "cleanup", "--artifact", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    (tmp_path / "docs/adr/evidence-context-authority-v0.md").write_text("# Drifted\n\n## Decision\n\nChanged after approval.\n", encoding="utf-8")
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", candidate.as_posix(), "--json"]) == 1
+    failed_run_payload = json.loads(capsys.readouterr().out)
+    assert failed_run_payload["ok"] is False
+    assert candidate.is_file()
+
+    assert main(["field-gate", "compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-failed-count-increase", "0", "--require-same-gates", "--require-no-gate-regressions", "--json"]) == 1
+    compare_payload = json.loads(capsys.readouterr().out)
+    codes = [problem["code"] for problem in compare_payload["problems"]]
+    assert "field_gate_artifact_failed" not in codes
+    assert "field_gate_failed_count_regressed" in codes
+    assert "field_gate_gate_regressed" in codes
+    assert compare_payload["data"]["failed_count_delta"]["baseline"] == 0
+    assert compare_payload["data"]["failed_count_delta"]["candidate"] >= 1
+    assert compare_payload["data"]["failed_count_delta"]["delta"] >= 1
+    knowledge_delta = next(delta for delta in compare_payload["data"]["gate_deltas"] if delta["name"] == "knowledge_check")
+    assert knowledge_delta["ok"]["regressed"] is True
+    assert knowledge_delta["problem_count"]["candidate"] == 1
+
+
 def test_field_gate_cleanup_removes_only_recorded_created_files(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
