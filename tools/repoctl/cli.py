@@ -15,7 +15,7 @@ from .context_task_pack import build_task_context_pack, compare_task_context_pac
 from .graph import build_graph, query_graph
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
@@ -2525,12 +2525,14 @@ def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     if args.all_stale:
-        data, problems = refresh_stale_knowledge_candidates(root, repo_id=args.repo_id)
+        data, problems = refresh_stale_knowledge_candidates(root, repo_id=args.repo_id, include_records=args.include_records)
+    elif args.record_id:
+        data, problems = refresh_knowledge_record_candidate(root, repo_id=args.repo_id, record_id=args.record_id)
     elif args.candidate_id:
         data, problems = refresh_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
     else:
         data = {}
-        problems = [Problem("error", "knowledge_candidate_refresh_target_required", "provide a candidate id or --all-stale")]
+        problems = [Problem("error", "knowledge_candidate_refresh_target_required", "provide a candidate id, --record-id, or --all-stale")]
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge candidate refresh",
@@ -2548,6 +2550,9 @@ def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
     else:
         if args.all_stale:
             print(f"knowledge candidate refresh repo_id={args.repo_id} refreshed={data.get('refreshed_count', 0)} skipped={data.get('skipped_count', 0)}")
+        elif args.record_id:
+            candidate = data.get("candidate", {}) if data else {}
+            print(f"knowledge candidate refresh record={args.record_id} new={candidate.get('id', '')}")
         else:
             candidate = data.get("candidate", {}) if data else {}
             print(f"knowledge candidate refresh old={args.candidate_id} new={candidate.get('id', '')}")
@@ -3205,6 +3210,8 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_refresh = knowledge_candidate_sub.add_parser("refresh")
     knowledge_candidate_refresh.add_argument("candidate_id", nargs="?")
     knowledge_candidate_refresh.add_argument("--all-stale", action="store_true")
+    knowledge_candidate_refresh.add_argument("--include-records", action="store_true")
+    knowledge_candidate_refresh.add_argument("--record-id")
     knowledge_candidate_refresh.add_argument("--repo-id", required=True)
     knowledge_candidate_refresh.add_argument("--json", action="store_true")
     knowledge_candidate_refresh.set_defaults(func=cmd_knowledge_candidate_refresh)

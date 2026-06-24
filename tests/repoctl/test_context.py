@@ -1744,6 +1744,74 @@ def test_release_candidate_field_gate_fails_on_stale_reviewed_knowledge(tmp_path
     assert any(problem["code"] == "field_gate_failed" and problem["message"].endswith("knowledge_check") for problem in payload["problems"])
 
 
+def test_knowledge_refresh_all_stale_can_create_candidate_from_stale_record(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    approved_payload = json.loads(capsys.readouterr().out)
+    record_id = approved_payload["data"]["record"]["id"]
+    record_path = tmp_path / approved_payload["data"]["record_path"]
+    original_record_text = record_path.read_text(encoding="utf-8")
+    source_path = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source_path.write_text("# ADR: Evidence Context Authority v0\n\n## Decision\n\nChanged after approval and needs review.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--include-records", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["refreshed_candidates"] == []
+    assert payload["data"]["refreshed_records"][0]["record_id"] == record_id
+    new_candidate_id = payload["data"]["refreshed_records"][0]["new_candidate_id"]
+    assert new_candidate_id.startswith("KC-")
+    assert record_path.read_text(encoding="utf-8") == original_record_text
+    new_candidate_path = tmp_path / ".repoctl-state/knowledge/candidates/main" / f"{new_candidate_id}.json"
+    new_candidate = json.loads(new_candidate_path.read_text(encoding="utf-8"))
+    assert new_candidate["authoritative"] is False
+    assert new_candidate["source_refs"][0]["content_sha256"] != approved_payload["data"]["record"]["source_refs"][0]["content_sha256"]
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["event_checks"]["error_count"] == 0
+    assert check_payload["data"]["record_checks"]["problem_codes"] == {"knowledge_source_digest_drift": 1}
+
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--include-records", "--repo-id", "main", "--json"]) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["data"]["refreshed_records"] == []
+    assert second_payload["data"]["skipped_records"][0] == {"record_id": record_id, "reason": "already_refreshed"}
+
+
+def test_knowledge_refresh_all_stale_reports_missing_record_source(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    (tmp_path / "docs/adr/evidence-context-authority-v0.md").unlink()
+
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--include-records", "--repo-id", "main", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["refreshed_records"] == []
+    assert payload["data"]["skipped_records"][0] == {
+        "record_id": record_id,
+        "reason": "blocked_by_non_drift_errors",
+        "problem_codes": {"knowledge_source_missing": 1},
+    }
+    assert payload["problems"][0]["code"] == "knowledge_source_missing"
+
+
 def test_release_candidate_field_gate_runner_includes_multirepo_isolation_when_configured(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

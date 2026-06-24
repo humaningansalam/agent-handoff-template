@@ -407,49 +407,131 @@ def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
     }, []
 
 
-def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
+def refresh_knowledge_record_candidate(root: Path, *, repo_id: str, record_id: str) -> tuple[dict[str, Any], list[Problem]]:
+    record_data, problems = show_knowledge_record(root, repo_id=repo_id, record_id=record_id)
+    if problems:
+        return {}, problems
+    record = record_data["record"]
+    if not _source_digest_problems(root, record, record_id=record_id):
+        return {}, [Problem("error", "knowledge_record_refresh_not_stale", "knowledge record is not stale", record_id)]
+    source_path = _refresh_source_path(record)
+    if not source_path:
+        return {}, [Problem("error", "knowledge_record_refresh_source_missing", "record has no refreshable document source", record_id)]
+    kind = str(record.get("kind") or "")
+    refreshed_data, refresh_problems = build_knowledge_candidate(root, source=Path(source_path), repo_id=repo_id, kind=kind)
+    if refresh_problems:
+        return {}, refresh_problems
+
+    new_candidate = refreshed_data["candidate"]
+    event = {
+        "schema": "repoctl.knowledge.event",
+        "schema_version": 1,
+        "id": _unique_event_id(root, "refreshed-record-candidate", record_id),
+        "type": "refreshed_record_candidate",
+        "repo_id": repo_id,
+        "record_id": record_id,
+        "record_digest": record.get("record_digest", ""),
+        "new_candidate_id": new_candidate.get("id", ""),
+        "new_candidate_digest": new_candidate.get("candidate_digest", ""),
+    }
+    event["event_digest"] = digest_data(event)
+    event_path = _event_dir(root) / f"{event['id']}.json"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {
+        "candidate": new_candidate,
+        "path": refreshed_data["path"],
+        "refreshed_from_record": record_id,
+        "event": event,
+        "event_path": event_path.relative_to(root).as_posix(),
+    }, []
+
+
+def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_records: bool = False) -> tuple[dict[str, Any], list[Problem]]:
     directory = _candidate_dir(root, repo_id)
     candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
     refreshed_before = _refreshed_candidate_ids(root, repo_id=repo_id)
-    refreshed: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
+    review_states = _candidate_review_states(root, repo_id=repo_id)
+    refreshed_candidates: list[dict[str, Any]] = []
+    skipped_candidates: list[dict[str, Any]] = []
     problems: list[Problem] = []
     for candidate in candidates:
         candidate_id = str(candidate.get("id") or "")
-        quality_problems = _candidate_quality_problems(root, candidate)
-        has_drift = any(problem.code == "knowledge_source_digest_drift" for problem in quality_problems)
-        hard_errors = [problem for problem in quality_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
-        if not has_drift:
-            skipped.append({"candidate_id": candidate_id, "reason": "not_stale"})
-            continue
         if candidate_id in refreshed_before:
-            skipped.append({"candidate_id": candidate_id, "reason": "already_refreshed"})
+            skipped_candidates.append({"candidate_id": candidate_id, "reason": "already_refreshed"})
+            continue
+        review_state = review_states.get(candidate_id, "pending")
+        if review_state != "pending":
+            skipped_candidates.append({"candidate_id": candidate_id, "reason": "not_pending", "review_state": review_state})
+            continue
+        quality_problems = _candidate_quality_problems(root, candidate)
+        has_source_problem = any(problem.code in {"knowledge_source_digest_drift", "knowledge_source_missing", "knowledge_source_refs_missing"} for problem in quality_problems)
+        hard_errors = [problem for problem in quality_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
+        if not has_source_problem:
+            skipped_candidates.append({"candidate_id": candidate_id, "reason": "not_stale"})
             continue
         if hard_errors:
-            skipped.append({"candidate_id": candidate_id, "reason": "blocked_by_non_drift_errors"})
+            skipped_candidates.append({"candidate_id": candidate_id, "reason": "blocked_by_non_drift_errors", "problem_codes": _problem_code_counts(hard_errors)})
             problems.extend(hard_errors)
             continue
         refreshed_data, refresh_problems = refresh_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
         if refresh_problems:
-            skipped.append({"candidate_id": candidate_id, "reason": "refresh_failed"})
+            skipped_candidates.append({"candidate_id": candidate_id, "reason": "refresh_failed", "problem_codes": _problem_code_counts(refresh_problems)})
             problems.extend(refresh_problems)
             continue
-        refreshed.append(
+        refreshed_candidates.append(
             {
                 "candidate_id": candidate_id,
                 "new_candidate_id": refreshed_data["candidate"].get("id", ""),
                 "event_id": refreshed_data["event"].get("id", ""),
             }
         )
+    refreshed_records: list[dict[str, Any]] = []
+    skipped_records: list[dict[str, Any]] = []
+    if include_records:
+        refreshed_record_ids = _refreshed_record_ids(root, repo_id=repo_id)
+        records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+        for record in records:
+            record_id = str(record.get("id") or "")
+            record_problems = _source_digest_problems(root, record, record_id=record_id)
+            has_source_problem = any(problem.code in {"knowledge_source_digest_drift", "knowledge_source_missing", "knowledge_source_refs_missing"} for problem in record_problems)
+            hard_errors = [problem for problem in record_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
+            if not has_source_problem:
+                skipped_records.append({"record_id": record_id, "reason": "not_stale"})
+                continue
+            if record_id in refreshed_record_ids:
+                skipped_records.append({"record_id": record_id, "reason": "already_refreshed"})
+                continue
+            if hard_errors:
+                skipped_records.append({"record_id": record_id, "reason": "blocked_by_non_drift_errors", "problem_codes": _problem_code_counts(hard_errors)})
+                problems.extend(hard_errors)
+                continue
+            refreshed_data, refresh_problems = refresh_knowledge_record_candidate(root, repo_id=repo_id, record_id=record_id)
+            if refresh_problems:
+                skipped_records.append({"record_id": record_id, "reason": "refresh_failed", "problem_codes": _problem_code_counts(refresh_problems)})
+                problems.extend(refresh_problems)
+                continue
+            refreshed_records.append(
+                {
+                    "record_id": record_id,
+                    "new_candidate_id": refreshed_data["candidate"].get("id", ""),
+                    "event_id": refreshed_data["event"].get("id", ""),
+                }
+            )
     return {
         "schema": "repoctl.knowledge.candidate_refresh_all_stale",
         "schema_version": 1,
         "repo_id": repo_id,
+        "include_records": include_records,
         "candidate_count": len(candidates),
-        "refreshed_count": len(refreshed),
-        "skipped_count": len(skipped),
-        "refreshed": refreshed,
-        "skipped": skipped,
+        "refreshed_count": len(refreshed_candidates) + len(refreshed_records),
+        "skipped_count": len(skipped_candidates) + len(skipped_records),
+        "refreshed": refreshed_candidates,
+        "skipped": skipped_candidates,
+        "refreshed_candidates": refreshed_candidates,
+        "skipped_candidates": skipped_candidates,
+        "refreshed_records": refreshed_records,
+        "skipped_records": skipped_records,
     }, problems
 
 
@@ -1031,6 +1113,16 @@ def _refreshed_candidate_ids(root: Path, *, repo_id: str) -> set[str]:
     return refreshed
 
 
+def _refreshed_record_ids(root: Path, *, repo_id: str) -> set[str]:
+    refreshed: set[str] = set()
+    for event in _load_events(root, repo_id=repo_id):
+        if event.get("type") == "refreshed_record_candidate":
+            record_id = str(event.get("record_id") or "")
+            if record_id:
+                refreshed.add(record_id)
+    return refreshed
+
+
 def _validate_supersedes(root: Path, *, repo_id: str, supersedes: list[str]) -> list[Problem]:
     problems: list[Problem] = []
     records = {str(record.get("id") or ""): record for record in _load_records(root)}
@@ -1117,6 +1209,14 @@ def event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str
                 problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge superseded event digest does not match replacement record", superseded_by))
         elif event_type in {"rejected_candidate", "refreshed_candidate"}:
             continue
+        elif event_type == "refreshed_record_candidate":
+            record_id = str(event.get("record_id") or "")
+            record = by_id.get(record_id)
+            if record is None:
+                problems.append(Problem("error", "knowledge_event_record_missing", "knowledge refreshed-record event references a missing record", record_id or event_id))
+                continue
+            if str(event.get("record_digest") or "") != str(record.get("record_digest") or ""):
+                problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge refreshed-record event digest does not match record", record_id))
         else:
             problems.append(Problem("error", "knowledge_event_type_unknown", "knowledge event type is unknown", event_id))
     return problems
