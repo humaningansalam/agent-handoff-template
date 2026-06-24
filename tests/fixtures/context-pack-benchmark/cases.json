@@ -21,6 +21,40 @@
           "path": "docs/contracts/repoctl-module-boundaries.md"
         }
       ]
+    },
+    {
+      "id": "CP-003",
+      "task_id": "T-20260624040404Z",
+      "required_must_read_refs": [
+        {
+          "kind": "document",
+          "path": "docs/adr/repoctl-graph-v0.md"
+        }
+      ]
+    },
+    {
+      "id": "CP-004",
+      "task_id": "T-20260624050505Z",
+      "required_must_read_refs": [
+        {
+          "kind": "document",
+          "path": "docs/contracts/repoctl-module-boundaries.md"
+        },
+        {
+          "kind": "document",
+          "path": "docs/adr/evidence-context-authority-v0.md"
+        }
+      ]
+    },
+    {
+      "id": "CP-005",
+      "task_id": "T-20260624060606Z",
+      "required_must_read_refs": [
+        {
+          "kind": "document",
+          "path": "AGENTS.md"
+        }
+      ]
     }
   ]
 }

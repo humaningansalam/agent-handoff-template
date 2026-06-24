@@ -155,6 +155,127 @@ Preserve repoctl module boundaries while preparing context packs.
 """,
         encoding="utf-8",
     )
+    graph_task_path = root / "docs/tasks/T-20260624040404Z--pack-benchmark-graph.md"
+    graph_task_path.write_text(
+        """---
+id: T-20260624040404Z
+title: "Benchmark Graph authority startup context"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260624T040404Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260624040404Z - Benchmark Graph authority startup context
+
+## Context Docs
+
+- `docs/adr/repoctl-graph-v0.md`
+
+## Discovery
+
+- Candidate query: graph derived evidence snapshot
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Preserve Graph as a read-only derived evidence snapshot.
+
+## Handoff
+
+- Next exact step: inspect Graph authority decision.
+- First file to open: `docs/adr/repoctl-graph-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260624040404Z --repo-id main --json`
+- Done when: Graph authority source refs are packed.
+""",
+        encoding="utf-8",
+    )
+    future_layer_task_path = root / "docs/tasks/T-20260624050505Z--pack-benchmark-future-layer.md"
+    future_layer_task_path.write_text(
+        """---
+id: T-20260624050505Z
+title: "Benchmark future layer boundaries"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260624T050505Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260624050505Z - Benchmark future layer boundaries
+
+## Context Docs
+
+- `docs/contracts/repoctl-module-boundaries.md`
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: future layer rules context authority
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Keep context and knowledge from replacing source authorities.
+
+## Handoff
+
+- Next exact step: inspect future layer rules.
+- First file to open: `docs/contracts/repoctl-module-boundaries.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260624050505Z --repo-id main --json`
+- Done when: future layer boundary refs are packed.
+""",
+        encoding="utf-8",
+    )
+    workspace_contract_task_path = root / "docs/tasks/T-20260624060606Z--pack-benchmark-workspace-contract.md"
+    workspace_contract_task_path.write_text(
+        """---
+id: T-20260624060606Z
+title: "Benchmark workspace contract startup context"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260624T060606Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260624060606Z - Benchmark workspace contract startup context
+
+## Context Docs
+
+- `AGENTS.md`
+
+## Discovery
+
+- Candidate query: workspace contract selected product repo boundary
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Follow workspace contract and selected product repository boundary.
+
+## Handoff
+
+- Next exact step: inspect workspace contract.
+- First file to open: `AGENTS.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260624060606Z --repo-id main --json`
+- Done when: workspace contract source refs are packed.
+""",
+        encoding="utf-8",
+    )
 
 
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1414,14 +1535,19 @@ def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, m
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "context pack-benchmark"
-    assert payload["data"]["case_count"] == 2
+    assert payload["data"]["case_count"] == 5
     assert payload["data"]["summary"]["mean_must_read_recall"] == 1.0
     found_paths = {
         ref["path"]
         for result in payload["data"]["results"]
         for ref in result["required_must_read_found"]
     }
-    assert found_paths == {"docs/adr/evidence-context-authority-v0.md", "docs/contracts/repoctl-module-boundaries.md"}
+    assert found_paths == {
+        "AGENTS.md",
+        "docs/adr/evidence-context-authority-v0.md",
+        "docs/adr/repoctl-graph-v0.md",
+        "docs/contracts/repoctl-module-boundaries.md",
+    }
     assert payload["data"]["gates"]["min_must_read_recall"] == 1.0
     assert payload["warnings"][0]["code"] == "context_pack_benchmark_retrieval_only"
 
