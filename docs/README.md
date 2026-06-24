@@ -65,6 +65,8 @@ This directory contains the live task registry, task files, workflows, and archi
 - List candidates with check summaries: `./scripts/repoctl knowledge candidate list --repo-id main --with-checks --json`
 - Refresh a stale candidate without mutating it: `./scripts/repoctl knowledge candidate refresh KC-... --repo-id main --json`
 - Refresh all stale candidates non-destructively: `./scripts/repoctl knowledge candidate refresh --all-stale --repo-id main --json`
+- Refresh stale reviewed records into review-only candidates: `./scripts/repoctl knowledge candidate refresh --all-stale --include-records --repo-id main --json`
+- Refresh one stale reviewed record into a review-only candidate: `./scripts/repoctl knowledge candidate refresh --record-id K-... --repo-id main --json`
 - Show knowledge workflow status and check summaries: `./scripts/repoctl knowledge status --repo-id main --json`
 - List append-only knowledge events: `./scripts/repoctl knowledge event list --repo-id main --json`
 - Show one knowledge event: `./scripts/repoctl knowledge event show E-... --repo-id main --json`
@@ -108,6 +110,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
 - `repoctl knowledge candidate build --from-pack` uses the pack only to select current authority source refs; the pack artifact itself does not become a canonical knowledge source.
 - `repoctl knowledge candidate refresh` creates a new candidate plus an event; it does not edit the stale candidate in place.
+- `repoctl knowledge candidate refresh --include-records` turns stale reviewed records into non-authoritative candidates with original-record provenance; approval supersedes the original record instead of editing it.
 - `repoctl knowledge candidate list` and `knowledge status` derive candidate review state from append-only events.
 - `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale and superseded records by default.
 - `repoctl knowledge render` writes ignored non-authoritative pages under `docs/knowledge/generated/` for `main` and `docs/knowledge/generated/<repo-id>/` for other repo IDs; `knowledge render --check` verifies those pages are current without rewriting them.

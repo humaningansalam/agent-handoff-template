@@ -240,7 +240,9 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     record_problem_codes: dict[str, int] = {}
     record_problems: list[Problem] = []
     for record in records:
-        record_problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        if status not in {"superseded", "deprecated"}:
+            record_problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
     record_problems.extend(_supersession_problems(records))
     record_problems.extend(event_integrity_problems(root, repo_id=repo_id, records=records))
     for problem in record_problems:
@@ -418,7 +420,26 @@ def refresh_knowledge_record_candidate(root: Path, *, repo_id: str, record_id: s
     if not source_path:
         return {}, [Problem("error", "knowledge_record_refresh_source_missing", "record has no refreshable document source", record_id)]
     kind = str(record.get("kind") or "")
-    refreshed_data, refresh_problems = build_knowledge_candidate(root, source=Path(source_path), repo_id=repo_id, kind=kind)
+    chunks = chunk_markdown_file(root, root / source_path)
+    if not chunks:
+        return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", source_path)]
+    refreshed_data, refresh_problems = _write_candidate_from_chunk(
+        root,
+        repo_id=repo_id,
+        kind=kind,
+        primary=_primary_chunk(chunks, kind),
+        derived_from={
+            "kind": "knowledge_record",
+            "record_id": record_id,
+            "record_digest": record.get("record_digest", ""),
+        },
+        checklist=[
+            "refreshed source refs resolve to current content digests",
+            "candidate should replace the stale reviewed record only after explicit approval",
+            "approval should supersede the original reviewed record instead of editing it",
+            "candidate should not replace task, Board, Graph, or .repometa authority",
+        ],
+    )
     if refresh_problems:
         return {}, refresh_problems
 
@@ -544,7 +565,7 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
     quality_problems = [problem for problem in quality_results if problem.severity == "error"]
     if quality_problems:
         return {}, quality_problems
-    supersedes = supersedes or []
+    supersedes = supersedes or _default_supersedes_for_candidate(candidate)
     relation_problems = _validate_supersedes(root, repo_id=repo_id, supersedes=supersedes)
     if relation_problems:
         return {}, relation_problems
@@ -707,13 +728,14 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     record_results: list[dict[str, Any]] = []
     for record in selected:
         record_id = str(record.get("id") or "")
-        record_problems = _source_digest_problems(root, record, record_id=record_id)
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        record_problems = [] if status in {"superseded", "deprecated"} else _source_digest_problems(root, record, record_id=record_id)
         problems.extend(record_problems)
         record_results.append(
             {
                 "id": record_id,
                 "kind": record.get("kind", ""),
-                "status": _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids),
+                "status": status,
                 "title": record.get("title", ""),
                 "source_statuses": _source_ref_statuses(root, record),
                 "error_count": len([problem for problem in record_problems if problem.severity == "error"]),
@@ -1123,6 +1145,14 @@ def _refreshed_record_ids(root: Path, *, repo_id: str) -> set[str]:
     return refreshed
 
 
+def _default_supersedes_for_candidate(candidate: dict[str, Any]) -> list[str]:
+    derived = candidate.get("derived_from")
+    if not isinstance(derived, dict) or str(derived.get("kind") or "") != "knowledge_record":
+        return []
+    record_id = str(derived.get("record_id") or "")
+    return [record_id] if record_id else []
+
+
 def _validate_supersedes(root: Path, *, repo_id: str, supersedes: list[str]) -> list[Problem]:
     problems: list[Problem] = []
     records = {str(record.get("id") or ""): record for record in _load_records(root)}
@@ -1223,13 +1253,13 @@ def event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str
 
 
 def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str] | None = None) -> str:
-    if _source_digest_problems(root, record):
-        return "stale"
     record_id = str(record.get("id") or "")
     if record_id in superseded_ids:
         return "superseded"
     if deprecated_ids and record_id in deprecated_ids:
         return "deprecated"
+    if _source_digest_problems(root, record):
+        return "stale"
     return str(record.get("status") or "")
 
 

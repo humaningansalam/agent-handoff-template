@@ -1773,6 +1773,12 @@ def test_knowledge_refresh_all_stale_can_create_candidate_from_stale_record(tmp_
     new_candidate_path = tmp_path / ".repoctl-state/knowledge/candidates/main" / f"{new_candidate_id}.json"
     new_candidate = json.loads(new_candidate_path.read_text(encoding="utf-8"))
     assert new_candidate["authoritative"] is False
+    assert new_candidate["derived_from"] == {
+        "kind": "knowledge_record",
+        "record_id": record_id,
+        "record_digest": approved_payload["data"]["record"]["record_digest"],
+    }
+    assert "approval should supersede the original reviewed record instead of editing it" in new_candidate["review"]["checklist"]
     assert new_candidate["source_refs"][0]["content_sha256"] != approved_payload["data"]["record"]["source_refs"][0]["content_sha256"]
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
@@ -1784,6 +1790,23 @@ def test_knowledge_refresh_all_stale_can_create_candidate_from_stale_record(tmp_
     second_payload = json.loads(capsys.readouterr().out)
     assert second_payload["data"]["refreshed_records"] == []
     assert second_payload["data"]["skipped_records"][0] == {"record_id": record_id, "reason": "already_refreshed"}
+
+    assert main(["knowledge", "approve", new_candidate_id, "--repo-id", "main", "--json"]) == 0
+    replacement_payload = json.loads(capsys.readouterr().out)
+    replacement_record_id = replacement_payload["data"]["record"]["id"]
+    assert replacement_payload["data"]["record"]["supersedes"] == [record_id]
+    assert replacement_payload["data"]["superseded_events"][0]["event"]["record_id"] == record_id
+    assert replacement_payload["data"]["superseded_events"][0]["event"]["superseded_by"] == replacement_record_id
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    recovered_check_payload = json.loads(capsys.readouterr().out)
+    assert recovered_check_payload["data"]["record_checks"]["error_count"] == 0
+
+    assert main(["knowledge", "query", "Changed after approval", "--repo-id", "main", "--include-superseded", "--json"]) == 0
+    query_payload = json.loads(capsys.readouterr().out)
+    statuses = {item["record"]["id"]: item["record"]["status"] for item in query_payload["data"]["results"]}
+    assert statuses[record_id] == "superseded"
+    assert statuses[replacement_record_id] == "reviewed"
 
 
 def test_knowledge_refresh_all_stale_reports_missing_record_source(tmp_path: Path, monkeypatch, capsys) -> None:
