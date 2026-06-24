@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -238,6 +239,34 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert field_gate_compare.returncode == 0, field_gate_compare.stderr
     field_gate_compare_payload = json.loads(field_gate_compare.stdout)
     assert field_gate_compare_payload["data"]["failed_count_delta"]["delta"] == 0
+
+    shutil.rmtree(package_root / "repos")
+    (package_root / "repos/web").mkdir(parents=True)
+    (package_root / "repos/api").mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=package_root / "repos/web", stdout=subprocess.DEVNULL, check=True)
+    subprocess.run(["git", "init"], cwd=package_root / "repos/api", stdout=subprocess.DEVNULL, check=True)
+    (package_root / "docs/repoctl.json").write_text(
+        json.dumps({"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    write_repometa(package_root / "repos/web")
+    write_repometa(package_root / "repos/api")
+    multi_gate = subprocess.run(
+        ["./scripts/repoctl", "field-gate", "run", "release-candidate", "--repo-id", "web", "--json"],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert multi_gate.returncode == 0, multi_gate.stderr
+    multi_gate_payload = json.loads(multi_gate.stdout)
+    multi_names = [gate["name"] for gate in multi_gate_payload["data"]["gates"]]
+    assert "context_benchmark_multirepo_isolation" in multi_names
+    multi_summary = next(gate["summary"] for gate in multi_gate_payload["data"]["gates"] if gate["name"] == "context_benchmark_multirepo_isolation")
+    assert multi_summary["question_count"] == 8
+    assert multi_summary["cross_repo_ref_count"] == 0
 
 
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:

@@ -98,7 +98,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
-- `repoctl field-gate run release-candidate` is an explicit mutating runner for release-candidate field tests; it records per-gate summaries and digests without parsing human output.
+- `repoctl field-gate run release-candidate` is an explicit mutating runner for release-candidate field tests; it records per-gate summaries and digests without parsing human output, and includes multi-repo isolation gates when `web` and `api` repositories are configured.
 - `repoctl field-gate compare` validates field-gate artifact digests before comparing gate sets, failed counts, per-gate status, and numeric summary deltas.
 - `repoctl context benchmark-materialize` is the explicit mutating setup step for controlled benchmark fixtures; `context benchmark` itself remains read-only.
 - `repoctl context pack-benchmark-materialize` is the explicit mutating setup step for archived fixture tasks; `context pack-benchmark` itself remains read-only.

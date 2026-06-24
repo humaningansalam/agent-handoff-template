@@ -166,10 +166,10 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
             }
         )
 
-    if (root / "tests/fixtures/context-benchmark/corpus.json").exists():
+    if _repo_target_available(root, repo_id) and _fixture_has_repository(root / "tests/fixtures/context-benchmark", repo_id):
         add(
             "Materialize context benchmark corpus",
-            command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id main --json",
+            command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
             mutates_workspace=True,
             requires=["tests/fixtures/context-benchmark/corpus.json"],
         )
@@ -179,7 +179,7 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
             mutates_workspace=False,
             requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
         )
-    if (root / "tests/fixtures/context-pack-benchmark/cases.json").exists():
+    if _repo_target_available(root, repo_id) and (root / "tests/fixtures/context-pack-benchmark/cases.json").exists():
         if (root / "tests/fixtures/context-pack-benchmark/tasks.json").exists():
             add(
                 "Materialize context pack benchmark tasks",
@@ -193,6 +193,19 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
             mutates_workspace=False,
             requires=["tests/fixtures/context-pack-benchmark/cases.json"],
         )
+    if _has_configured_repositories(root, {"web", "api"}) and (root / "tests/fixtures/context-benchmark-multirepo/corpus.json").exists():
+        add(
+            "Materialize multi-repo context benchmark corpus",
+            command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
+            mutates_workspace=True,
+            requires=["tests/fixtures/context-benchmark-multirepo/corpus.json"],
+        )
+        add(
+            "Run multi-repo isolation benchmark gate",
+            command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-packed-recall multi-repo-isolation=1.0 --json",
+            mutates_workspace=False,
+            requires=["tests/fixtures/context-benchmark-multirepo/questions.jsonl", "tests/fixtures/context-benchmark-multirepo/expected-sources.json"],
+        )
     knowledge_records = root / "docs/knowledge/records"
     if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
         add(
@@ -204,8 +217,51 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
     return gates
 
 
+def _has_configured_repositories(root: Path, repo_ids: set[str]) -> bool:
+    try:
+        layout = repo_layout(root)
+    except (OSError, RepoctlError):
+        return False
+    if not layout.registry_ready:
+        return False
+    configured = {target.id for target in layout.targets}
+    return repo_ids.issubset(configured)
+
+
+def _repo_target_available(root: Path, repo_id: str) -> bool:
+    try:
+        require_repo_target(root, repo_id=repo_id)
+    except (OSError, RepoctlError):
+        return False
+    return True
+
+
+def _fixture_has_repository(fixture: Path, repo_id: str) -> bool:
+    corpus_path = fixture / "corpus.json"
+    if not corpus_path.is_file():
+        return False
+    try:
+        payload = json.loads(corpus_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    repositories = payload.get("repositories") if isinstance(payload, dict) else None
+    return isinstance(repositories, dict) and repo_id in repositories
+
+
 def _problem_dicts(problems: list[Problem]) -> list[dict[str, str]]:
     return [problem.to_dict() for problem in problems]
+
+
+def _problems_from_dicts(items: list[dict[str, str]]) -> list[Problem]:
+    return [
+        Problem(
+            str(item.get("severity") or "error"),
+            str(item.get("code") or "repoctl_error"),
+            str(item.get("message") or ""),
+            str(item.get("path")) if item.get("path") is not None else None,
+        )
+        for item in items
+    ]
 
 
 def _release_candidate_gate_result(
@@ -247,8 +303,32 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
     if _has_errors(check_problems):
         return _release_candidate_payload(repo_id=repo_id, gates=gates)
 
+    try:
+        layout = repo_layout(root)
+        repo_problems = _problems_from_dicts(repo_check_problems(layout))
+        repo_data = layout.to_dict()
+    except RepoctlError as exc:
+        repo_problems = [Problem("error", exc.code, str(exc), exc.path)]
+        repo_data = {}
+    gates.append(
+        _release_candidate_gate_result(
+            name="repository_check",
+            command="./scripts/repoctl repo check --json",
+            mutates_workspace=False,
+            data=repo_data,
+            problems=repo_problems,
+            summary={
+                "registry_ready": bool(repo_data.get("registry_ready")) if repo_data else False,
+                "target_count": len(repo_data.get("targets", [])) if isinstance(repo_data.get("targets"), list) else 0,
+                "candidate_count": len(repo_data.get("candidates", [])) if isinstance(repo_data.get("candidates"), list) else 0,
+            },
+        )
+    )
+    if _has_errors(repo_problems):
+        return _release_candidate_payload(repo_id=repo_id, gates=gates)
+
     context_fixture = root / "tests/fixtures/context-benchmark"
-    if (context_fixture / "corpus.json").exists():
+    if _repo_target_available(root, repo_id) and _fixture_has_repository(context_fixture, repo_id):
         context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(root, fixture=context_fixture, repo_id=repo_id, force=False)
         gates.append(
             _release_candidate_gate_result(
@@ -287,7 +367,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
             )
 
     pack_fixture = root / "tests/fixtures/context-pack-benchmark"
-    if (pack_fixture / "cases.json").exists():
+    if _repo_target_available(root, repo_id) and (pack_fixture / "cases.json").exists():
         if (pack_fixture / "tasks.json").exists():
             pack_materialize, pack_materialize_problems = materialize_task_context_pack_benchmark_tasks(root, fixture=pack_fixture, force=False)
             gates.append(
@@ -317,6 +397,44 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                     summary={
                         "case_count": pack_benchmark.get("case_count", 0),
                         **(pack_benchmark.get("summary", {}) if isinstance(pack_benchmark.get("summary"), dict) else {}),
+                    },
+                )
+            )
+
+    multi_fixture = root / "tests/fixtures/context-benchmark-multirepo"
+    if _has_configured_repositories(root, {"web", "api"}) and (multi_fixture / "corpus.json").exists():
+        multi_materialize, multi_materialize_problems = materialize_context_benchmark_corpus(root, fixture=multi_fixture, repo_id="", force=False)
+        gates.append(
+            _release_candidate_gate_result(
+                name="context_benchmark_multirepo_materialize",
+                command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
+                mutates_workspace=True,
+                data=multi_materialize,
+                problems=multi_materialize_problems,
+                warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
+                summary=multi_materialize.get("totals", {}) if multi_materialize else {},
+            )
+        )
+        if not _has_errors(multi_materialize_problems):
+            multi_benchmark, multi_benchmark_problems = run_context_benchmark(
+                root,
+                fixture=multi_fixture,
+                min_category_packed_recall={"multi-repo-isolation": 1.0},
+                require_fixture_corpus=True,
+                require_no_cross_repo=True,
+                require_no_forbidden=True,
+            )
+            gates.append(
+                _release_candidate_gate_result(
+                    name="context_benchmark_multirepo_isolation",
+                    command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-packed-recall multi-repo-isolation=1.0 --json",
+                    mutates_workspace=False,
+                    data=multi_benchmark,
+                    problems=multi_benchmark_problems,
+                    warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
+                    summary={
+                        "question_count": multi_benchmark.get("question_count", 0),
+                        **(multi_benchmark.get("summary", {}) if isinstance(multi_benchmark.get("summary"), dict) else {}),
                     },
                 )
             )

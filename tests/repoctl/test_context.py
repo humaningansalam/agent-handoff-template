@@ -1643,11 +1643,12 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     assert payload["command"] == "field-gate run"
     assert payload["data"]["schema"] == "repoctl.field_gate.release_candidate"
     assert payload["data"]["failed_count"] == 0
-    assert payload["data"]["gate_count"] == 5
+    assert payload["data"]["gate_count"] == 6
     assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/release-candidate.json"
     gate_names = [gate["name"] for gate in payload["data"]["gates"]]
     assert gate_names == [
         "workspace_check",
+        "repository_check",
         "context_benchmark_materialize",
         "context_benchmark",
         "context_pack_benchmark_materialize",
@@ -1657,6 +1658,33 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     pack_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_pack_benchmark")
     assert context_summary["mean_recall_at_5"] >= 0.85
     assert pack_summary["mean_must_read_recall"] == 1.0
+
+
+def test_release_candidate_field_gate_runner_includes_multirepo_isolation_when_configured(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    write_repometa(tmp_path / "repos/web")
+    write_repometa(tmp_path / "repos/api")
+    write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark-multirepo", tmp_path / "tests/fixtures/context-benchmark-multirepo")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "web", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    gate_names = [gate["name"] for gate in payload["data"]["gates"]]
+    assert "context_benchmark" not in gate_names
+    assert "context_benchmark_multirepo_materialize" in gate_names
+    assert "context_benchmark_multirepo_isolation" in gate_names
+    multi_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_benchmark_multirepo_isolation")
+    assert multi_summary["question_count"] == 8
+    assert multi_summary["cross_repo_ref_count"] == 0
+    assert multi_summary["by_category"]["multi-repo-isolation"]["mean_packed_recall"] == 1.0
+    assert payload["data"]["failed_count"] == 0
 
 
 def test_field_gate_compare_detects_gate_regression_and_digest_tamper(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -126,8 +126,9 @@ def test_check_reports_board_missing_live_task(tmp_path: Path, monkeypatch, caps
 
 def test_clean_check_reports_release_candidate_field_gates(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
     (tmp_path / "tests/fixtures/context-benchmark").mkdir(parents=True)
-    (tmp_path / "tests/fixtures/context-benchmark/corpus.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "tests/fixtures/context-benchmark/corpus.json").write_text('{"repositories":{"main":{"files":[]}}}\n', encoding="utf-8")
     (tmp_path / "tests/fixtures/context-benchmark/questions.jsonl").write_text("", encoding="utf-8")
     (tmp_path / "tests/fixtures/context-benchmark/expected-sources.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / "tests/fixtures/context-pack-benchmark").mkdir(parents=True)
