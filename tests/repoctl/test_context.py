@@ -401,6 +401,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["summary"]["by_category"]["authority"]["mean_packed_recall"] == 1.0
     assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
+    assert payload["data"]["summary"]["by_category"]["cross-file-call-impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
     assert payload["data"]["summary"]["by_category"]["method-impact"]["mean_graph_edge_recall"] == 1.0
     assert payload["data"]["summary"]["by_category"]["cross-file-call-impact"]["mean_graph_edge_recall"] == 1.0

@@ -56,6 +56,7 @@ STOPWORDS = {
 def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: GraphSnapshot | None = None, limit: int = 20) -> list[ContextCandidate]:
     terms = _terms(query)
     code_query = _is_code_query(terms)
+    query_lower = query.lower()
     scores: dict[tuple[str, str, str, int, int], dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "fts": 0.0, "authority": 0.0, "graph": 0.0})
     reasons: dict[tuple[str, str, str, int, int], set[str]] = defaultdict(set)
     by_key = {chunk.source_ref.key(): chunk for chunk in chunks}
@@ -68,6 +69,8 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
             exact_score = min(1.0, exact_hits / max(1, len(terms)))
             if chunk.source_ref.kind == "graph_node" and not code_query:
                 exact_score *= 0.3
+            if chunk.source_ref.kind != "graph_node" and code_query:
+                exact_score *= 0.3
             scores[key]["exact"] = exact_score
             reasons[key].add("exact term/path/heading match")
         scores[key]["authority"] = _authority_score(chunk)
@@ -75,11 +78,13 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
     for key, fts_score in _fts_scores(query, chunks).items():
         if by_key[key].source_ref.kind == "graph_node" and not code_query:
             fts_score *= 0.3
+        if by_key[key].source_ref.kind != "graph_node" and code_query:
+            fts_score *= 0.3
         scores[key]["fts"] = max(scores[key]["fts"], fts_score)
         reasons[key].add("SQLite FTS match")
 
     if snapshot is not None:
-        graph_scores = _graph_scores(terms, chunks, snapshot, code_query=code_query)
+        graph_scores = _graph_scores(terms, chunks, snapshot, code_query=code_query, query_lower=query_lower)
         for key, graph_score in graph_scores.items():
             scores[key]["graph"] = max(scores[key]["graph"], graph_score)
             reasons[key].add("Graph evidence match")
@@ -89,10 +94,10 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
         if breakdown["exact"] <= 0 and breakdown["fts"] <= 0 and breakdown["graph"] <= 0:
             continue
         graph_weight = 2.0 if code_query else 0.15
-        score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"] * graph_weight
+        chunk = by_key[key]
+        score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"] * graph_weight + _code_node_kind_boost(chunk, query_lower, code_query=code_query)
         if score <= 0:
             continue
-        chunk = by_key[key]
         candidates.append(
             ContextCandidate(
                 source_ref=chunk.source_ref,
@@ -188,13 +193,16 @@ def _escape_fts(token: str) -> str:
     return '"' + token.replace('"', '""') + '"'
 
 
-def _graph_scores(terms: set[str], chunks: list[DocumentChunk], snapshot: GraphSnapshot, *, code_query: bool) -> dict[tuple[str, str, str, int, int], float]:
+def _graph_scores(terms: set[str], chunks: list[DocumentChunk], snapshot: GraphSnapshot, *, code_query: bool, query_lower: str) -> dict[tuple[str, str, str, int, int], float]:
     index = GraphIndex(snapshot)
     matches = index.exact_matches(terms)
     if not matches:
         return {}
     seed_ids = {match.node_id for match in matches[:20]}
     neighbor_ids, _edges = index.neighborhood(seed_ids, depth=1)
+    impact_scores: dict[str, float] = {}
+    if code_query:
+        impact_scores = _caller_impact_scores(index, seed_ids, include_symbols=any(term in query_lower for term in ("call", "function", "impact")))
     result: dict[tuple[str, str, str, int, int], float] = {}
     graph_chunks = [chunk for chunk in chunks if chunk.source_ref.kind == "graph_node"]
     for chunk in graph_chunks:
@@ -202,11 +210,35 @@ def _graph_scores(terms: set[str], chunks: list[DocumentChunk], snapshot: GraphS
         for node_id in neighbor_ids:
             if path == f"<graph:{node_id}>":
                 if code_query:
-                    result[chunk.source_ref.key()] = 1.0 if node_id in seed_ids else 0.45
+                    result[chunk.source_ref.key()] = max(impact_scores.get(node_id, 0.0), 1.0 if node_id in seed_ids else 0.45)
                 else:
                     result[chunk.source_ref.key()] = 0.25 if node_id in seed_ids else 0.1
                 break
     return result
+
+
+def _caller_impact_scores(index: GraphIndex, seed_ids: set[str], *, include_symbols: bool) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for edge in index.snapshot.edges:
+        if edge.kind != "CALLS" or edge.to_id not in seed_ids:
+            continue
+        if include_symbols:
+            scores[edge.from_id] = max(scores.get(edge.from_id, 0.0), 2.2)
+        for defining_edge in index.incoming.get(edge.from_id, []):
+            if defining_edge.kind == "DEFINES":
+                scores[defining_edge.from_id] = max(scores.get(defining_edge.from_id, 0.0), 2.0)
+    return scores
+
+
+def _code_node_kind_boost(chunk: DocumentChunk, query_lower: str, *, code_query: bool) -> float:
+    if not code_query or chunk.source_ref.kind != "graph_node":
+        return 0.0
+    section = chunk.source_ref.section
+    if "function" in query_lower and section.startswith("symbol "):
+        return 0.4
+    if "file" in query_lower and section.startswith("file "):
+        return 0.4
+    return 0.0
 
 
 def _excerpt(text: str, *, limit: int = 900) -> str:
