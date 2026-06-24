@@ -80,6 +80,7 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
 
     checks = [
         (["./scripts/repoctl", "context", "--help"], "pack-benchmark-materialize"),
+        (["./scripts/repoctl", "field-gate", "run", "--help"], "release-candidate"),
         (["./scripts/repoctl", "knowledge", "--help"], "render"),
         (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
     ]
@@ -194,6 +195,22 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert pack_benchmark_payload["data"]["case_count"] == 5
     assert pack_benchmark_payload["data"]["summary"]["mean_must_read_recall"] == 1.0
     assert pack_benchmark_payload["problems"] == []
+
+    field_gate_output = ".repoctl-state/field-gates/release-candidate.json"
+    field_gate = subprocess.run(
+        ["./scripts/repoctl", "field-gate", "run", "release-candidate", "--repo-id", "main", "--output", field_gate_output, "--json"],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert field_gate.returncode == 0, field_gate.stderr
+    field_gate_payload = json.loads(field_gate.stdout)
+    assert field_gate_payload["data"]["failed_count"] == 0
+    assert field_gate_payload["data"]["artifact"]["path"] == field_gate_output
+    assert (package_root / field_gate_output).is_file()
 
 
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:

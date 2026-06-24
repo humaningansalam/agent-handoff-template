@@ -319,6 +319,7 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
     env["PYTHON"] = sys.executable
     checks = [
         (["./scripts/repoctl", "context", "--help"], ["benchmark-materialize", "pack-benchmark-materialize", "pack-benchmark-compare"]),
+        (["./scripts/repoctl", "field-gate", "run", "--help"], ["release-candidate"]),
         (["./scripts/repoctl", "knowledge", "--help"], ["render"]),
         (["./scripts/repoctl", "knowledge", "render", "--help"], ["--check"]),
     ]

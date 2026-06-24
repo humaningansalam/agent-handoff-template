@@ -12,6 +12,7 @@ from .context import build_context_bundle
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
+from .graph_model import digest_data
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
@@ -152,7 +153,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
     return actions
 
 
-def _release_candidate_field_gates(root: Path) -> list[dict[str, Any]]:
+def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list[dict[str, Any]]:
     gates: list[dict[str, Any]] = []
 
     def add(label: str, *, command: str, mutates_workspace: bool, requires: list[str] | None = None) -> None:
@@ -174,7 +175,7 @@ def _release_candidate_field_gates(root: Path) -> list[dict[str, Any]]:
         )
         add(
             "Run context benchmark gate",
-            command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id main --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
             mutates_workspace=False,
             requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
         )
@@ -188,7 +189,7 @@ def _release_candidate_field_gates(root: Path) -> list[dict[str, Any]]:
             )
         add(
             "Run context pack benchmark gate",
-            command="./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id main --min-must-read-recall 1.0 --json",
+            command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
             mutates_workspace=False,
             requires=["tests/fixtures/context-pack-benchmark/cases.json"],
         )
@@ -196,11 +197,162 @@ def _release_candidate_field_gates(root: Path) -> list[dict[str, Any]]:
     if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
         add(
             "Check rendered knowledge pages",
-            command="./scripts/repoctl knowledge render --repo-id main --check --json",
+            command=f"./scripts/repoctl knowledge render --repo-id {repo_id} --check --json",
             mutates_workspace=False,
             requires=["docs/knowledge/records"],
         )
     return gates
+
+
+def _problem_dicts(problems: list[Problem]) -> list[dict[str, str]]:
+    return [problem.to_dict() for problem in problems]
+
+
+def _release_candidate_gate_result(
+    *,
+    name: str,
+    command: str,
+    mutates_workspace: bool,
+    data: dict[str, Any],
+    problems: list[Problem],
+    warnings: list[dict[str, str]] | None = None,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "command": command,
+        "ok": not _has_errors(problems),
+        "mutates_workspace": mutates_workspace,
+        "summary": summary or {},
+        "data_digest": digest_data(data) if data else "",
+        "problems": _problem_dicts(problems),
+        "warnings": warnings or [],
+    }
+
+
+def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str, Any]:
+    gates: list[dict[str, Any]] = []
+    check_payload, check_problems, _live_paths = _check_payload(root)
+    gates.append(
+        _release_candidate_gate_result(
+            name="workspace_check",
+            command="./scripts/repoctl check --json",
+            mutates_workspace=False,
+            data=check_payload,
+            problems=check_problems,
+            warnings=check_payload.get("warnings", []) if isinstance(check_payload.get("warnings"), list) else [],
+            summary={"board_stale": bool(check_payload.get("board", {}).get("stale")) if isinstance(check_payload.get("board"), dict) else False},
+        )
+    )
+    if _has_errors(check_problems):
+        return _release_candidate_payload(repo_id=repo_id, gates=gates)
+
+    context_fixture = root / "tests/fixtures/context-benchmark"
+    if (context_fixture / "corpus.json").exists():
+        context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(root, fixture=context_fixture, repo_id=repo_id, force=False)
+        gates.append(
+            _release_candidate_gate_result(
+                name="context_benchmark_materialize",
+                command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
+                mutates_workspace=True,
+                data=context_materialize,
+                problems=context_materialize_problems,
+                warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
+                summary=context_materialize.get("totals", {}) if context_materialize else {},
+            )
+        )
+        if not _has_errors(context_materialize_problems):
+            context_benchmark, context_benchmark_problems = run_context_benchmark(
+                root,
+                fixture=context_fixture,
+                repo_id=repo_id,
+                min_recall_at_5=0.85,
+                require_source_integrity=True,
+                require_fixture_corpus=True,
+                require_no_forbidden=True,
+            )
+            gates.append(
+                _release_candidate_gate_result(
+                    name="context_benchmark",
+                    command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+                    mutates_workspace=False,
+                    data=context_benchmark,
+                    problems=context_benchmark_problems,
+                    warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
+                    summary={
+                        "question_count": context_benchmark.get("question_count", 0),
+                        **(context_benchmark.get("summary", {}) if isinstance(context_benchmark.get("summary"), dict) else {}),
+                    },
+                )
+            )
+
+    pack_fixture = root / "tests/fixtures/context-pack-benchmark"
+    if (pack_fixture / "cases.json").exists():
+        if (pack_fixture / "tasks.json").exists():
+            pack_materialize, pack_materialize_problems = materialize_task_context_pack_benchmark_tasks(root, fixture=pack_fixture, force=False)
+            gates.append(
+                _release_candidate_gate_result(
+                    name="context_pack_benchmark_materialize",
+                    command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
+                    mutates_workspace=True,
+                    data=pack_materialize,
+                    problems=pack_materialize_problems,
+                    warnings=[{"code": "context_pack_benchmark_materialize_mutates_workspace", "message": "context pack benchmark materialize writes archived fixture tasks for controlled startup-pack tests"}],
+                    summary=pack_materialize.get("totals", {}) if pack_materialize else {},
+                )
+            )
+        else:
+            pack_materialize_problems = []
+        if not _has_errors(pack_materialize_problems):
+            target = require_repo_target(root, repo_id=repo_id)
+            pack_benchmark, pack_benchmark_problems = run_task_context_pack_benchmark(root, target=target, fixture=pack_fixture, min_must_read_recall=1.0)
+            gates.append(
+                _release_candidate_gate_result(
+                    name="context_pack_benchmark",
+                    command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
+                    mutates_workspace=False,
+                    data=pack_benchmark,
+                    problems=pack_benchmark_problems,
+                    warnings=[{"code": "context_pack_benchmark_retrieval_only", "message": "context pack benchmark measures source pack recall only; it does not validate generated answers or task scope"}],
+                    summary={
+                        "case_count": pack_benchmark.get("case_count", 0),
+                        **(pack_benchmark.get("summary", {}) if isinstance(pack_benchmark.get("summary"), dict) else {}),
+                    },
+                )
+            )
+
+    knowledge_records = root / "docs/knowledge/records"
+    if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
+        render_output = Path("docs/knowledge/generated")
+        render_data, render_problems = render_knowledge(root, repo_id=repo_id, output=render_output, check=True)
+        gates.append(
+            _release_candidate_gate_result(
+                name="knowledge_render_check",
+                command=f"./scripts/repoctl knowledge render --repo-id {repo_id} --check --json",
+                mutates_workspace=False,
+                data=render_data,
+                problems=render_problems,
+                warnings=[{"code": "knowledge_render_not_authoritative", "message": "rendered knowledge pages are generated views and must not be ingested as source authority"}],
+                summary=render_data.get("check", {}) if isinstance(render_data.get("check"), dict) else {},
+            )
+        )
+
+    return _release_candidate_payload(repo_id=repo_id, gates=gates)
+
+
+def _release_candidate_payload(*, repo_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
+    error_count = sum(1 for gate in gates if not gate.get("ok"))
+    data = {
+        "schema": "repoctl.field_gate.release_candidate",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "gate_count": len(gates),
+        "passed_count": len(gates) - error_count,
+        "failed_count": error_count,
+        "gates": gates,
+    }
+    data["run_digest"] = digest_data(data)
+    return data
 
 
 def _repo_scoped_frontmatter(task: Any) -> bool:
@@ -238,7 +390,7 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
 
 
 def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "context_command", "knowledge_command", "knowledge_candidate_command", "knowledge_event_command", "upgrade_command") if getattr(args, name, None)]
+    parts = [str(getattr(args, name)) for name in ("command", "field_gate_command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "context_command", "knowledge_command", "knowledge_candidate_command", "knowledge_event_command", "upgrade_command") if getattr(args, name, None)]
     return ".".join(parts) if parts else "repoctl"
 
 
@@ -292,6 +444,51 @@ def cmd_check(args: argparse.Namespace) -> int:
         if payload["board"]["stale"]:
             print("BOARD is stale. Run: repoctl check --fix-board")
     return 1 if _has_errors(problems) else 0
+
+
+def cmd_field_gate_run(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    if args.gate != "release-candidate":
+        raise RepoctlError(f"unsupported field gate: {args.gate}")
+    data = _run_release_candidate_field_gates(root, repo_id=args.repo_id)
+    problems = [
+        Problem("error", "field_gate_failed", f"field gate failed: {gate.get('name', '')}")
+        for gate in data.get("gates", [])
+        if not gate.get("ok")
+    ]
+    payload = {
+        "ok": not problems,
+        "command": "field-gate run",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "field_gate_runner_mutates_workspace",
+                "message": "release-candidate field gate materializes controlled benchmark fixtures before running read-only gates",
+            }
+        ],
+    }
+    if args.output:
+        output, output_problem = _workspace_output_path(root, args.output, code="field_gate_output_outside_workspace")
+        if output_problem is not None:
+            problems.append(output_problem)
+            payload["ok"] = False
+            payload["problems"] = [problem.to_dict() for problem in problems]
+        else:
+            data["artifact"] = {
+                "path": output.relative_to(root).as_posix(),
+                "run_digest": data.get("run_digest", ""),
+            }
+            _complete_json_envelope(payload)
+            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    if args.json:
+        _json(payload)
+    else:
+        print(f"field gate {args.gate} passed={data.get('passed_count', 0)} failed={data.get('failed_count', 0)} digest={data.get('run_digest', '')}")
+        for gate in data.get("gates", []):
+            status = "ok" if gate.get("ok") else "failed"
+            print(f"[{status}] {gate.get('name', '')}")
+    return 1 if problems else 0
 
 
 def cmd_repo_list(args: argparse.Namespace) -> int:
@@ -2157,6 +2354,15 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--include-archived-warnings", action="store_true")
     check.add_argument("--json", action="store_true")
     check.set_defaults(func=cmd_check)
+
+    field_gate = sub.add_parser("field-gate")
+    field_gate_sub = field_gate.add_subparsers(dest="field_gate_command", required=True, parser_class=RepoctlArgumentParser)
+    field_gate_run = field_gate_sub.add_parser("run")
+    field_gate_run.add_argument("gate", choices=["release-candidate"])
+    field_gate_run.add_argument("--repo-id", default="main")
+    field_gate_run.add_argument("--output")
+    field_gate_run.add_argument("--json", action="store_true")
+    field_gate_run.set_defaults(func=cmd_field_gate_run)
 
     repo = sub.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True, parser_class=RepoctlArgumentParser)

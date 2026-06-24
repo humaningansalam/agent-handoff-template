@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from tools.repoctl.cli import main
@@ -1621,6 +1622,41 @@ def test_context_pack_benchmark_materialize_makes_shipped_fixture_runnable(tmp_p
     benchmark_payload = json.loads(capsys.readouterr().out)
     assert benchmark_payload["data"]["case_count"] == 5
     assert benchmark_payload["data"]["summary"]["mean_must_read_recall"] == 1.0
+
+
+def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    output = tmp_path / ".repoctl-state/field-gates/release-candidate.json"
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["command"] == "field-gate run"
+    assert payload["data"]["schema"] == "repoctl.field_gate.release_candidate"
+    assert payload["data"]["failed_count"] == 0
+    assert payload["data"]["gate_count"] == 5
+    assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/release-candidate.json"
+    gate_names = [gate["name"] for gate in payload["data"]["gates"]]
+    assert gate_names == [
+        "workspace_check",
+        "context_benchmark_materialize",
+        "context_benchmark",
+        "context_pack_benchmark_materialize",
+        "context_pack_benchmark",
+    ]
+    context_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_benchmark")
+    pack_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_pack_benchmark")
+    assert context_summary["mean_recall_at_5"] >= 0.85
+    assert pack_summary["mean_must_read_recall"] == 1.0
 
 
 def test_context_pack_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
