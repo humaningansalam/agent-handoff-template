@@ -355,6 +355,158 @@ def _release_candidate_payload(*, repo_id: str, gates: list[dict[str, Any]]) -> 
     return data
 
 
+def _read_field_gate_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        problems.append(Problem("error", "field_gate_artifact_missing", f"{label} field gate artifact is missing", path.as_posix()))
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        problems.append(Problem("error", "field_gate_artifact_invalid_json", f"{label} field gate artifact is not valid JSON", path.as_posix()))
+        return {}
+    if not isinstance(payload, dict):
+        problems.append(Problem("error", "field_gate_artifact_invalid", f"{label} field gate artifact must be an object", path.as_posix()))
+        return {}
+    if str(payload.get("command") or "") == "field-gate run" and payload.get("ok") is False:
+        problems.append(Problem("error", "field_gate_artifact_failed", f"{label} field gate artifact was produced by a failed command", path.as_posix()))
+        return {}
+    data = payload.get("data") if str(payload.get("command") or "") == "field-gate run" else payload
+    if not isinstance(data, dict):
+        problems.append(Problem("error", "field_gate_artifact_missing_data", f"{label} field gate artifact is missing data", path.as_posix()))
+        return {}
+    if str(data.get("schema") or "") != "repoctl.field_gate.release_candidate":
+        problems.append(Problem("error", "field_gate_artifact_wrong_schema", f"{label} artifact is not a release-candidate field gate run", path.as_posix()))
+        return {}
+    gates = data.get("gates")
+    if not isinstance(gates, list) or not all(isinstance(gate, dict) for gate in gates):
+        problems.append(Problem("error", "field_gate_artifact_invalid_data", f"{label} field gate artifact is missing gates", path.as_posix()))
+        return {}
+    expected_digest = str(data.get("run_digest") or "")
+    actual_digest = digest_data({key: value for key, value in data.items() if key not in {"run_digest", "artifact"}})
+    if expected_digest != actual_digest:
+        problems.append(Problem("error", "field_gate_artifact_digest_mismatch", f"{label} field gate artifact digest does not match its content", path.as_posix()))
+        return {}
+    return data
+
+
+def _compare_field_gate_runs(
+    *,
+    baseline_path: Path,
+    candidate_path: Path,
+    max_failed_count_increase: int | None = None,
+    require_same_gates: bool = False,
+    require_no_gate_regressions: bool = False,
+) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    baseline = _read_field_gate_artifact(baseline_path, problems, label="baseline")
+    candidate = _read_field_gate_artifact(candidate_path, problems, label="candidate")
+    if not baseline or not candidate:
+        return {}, problems
+    baseline_gates = _field_gates_by_name(baseline)
+    candidate_gates = _field_gates_by_name(candidate)
+    missing_gates = sorted(set(baseline_gates) - set(candidate_gates))
+    new_gates = sorted(set(candidate_gates) - set(baseline_gates))
+    gate_deltas = []
+    for name in sorted(set(baseline_gates) | set(candidate_gates)):
+        baseline_gate = baseline_gates.get(name, {})
+        candidate_gate = candidate_gates.get(name, {})
+        baseline_ok = bool(baseline_gate.get("ok")) if baseline_gate else None
+        candidate_ok = bool(candidate_gate.get("ok")) if candidate_gate else None
+        gate_deltas.append(
+            {
+                "name": name,
+                "present_in_baseline": bool(baseline_gate),
+                "present_in_candidate": bool(candidate_gate),
+                "ok": {"baseline": baseline_ok, "candidate": candidate_ok, "regressed": baseline_ok is True and candidate_ok is False},
+                "summary_deltas": _summary_deltas(
+                    baseline_gate.get("summary", {}) if isinstance(baseline_gate.get("summary"), dict) else {},
+                    candidate_gate.get("summary", {}) if isinstance(candidate_gate.get("summary"), dict) else {},
+                ),
+                "problem_count": {
+                    "baseline": len(baseline_gate.get("problems", [])) if isinstance(baseline_gate.get("problems"), list) else 0,
+                    "candidate": len(candidate_gate.get("problems", [])) if isinstance(candidate_gate.get("problems"), list) else 0,
+                },
+            }
+        )
+    failed_delta = int(candidate.get("failed_count") or 0) - int(baseline.get("failed_count") or 0)
+    if max_failed_count_increase is not None and failed_delta > max_failed_count_increase:
+        problems.append(Problem("error", "field_gate_failed_count_regressed", "candidate field gate failed_count increased more than allowed"))
+    if require_same_gates and (missing_gates or new_gates):
+        problems.append(Problem("error", "field_gate_gate_set_changed", "candidate field gate set differs from baseline"))
+    if require_no_gate_regressions:
+        for delta in gate_deltas:
+            if delta["ok"]["regressed"]:
+                problems.append(Problem("error", "field_gate_gate_regressed", f"field gate regressed from ok to failed: {delta['name']}"))
+    data = {
+        "schema": "repoctl.field_gate.compare",
+        "schema_version": 1,
+        "baseline": _field_gate_identity(baseline_path, baseline),
+        "candidate": _field_gate_identity(candidate_path, candidate),
+        "failed_count_delta": {"baseline": int(baseline.get("failed_count") or 0), "candidate": int(candidate.get("failed_count") or 0), "delta": failed_delta},
+        "missing_gates": missing_gates,
+        "new_gates": new_gates,
+        "gate_deltas": gate_deltas,
+        "gates": {
+            "max_failed_count_increase": max_failed_count_increase,
+            "require_same_gates": require_same_gates,
+            "require_no_gate_regressions": require_no_gate_regressions,
+        },
+    }
+    data["compare_digest"] = digest_data(data)
+    return data, problems
+
+
+def _field_gates_by_name(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    gates: dict[str, dict[str, Any]] = {}
+    for gate in data.get("gates", []):
+        if not isinstance(gate, dict):
+            continue
+        name = str(gate.get("name") or "")
+        if name:
+            gates[name] = gate
+    return gates
+
+
+def _field_gate_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": path.as_posix(),
+        "run_digest": str(data.get("run_digest") or ""),
+        "repo_id": str(data.get("repo_id") or ""),
+        "gate_count": int(data.get("gate_count") or 0),
+        "failed_count": int(data.get("failed_count") or 0),
+    }
+
+
+def _summary_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, dict[str, float]]:
+    baseline_values = _flatten_numeric_summary(baseline)
+    candidate_values = _flatten_numeric_summary(candidate)
+    deltas: dict[str, dict[str, float]] = {}
+    for key in sorted(set(baseline_values) | set(candidate_values)):
+        baseline_value = baseline_values.get(key)
+        candidate_value = candidate_values.get(key)
+        if baseline_value is None or candidate_value is None:
+            continue
+        deltas[key] = {
+            "baseline": round(baseline_value, 6),
+            "candidate": round(candidate_value, 6),
+            "delta": round(candidate_value - baseline_value, 6),
+        }
+    return deltas
+
+
+def _flatten_numeric_summary(value: Any, *, prefix: str = "") -> dict[str, float]:
+    results: dict[str, float] = {}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            results.update(_flatten_numeric_summary(child, prefix=child_prefix))
+    elif isinstance(value, bool):
+        results[prefix] = 1.0 if value else 0.0
+    elif isinstance(value, (int, float)):
+        results[prefix] = float(value)
+    return results
+
+
 def _repo_scoped_frontmatter(task: Any) -> bool:
     area = str(task.frontmatter.get("area") or "")
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
@@ -489,6 +641,31 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
             status = "ok" if gate.get("ok") else "failed"
             print(f"[{status}] {gate.get('name', '')}")
     return 1 if problems else 0
+
+
+def cmd_field_gate_compare(args: argparse.Namespace) -> int:
+    data, problems = _compare_field_gate_runs(
+        baseline_path=Path(args.baseline),
+        candidate_path=Path(args.candidate),
+        max_failed_count_increase=args.max_failed_count_increase,
+        require_same_gates=args.require_same_gates,
+        require_no_gate_regressions=args.require_no_gate_regressions,
+    )
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "field-gate compare",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        delta = data.get("failed_count_delta", {}) if data else {}
+        print(f"field gate compare failed_count_delta={delta.get('delta', 0)} missing={len(data.get('missing_gates', [])) if data else 0} new={len(data.get('new_gates', [])) if data else 0}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
 
 
 def cmd_repo_list(args: argparse.Namespace) -> int:
@@ -2363,6 +2540,14 @@ def build_parser() -> argparse.ArgumentParser:
     field_gate_run.add_argument("--output")
     field_gate_run.add_argument("--json", action="store_true")
     field_gate_run.set_defaults(func=cmd_field_gate_run)
+    field_gate_compare = field_gate_sub.add_parser("compare")
+    field_gate_compare.add_argument("--baseline", required=True)
+    field_gate_compare.add_argument("--candidate", required=True)
+    field_gate_compare.add_argument("--max-failed-count-increase", type=int)
+    field_gate_compare.add_argument("--require-same-gates", action="store_true")
+    field_gate_compare.add_argument("--require-no-gate-regressions", action="store_true")
+    field_gate_compare.add_argument("--json", action="store_true")
+    field_gate_compare.set_defaults(func=cmd_field_gate_compare)
 
     repo = sub.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True, parser_class=RepoctlArgumentParser)

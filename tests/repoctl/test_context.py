@@ -1659,6 +1659,51 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     assert pack_summary["mean_must_read_recall"] == 1.0
 
 
+def test_field_gate_compare_detects_gate_regression_and_digest_tamper(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    baseline = tmp_path / ".repoctl-state/field-gates/baseline.json"
+    candidate = tmp_path / ".repoctl-state/field-gates/candidate.json"
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["field-gate", "compare", "--baseline", baseline.as_posix(), "--candidate", baseline.as_posix(), "--max-failed-count-increase", "0", "--require-same-gates", "--require-no-gate-regressions", "--json"]) == 0
+    compare_payload = json.loads(capsys.readouterr().out)
+    assert compare_payload["command"] == "field-gate compare"
+    assert compare_payload["data"]["failed_count_delta"]["delta"] == 0
+    assert compare_payload["data"]["missing_gates"] == []
+    assert compare_payload["data"]["new_gates"] == []
+
+    regressed = json.loads(baseline.read_text(encoding="utf-8"))
+    regressed["data"]["failed_count"] = 1
+    regressed["data"]["passed_count"] -= 1
+    regressed["data"]["gates"][-1]["ok"] = False
+    regressed["data"]["gates"][-1]["problems"] = [{"severity": "error", "code": "synthetic", "message": "synthetic"}]
+    regressed["data"]["run_digest"] = digest_data({key: value for key, value in regressed["data"].items() if key not in {"run_digest", "artifact"}})
+    candidate.write_text(json.dumps(regressed, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["field-gate", "compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-failed-count-increase", "0", "--require-same-gates", "--require-no-gate-regressions", "--json"]) == 1
+    failed_payload = json.loads(capsys.readouterr().out)
+    codes = [problem["code"] for problem in failed_payload["problems"]]
+    assert "field_gate_failed_count_regressed" in codes
+    assert "field_gate_gate_regressed" in codes
+
+    tampered = json.loads(candidate.read_text(encoding="utf-8"))
+    tampered["data"]["failed_count"] = 0
+    candidate.write_text(json.dumps(tampered, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["field-gate", "compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--json"]) == 1
+    tamper_payload = json.loads(capsys.readouterr().out)
+    assert tamper_payload["problems"][0]["code"] == "field_gate_artifact_digest_mismatch"
+
+
 def test_context_pack_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

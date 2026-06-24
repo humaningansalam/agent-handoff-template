@@ -81,6 +81,7 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
     checks = [
         (["./scripts/repoctl", "context", "--help"], "pack-benchmark-materialize"),
         (["./scripts/repoctl", "field-gate", "run", "--help"], "release-candidate"),
+        (["./scripts/repoctl", "field-gate", "compare", "--help"], "--require-no-gate-regressions"),
         (["./scripts/repoctl", "knowledge", "--help"], "render"),
         (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
     ]
@@ -211,6 +212,32 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert field_gate_payload["data"]["failed_count"] == 0
     assert field_gate_payload["data"]["artifact"]["path"] == field_gate_output
     assert (package_root / field_gate_output).is_file()
+
+    field_gate_compare = subprocess.run(
+        [
+            "./scripts/repoctl",
+            "field-gate",
+            "compare",
+            "--baseline",
+            field_gate_output,
+            "--candidate",
+            field_gate_output,
+            "--max-failed-count-increase",
+            "0",
+            "--require-same-gates",
+            "--require-no-gate-regressions",
+            "--json",
+        ],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert field_gate_compare.returncode == 0, field_gate_compare.stderr
+    field_gate_compare_payload = json.loads(field_gate_compare.stdout)
+    assert field_gate_compare_payload["data"]["failed_count_delta"]["delta"] == 0
 
 
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:
