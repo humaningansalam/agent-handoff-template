@@ -327,6 +327,34 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
     if _has_errors(repo_problems):
         return _release_candidate_payload(repo_id=repo_id, gates=gates)
 
+    knowledge_data, knowledge_problems = check_knowledge_records(root, repo_id=repo_id)
+    candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=repo_id, pending_only=True)
+    knowledge_data["candidate_checks"] = candidate_data
+    knowledge_gate_problems = [
+        *knowledge_problems,
+        *[problem for problem in candidate_problems if problem.severity == "error"],
+    ]
+    knowledge_gate_warnings = [problem for problem in candidate_problems if problem.severity == "warning"]
+    gates.append(
+        _release_candidate_gate_result(
+            name="knowledge_check",
+            command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --include-candidates --json",
+            mutates_workspace=False,
+            data=knowledge_data,
+            problems=knowledge_gate_problems,
+            warnings=_problem_dicts(knowledge_gate_warnings),
+            summary={
+                "record_count": int(knowledge_data.get("record_count") or 0),
+                "event_count": int(knowledge_data.get("event_count") or 0),
+                "record_error_count": len([problem for problem in knowledge_problems if problem.severity == "error"]),
+                "candidate_total_count": int(candidate_data.get("candidate_total_count") or 0) if isinstance(candidate_data, dict) else 0,
+                "candidate_checked_count": len(candidate_data.get("results", [])) if isinstance(candidate_data.get("results"), list) else 0,
+                "candidate_error_count": len([problem for problem in candidate_problems if problem.severity == "error"]),
+                "candidate_warning_count": len([problem for problem in candidate_problems if problem.severity == "warning"]),
+            },
+        )
+    )
+
     context_fixture = root / "tests/fixtures/context-benchmark"
     if _repo_target_available(root, repo_id) and _fixture_has_repository(context_fixture, repo_id):
         context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(root, fixture=context_fixture, repo_id=repo_id, force=False)

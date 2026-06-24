@@ -1643,12 +1643,13 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     assert payload["command"] == "field-gate run"
     assert payload["data"]["schema"] == "repoctl.field_gate.release_candidate"
     assert payload["data"]["failed_count"] == 0
-    assert payload["data"]["gate_count"] == 6
+    assert payload["data"]["gate_count"] == 7
     assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/release-candidate.json"
     gate_names = [gate["name"] for gate in payload["data"]["gates"]]
     assert gate_names == [
         "workspace_check",
         "repository_check",
+        "knowledge_check",
         "context_benchmark_materialize",
         "context_benchmark",
         "context_pack_benchmark_materialize",
@@ -1658,6 +1659,33 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     pack_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_pack_benchmark")
     assert context_summary["mean_recall_at_5"] >= 0.85
     assert pack_summary["mean_must_read_recall"] == 1.0
+
+
+def test_release_candidate_field_gate_fails_on_stale_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    (tmp_path / "docs/adr/evidence-context-authority-v0.md").write_text("# Drifted\n\n## Decision\n\nChanged after approval.\n", encoding="utf-8")
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    knowledge_gate = next(gate for gate in payload["data"]["gates"] if gate["name"] == "knowledge_check")
+    assert knowledge_gate["ok"] is False
+    assert knowledge_gate["summary"]["record_error_count"] == 1
+    assert any(problem["code"] == "knowledge_source_digest_drift" for problem in knowledge_gate["problems"])
+    assert any(problem["code"] == "field_gate_failed" and problem["message"].endswith("knowledge_check") for problem in payload["problems"])
 
 
 def test_release_candidate_field_gate_runner_includes_multirepo_isolation_when_configured(tmp_path: Path, monkeypatch, capsys) -> None:
