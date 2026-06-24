@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -284,3 +287,31 @@ def test_upgrade_create_paths_add_missing_workflow_without_overwriting_existing(
     capsys.readouterr()
     assert (workspace / "docs/workflows/INDEX.md").read_text(encoding="utf-8") == "local workflow index\n"
     assert (workspace / "docs/workflows/repo-metadata.md").read_text(encoding="utf-8") == "upstream metadata workflow\n"
+
+
+def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    plan_file = tmp_path / "plan.json"
+    source = Path(__file__).resolve().parents[2]
+    write_workspace(workspace)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["upgrade", "apply", "--plan-file", str(plan_file), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+
+    env = os.environ.copy()
+    env["PATH"] = "/usr/bin:/bin"
+    env["PYTHON"] = sys.executable
+    checks = [
+        (["./scripts/repoctl", "context", "--help"], ["pack-benchmark-compare"]),
+        (["./scripts/repoctl", "knowledge", "--help"], ["render"]),
+        (["./scripts/repoctl", "knowledge", "render", "--help"], ["--check"]),
+    ]
+    for command, expected in checks:
+        result = subprocess.run(command, cwd=workspace, env=env, text=True, capture_output=True, timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        for text in expected:
+            assert text in result.stdout
