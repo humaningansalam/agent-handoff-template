@@ -10,7 +10,7 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .context import build_context_bundle
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, run_task_context_pack_benchmark
+from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
@@ -152,6 +152,57 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
     return actions
 
 
+def _release_candidate_field_gates(root: Path) -> list[dict[str, Any]]:
+    gates: list[dict[str, Any]] = []
+
+    def add(label: str, *, command: str, mutates_workspace: bool, requires: list[str] | None = None) -> None:
+        gates.append(
+            {
+                "label": label,
+                "command": command,
+                "mutates_workspace": mutates_workspace,
+                "requires": requires or [],
+            }
+        )
+
+    if (root / "tests/fixtures/context-benchmark/corpus.json").exists():
+        add(
+            "Materialize context benchmark corpus",
+            command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id main --json",
+            mutates_workspace=True,
+            requires=["tests/fixtures/context-benchmark/corpus.json"],
+        )
+        add(
+            "Run context benchmark gate",
+            command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id main --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+            mutates_workspace=False,
+            requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
+        )
+    if (root / "tests/fixtures/context-pack-benchmark/cases.json").exists():
+        if (root / "tests/fixtures/context-pack-benchmark/tasks.json").exists():
+            add(
+                "Materialize context pack benchmark tasks",
+                command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
+                mutates_workspace=True,
+                requires=["tests/fixtures/context-pack-benchmark/tasks.json"],
+            )
+        add(
+            "Run context pack benchmark gate",
+            command="./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id main --min-must-read-recall 1.0 --json",
+            mutates_workspace=False,
+            requires=["tests/fixtures/context-pack-benchmark/cases.json"],
+        )
+    knowledge_records = root / "docs/knowledge/records"
+    if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
+        add(
+            "Check rendered knowledge pages",
+            command="./scripts/repoctl knowledge render --repo-id main --check --json",
+            mutates_workspace=False,
+            requires=["docs/knowledge/records"],
+        )
+    return gates
+
+
 def _repo_scoped_frontmatter(task: Any) -> bool:
     area = str(task.frontmatter.get("area") or "")
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
@@ -200,6 +251,11 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tu
     live_paths = [task.rel_path for task in live_tasks(tasks)]
     payload = {
         "ok": not _has_errors(problems),
+        "data": {
+            "field_gates": {
+                "release_candidate": _release_candidate_field_gates(root),
+            },
+        },
         "problems": [problem.to_dict() for problem in problems],
         "warnings": _warnings(problems),
         "board": {
@@ -1523,6 +1579,34 @@ def cmd_context_pack_benchmark(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_pack_benchmark_materialize(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    fixture = Path(args.fixture)
+    if not fixture.is_absolute():
+        fixture = root / fixture
+    data, problems = materialize_task_context_pack_benchmark_tasks(root, fixture=fixture, force=args.force)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context pack-benchmark-materialize",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "context_pack_benchmark_materialize_mutates_workspace",
+                "message": "context pack benchmark materialize writes archived fixture tasks for controlled startup-pack tests",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        totals = data.get("totals", {}) if data else {}
+        print(f"context pack benchmark tasks materialized created={totals.get('created', 0)} unchanged={totals.get('unchanged', 0)} conflicts={totals.get('conflict', 0)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def cmd_context_pack_benchmark_compare(args: argparse.Namespace) -> int:
     baseline = Path(args.baseline)
     candidate = Path(args.candidate)
@@ -2348,6 +2432,11 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_benchmark.add_argument("--output")
     context_pack_benchmark.add_argument("--json", action="store_true")
     context_pack_benchmark.set_defaults(func=cmd_context_pack_benchmark)
+    context_pack_benchmark_materialize = context_sub.add_parser("pack-benchmark-materialize")
+    context_pack_benchmark_materialize.add_argument("--fixture", default="tests/fixtures/context-pack-benchmark")
+    context_pack_benchmark_materialize.add_argument("--force", action="store_true")
+    context_pack_benchmark_materialize.add_argument("--json", action="store_true")
+    context_pack_benchmark_materialize.set_defaults(func=cmd_context_pack_benchmark_materialize)
     context_pack_benchmark_compare = context_sub.add_parser("pack-benchmark-compare")
     context_pack_benchmark_compare.add_argument("--baseline", required=True)
     context_pack_benchmark_compare.add_argument("--candidate", required=True)

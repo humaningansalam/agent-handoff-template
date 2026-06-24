@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .context import build_context_bundle
+from .context_chunks import chunk_markdown_file
 from .context_model import ContextCandidate
 from .context_pack import estimate_tokens
 from .graph_model import digest_data
@@ -13,11 +15,81 @@ from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task
 
 
+def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, force: bool = False) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    tasks_path = fixture / "tasks.json"
+    if not tasks_path.is_file():
+        return {}, [Problem("error", "context_pack_benchmark_tasks_missing", "context pack benchmark tasks.json is missing", tasks_path.as_posix())]
+    try:
+        payload = json.loads(tasks_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, [Problem("error", "context_pack_benchmark_tasks_invalid_json", f"context pack benchmark tasks.json is invalid: {exc}", tasks_path.as_posix())]
+    task_entries = payload.get("tasks") if isinstance(payload, dict) else None
+    if not isinstance(task_entries, list):
+        return {}, [Problem("error", "context_pack_benchmark_tasks_invalid", "context pack benchmark tasks must be a list", tasks_path.as_posix())]
+
+    created: list[str] = []
+    unchanged: list[str] = []
+    overwritten: list[str] = []
+    conflicts: list[str] = []
+    for entry in task_entries:
+        if not isinstance(entry, dict):
+            problems.append(Problem("error", "context_pack_benchmark_task_invalid", "context pack benchmark task entry must be an object", tasks_path.as_posix()))
+            continue
+        rel_path = str(entry.get("path") or "")
+        content = entry.get("content")
+        if not rel_path.startswith("docs/archive/tasks/T-") or not rel_path.endswith(".md") or not isinstance(content, str):
+            problems.append(Problem("error", "context_pack_benchmark_task_invalid", "context pack benchmark task must declare archive task path and content", rel_path or tasks_path.as_posix()))
+            continue
+        target = root / rel_path
+        try:
+            target.resolve().relative_to(root.resolve())
+        except ValueError:
+            problems.append(Problem("error", "context_pack_benchmark_task_outside_workspace", "context pack benchmark task path must stay inside workspace", rel_path))
+            continue
+        if target.exists():
+            current = target.read_text(encoding="utf-8")
+            if current == content:
+                unchanged.append(rel_path)
+                continue
+            if not force:
+                conflicts.append(rel_path)
+                continue
+            overwritten.append(rel_path)
+        else:
+            created.append(rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    if conflicts:
+        problems.append(Problem("error", "context_pack_benchmark_task_conflict", "context pack benchmark task already exists with different content; rerun with --force to overwrite", conflicts[0]))
+    data = {
+        "schema": "repoctl.context.task_pack.benchmark.materialize",
+        "schema_version": 1,
+        "fixture": fixture.as_posix(),
+        "created": created,
+        "unchanged": unchanged,
+        "overwritten": overwritten,
+        "conflicts": conflicts,
+        "totals": {
+            "created": len(created),
+            "unchanged": len(unchanged),
+            "overwritten": len(overwritten),
+            "conflict": len(conflicts),
+            "task_count": len(task_entries),
+        },
+    }
+    return data, problems
+
+
 def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 5000, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
     task = resolve_task(root, task_id)
     query = _task_seed_query(task)
     bundle, problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens, explain=explain)
-    groups = _group_candidates(bundle.packed_context if bundle is not None else [])
+    mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
+    problems.extend(mandatory_problems)
+    packed_context = _dedupe_candidates([*mandatory_candidates, *(bundle.packed_context if bundle is not None else [])])
+    groups = _group_candidates(packed_context)
     groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
     data = {
         "schema": "repoctl.context.task_pack",
@@ -194,6 +266,61 @@ def _task_seed_query(task: Task) -> str:
         _section(task, "Handoff"),
     ]
     return "\n".join(part.strip() for part in parts if part.strip())
+
+
+CONTEXT_DOC_RE = re.compile(r"`([^`]+)`")
+
+
+def _explicit_context_doc_candidates(root: Path, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
+    candidates: list[ContextCandidate] = []
+    problems: list[Problem] = []
+    for rel_path in _context_doc_paths(task):
+        path = root / rel_path
+        try:
+            path.resolve().relative_to(root.resolve())
+        except ValueError:
+            problems.append(Problem("error", "context_pack_context_doc_outside_workspace", "task Context Docs path must stay inside workspace", rel_path))
+            continue
+        if not path.is_file():
+            problems.append(Problem("warning", "context_pack_context_doc_missing", "task Context Docs path is missing", rel_path))
+            continue
+        for chunk in chunk_markdown_file(root, path):
+            candidates.append(
+                ContextCandidate(
+                    source_ref=chunk.source_ref,
+                    text=chunk.text,
+                    score=100.0,
+                    score_breakdown={"explicit_context_doc": 1.0},
+                    selection_reasons=["Task Context Docs explicit source"],
+                    graph_path=[],
+                )
+            )
+    return candidates, problems
+
+
+def _context_doc_paths(task: Task) -> list[str]:
+    section = _section(task, "Context Docs")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in CONTEXT_DOC_RE.finditer(section):
+        rel_path = match.group(1).strip()
+        if not rel_path or rel_path in seen:
+            continue
+        seen.add(rel_path)
+        paths.append(rel_path)
+    return paths
+
+
+def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
+    deduped: list[ContextCandidate] = []
+    seen: set[tuple[str, str, str, int, int]] = set()
+    for candidate in candidates:
+        key = candidate.source_ref.key()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
 
 
 def _read_pack_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:

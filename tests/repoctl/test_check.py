@@ -124,6 +124,30 @@ def test_check_reports_board_missing_live_task(tmp_path: Path, monkeypatch, caps
     assert any(problem["code"] == "board_missing_live_task" for problem in payload["problems"])
 
 
+def test_clean_check_reports_release_candidate_field_gates(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    (tmp_path / "tests/fixtures/context-benchmark").mkdir(parents=True)
+    (tmp_path / "tests/fixtures/context-benchmark/corpus.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "tests/fixtures/context-benchmark/questions.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "tests/fixtures/context-benchmark/expected-sources.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "tests/fixtures/context-pack-benchmark").mkdir(parents=True)
+    (tmp_path / "tests/fixtures/context-pack-benchmark/cases.json").write_text("[]\n", encoding="utf-8")
+    (tmp_path / "tests/fixtures/context-pack-benchmark/tasks.json").write_text('{"tasks":[]}\n', encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["check", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    gates = payload["data"]["field_gates"]["release_candidate"]
+    commands = [gate["command"] for gate in gates]
+    assert payload["next_actions"] == []
+    assert any("context benchmark-materialize" in command for command in commands)
+    assert any("context benchmark --fixture tests/fixtures/context-benchmark" in command for command in commands)
+    assert any("context pack-benchmark-materialize" in command for command in commands)
+    assert any("context pack-benchmark" in command for command in commands)
+    assert any(gate["mutates_workspace"] is True for gate in gates if "benchmark-materialize" in gate["command"])
+
+
 def test_check_does_not_require_repo_ref_for_repository_task(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     text = task_text("T-20260609184046Z").replace('area: ""', 'area: "backend"').replace('repo_id: ""', 'repo_id: "main"')

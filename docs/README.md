@@ -50,6 +50,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Pack task startup context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
 - Pack task startup context with source-status explanation: `./scripts/repoctl context pack --task T-... --repo-id main --explain --json`
 - Compare task context pack artifacts: `./scripts/repoctl context pack-compare --baseline .repoctl-state/context-pack/baseline.json --candidate .repoctl-state/context-pack/candidate.json --json`
+- Materialize task context pack benchmark tasks: `./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json`
 - Benchmark task startup context packs: `./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id main --output .repoctl-state/context-pack-benchmark/result.json --json`
 - Compare context pack benchmark artifacts: `./scripts/repoctl context pack-benchmark-compare --baseline .repoctl-state/context-pack-benchmark/baseline.json --candidate .repoctl-state/context-pack-benchmark/candidate.json --max-mean-must-read-recall-drop 0 --json`
 - Build a review-only knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
@@ -96,6 +97,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
 - `repoctl context benchmark-materialize` is the explicit mutating setup step for controlled benchmark fixtures; `context benchmark` itself remains read-only.
+- `repoctl context pack-benchmark-materialize` is the explicit mutating setup step for archived fixture tasks; `context pack-benchmark` itself remains read-only.
 - `repoctl context pack-benchmark` and `pack-benchmark-compare` are retrieval/packing gates for field tests; they measure required source recall and do not validate task scope or generated answers.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
 - `repoctl knowledge candidate build --from-pack` uses the pack only to select current authority source refs; the pack artifact itself does not become a canonical knowledge source.

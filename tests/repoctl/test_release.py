@@ -79,7 +79,7 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
 
     checks = [
-        (["./scripts/repoctl", "context", "--help"], "benchmark-materialize"),
+        (["./scripts/repoctl", "context", "--help"], "pack-benchmark-materialize"),
         (["./scripts/repoctl", "knowledge", "--help"], "render"),
         (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
     ]
@@ -154,6 +154,46 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert benchmark_payload["data"]["question_count"] == 24
     assert benchmark_payload["data"]["summary"]["mean_recall_at_5"] >= 0.85
     assert benchmark_payload["problems"] == []
+
+    pack_materialize = subprocess.run(
+        ["./scripts/repoctl", "context", "pack-benchmark-materialize", "--fixture", "tests/fixtures/context-pack-benchmark", "--json"],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert pack_materialize.returncode == 0, pack_materialize.stderr
+    pack_materialize_payload = json.loads(pack_materialize.stdout)
+    assert pack_materialize_payload["data"]["totals"]["created"] == 5
+    assert pack_materialize_payload["data"]["totals"]["conflict"] == 0
+
+    pack_benchmark = subprocess.run(
+        [
+            "./scripts/repoctl",
+            "context",
+            "pack-benchmark",
+            "--fixture",
+            "tests/fixtures/context-pack-benchmark",
+            "--repo-id",
+            "main",
+            "--min-must-read-recall",
+            "1.0",
+            "--json",
+        ],
+        cwd=package_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert pack_benchmark.returncode == 0, pack_benchmark.stderr
+    pack_benchmark_payload = json.loads(pack_benchmark.stdout)
+    assert pack_benchmark_payload["data"]["case_count"] == 5
+    assert pack_benchmark_payload["data"]["summary"]["mean_must_read_recall"] == 1.0
+    assert pack_benchmark_payload["problems"] == []
 
 
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:

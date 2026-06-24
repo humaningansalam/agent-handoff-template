@@ -1603,6 +1603,26 @@ def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, m
     assert payload["warnings"][0]["code"] == "context_pack_benchmark_retrieval_only"
 
 
+def test_context_pack_benchmark_materialize_makes_shipped_fixture_runnable(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-pack-benchmark").resolve()
+
+    assert main(["context", "pack-benchmark-materialize", "--fixture", fixture.as_posix(), "--json"]) == 0
+    materialize_payload = json.loads(capsys.readouterr().out)
+    assert materialize_payload["command"] == "context pack-benchmark-materialize"
+    assert materialize_payload["data"]["totals"]["created"] == 5
+
+    assert main(["context", "pack-benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-must-read-recall", "1.0", "--json"]) == 0
+    benchmark_payload = json.loads(capsys.readouterr().out)
+    assert benchmark_payload["data"]["case_count"] == 5
+    assert benchmark_payload["data"]["summary"]["mean_must_read_recall"] == 1.0
+
+
 def test_context_pack_benchmark_writes_output_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
