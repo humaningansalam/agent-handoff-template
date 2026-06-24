@@ -897,6 +897,22 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     if args.gate != "release-candidate":
         raise RepoctlError(f"unsupported field gate: {args.gate}")
+    output: Path | None = None
+    if args.output:
+        output, output_problem = _workspace_output_path(root, args.output, code="field_gate_output_outside_workspace")
+        if output_problem is not None:
+            payload = {
+                "ok": False,
+                "command": "field-gate run",
+                "data": {},
+                "problems": [output_problem.to_dict()],
+                "warnings": [],
+            }
+            if args.json:
+                _json(payload)
+            else:
+                print(output_problem.message)
+            return 1
     data = _run_release_candidate_field_gates(root, repo_id=args.repo_id)
     problems = [
         Problem("error", "field_gate_failed", f"field gate failed: {gate.get('name', '')}")
@@ -915,19 +931,13 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
             }
         ],
     }
-    if args.output:
-        output, output_problem = _workspace_output_path(root, args.output, code="field_gate_output_outside_workspace")
-        if output_problem is not None:
-            problems.append(output_problem)
-            payload["ok"] = False
-            payload["problems"] = [problem.to_dict() for problem in problems]
-        else:
-            data["artifact"] = {
-                "path": output.relative_to(root).as_posix(),
-                "run_digest": data.get("run_digest", ""),
-            }
-            _complete_json_envelope(payload)
-            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    if output is not None:
+        data["artifact"] = {
+            "path": output.relative_to(root).as_posix(),
+            "run_digest": data.get("run_digest", ""),
+        }
+        _complete_json_envelope(payload)
+        atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     if args.json:
         _json(payload)
     else:

@@ -1663,6 +1663,27 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     assert pack_summary["mean_must_read_recall"] == 1.0
 
 
+def test_release_candidate_field_gate_rejects_invalid_output_before_mutation(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    source_root = Path(__file__).resolve().parents[2]
+    shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
+    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    outside = tmp_path.parent / "release-candidate.json"
+
+    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", outside.as_posix(), "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "field_gate_output_outside_workspace"
+    assert not outside.exists()
+    assert not (tmp_path / "repos/auth/flow.py").exists()
+    assert not (tmp_path / "docs/archive/tasks/T-20260624020202Z--pack-benchmark.md").exists()
+
+
 def test_release_candidate_field_gate_fails_on_stale_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
