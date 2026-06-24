@@ -44,6 +44,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Query the derived Graph snapshot: `./scripts/repoctl graph query --repo-id main --file src/app.py --json`
 - Query evidence context: `./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --json`
 - Query evidence context with knowledge source-status explanation: `./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --explain --json`
+- Materialize a controlled benchmark corpus: `./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id main --json`
 - Benchmark context and reviewed-knowledge retrieval: `./scripts/repoctl context benchmark --repo-id main --json`
 - Enforce benchmark gates: `./scripts/repoctl context benchmark --repo-id main --min-recall-at-5 0.8 --min-knowledge-recall-at-5 1.0 --require-source-integrity --json`
 - Pack task startup context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
@@ -94,6 +95,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl index code` extracts technical facts such as language, imports, symbols, calls, deps, and observed effect hints without writing `.repometa` or creating Graph state.
 - `repoctl graph build` derives a deterministic snapshot from repo registry, code index, and `.repometa`; it does not mutate source authorities or resolve symbols/imports.
 - `repoctl context` returns temporary source bundles and separate reviewed-knowledge matches; `context pack` exposes reviewed knowledge in its own group and does not create durable facts or change task scope.
+- `repoctl context benchmark-materialize` is the explicit mutating setup step for controlled benchmark fixtures; `context benchmark` itself remains read-only.
 - `repoctl context pack-benchmark` and `pack-benchmark-compare` are retrieval/packing gates for field tests; they measure required source recall and do not validate task scope or generated answers.
 - `repoctl knowledge candidate` writes review inputs under `.repoctl-state/`, which is ignored by Git.
 - `repoctl knowledge candidate build --from-pack` uses the pack only to select current authority source refs; the pack artifact itself does not become a canonical knowledge source.

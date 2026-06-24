@@ -449,6 +449,57 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert cross_file_payload["problems"] == []
 
 
+def test_context_benchmark_materialize_fixture_then_scores(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["context", "benchmark-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
+
+    materialize_payload = json.loads(capsys.readouterr().out)
+    assert materialize_payload["command"] == "context benchmark-materialize"
+    assert materialize_payload["data"]["totals"]["created"] >= 10
+    assert materialize_payload["data"]["totals"]["conflict"] == 0
+    assert materialize_payload["warnings"][0]["code"] == "context_benchmark_materialize_mutates_workspace"
+
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-recall-at-5", "0.85", "--require-source-integrity", "--require-fixture-corpus", "--require-no-forbidden", "--json"]) == 0
+
+    benchmark_payload = json.loads(capsys.readouterr().out)
+    assert benchmark_payload["data"]["question_count"] == 24
+    assert benchmark_payload["data"]["summary"]["mean_recall_at_5"] >= 0.85
+    assert benchmark_payload["data"]["fixture_corpus"]["missing_count"] == 0
+    assert benchmark_payload["problems"] == []
+
+
+def test_context_benchmark_materialize_blocks_conflicts_without_force(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "utils").mkdir(parents=True)
+    (repo / "utils/tokens.py").write_text("local edit\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    fixture = Path("tests/fixtures/context-benchmark").resolve()
+
+    assert main(["context", "benchmark-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 1
+
+    conflict_payload = json.loads(capsys.readouterr().out)
+    assert conflict_payload["data"]["totals"]["conflict"] == 1
+    assert conflict_payload["problems"][0]["code"] == "context_benchmark_corpus_materialize_conflict"
+    assert (repo / "utils/tokens.py").read_text(encoding="utf-8") == "local edit\n"
+
+    assert main(["context", "benchmark-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--force", "--json"]) == 0
+
+    force_payload = json.loads(capsys.readouterr().out)
+    assert force_payload["data"]["totals"]["overwritten"] == 1
+    assert "def issue_token" in (repo / "utils/tokens.py").read_text(encoding="utf-8")
+
+
 def test_context_benchmark_fixture_corpus_gate_fails_when_not_applied(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

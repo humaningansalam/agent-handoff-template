@@ -78,7 +78,7 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
 
     checks = [
-        (["./scripts/repoctl", "context", "--help"], "pack-benchmark-compare"),
+        (["./scripts/repoctl", "context", "--help"], "benchmark-materialize"),
         (["./scripts/repoctl", "knowledge", "--help"], "render"),
         (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
     ]

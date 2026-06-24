@@ -9,7 +9,7 @@ from typing import Any
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
 from .context import build_context_bundle
-from .context_benchmark import compare_context_benchmarks, run_context_benchmark
+from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
@@ -1317,6 +1317,34 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_context_benchmark_materialize(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    fixture = Path(args.fixture)
+    if not fixture.is_absolute():
+        fixture = root / fixture
+    data, problems = materialize_context_benchmark_corpus(root, fixture=fixture, repo_id=args.repo_id or "", force=args.force)
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "context benchmark-materialize",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "context_benchmark_materialize_mutates_workspace",
+                "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        totals = data.get("totals", {}) if data else {}
+        print(f"context benchmark-materialize created={totals.get('created', 0)} unchanged={totals.get('unchanged', 0)} overwritten={totals.get('overwritten', 0)} conflicts={totals.get('conflict', 0)}")
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
+
+
 def _parse_category_recall_gates(values: list[str]) -> tuple[dict[str, float], list[Problem]]:
     gates: dict[str, float] = {}
     problems: list[Problem] = []
@@ -2279,6 +2307,12 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--output")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)
+    context_benchmark_materialize = context_sub.add_parser("benchmark-materialize")
+    context_benchmark_materialize.add_argument("--fixture", default="tests/fixtures/context-benchmark")
+    context_benchmark_materialize.add_argument("--repo-id")
+    context_benchmark_materialize.add_argument("--force", action="store_true")
+    context_benchmark_materialize.add_argument("--json", action="store_true")
+    context_benchmark_materialize.set_defaults(func=cmd_context_benchmark_materialize)
     context_benchmark_compare = context_sub.add_parser("benchmark-compare")
     context_benchmark_compare.add_argument("--baseline", required=True)
     context_benchmark_compare.add_argument("--candidate", required=True)

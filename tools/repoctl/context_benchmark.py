@@ -177,20 +177,12 @@ def _read_questions(path: Path) -> list[dict[str, Any]]:
 
 
 def _fixture_corpus_status(root: Path, fixture: Path, *, repo_id: str = "") -> tuple[dict[str, Any], list[Problem]]:
-    corpus_path = fixture / "corpus.json"
-    if not corpus_path.is_file():
-        return {"present": False, "repositories": {}, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, []
-    try:
-        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return {"present": True, "invalid": True, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, [
-            Problem("error", "context_benchmark_corpus_invalid_json", f"context benchmark corpus.json is invalid: {exc}", corpus_path.as_posix())
-        ]
-    repositories = corpus.get("repositories") if isinstance(corpus, dict) else {}
-    if not isinstance(repositories, dict):
-        return {"present": True, "invalid": True, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, [
-            Problem("error", "context_benchmark_corpus_invalid", "context benchmark corpus repositories must be an object", corpus_path.as_posix())
-        ]
+    corpus, load_problems = _load_fixture_corpus(fixture)
+    if load_problems:
+        if any(problem.code == "context_benchmark_corpus_missing" for problem in load_problems):
+            return {"present": False, "repositories": {}, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, []
+        return {"present": True, "invalid": True, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, load_problems
+    repositories = corpus["repositories"]
 
     wanted_repo_ids = [repo_id] if repo_id else sorted(str(key) for key in repositories)
     status_repos: dict[str, Any] = {}
@@ -235,6 +227,75 @@ def _fixture_corpus_status(root: Path, fixture: Path, *, repo_id: str = "") -> t
         "missing_count": missing_count,
         "digest_drift_count": digest_drift_count,
     }, problems
+
+
+def materialize_context_benchmark_corpus(root: Path, *, fixture: Path, repo_id: str = "", force: bool = False) -> tuple[dict[str, Any], list[Problem]]:
+    corpus, load_problems = _load_fixture_corpus(fixture)
+    if load_problems:
+        return {}, load_problems
+    repositories = corpus["repositories"]
+    wanted_repo_ids = [repo_id] if repo_id else sorted(str(key) for key in repositories)
+    results: dict[str, Any] = {}
+    problems: list[Problem] = []
+    totals = {"created": 0, "unchanged": 0, "overwritten": 0, "conflict": 0, "file_count": 0}
+    for wanted_repo_id in wanted_repo_ids:
+        repo_corpus = repositories.get(wanted_repo_id)
+        if not isinstance(repo_corpus, dict):
+            continue
+        target = require_repo_target(root, repo_id=wanted_repo_id or None)
+        repo_result = {"created": [], "unchanged": [], "overwritten": [], "conflicts": []}
+        files = repo_corpus.get("files") if isinstance(repo_corpus.get("files"), list) else []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            rel = str(item.get("path") or "")
+            content = str(item.get("content") or "")
+            if not rel:
+                continue
+            totals["file_count"] += 1
+            path = target.root_path / rel
+            if path.exists() and path.read_text(encoding="utf-8") != content:
+                if not force:
+                    repo_result["conflicts"].append(rel)
+                    totals["conflict"] += 1
+                    problems.append(Problem("error", "context_benchmark_corpus_materialize_conflict", "fixture corpus would overwrite an existing file; pass --force to replace it", rel))
+                    continue
+                path.write_text(content, encoding="utf-8")
+                repo_result["overwritten"].append(rel)
+                totals["overwritten"] += 1
+                continue
+            if path.exists():
+                repo_result["unchanged"].append(rel)
+                totals["unchanged"] += 1
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            repo_result["created"].append(rel)
+            totals["created"] += 1
+        results[wanted_repo_id] = repo_result
+    return {
+        "schema": "repoctl.context.benchmark.materialize",
+        "schema_version": 1,
+        "fixture": fixture.as_posix(),
+        "repo_id": repo_id,
+        "force": force,
+        "repositories": results,
+        "totals": totals,
+    }, problems
+
+
+def _load_fixture_corpus(fixture: Path) -> tuple[dict[str, Any], list[Problem]]:
+    corpus_path = fixture / "corpus.json"
+    if not corpus_path.is_file():
+        return {}, [Problem("error", "context_benchmark_corpus_missing", "context benchmark corpus.json is missing", corpus_path.as_posix())]
+    try:
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, [Problem("error", "context_benchmark_corpus_invalid_json", f"context benchmark corpus.json is invalid: {exc}", corpus_path.as_posix())]
+    repositories = corpus.get("repositories") if isinstance(corpus, dict) else {}
+    if not isinstance(repositories, dict):
+        return {}, [Problem("error", "context_benchmark_corpus_invalid", "context benchmark corpus repositories must be an object", corpus_path.as_posix())]
+    return {"repositories": repositories}, []
 
 
 def _text_digest(value: str) -> str:
