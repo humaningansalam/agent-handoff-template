@@ -10,6 +10,7 @@ import pytest
 
 from tools.repoctl.cli import main
 from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
+from tests.repoctl.test_meta_check import write_repometa
 
 
 def write_workspace(root: Path) -> None:
@@ -48,6 +49,17 @@ def write_source(root: Path, *, manifest: dict | None = None) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def run_repoctl_json(workspace: Path, args: list[str]) -> dict:
+    env = os.environ.copy()
+    env["PATH"] = "/usr/bin:/bin"
+    env["PYTHON"] = sys.executable
+    result = subprocess.run(["./scripts/repoctl", *args, "--json"], cwd=workspace, env=env, text=True, capture_output=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    return payload
 
 
 def test_upgrade_plan_is_read_only_and_reports_managed_changes(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -315,3 +327,82 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
         assert result.returncode == 0, result.stderr
         for text in expected:
             assert text in result.stdout
+
+
+def test_upgrade_apply_supports_pack_to_reviewed_knowledge_flow(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    plan_file = tmp_path / "plan.json"
+    source = Path(__file__).resolve().parents[2]
+    write_workspace(workspace)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["upgrade", "apply", "--plan-file", str(plan_file), "--json"]) == 0
+    capsys.readouterr()
+
+    subprocess.run(["git", "init"], cwd=workspace / "repos", stdout=subprocess.DEVNULL, check=True)
+    write_repometa(workspace / "repos")
+    task_id = "T-20260624101010Z"
+    pack_path = ".repoctl-state/context-pack/T-20260624101010Z.json"
+    (workspace / f"docs/tasks/{task_id}--upgrade-knowledge-flow.md").write_text(
+        """---
+id: T-20260624101010Z
+title: "Upgrade knowledge flow smoke"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260624T101010Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260624101010Z - Upgrade knowledge flow smoke
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: Evidence Context authority
+- Candidate files reviewed: `repos/app.py`
+- Chosen files: `repos/app.py`
+
+## Goal
+
+Promote a context pack into reviewed knowledge after upgrade.
+
+## Handoff
+
+- Next exact step: build candidate from context pack.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260624101010Z.json --repo-id main --json`
+- Done when: reviewed knowledge is queryable and render output is current.
+""",
+        encoding="utf-8",
+    )
+
+    pack_payload = run_repoctl_json(workspace, ["context", "pack", "--task", task_id, "--repo-id", "main", "--output", pack_path])
+    assert pack_payload["data"]["metrics"]["unique_must_read_source_count"] >= 1
+
+    candidate_payload = run_repoctl_json(workspace, ["knowledge", "candidate", "build", "--from-pack", pack_path, "--repo-id", "main", "--kind", "decision"])
+    candidate_id = candidate_payload["data"]["candidate"]["id"]
+    assert candidate_payload["data"]["candidate"]["authoritative"] is False
+
+    check_payload = run_repoctl_json(workspace, ["knowledge", "candidate", "check", candidate_id, "--repo-id", "main"])
+    assert check_payload["data"]["checks"]["pack_provenance_current"] is True
+
+    approve_payload = run_repoctl_json(workspace, ["knowledge", "approve", candidate_id, "--repo-id", "main"])
+    record_id = approve_payload["data"]["record"]["id"]
+    assert approve_payload["warnings"] == []
+
+    query_payload = run_repoctl_json(workspace, ["knowledge", "query", "context returns source bundles", "--repo-id", "main"])
+    assert query_payload["data"]["results"][0]["record"]["id"] == record_id
+
+    render_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main"])
+    assert render_payload["data"]["rendered"]
+    render_check_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main", "--check"])
+    assert render_check_payload["data"]["check"]["current"] is True
