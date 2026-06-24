@@ -234,8 +234,8 @@ def test_context_benchmark_fixture_has_source_refs() -> None:
     expected = json.loads((fixture / "expected-sources.json").read_text(encoding="utf-8"))
     corpus = json.loads((fixture / "corpus.json").read_text(encoding="utf-8"))
 
-    assert len(questions) >= 7
-    assert {question["category"] for question in questions} >= {"authority", "contract", "impact", "reference-impact", "method-impact"}
+    assert len(questions) >= 24
+    assert {question["category"] for question in questions} >= {"authority", "contract", "code-location", "impact", "reference-impact", "method-impact", "import-impact"}
     assert corpus["schema"] == "repoctl.context.benchmark.corpus"
     assert len(corpus["repositories"]["main"]["files"]) >= 10
     for question in questions:
@@ -308,7 +308,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     authority_payload = json.loads(capsys.readouterr().out)
     authority_result = next(result for result in authority_payload["data"]["results"] if result["id"] == "Q-001")
     assert authority_result["metrics"]["packed_recall"] == 1.0
-    assert len(authority_result["packed_required_found_refs"]) == 2
+    assert len(authority_result["missing_required_from_packed"]) == 0
     assert authority_payload["problems"] == []
 
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-graph-edge-recall", "method-impact=1.0", "--require-fixture-corpus", "--json"]) == 0

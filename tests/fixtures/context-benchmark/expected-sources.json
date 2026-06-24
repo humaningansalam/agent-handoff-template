@@ -1,36 +1,40 @@
 {
   "Q-001": {
-    "required_source_refs": [
-      {
-        "path": "docs/adr/repoctl-graph-v0.md",
-        "section": "Decision"
-      },
+    "acceptable_optional_refs": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
         "section": "Future layer rules"
       }
     ],
+    "forbidden_refs": [],
     "required_knowledge_source_refs": [],
-    "acceptable_optional_refs": [],
-    "forbidden_refs": []
-  },
-  "Q-002": {
     "required_source_refs": [
       {
-        "path": "docs/adr/evidence-context-authority-v0.md",
-        "section": "Authority Rules"
+        "path": "docs/adr/repoctl-graph-v0.md",
+        "section": "Decision"
       }
-    ],
+    ]
+  },
+  "Q-002": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
     "required_knowledge_source_refs": [
       {
         "path": "docs/adr/evidence-context-authority-v0.md",
         "section": "Decision"
       }
     ],
-    "acceptable_optional_refs": [],
-    "forbidden_refs": []
+    "required_source_refs": [
+      {
+        "path": "docs/adr/evidence-context-authority-v0.md",
+        "section": "Authority Rules"
+      }
+    ]
   },
   "Q-003": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
         "path": "<graph:repo:main:file:utils%2Ftokens.py>"
@@ -38,12 +42,12 @@
       {
         "path": "<graph:repo:main:file:handlers%2Flogin.py>"
       }
-    ],
-    "required_knowledge_source_refs": [],
-    "acceptable_optional_refs": [],
-    "forbidden_refs": []
+    ]
   },
   "Q-004": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
         "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
@@ -51,12 +55,12 @@
       {
         "path": "<graph:repo:main:file:handlers%2Fsession_login.py>"
       }
-    ],
-    "required_knowledge_source_refs": [],
-    "acceptable_optional_refs": [],
-    "forbidden_refs": []
+    ]
   },
   "Q-005": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
         "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
@@ -64,21 +68,9 @@
       {
         "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
       }
-    ],
-    "required_knowledge_source_refs": [],
-    "acceptable_optional_refs": [],
-    "forbidden_refs": []
+    ]
   },
   "Q-006": {
-    "required_source_refs": [
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
-      }
-    ],
-    "required_knowledge_source_refs": [],
     "acceptable_optional_refs": [
       {
         "path": "<graph:repo:main:file:auth%2Fflow.py>"
@@ -87,24 +79,24 @@
     "forbidden_refs": [],
     "required_graph_edges": [
       {
-        "kind": "CALLS",
-        "from": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19",
-        "to": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24",
         "assertion": "resolved",
-        "source": "python_ast"
+        "from": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19",
+        "kind": "CALLS",
+        "source": "python_ast",
+        "to": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
       }
     ]
   },
   "Q-007": {
-    "required_source_refs": [
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23>"
-      }
-    ],
-    "required_knowledge_source_refs": [],
     "acceptable_optional_refs": [
       {
         "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
@@ -113,24 +105,24 @@
     "forbidden_refs": [],
     "required_graph_edges": [
       {
-        "kind": "CALLS",
-        "from": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23",
-        "to": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28",
         "assertion": "resolved",
-        "source": "python_ast"
+        "from": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23",
+        "kind": "CALLS",
+        "source": "python_ast",
+        "to": "repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23>"
       }
     ]
   },
   "Q-008": {
-    "required_source_refs": [
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31>"
-      }
-    ],
-    "required_knowledge_source_refs": [],
     "acceptable_optional_refs": [
       {
         "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
@@ -142,11 +134,234 @@
     "forbidden_refs": [],
     "required_graph_edges": [
       {
-        "kind": "CALLS",
-        "from": "repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31",
-        "to": "repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29",
         "assertion": "resolved",
-        "source": "python_ast"
+        "from": "repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31",
+        "kind": "CALLS",
+        "source": "python_ast",
+        "to": "repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31>"
+      }
+    ]
+  },
+  "Q-009": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "docs/adr/repoctl-graph-v0.md",
+        "section": "Decision"
+      }
+    ]
+  },
+  "Q-010": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "docs/adr/evidence-context-authority-v0.md",
+        "section": "Decision"
+      }
+    ]
+  },
+  "Q-011": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "docs/adr/evidence-context-authority-v0.md",
+        "section": "Authority Rules"
+      }
+    ]
+  },
+  "Q-012": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "docs/contracts/repoctl-module-boundaries.md",
+        "section": "Future layer rules"
+      }
+    ]
+  },
+  "Q-013": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+      }
+    ]
+  },
+  "Q-014": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Autils%2Ftokens.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+      }
+    ]
+  },
+  "Q-015": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
+      }
+    ]
+  },
+  "Q-016": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
+      },
+      {
+        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
+      }
+    ]
+  },
+  "Q-017": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
+      },
+      {
+        "path": "<graph:repo:main:file:handlers%2Fsession_login.py>"
+      }
+    ]
+  },
+  "Q-018": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:auth%2Fflow.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
+      }
+    ]
+  },
+  "Q-019": {
+    "acceptable_optional_refs": [
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
+      }
+    ],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:auth%2Fflow.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
+      }
+    ]
+  },
+  "Q-020": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:import-ref:python:services.token_service.issue_token>"
+      },
+      {
+        "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
+      }
+    ]
+  },
+  "Q-021": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:import-ref:python:utils.tokens.issue_token>"
+      },
+      {
+        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
+      }
+    ]
+  },
+  "Q-022": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fsession_tokens.py%3Aissue_session%3Afunction%3A1%3A0%3A2%3A31>"
+      }
+    ]
+  },
+  "Q-023": {
+    "acceptable_optional_refs": [
+      {
+        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
+      },
+      {
+        "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
+      }
+    ],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:auth%2Fflow.py>"
+      },
+      {
+        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
+      }
+    ]
+  },
+  "Q-024": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
+      },
+      {
+        "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
+      },
+      {
+        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
       }
     ]
   }

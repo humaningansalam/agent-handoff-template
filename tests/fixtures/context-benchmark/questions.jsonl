@@ -1,4 +1,4 @@
-{"id":"Q-001","category":"authority","repo_id":"main","question":"Why is Graph non-authoritative?"}
+{"id":"Q-001","category":"authority","repo_id":"main","question":"Why is Graph a read-only derived evidence snapshot and what source authorities remain?"}
 {"id":"Q-002","category":"contract","repo_id":"main","question":"What source authorities remain after context retrieval?"}
 {"id":"Q-003","category":"impact","repo_id":"main","question":"What files are impacted if utils/tokens.py changes?"}
 {"id":"Q-004","category":"impact","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
@@ -6,3 +6,19 @@
 {"id":"Q-006","category":"reference-impact","repo_id":"main","question":"What functions are impacted if validate_token changes?"}
 {"id":"Q-007","category":"method-impact","repo_id":"main","question":"What methods are impacted if TokenFlow.validate changes?"}
 {"id":"Q-008","category":"cross-file-call-impact","repo_id":"main","question":"What functions are impacted if issue_token changes?"}
+{"id":"Q-009","category":"authority","repo_id":"main","question":"Which source authorities remain: repo registry code index repometa task completion receipts?"}
+{"id":"Q-010","category":"authority","repo_id":"main","question":"Why does Evidence Context come before reviewed knowledge?"}
+{"id":"Q-011","category":"authority","repo_id":"main","question":"Does Context retrieval replace Board Backlog Graph or repometa authority?"}
+{"id":"Q-012","category":"contract","repo_id":"main","question":"What future layer rule prevents Context from replacing task Board Backlog Graph repometa authority?"}
+{"id":"Q-013","category":"code-location","repo_id":"main","question":"Where is services token_service issue_token defined?"}
+{"id":"Q-014","category":"code-location","repo_id":"main","question":"Where is utils tokens issue_token defined?"}
+{"id":"Q-015","category":"code-location","repo_id":"main","question":"Where is TokenFlow validate method defined?"}
+{"id":"Q-016","category":"code-location","repo_id":"main","question":"Where is frontend issueToken used?"}
+{"id":"Q-017","category":"impact","repo_id":"main","question":"What file calls issue_session?"}
+{"id":"Q-018","category":"code-location","repo_id":"main","question":"What file defines validate_token?"}
+{"id":"Q-019","category":"reference-impact","repo_id":"main","question":"What file calls validate_token?"}
+{"id":"Q-020","category":"import-impact","repo_id":"main","question":"What imports services token_service issue_token?"}
+{"id":"Q-021","category":"import-impact","repo_id":"main","question":"What imports utils tokens issue_token?"}
+{"id":"Q-022","category":"code-location","repo_id":"main","question":"What file defines issue_session?"}
+{"id":"Q-023","category":"code-location","repo_id":"main","question":"Where is login defined?"}
+{"id":"Q-024","category":"impact","repo_id":"main","question":"Where is issue_token defined and used?"}

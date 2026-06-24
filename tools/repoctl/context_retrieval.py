@@ -55,6 +55,7 @@ STOPWORDS = {
 
 def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: GraphSnapshot | None = None, limit: int = 20) -> list[ContextCandidate]:
     terms = _terms(query)
+    code_query = _is_code_query(terms)
     scores: dict[tuple[str, str, str, int, int], dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "fts": 0.0, "authority": 0.0, "graph": 0.0})
     reasons: dict[tuple[str, str, str, int, int], set[str]] = defaultdict(set)
     by_key = {chunk.source_ref.key(): chunk for chunk in chunks}
@@ -65,20 +66,20 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
         exact_hits = sum(1 for term in terms if term.lower() in haystack)
         if exact_hits:
             exact_score = min(1.0, exact_hits / max(1, len(terms)))
-            if chunk.source_ref.kind == "graph_node":
+            if chunk.source_ref.kind == "graph_node" and not code_query:
                 exact_score *= 0.3
             scores[key]["exact"] = exact_score
             reasons[key].add("exact term/path/heading match")
         scores[key]["authority"] = _authority_score(chunk)
 
     for key, fts_score in _fts_scores(query, chunks).items():
-        if by_key[key].source_ref.kind == "graph_node":
+        if by_key[key].source_ref.kind == "graph_node" and not code_query:
             fts_score *= 0.3
         scores[key]["fts"] = max(scores[key]["fts"], fts_score)
         reasons[key].add("SQLite FTS match")
 
     if snapshot is not None:
-        graph_scores = _graph_scores(terms, chunks, snapshot)
+        graph_scores = _graph_scores(terms, chunks, snapshot, code_query=code_query)
         for key, graph_score in graph_scores.items():
             scores[key]["graph"] = max(scores[key]["graph"], graph_score)
             reasons[key].add("Graph evidence match")
@@ -87,7 +88,8 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
     for key, breakdown in scores.items():
         if breakdown["exact"] <= 0 and breakdown["fts"] <= 0 and breakdown["graph"] <= 0:
             continue
-        score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"]
+        graph_weight = 2.0 if code_query else 1.0
+        score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"] * graph_weight
         if score <= 0:
             continue
         chunk = by_key[key]
@@ -111,6 +113,20 @@ def _terms(query: str) -> set[str]:
             if needle in term:
                 expanded.update(synonyms)
     return expanded
+
+
+def _is_code_query(terms: set[str]) -> bool:
+    code_action_terms = {"call", "calls", "called", "define", "defined", "defines", "import", "imports", "imported", "method", "symbol", "where"}
+    for term in terms:
+        if term.lower() in code_action_terms:
+            return True
+        if any(separator in term for separator in ("_", "/", "::")):
+            return True
+        if "." in term and not term.startswith("."):
+            return True
+        if any(char.islower() for char in term) and any(char.isupper() for char in term):
+            return True
+    return False
 
 
 def _authority_score(chunk: DocumentChunk) -> float:
@@ -162,7 +178,7 @@ def _escape_fts(token: str) -> str:
     return '"' + token.replace('"', '""') + '"'
 
 
-def _graph_scores(terms: set[str], chunks: list[DocumentChunk], snapshot: GraphSnapshot) -> dict[tuple[str, str, str, int, int], float]:
+def _graph_scores(terms: set[str], chunks: list[DocumentChunk], snapshot: GraphSnapshot, *, code_query: bool) -> dict[tuple[str, str, str, int, int], float]:
     index = GraphIndex(snapshot)
     matches = index.exact_matches(terms)
     if not matches:
@@ -175,7 +191,10 @@ def _graph_scores(terms: set[str], chunks: list[DocumentChunk], snapshot: GraphS
         path = chunk.source_ref.path
         for node_id in neighbor_ids:
             if path == f"<graph:{node_id}>":
-                result[chunk.source_ref.key()] = 0.25 if node_id in seed_ids else 0.1
+                if code_query:
+                    result[chunk.source_ref.key()] = 1.0 if node_id in seed_ids else 0.45
+                else:
+                    result[chunk.source_ref.key()] = 0.25 if node_id in seed_ids else 0.1
                 break
     return result
 
