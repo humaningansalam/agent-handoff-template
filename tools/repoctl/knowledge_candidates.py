@@ -609,33 +609,56 @@ def show_knowledge_record(root: Path, *, record_id: str, repo_id: str) -> tuple[
     return {"record": record, "path": path.relative_to(root).as_posix()}, []
 
 
+def _problem_code_counts(problems: list[Problem]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for problem in problems:
+        counts[problem.code] = counts.get(problem.code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
     problems: list[Problem] = []
     records = [_read_candidate(path) for path in sorted(_record_dir(root).glob("K-*.json"))]
     selected = [record for record in records if str(record.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(selected)
     deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
+    record_results: list[dict[str, Any]] = []
     for record in selected:
-        problems.extend(_source_digest_problems(root, record, record_id=str(record.get("id") or "")))
-    problems.extend(_supersession_problems(selected))
-    problems.extend(event_integrity_problems(root, repo_id=repo_id, records=selected))
+        record_id = str(record.get("id") or "")
+        record_problems = _source_digest_problems(root, record, record_id=record_id)
+        problems.extend(record_problems)
+        record_results.append(
+            {
+                "id": record_id,
+                "kind": record.get("kind", ""),
+                "status": _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids),
+                "title": record.get("title", ""),
+                "source_statuses": _source_ref_statuses(root, record),
+                "error_count": len([problem for problem in record_problems if problem.severity == "error"]),
+                "warning_count": len([problem for problem in record_problems if problem.severity == "warning"]),
+                "problem_codes": _problem_code_counts(record_problems),
+            }
+        )
+    supersession_problems = _supersession_problems(selected)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=selected)
+    problems.extend(supersession_problems)
+    problems.extend(event_problems)
     return {
         "schema": "repoctl.knowledge.check",
         "schema_version": 1,
         "repo_id": repo_id,
         "record_count": len(selected),
         "event_count": len(_load_events(root, repo_id=repo_id)),
-        "records": [
-            {
-                "id": record.get("id", ""),
-                "kind": record.get("kind", ""),
-                "status": _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids),
-                "title": record.get("title", ""),
-            }
-            for record in selected
-        ],
+        "records": record_results,
+        "record_checks": {
+            "error_count": len([problem for problem in problems if problem.severity == "error" and not problem.code.startswith("knowledge_event_")]),
+            "warning_count": len([problem for problem in problems if problem.severity == "warning" and not problem.code.startswith("knowledge_event_")]),
+            "problem_codes": _problem_code_counts([problem for problem in problems if not problem.code.startswith("knowledge_event_")]),
+        },
         "event_checks": {
-            "error_count": len([problem for problem in problems if problem.code.startswith("knowledge_event_")]),
+            "error_count": len([problem for problem in event_problems if problem.severity == "error"]),
+            "warning_count": len([problem for problem in event_problems if problem.severity == "warning"]),
+            "problem_codes": _problem_code_counts(event_problems),
         },
     }, problems
 

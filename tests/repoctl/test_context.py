@@ -1019,6 +1019,38 @@ def test_context_benchmark_knowledge_source_current_gate_fails_on_stale_record(t
     assert any(problem["code"] == "context_benchmark_knowledge_source_stale" for problem in payload["problems"])
 
 
+def test_knowledge_check_reports_record_source_diagnostics(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nChanged after approval.\n", encoding="utf-8")
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["record_checks"]["problem_codes"] == {"knowledge_source_digest_drift": 1}
+    record = next(item for item in payload["data"]["records"] if item["id"] == record_id)
+    assert record["status"] == "stale"
+    assert record["error_count"] == 1
+    assert record["problem_codes"] == {"knowledge_source_digest_drift": 1}
+    source_status = record["source_statuses"][0]
+    assert source_status["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert source_status["exists"] is True
+    assert source_status["digest_matches"] is False
+    assert source_status["expected_sha256"].startswith("sha256:")
+    assert source_status["actual_sha256"].startswith("sha256:")
+    assert any(problem["code"] == "knowledge_source_digest_drift" for problem in payload["problems"])
+
+
 def test_context_benchmark_counts_superseded_knowledge_exclusion(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
@@ -1707,6 +1739,7 @@ def test_release_candidate_field_gate_fails_on_stale_reviewed_knowledge(tmp_path
     knowledge_gate = next(gate for gate in payload["data"]["gates"] if gate["name"] == "knowledge_check")
     assert knowledge_gate["ok"] is False
     assert knowledge_gate["summary"]["record_error_count"] == 1
+    assert knowledge_gate["summary"]["record_problem_codes"] == {"knowledge_source_digest_drift": 1}
     assert any(problem["code"] == "knowledge_source_digest_drift" for problem in knowledge_gate["problems"])
     assert any(problem["code"] == "field_gate_failed" and problem["message"].endswith("knowledge_check") for problem in payload["problems"])
 

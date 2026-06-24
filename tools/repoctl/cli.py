@@ -253,6 +253,13 @@ def _problem_dicts(problems: list[Problem]) -> list[dict[str, str]]:
     return [problem.to_dict() for problem in problems]
 
 
+def _problem_code_counts(problems: list[Problem]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for problem in problems:
+        counts[problem.code] = counts.get(problem.code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _problems_from_dicts(items: list[dict[str, str]]) -> list[Problem]:
     return [
         Problem(
@@ -406,10 +413,13 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 "record_count": int(knowledge_data.get("record_count") or 0),
                 "event_count": int(knowledge_data.get("event_count") or 0),
                 "record_error_count": len([problem for problem in knowledge_problems if problem.severity == "error"]),
+                "record_problem_codes": _problem_code_counts([problem for problem in knowledge_problems if problem.severity == "error"]),
                 "candidate_total_count": int(candidate_data.get("candidate_total_count") or 0) if isinstance(candidate_data, dict) else 0,
                 "candidate_checked_count": len(candidate_data.get("results", [])) if isinstance(candidate_data.get("results"), list) else 0,
                 "candidate_error_count": len([problem for problem in candidate_problems if problem.severity == "error"]),
                 "candidate_warning_count": len([problem for problem in candidate_problems if problem.severity == "warning"]),
+                "candidate_problem_codes": _problem_code_counts([problem for problem in candidate_problems if problem.severity == "error"]),
+                "candidate_warning_codes": _problem_code_counts([problem for problem in candidate_problems if problem.severity == "warning"]),
             },
         )
     )
