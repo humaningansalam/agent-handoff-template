@@ -7,6 +7,18 @@
         {
           "path": "app.py",
           "content": "def auth() -> str:\n    return 'api'\n"
+        },
+        {
+          "path": "auth/client.py",
+          "content": "def auth_client() -> str:\n    return 'api-client'\n"
+        },
+        {
+          "path": "config/settings.py",
+          "content": "SERVICE = 'api'\n"
+        },
+        {
+          "path": "shared/session.py",
+          "content": "def session_scope() -> str:\n    return 'api-session'\n"
         }
       ]
     },
@@ -15,6 +27,18 @@
         {
           "path": "app.py",
           "content": "def auth() -> str:\n    return 'web'\n"
+        },
+        {
+          "path": "auth/client.py",
+          "content": "def auth_client() -> str:\n    return 'web-client'\n"
+        },
+        {
+          "path": "config/settings.py",
+          "content": "SERVICE = 'web'\n"
+        },
+        {
+          "path": "shared/session.py",
+          "content": "def session_scope() -> str:\n    return 'web-session'\n"
         }
       ]
     }

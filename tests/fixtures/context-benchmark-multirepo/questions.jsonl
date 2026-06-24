@@ -1,1 +1,8 @@
 {"id":"Q-MR-001","category":"multi-repo-isolation","repo_id":"web","question":"web app.py"}
+{"id":"Q-MR-002","category":"multi-repo-isolation","repo_id":"api","question":"api app.py"}
+{"id":"Q-MR-003","category":"multi-repo-isolation","repo_id":"web","question":"web auth client.py"}
+{"id":"Q-MR-004","category":"multi-repo-isolation","repo_id":"api","question":"api auth client.py"}
+{"id":"Q-MR-005","category":"multi-repo-isolation","repo_id":"web","question":"web config settings.py"}
+{"id":"Q-MR-006","category":"multi-repo-isolation","repo_id":"api","question":"api config settings.py"}
+{"id":"Q-MR-007","category":"multi-repo-isolation","repo_id":"web","question":"web session_scope shared session"}
+{"id":"Q-MR-008","category":"multi-repo-isolation","repo_id":"api","question":"api session_scope shared session"}

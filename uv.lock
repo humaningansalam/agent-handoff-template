@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "agent-handoff-template-workspace"
-version = "0.2.119"
+version = "0.2.120"
 source = { virtual = "." }
 
 [package.dev-dependencies]

@@ -1,15 +1,113 @@
 {
   "Q-MR-001": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:api:file:app.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
     "required_source_refs": [
+      {
+        "path": "<graph:repo:web:file:app.py>"
+      }
+    ]
+  },
+  "Q-MR-002": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
       {
         "path": "<graph:repo:web:file:app.py>"
       }
     ],
     "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:api:file:app.py>"
+      }
+    ]
+  },
+  "Q-MR-003": {
     "acceptable_optional_refs": [],
     "forbidden_refs": [
       {
-        "path": "<graph:repo:api:file:app.py>"
+        "path": "<graph:repo:api:file:auth%2Fclient.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:web:file:auth%2Fclient.py>"
+      }
+    ]
+  },
+  "Q-MR-004": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:web:file:auth%2Fclient.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:api:file:auth%2Fclient.py>"
+      }
+    ]
+  },
+  "Q-MR-005": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:api:file:config%2Fsettings.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:web:file:config%2Fsettings.py>"
+      }
+    ]
+  },
+  "Q-MR-006": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:web:file:config%2Fsettings.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:api:file:config%2Fsettings.py>"
+      }
+    ]
+  },
+  "Q-MR-007": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:api:file:shared%2Fsession.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:web:file:shared%2Fsession.py>"
+      }
+    ]
+  },
+  "Q-MR-008": {
+    "acceptable_optional_refs": [],
+    "forbidden_refs": [
+      {
+        "path": "<graph:repo:web:file:shared%2Fsession.py>"
+      }
+    ],
+    "required_knowledge_source_refs": [],
+    "required_source_refs": [
+      {
+        "path": "<graph:repo:api:file:shared%2Fsession.py>"
       }
     ]
   }
