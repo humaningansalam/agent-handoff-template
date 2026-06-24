@@ -22,6 +22,8 @@ Direct single-repo layout may omit `--repo-id` when `repos/.git` is the only tar
 
 Query does not parse `graph build` stdout, require a snapshot file, or use a database.
 
+Current public query selectors are limited to `--file`, `--topic`, and `--import`. Symbol, caller, callee, and impact selectors are planned product work in `docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md` Phase 1 and must not be documented as shipped until implemented.
+
 ## Snapshot
 
 ```json
@@ -34,13 +36,30 @@ Query does not parse `graph build` stdout, require a snapshot file, or use a dat
     "path": "repos",
     "identity_source": "reserved"
   },
-  "capabilities": ["artifact", "change_event", "file", "import_ref", "repository", "task", "topic"],
+  "capabilities": [
+    "anchor",
+    "artifact",
+    "change_event",
+    "cross_file_import_calls",
+    "file",
+    "import_ref",
+    "import_resolution",
+    "repository",
+    "same_file_calls",
+    "symbol",
+    "task",
+    "topic"
+  ],
   "sources": [],
   "completeness": {
     "inventory_complete": true,
+    "identity_collisions": 0,
+    "metadata_store_valid": true,
+    "receipt_set_complete": true,
     "index_truncated": false,
     "code_facts_complete": true,
-    "parse_error_count": 0
+    "parse_error_count": 0,
+    "provider_failures": []
   },
   "nodes": [],
   "edges": [],
@@ -87,9 +106,18 @@ CHANGE_AFFECTED_FILE
 TASK_VERIFIED_BY
 DEFINES
 ANCHORS
+RESOLVES_TO
+IMPORTS_FILE
+CALLS
 ```
 
-`DECLARES_IMPORT` points to `import_ref`, not to file, module, package, or symbol. Future resolvers may add `RESOLVES_TO` edges without changing this meaning.
+`DECLARES_IMPORT` points to `import_ref`, not to file, module, package, or symbol. Resolvers may add `RESOLVES_TO` without changing this meaning.
+
+`RESOLVES_TO` points from an `import_ref` node to an unambiguous resolved file node. It is provider evidence, not package-manager or runtime inference.
+
+`IMPORTS_FILE` points from the importing file node to the resolved imported file node. It is added only when resolution is unambiguous.
+
+`CALLS` points from a precise provider symbol node to another precise provider symbol node. Current support covers Python provider-confirmed same-file calls, same-class method calls, and selected cross-file calls through imported Python functions. String matching alone must not create `CALLS`.
 
 `HAS_TOPIC` uses repo-local topic nodes. Same topic text in two repositories is not the same graph entity.
 
@@ -140,12 +168,12 @@ observed
 declared
 default
 recorded
+resolved
 ```
 
 Reserved future assertion values:
 
 ```text
-resolved
 inferred
 ```
 

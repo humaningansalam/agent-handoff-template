@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted as the historical Graph v0 authority decision.
+
+Partially superseded for current product behavior by `docs/contracts/repoctl-graph-contract.md` and `docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md`.
 
 ## Context
 
@@ -47,7 +49,7 @@ DEFINES
 ANCHORS
 ```
 
-Graph v0 rules:
+Original Graph v0 rules:
 
 - No import resolution.
 - No task Markdown parsing.
@@ -56,10 +58,19 @@ Graph v0 rules:
 - No llmwiki integration.
 - MCP transport is a future layer over Graph build/query.
 
+Current implementation has additive precise-provider capabilities beyond the original v0 baseline:
+
+- Python AST symbol and anchor nodes.
+- Python same-file, same-class, and imported cross-file `CALLS` edges when provider evidence is available.
+- Python and JS/TS relative import resolution through `RESOLVES_TO` and `IMPORTS_FILE` edges when unambiguous.
+- Graph completeness fields for identity collisions, metadata store validity, receipt completeness, parse errors, and provider failures.
+
+These additions preserve the original rule that Graph is read-only and non-authoritative. They add facts and edges; they do not make `.repometa`, task Markdown, generated wiki, or Graph itself a source authority.
+
 ## Consequences
 
 - Graph can be built before SCIP/LSP providers exist.
-- Raw import references stay stable when future resolution providers are added.
+- Raw import references stay stable when resolution providers add `RESOLVES_TO` or `IMPORTS_FILE` evidence.
 - Symbol names remain file facts until a provider can supply stable symbol identity and source anchors.
 - Task evidence enters Graph only from task completion receipts.
 - Repo-local topics avoid accidental cross-repo concept merging.
