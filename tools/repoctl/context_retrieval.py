@@ -88,7 +88,7 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
     for key, breakdown in scores.items():
         if breakdown["exact"] <= 0 and breakdown["fts"] <= 0 and breakdown["graph"] <= 0:
             continue
-        graph_weight = 2.0 if code_query else 1.0
+        graph_weight = 2.0 if code_query else 0.15
         score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"] * graph_weight
         if score <= 0:
             continue
@@ -124,18 +124,25 @@ def _is_code_query(terms: set[str]) -> bool:
             return True
         if "." in term and not term.startswith("."):
             return True
-        if any(char.islower() for char in term) and any(char.isupper() for char in term):
+        if _looks_like_code_identifier(term):
             return True
     return False
+
+
+def _looks_like_code_identifier(term: str) -> bool:
+    if not any(char.islower() for char in term) or not any(char.isupper() for char in term):
+        return False
+    return not (term[:1].isupper() and term[1:].islower())
 
 
 def _authority_score(chunk: DocumentChunk) -> float:
     path = chunk.source_ref.path
     kind = chunk.source_ref.kind
+    section = chunk.source_ref.section.lower()
     if path.startswith("docs/contracts/"):
         return 0.45
     if path.startswith("docs/adr/"):
-        return 0.4
+        return 0.5 if section == "decision" else 0.4
     if kind == "completion_receipt":
         return 0.35
     if kind == "task_artifact":
@@ -166,7 +173,10 @@ def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str,
         cursor = conn.execute("SELECT rowid, bm25(chunks) AS rank FROM chunks WHERE chunks MATCH ? ORDER BY rank LIMIT 50", (phrase,))
         for rowid, rank in cursor.fetchall():
             chunk = chunks[int(rowid) - 1]
-            result[chunk.source_ref.key()] = 1.0 / (1.0 + abs(float(rank)))
+            score = 1.0 / (1.0 + abs(float(rank)))
+            if len(TOKEN_RE.findall(chunk.text)) < 5:
+                score *= 0.3
+            result[chunk.source_ref.key()] = score
         return result
     except sqlite3.Error:
         return {}

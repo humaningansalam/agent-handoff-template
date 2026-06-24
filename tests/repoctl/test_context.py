@@ -397,6 +397,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["question_count"] >= 2
     assert payload["data"]["summary"]["source_ref_integrity"] is True
     assert payload["data"]["summary"]["mean_recall_at_5"] > 0
+    assert payload["data"]["summary"]["by_category"]["authority"]["mean_recall_at_5"] >= 0.85
     assert payload["data"]["summary"]["by_category"]["authority"]["mean_packed_recall"] == 1.0
     assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
