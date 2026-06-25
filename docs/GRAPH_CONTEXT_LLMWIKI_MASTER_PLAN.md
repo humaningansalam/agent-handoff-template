@@ -1564,8 +1564,8 @@ Next exact slice: <one user-visible capability>
 | Phase 3 — Agent Context Pack v1 | COMMITTED | three fresh-copy repo tasks generated Markdown packs, used pack evidence before editing, passed focused verification, and finished with receipts | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 3 entry | `7a9cf0d` | none |
 | Phase 4 — Reviewed Knowledge v1 | COMMITTED | receipt candidate review Markdown, reviewer/note approval provenance, next-pack reuse, supersede, stale refresh | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 4 entry | `dd05e85` | none |
 | Phase 5 — llmwiki v1 | COMMITTED | navigable static wiki with index, kind pages, records, file targets, history, search index, lifecycle/source freshness | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 5 entry | `4590fc0` | none |
-| Phase 6 — Closed-loop Field Proof | NOT_STARTED | three Golden Workflows | pending | pending | none |
-| Phase 7 — Release and Completion | NOT_STARTED | release artifact E2E | pending | pending | none |
+| Phase 6 — Closed-loop Field Proof | FIELD_VERIFIED | Golden A/B/C pass, fixture quality gates pass, next-pack reuse and stale refresh proven | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 6 entry | this commit | none |
+| Phase 7 — Release and Completion | FIELD_VERIFIED | full pytest, repoctl gates, release archive, extracted-artifact Graph/Context/Knowledge/wiki/field-gate smoke | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 7 entry | this commit | bare extracted artifact is an upgrade source; minimal workspace state is required for workspace-mutating commands |
 
 ---
 

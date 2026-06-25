@@ -452,8 +452,10 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert stale_bundle["source_status_counts"] == {"digest_mismatch": 1}
     assert stale_bundle["source_statuses"][0]["status"] == "digest_mismatch"
     stale_decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert "- Status: `stale`" in stale_decisions_text
-    assert "status=`digest_mismatch`" in stale_decisions_text
+    assert f"records/{record['id']}.md" in stale_decisions_text
+    stale_record_text = (tmp_path / "docs/knowledge/generated/records" / f"{record['id']}.md").read_text(encoding="utf-8")
+    assert "- Status: `stale`" in stale_record_text
+    assert "status=`digest_mismatch`" in stale_record_text
 
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
@@ -698,9 +700,12 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     assert "### Reviewed" in index_text
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
     assert "Non-authoritative generated view" in decisions_text
-    assert f"- Lifecycle events: `{approved_event['id']}`" in decisions_text
-    assert "status=`current`" in decisions_text
-    assert "docs/adr/evidence-context-authority-v0.md#Decision" in decisions_text
+    record_id = decisions_bundle["record_ids"][0]
+    assert f"records/{record_id}.md" in decisions_text
+    record_text = (tmp_path / "docs/knowledge/generated/records" / f"{record_id}.md").read_text(encoding="utf-8")
+    assert f"- Lifecycle events: `{approved_event['id']}`" in record_text
+    assert "status=`current`" in record_text
+    assert "docs/adr/evidence-context-authority-v0.md#Decision" in record_text
 
     assert main(["context", "query", "Knowledge Index", "--repo-id", "main", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
@@ -808,6 +813,7 @@ def test_knowledge_render_check_detects_current_and_stale_outputs_without_writin
         "stale_pages": [],
         "unreadable_pages": [],
         "stale_owned_pages": [],
+        "broken_links": [],
     }
 
     decisions_path = tmp_path / "docs/knowledge/generated/decisions.md"
@@ -820,7 +826,10 @@ def test_knowledge_render_check_detects_current_and_stale_outputs_without_writin
     assert "knowledge_render_manifest_stale" in problem_codes
     assert "knowledge_render_page_stale" in problem_codes
     assert stale_payload["data"]["check"]["current"] is False
-    assert stale_payload["data"]["check"]["stale_pages"] == ["docs/knowledge/generated/INDEX.md", "docs/knowledge/generated/decisions.md"]
+    stale_pages = set(stale_payload["data"]["check"]["stale_pages"])
+    assert "docs/knowledge/generated/INDEX.md" in stale_pages
+    assert "docs/knowledge/generated/decisions.md" in stale_pages
+    assert any(path.startswith("docs/knowledge/generated/records/") for path in stale_pages)
     assert decisions_path.read_text(encoding="utf-8") == original_decisions
 
 
@@ -959,13 +968,17 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
     render_payload = json.loads(capsys.readouterr().out)
     assert render_payload["data"]["event_count"] == 3
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert f"- Record: `{old_record}`" in decisions_text
-    assert "- Status: `superseded`" in decisions_text
-    assert f"- Superseded by: `{new_record}`" in decisions_text
-    assert f"- Supersedes: `{old_record}`" in decisions_text
-    assert "- Lifecycle events: `" in decisions_text
-    assert f"- Approved from candidate: `{second_candidate}`" in decisions_text
-    assert f"- Related at approval: `{old_record} status=reviewed relation=same_claim`" in decisions_text
+    assert f"records/{old_record}.md" in decisions_text
+    assert f"records/{new_record}.md" in decisions_text
+    old_record_text = (tmp_path / "docs/knowledge/generated/records" / f"{old_record}.md").read_text(encoding="utf-8")
+    new_record_text = (tmp_path / "docs/knowledge/generated/records" / f"{new_record}.md").read_text(encoding="utf-8")
+    assert f"- Record: `{old_record}`" in old_record_text
+    assert "- Status: `superseded`" in old_record_text
+    assert f"- Superseded by: [{new_record}]" in old_record_text
+    assert f"- Supersedes: [{old_record}]" in new_record_text
+    assert "- Lifecycle events: `" in old_record_text
+    assert f"- Approved from candidate: `{second_candidate}`" in new_record_text
+    assert f"- Related at approval: `{old_record} status=reviewed relation=same_claim`" in new_record_text
 
 
 def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1064,7 +1077,9 @@ def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatc
     assert "- deprecated: 1" in index_text
     assert "### Deprecated" in index_text
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert "- Status: `deprecated`" in decisions_text
+    assert f"records/{record['id']}.md" in decisions_text
+    record_text = (tmp_path / "docs/knowledge/generated/records" / f"{record['id']}.md").read_text(encoding="utf-8")
+    assert "- Status: `deprecated`" in record_text
 
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
@@ -1218,7 +1233,14 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert candidate["kind"] == "invariant"
     assert candidate["title"] == "Task T-20260609184046Z"
     assert candidate["authoritative"] is False
-    assert candidate["derived_from"] == {"kind": "completion_receipt", "task_id": "T-20260609184046Z"}
+    assert candidate["derived_from"] == {
+        "kind": "completion_receipt",
+        "task_id": "T-20260609184046Z",
+        "repo_id": "main",
+        "verification_artifact": "docs/archive/tasks/T-20260609184046Z--receipt-backed.md",
+        "changed_files": [],
+        "related_symbols": [],
+    }
     source_refs = candidate["source_refs"]
     assert source_refs[0]["kind"] == "completion_receipt"
     assert source_refs[0]["path"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
@@ -1327,8 +1349,11 @@ Create a candidate from a context pack without making the pack an authority sour
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert f"- Approved from candidate: `{candidate['id']}`" in decisions_text
-    assert "- Candidate warnings: `knowledge_candidate_pack_provenance_missing`" in decisions_text
+    record_id = approve_payload["data"]["record"]["id"]
+    assert f"records/{record_id}.md" in decisions_text
+    record_text = (tmp_path / "docs/knowledge/generated/records" / f"{record_id}.md").read_text(encoding="utf-8")
+    assert f"- Approved from candidate: `{candidate['id']}`" in record_text
+    assert "- Candidate warnings: `knowledge_candidate_pack_provenance_missing`" in record_text
 
 
 def test_context_pack_promotes_to_reviewed_knowledge_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
