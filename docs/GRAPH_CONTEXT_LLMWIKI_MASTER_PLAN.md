@@ -1562,7 +1562,7 @@ Next exact slice: <one user-visible capability>
 | Phase 1 — Graph Product API | COMMITTED | symbol/callers/callees/impact public CLI selectors return matches, paths, completeness, and ambiguity candidates | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 1 entry | `310e9f1` | none |
 | Phase 2 — Evidence Context v1 | COMMITTED | context query returns actionable JSON/Markdown groups with Graph caller evidence, source authority refs, and stale knowledge exclusion | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 2 entry | `779e2e6` | none |
 | Phase 3 — Agent Context Pack v1 | COMMITTED | three fresh-copy repo tasks generated Markdown packs, used pack evidence before editing, passed focused verification, and finished with receipts | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 3 entry | `7a9cf0d` | none |
-| Phase 4 — Reviewed Knowledge v1 | FIELD_VERIFIED | receipt candidate review Markdown, reviewer/note approval provenance, next-pack reuse, supersede, stale refresh | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 4 entry | pending `feat(knowledge): make candidate review and provenance actionable` | none |
+| Phase 4 — Reviewed Knowledge v1 | COMMITTED | receipt candidate review Markdown, reviewer/note approval provenance, next-pack reuse, supersede, stale refresh | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 4 entry | `dd05e85` | none |
 | Phase 5 — llmwiki v1 | NOT_STARTED | linked static wiki | pending | pending | none |
 | Phase 6 — Closed-loop Field Proof | NOT_STARTED | three Golden Workflows | pending | pending | none |
 | Phase 7 — Release and Completion | NOT_STARTED | release artifact E2E | pending | pending | none |
