@@ -78,3 +78,26 @@ warnings/completeness
 ```
 
 Markdown output is a view. It must not be ingested as a future Context, Knowledge, or llmwiki source.
+
+## Task Pack
+
+`repoctl context pack` turns a live task into a startup evidence pack:
+
+```bash
+./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
+```
+
+The pack is non-authoritative and must be read before editing repo files for repo-scoped tasks when available. It contains:
+
+```text
+must_read
+likely_change
+impact
+verification
+reviewed_knowledge
+warnings
+```
+
+Legacy JSON groups such as `maybe_relevant` and `verification_hints` remain for compatibility. The agent-facing groups are aliases over the same source references plus direct task Graph evidence.
+
+The pack may use task title, Goal, Discovery, Handoff, chosen files, and explicit Context Docs as retrieval seeds only. It must not convert task prose into source authority or automatic edit scope.

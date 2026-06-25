@@ -21,6 +21,14 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 6. `docs/PRD.md` when shared project context is needed
 7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
+For repo-scoped implementation tasks, after the task is live and before editing product files, generate and read a Context Pack when available:
+
+```bash
+./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
+```
+
+Context Pack is read-only evidence. It does not define task scope; open and inspect candidate files directly before choosing files to edit.
+
 If no active task is assigned:
 
 - Resume a live task from `docs/BOARD.md` if one exists.

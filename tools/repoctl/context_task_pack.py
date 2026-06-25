@@ -7,9 +7,10 @@ from typing import Any
 
 from .context import build_context_bundle
 from .context_chunks import chunk_markdown_file
-from .context_model import ContextCandidate
+from .context_model import ContextBundle, ContextCandidate
 from .context_pack import estimate_tokens
 from .graph_model import digest_data
+from .graph import build_graph, query_graph
 from .markdown import find_section
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task
@@ -86,11 +87,15 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     task = resolve_task(root, task_id)
     query = _task_seed_query(task)
     bundle, problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens, explain=explain)
+    task_graph_evidence, task_graph_problems = _direct_task_graph_evidence(root, target=target, task=task)
+    problems.extend(task_graph_problems)
     mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
     problems.extend(mandatory_problems)
     packed_context = _dedupe_candidates([*mandatory_candidates, *(bundle.packed_context if bundle is not None else [])])
     groups = _group_candidates(packed_context)
     groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
+    groups["task_graph_evidence"] = task_graph_evidence
+    groups.update(_agent_pack_groups(groups, bundle))
     data = {
         "schema": "repoctl.context.task_pack",
         "schema_version": 1,
@@ -114,6 +119,64 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     }
     data["pack_digest"] = digest_data(data)
     return data, problems, meta
+
+
+def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    seed = data.get("seed") if isinstance(data.get("seed"), dict) else {}
+    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    lines = [
+        "# Agent Context Pack",
+        "",
+        f"- Task: `{task.get('id', '')}`",
+        f"- Repository: `{task.get('repo_id', '')}`",
+        f"- Status: `{task.get('status', '')}`",
+        f"- Pack digest: `{data.get('pack_digest', '')}`",
+        f"- Source: {seed.get('source', '')}",
+        "",
+        "## Task Startup Order",
+        "",
+        "- Read `AGENTS.md`.",
+        f"- Read `{task.get('path', '')}`.",
+        "- Read this Context Pack before editing.",
+        "- Open the `must_read` sources and inspect candidate files directly before treating them as scope.",
+        "",
+        "## Task Query",
+        "",
+        "```text",
+        str(seed.get("query") or "").strip()[:1200],
+        "```",
+        "",
+    ]
+    sections = [
+        ("must_read", "Read First"),
+        ("likely_change", "Likely Change Surface"),
+        ("impact", "Definitions, Callers, Imports, Dependents"),
+        ("verification", "Tests And Verification Hints"),
+        ("reviewed_knowledge", "Current Decisions, Invariants, Failure Modes"),
+        ("warnings", "Ambiguity And Completeness Warnings"),
+    ]
+    for group, title in sections:
+        lines.extend([f"## {title}", ""])
+        items = groups.get(group)
+        if not isinstance(items, list) or not items:
+            lines.extend(["- No evidence selected.", ""])
+            continue
+        for item in items[:12]:
+            lines.extend(_markdown_item(item))
+        lines.append("")
+    lines.extend(
+        [
+            "## Source References",
+            "",
+            f"- Unique must-read sources: {metrics.get('unique_must_read_source_count', 0)}",
+            f"- Unique verification sources: {metrics.get('unique_verification_source_count', 0)}",
+            f"- Estimated tokens: {metrics.get('estimated_tokens', 0)} / {metrics.get('requested_tokens', 0)}",
+            "",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def compare_task_context_packs(
@@ -309,6 +372,86 @@ def _context_doc_paths(task: Task) -> list[str]:
         seen.add(rel_path)
         paths.append(rel_path)
     return paths
+
+
+IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+REPO_PATH_RE = re.compile(r"`?repos/([^`\s]+)`?")
+
+
+def _direct_task_graph_evidence(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[dict[str, Any]], list[Problem]]:
+    snapshot, problems, _meta = build_graph(root, target=target)
+    if snapshot is None:
+        return [], problems
+    evidence: list[dict[str, Any]] = []
+    query = _task_seed_query(task)
+    for symbol in _task_identifier_seeds(query):
+        for selector, kwargs in (
+            ("callers_of", {"callers_of": symbol}),
+            ("impact_symbol", {"impact_symbol": symbol, "depth": 2}),
+        ):
+            result, query_problems = query_graph(snapshot, **kwargs)
+            problems.extend(problem for problem in query_problems if problem.severity != "error" or problem.code == "graph_query_ambiguous_symbol")
+            if result is not None and (result.get("paths") or result.get("matches")):
+                evidence.append(_graph_result_item(result, reason=f"task {selector} evidence for `{symbol}`"))
+    for path in _task_path_seeds(query):
+        result, query_problems = query_graph(snapshot, impact_file=path, depth=2)
+        problems.extend(problem for problem in query_problems if problem.severity != "error")
+        if result is not None and (result.get("paths") or result.get("matches")):
+            evidence.append(_graph_result_item(result, reason=f"task file impact evidence for `{path}`"))
+    return _dedupe_dict_items(evidence), problems
+
+
+def _task_identifier_seeds(query: str) -> list[str]:
+    stop = {"Candidate", "query", "files", "reviewed", "Chosen", "First", "command", "repoctl", "context", "pack", "task", "repo", "main", "json"}
+    seeds: list[str] = []
+    for token in IDENTIFIER_RE.findall(query):
+        if token in stop or token.lower() in {item.lower() for item in stop}:
+            continue
+        if "_" not in token and not any(char.isupper() for char in token):
+            continue
+        if token not in seeds:
+            seeds.append(token)
+    return seeds[:12]
+
+
+def _task_path_seeds(query: str) -> list[str]:
+    seeds: list[str] = []
+    for match in REPO_PATH_RE.finditer(query):
+        path = match.group(1).strip().strip("`.,")
+        if path and path not in seeds:
+            seeds.append(path)
+    return seeds[:12]
+
+
+def _graph_result_item(result: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    digest = digest_data(result)
+    query = result.get("query") if isinstance(result.get("query"), dict) else {}
+    paths = result.get("paths") if isinstance(result.get("paths"), list) else []
+    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
+    lines: list[str] = []
+    for match in matches[:4]:
+        label = match.get("qualified_name") or match.get("path") or match.get("id")
+        location = match.get("path") or ""
+        lines.append(f"match {label} {location}".rstrip())
+    for path in paths[:8]:
+        source = path.get("from") if isinstance(path.get("from"), dict) else {}
+        target = path.get("to") if isinstance(path.get("to"), dict) else {}
+        source_label = source.get("qualified_name") or source.get("path") or source.get("id")
+        target_label = target.get("qualified_name") or target.get("path") or target.get("id")
+        lines.append(f"{source_label} --{path.get('edge')}--> {target_label}: {path.get('reason')}")
+    return {
+        "status": "current",
+        "source_ref": {
+            "kind": "graph_query",
+            "path": f"<graph-query:{query.get('type', 'graph')}:{digest[7:19]}>",
+            "section": str(query.get("type") or "graph"),
+            "content_sha256": digest,
+        },
+        "selection_reason": reason,
+        "score_breakdown": {"graph": 1.0},
+        "excerpt": "\n".join(lines),
+        "graph_path": paths,
+    }
 
 
 def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
@@ -715,6 +858,117 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
         else:
             groups["maybe_relevant"].append(item)
     return groups
+
+
+def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextBundle | None) -> dict[str, list[dict[str, Any]]]:
+    context_groups = bundle.groups if bundle is not None else {}
+    likely_change = [
+        *_copy_items(context_groups.get("likely_change_surface")),
+        *_copy_items(groups.get("maybe_relevant")),
+    ]
+    impact = [
+        *_copy_items(groups.get("task_graph_evidence")),
+        *_bundle_graph_query_items(bundle),
+        *_copy_items(context_groups.get("callers_and_dependents")),
+        *_copy_items(_graph_items(groups.get("maybe_relevant", []))),
+    ]
+    verification = [
+        *_copy_items(context_groups.get("tests_and_verification")),
+        *_copy_items(groups.get("verification_hints")),
+    ]
+    warnings = [
+        *_copy_items(context_groups.get("warnings_and_completeness")),
+        *_warning_items(bundle),
+    ]
+    return {
+        "likely_change": _dedupe_dict_items(likely_change),
+        "impact": _dedupe_dict_items(impact),
+        "verification": _dedupe_dict_items(verification),
+        "warnings": _dedupe_dict_items(warnings),
+    }
+
+
+def _copy_items(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _graph_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in items if isinstance(item.get("source_ref"), dict) and str(item["source_ref"].get("kind") or "").startswith("graph")]
+
+
+def _bundle_graph_query_items(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+    if bundle is None:
+        return []
+    items: list[dict[str, Any]] = []
+    for candidate in bundle.candidates:
+        if candidate.source_ref.kind != "graph_query":
+            continue
+        item = candidate.to_dict()
+        item.setdefault("status", "current")
+        items.append(item)
+    return items
+
+
+def _warning_items(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+    if bundle is None:
+        return []
+    warnings: list[dict[str, Any]] = []
+    graph_completeness = bundle.completeness.get("graph_completeness") if isinstance(bundle.completeness.get("graph_completeness"), dict) else {}
+    if graph_completeness and not graph_completeness.get("code_facts_complete", True):
+        warnings.append(
+            {
+                "status": "warning",
+                "code": "context_pack_graph_code_facts_incomplete",
+                "selection_reason": f"Graph parse errors: {graph_completeness.get('parse_error_count', 0)}",
+            }
+        )
+    lifecycle = bundle.completeness.get("knowledge_lifecycle") if isinstance(bundle.completeness.get("knowledge_lifecycle"), dict) else {}
+    excluded = lifecycle.get("excluded_statuses") if isinstance(lifecycle.get("excluded_statuses"), dict) else {}
+    for status, count in sorted(excluded.items()):
+        warnings.append(
+            {
+                "status": "warning",
+                "code": f"context_pack_knowledge_{status}_excluded",
+                "selection_reason": f"Reviewed knowledge with status {status} excluded from default pack: {count}",
+            }
+        )
+    return warnings
+
+
+def _dedupe_dict_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = json.dumps(item.get("source_ref", item), ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _markdown_item(item: dict[str, Any]) -> list[str]:
+    ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    record = item.get("record") if isinstance(item.get("record"), dict) else {}
+    label = ref.get("path") or record.get("id") or item.get("record_id") or item.get("code") or "evidence"
+    section = f" ({ref.get('section')})" if ref.get("section") else ""
+    status = item.get("status") or record.get("status") or "current"
+    if item.get("selection_reason"):
+        reason = str(item.get("selection_reason") or "")
+    elif isinstance(item.get("selection_reasons"), list):
+        reason = "; ".join(str(reason) for reason in item.get("selection_reasons", []))
+    else:
+        reason = ""
+    excerpt = item.get("excerpt") or item.get("claim") or record.get("claim") or record.get("summary") or item.get("selection_reason") or ""
+    lines = [f"- `{label}`{section} [{status}]: {reason}".rstrip()]
+    if ref.get("content_sha256"):
+        lines.append(f"  digest: `{ref.get('content_sha256')}`")
+    if excerpt:
+        lines.append(f"  {' '.join(str(excerpt).split())[:360]}")
+    graph_path = item.get("graph_path")
+    if isinstance(graph_path, list) and graph_path:
+        lines.append(f"  graph paths: {len(graph_path)}")
+    return lines
 
 
 def _pack_metrics(groups: dict[str, list[dict[str, Any]]], bundle: Any) -> dict[str, Any]:

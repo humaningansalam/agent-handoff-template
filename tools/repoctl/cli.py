@@ -11,7 +11,7 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .context import build_context_bundle, render_context_markdown
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, run_task_context_pack_benchmark
+from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
@@ -2207,6 +2207,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems],
         "warnings": data.get("warnings", []),
     }
+    output_format = "json" if args.json else args.format
     if args.output and not _has_errors(problems):
         output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
         if output_problem is not None:
@@ -2214,18 +2215,26 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
             payload["ok"] = False
             payload["problems"] = [problem.to_dict() for problem in problems]
         else:
-            if data:
+            if data and output_format == "json":
                 payload["data"]["artifact"] = {
                     "path": output.relative_to(root).as_posix(),
                     "pack_digest": data.get("pack_digest", ""),
                 }
             _complete_json_envelope(payload)
-            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    if args.json:
+            if output_format == "markdown":
+                atomic_write(output, render_task_context_pack_markdown(data))
+            else:
+                atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    if output_format == "json":
         _json(payload)
+    elif output_format == "markdown":
+        if data:
+            print(render_task_context_pack_markdown(data), end="")
+        for problem in problems:
+            print(problem.message)
     else:
         groups = data.get("groups", {})
-        print(f"context pack task={data.get('task', {}).get('id', args.task)} must_read={len(groups.get('must_read', []))} maybe={len(groups.get('maybe_relevant', []))} verification={len(groups.get('verification_hints', []))}")
+        print(f"context pack task={data.get('task', {}).get('id', args.task)} must_read={len(groups.get('must_read', []))} likely_change={len(groups.get('likely_change', []))} impact={len(groups.get('impact', []))} verification={len(groups.get('verification', []))}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -3184,6 +3193,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack.add_argument("--budget-tokens", type=int, default=5000)
     context_pack.add_argument("--explain", action="store_true")
     context_pack.add_argument("--output")
+    context_pack.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
     context_pack_compare = context_sub.add_parser("pack-compare")

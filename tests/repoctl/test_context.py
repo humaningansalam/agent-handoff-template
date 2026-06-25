@@ -1247,6 +1247,81 @@ Explain why Graph remains non-authoritative.
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
+def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "auth").mkdir()
+    (repo / "auth/flow.py").write_text(
+        'def validate_token(token: str) -> bool:\n    return token == "ok"\n\n\ndef login(token: str) -> str:\n    if validate_token(token):\n        return "ok"\n    return "denied"\n',
+        encoding="utf-8",
+    )
+    task_path = tmp_path / "docs/tasks/T-20260622010103Z--agent-pack.md"
+    task_path.write_text(
+        """---
+id: T-20260622010103Z
+title: "Change validate token behavior"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T010103Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260622010103Z - Change validate token behavior
+
+## Context Docs
+
+- `docs/adr/evidence-context-authority-v0.md`
+
+## Discovery
+
+- Candidate query: What calls validate_token?
+- Candidate files reviewed: `repos/auth/flow.py`
+- Chosen files: `repos/auth/flow.py`
+
+## Goal
+
+Change validate_token behavior without missing callers.
+
+## Handoff
+
+- Next exact step: generate and read the context pack.
+- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First command to run: `./scripts/repoctl context pack --task T-20260622010103Z --repo-id main --format markdown`
+- Done when: caller impact is visible.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    output = tmp_path / ".repoctl-state/context-pack/T-20260622010103Z.md"
+
+    assert main(["context", "pack", "--task", "T-20260622010103Z", "--repo-id", "main", "--format", "markdown", "--output", output.as_posix()]) == 0
+
+    stdout = capsys.readouterr().out
+    artifact = output.read_text(encoding="utf-8")
+    assert stdout == artifact
+    assert "# Agent Context Pack" in artifact
+    assert "## Task Startup Order" in artifact
+    assert "## Definitions, Callers, Imports, Dependents" in artifact
+    assert "login --CALLS--> validate_token" in artifact
+    assert "Context Pack is read-only evidence" not in artifact
+
+    assert main(["context", "pack", "--task", "T-20260622010103Z", "--repo-id", "main", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    groups = payload["data"]["groups"]
+    assert "likely_change" in groups
+    assert "impact" in groups
+    assert "verification" in groups
+    assert "warnings" in groups
+    assert any("login --CALLS--> validate_token" in str(item.get("excerpt", "")) for item in groups["impact"])
+
+
 def test_context_pack_warns_on_incomplete_graph_code_facts(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

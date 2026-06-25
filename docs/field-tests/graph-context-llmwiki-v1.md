@@ -32,3 +32,14 @@
 - Human inspection: useful. The Markdown is not a JSON dump; it separates must-read sources, change surface, callers/dependents, verification hints, reviewed knowledge, supporting evidence, and warnings so the next action is visible.
 - Result: PASS
 - Commit candidate: `feat(context): return actionable evidence groups`
+
+## 2026-06-25 - Phase 3 / Agent Context Pack v1
+
+- Copy source: fresh copy at `/tmp/repoctl-phase3.YuG5np/workspace`
+- Repository shape: single repo with Python caller/test fixture, TypeScript relative import fixture, reviewed knowledge record, and repo metadata gate
+- User scenario: create three live repo-scoped tasks, generate and read Markdown Context Packs before editing, use pack evidence to make focused changes, verify, and finish tasks without unrelated repo changes.
+- Commands: `./scripts/repoctl context pack --task <P1> --repo-id main --format markdown --output .repoctl-state/context-pack/<P1>.md`; `PYTHONPATH=repos uv run python -m pytest repos/tests/test_auth.py`; `./scripts/repoctl context pack --task <P2> --repo-id main --format markdown --output .repoctl-state/context-pack/<P2>.md`; `./scripts/repoctl graph query --repo-id main --impact-file frontend/src/api/tokens.ts --json`; `./scripts/repoctl context pack --task <P3> --repo-id main --format markdown --output .repoctl-state/context-pack/<P3>.md`; `uv run python` authority policy assertion; `./scripts/repoctl check --json`
+- Observed output: P1 pack showed `login --CALLS--> validate_token` plus test callers before changing `auth/flow.py`; P2 pack showed `frontend/src/client.ts --IMPORTS_FILE--> frontend/src/api/tokens.ts` and metadata gate required/accepted `.repometa` annotation; P3 pack showed reviewed knowledge under `Current Decisions, Invariants, Failure Modes` before preserving generated wiki/context non-authority flags.
+- Human inspection: useful. Reading only `AGENTS.md`, the task, and the generated pack was enough to identify the exact files for each task; broad repo scans were not needed, and task finish receipts were created for all three tasks.
+- Result: PASS
+- Commit candidate: `feat(context): make task packs directly consumable`
