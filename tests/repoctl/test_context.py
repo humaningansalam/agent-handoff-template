@@ -2462,3 +2462,90 @@ def test_receipt_candidate_review_exposes_origin_and_changed_files(tmp_path: Pat
     assert "Changed files: `auth.py`" in output
     assert "kind `completion_receipt`" in output
     assert "kind `task_artifact`" in output
+
+
+def test_knowledge_render_builds_navigable_record_target_and_search_pages(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_completion_receipt(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    note = tmp_path / "review-note.md"
+    note.write_text("Reviewed receipt evidence as a file-level invariant.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260625010101Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--reviewed-by", "render-test", "--note-file", note.as_posix(), "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+
+    render_payload = json.loads(capsys.readouterr().out)
+    output = tmp_path / render_payload["data"]["output"]
+    record_page = output / "records" / f"{record_id}.md"
+    target_page = output / "targets/files/auth.py.md"
+    search_index = output / "search-index.json"
+    history_page = output / "history.md"
+    assert record_page.is_file()
+    assert target_page.is_file()
+    assert search_index.is_file()
+    assert history_page.is_file()
+    record_text = record_page.read_text(encoding="utf-8")
+    assert "## Lifecycle" in record_text
+    assert "Status: `reviewed`" in record_text
+    assert "Reviewed by: `render-test`" in record_text
+    assert "Review note: Reviewed receipt evidence as a file-level invariant." in record_text
+    assert "Origin kind: `completion_receipt`" in record_text
+    assert "verification_artifact: `docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md`" in record_text
+    assert "[auth.py](../targets/files/auth.py.md)" in record_text
+    assert "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json" in record_text
+    target_text = target_page.read_text(encoding="utf-8")
+    assert f"Target: auth.py" in target_text
+    assert f"../../records/{record_id}.md" in target_text
+    rows = json.loads(search_index.read_text(encoding="utf-8"))
+    assert rows[0]["record_id"] == record_id
+    assert rows[0]["applies_to"]["files"] == ["auth.py"]
+    assert rows[0]["page_path"] == f"records/{record_id}.md"
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 0
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["check"]["current"] is True
+    assert check_payload["data"]["check"]["broken_links"] == []
+
+
+def test_knowledge_render_separates_current_history_and_reports_broken_links(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
+    first_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    replacement_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", replacement_candidate, "--repo-id", "main", "--supersedes", first_record, "--json"]) == 0
+    replacement_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    render_payload = json.loads(capsys.readouterr().out)
+    output = tmp_path / render_payload["data"]["output"]
+    decisions = (output / "decisions.md").read_text(encoding="utf-8")
+    assert f"records/{replacement_record}.md" in decisions
+    assert f"records/{first_record}.md" in decisions
+    assert decisions.index("## Current") < decisions.index(f"records/{replacement_record}.md")
+    assert decisions.index("## Historical") < decisions.index(f"records/{first_record}.md")
+    history = (output / "history.md").read_text(encoding="utf-8")
+    assert f"records/{first_record}.md" in history
+    assert f"records/{replacement_record}.md" in history
+
+    index = output / "INDEX.md"
+    index.write_text(index.read_text(encoding="utf-8") + "\n[Broken](missing.md)\n", encoding="utf-8")
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "knowledge_render_broken_link" for problem in check_payload["problems"])

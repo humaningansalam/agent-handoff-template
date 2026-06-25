@@ -82,7 +82,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Query all historical statuses explicitly: `./scripts/repoctl knowledge query "old auth decision" --repo-id main --include-history --json`
 - Check knowledge source drift: `./scripts/repoctl knowledge check --repo-id main --json`
 - Check records and candidates together: `./scripts/repoctl knowledge check --repo-id main --include-candidates --json`
-- Render non-authoritative knowledge pages: `./scripts/repoctl knowledge render --repo-id main --json`
+- Render non-authoritative static wiki pages: `./scripts/repoctl knowledge render --repo-id main --json`
 - Check rendered knowledge pages without rewriting them: `./scripts/repoctl knowledge render --repo-id main --check --json`
 - Check changed-file metadata gate: `./scripts/repoctl meta check --changed --json`
 
@@ -114,5 +114,5 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl knowledge candidate refresh --include-records` turns stale reviewed records into non-authoritative candidates with original-record provenance; approval supersedes the original record instead of editing it.
 - `repoctl knowledge candidate list` and `knowledge status` derive candidate review state from append-only events.
 - `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; reviewer labels, review notes, source digest sets, timestamps, and supersession links are stored as provenance; `knowledge query` excludes stale and superseded records by default.
-- `repoctl knowledge render` writes ignored non-authoritative pages under `docs/knowledge/generated/` for `main` and `docs/knowledge/generated/<repo-id>/` for other repo IDs; `knowledge render --check` verifies those pages are current without rewriting them.
+- `repoctl knowledge render` writes ignored non-authoritative static wiki pages under `docs/knowledge/generated/` for `main` and `docs/knowledge/generated/<repo-id>/` for other repo IDs. It includes `INDEX.md`, kind pages, per-record pages, file target pages, lifecycle history, `search-index.json`, and a manifest. `knowledge render --check` verifies those pages, internal links, stale owned pages, and manifest freshness without rewriting them.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

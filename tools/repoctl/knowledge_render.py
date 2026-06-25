@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .graph_model import digest_data
 from .io import atomic_write
@@ -134,6 +136,7 @@ def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path,
     missing_pages: list[str] = []
     stale_pages: list[str] = []
     unreadable_pages: list[str] = []
+    broken_links: list[dict[str, str]] = []
     for name, content in pages.items():
         page_path = output_dir / name
         page_rel = page_path.relative_to(root).as_posix()
@@ -152,6 +155,9 @@ def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path,
         if current_digest != expected_digest:
             stale_pages.append(page_rel)
             problems.append(Problem("error", "knowledge_render_page_stale", "rendered knowledge page does not match current knowledge records", page_rel))
+        for link in _broken_internal_links(output_dir=output_dir, page_name=name, content=current_text, page_names=set(pages)):
+            broken_links.append({"page": page_rel, "link": link})
+            problems.append(Problem("error", "knowledge_render_broken_link", "rendered knowledge page has a broken internal link", f"{page_rel}:{link}"))
     stale_owned_pages = _stale_rendered_files(root=root, output_dir=output_dir, next_page_names=set(pages))
     for page in stale_owned_pages:
         problems.append(Problem("error", "knowledge_render_stale_page", "render output contains a stale page owned by the previous manifest", page))
@@ -160,6 +166,7 @@ def _check_rendered_output(*, root: Path, output_dir: Path, manifest_path: Path,
         "missing_pages": missing_pages,
         "stale_pages": stale_pages,
         "unreadable_pages": unreadable_pages,
+        "broken_links": broken_links,
         "stale_owned_pages": stale_owned_pages,
     }
 
@@ -248,6 +255,16 @@ def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any
     pages: dict[str, str] = {"INDEX.md": _index_page(root, records, events, by_kind)}
     for kind, filename in PAGE_BY_KIND.items():
         pages[filename] = _kind_page(root, kind, by_kind[kind], _superseded_ids(records), _deprecated_ids(events), events)
+    events_by_record = _events_by_record(events)
+    superseded_ids = _superseded_ids(records)
+    deprecated_ids = _deprecated_ids(events)
+    for record in sorted(records, key=lambda item: str(item.get("id") or "")):
+        record_id = str(record.get("id") or "")
+        pages[_record_page_name(record_id)] = _record_page(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, events=events_by_record.get(record_id, []))
+    for target in _file_targets(records):
+        pages[_file_target_page_name(target)] = _file_target_page(root, target, records, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+    pages["history.md"] = _history_page(root, records, events, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+    pages["search-index.json"] = json.dumps(_search_index(root, records, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     return pages
 
 
@@ -255,6 +272,16 @@ def _page_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     by_page: dict[str, list[dict[str, Any]]] = {"INDEX.md": sorted(records, key=lambda item: str(item.get("id") or ""))}
     for kind, filename in PAGE_BY_KIND.items():
         by_page[filename] = sorted([record for record in records if str(record.get("kind") or "") == kind], key=lambda item: str(item.get("id") or ""))
+    by_page["history.md"] = sorted(records, key=lambda item: str(item.get("id") or ""))
+    by_page["search-index.json"] = sorted(records, key=lambda item: str(item.get("id") or ""))
+    for record in records:
+        record_id = str(record.get("id") or "")
+        by_page[_record_page_name(record_id)] = [record]
+    for target in _file_targets(records):
+        by_page[_file_target_page_name(target)] = sorted(
+            [record for record in records if target in _record_file_targets(record)],
+            key=lambda item: str(item.get("id") or ""),
+        )
     return by_page
 
 
@@ -312,6 +339,8 @@ def _unique_source_refs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _event_belongs_to_page(name: str, event: dict[str, Any], records: list[dict[str, Any]]) -> bool:
     if name == "INDEX.md":
         return True
+    if name == "history.md":
+        return True
     record_ids = {str(record.get("id") or "") for record in records}
     return str(event.get("record_id") or "") in record_ids or str(event.get("superseded_by") or "") in record_ids
 
@@ -326,7 +355,10 @@ def _index_page(root: Path, records: list[dict[str, Any]], events: list[dict[str
         "",
     ]
     for kind, filename in PAGE_BY_KIND.items():
-        lines.append(f"- [{kind.replace('_', ' ').title()}]({filename}) - {len(by_kind[kind])} records")
+        label = filename.removesuffix(".md").replace("-", " ").title()
+        lines.append(f"- [{label}]({filename}) - {len(by_kind[kind])} records")
+    lines.append("- [History](history.md)")
+    lines.append("- [Search index](search-index.json)")
     status_groups = _records_by_status(root, records, events)
     lines.extend(["", "## Lifecycle", ""])
     for status in ("reviewed", "stale", "superseded", "deprecated"):
@@ -338,10 +370,10 @@ def _index_page(root: Path, records: list[dict[str, Any]], events: list[dict[str
         lines.extend(["", f"### {status.title()}", ""])
         for record in items:
             kind = str(record.get("kind") or "")
-            filename = PAGE_BY_KIND.get(kind, "")
+            filename = _record_page_name(str(record.get("id") or ""))
             title = str(record.get("title") or record.get("id") or "Untitled")
             record_id = str(record.get("id") or "")
-            link = f"{filename}#{_markdown_anchor(title)}" if filename else ""
+            link = filename if filename else ""
             suffix = f" ([{record_id}]({link}))" if link else f" (`{record_id}`)"
             lines.append(f"- {title}{suffix}")
     lines.extend(["", "## Source Bundle", ""])
@@ -380,28 +412,133 @@ def _kind_page(root: Path, kind: str, records: list[dict[str, Any]], superseded_
     if not records:
         lines.append("No reviewed records.")
         return "\n".join(lines).rstrip() + "\n"
-    events_by_record = _events_by_record(events)
-    for record in sorted(records, key=lambda item: str(item.get("id") or "")):
-        lines.extend(_record_section(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, events=events_by_record.get(str(record.get("id") or ""), [])))
+    current: list[dict[str, Any]] = []
+    historical: list[dict[str, Any]] = []
+    for record in records:
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        if status == "reviewed":
+            current.append(record)
+        else:
+            historical.append(record)
+    lines.extend(["## Current", ""])
+    if current:
+        for record in sorted(current, key=lambda item: str(item.get("id") or "")):
+            lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="records/"))
+    else:
+        lines.append("No current records.")
+    lines.extend(["", "## Historical", ""])
+    if historical:
+        for record in sorted(historical, key=lambda item: str(item.get("id") or "")):
+            lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="records/"))
+    else:
+        lines.append("No historical records.")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> list[str]:
+def _record_summary_item(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str], page_prefix: str = "") -> list[str]:
     record_id = str(record.get("id") or "")
+    status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+    title = str(record.get("title") or record_id)
+    summary = _one_line(str(record.get("claim") or record.get("summary") or ""))
+    return [
+        f"- [{title}]({page_prefix}{record_id}.md) `{status}` `{record_id}`",
+        f"  - {summary}",
+    ]
+
+
+def _record_page(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> str:
+    record_id = str(record.get("id") or "")
+    status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+    kind = str(record.get("kind") or "")
+    kind_page = PAGE_BY_KIND.get(kind, "INDEX.md")
+    targets = _record_file_targets(record)
     lines = [
-        f"## {record.get('title', record.get('id', 'Untitled'))}",
+        f"# {record.get('title', record.get('id', 'Untitled'))}",
+        "",
+        "Non-authoritative generated view. Source records remain under `docs/knowledge/records/`.",
+        "",
+        "## Lifecycle",
         "",
         f"- Record: `{record_id}`",
-        f"- Status: `{_derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)}`",
+        f"- Kind: `{kind}`",
+        f"- Status: `{status}`",
         f"- Digest: `{record.get('record_digest', '')}`",
+        f"- Kind page: [{kind_page}](../{kind_page})",
     ]
     if record.get("supersedes"):
-        lines.append(f"- Supersedes: `{', '.join(str(item) for item in record.get('supersedes', []))}`")
-    superseded_by = [str(event.get("superseded_by") or "") for event in events if event.get("type") == "superseded" and event.get("superseded_by")]
+        links = ", ".join(f"[{item}]({_record_sibling_link(str(item))})" for item in record.get("supersedes", []))
+        lines.append(f"- Supersedes: {links}")
+    superseded_by = [
+        str(event.get("superseded_by") or "")
+        for event in events
+        if event.get("type") == "superseded" and str(event.get("record_id") or "") == record_id and event.get("superseded_by")
+    ]
     if superseded_by:
-        lines.append(f"- Superseded by: `{', '.join(superseded_by)}`")
+        links = ", ".join(f"[{item}]({_record_sibling_link(item)})" for item in superseded_by)
+        lines.append(f"- Superseded by: {links}")
     if events:
         lines.append(f"- Lifecycle events: `{', '.join(str(event.get('id') or '') for event in events)}`")
+    lines.extend([
+        "",
+        "### Claim",
+        "",
+        str(record.get("claim") or "").strip() or "(empty)",
+        "",
+        "### Summary",
+        "",
+        str(record.get("summary") or "").strip() or "(empty)",
+        "",
+        "### Applies To",
+        "",
+    ])
+    if targets:
+        for target in targets:
+            lines.append(f"- File: [{target}](../{_file_target_page_name(target)})")
+    else:
+        lines.append("- No explicit file target.")
+    lines.extend([
+        "",
+        "### Origin And Review",
+        "",
+    ])
+    lines.extend(_origin_and_review_lines(record))
+    lines.extend([
+        "",
+        "### Sources",
+        "",
+    ])
+    refs = record.get("source_refs", [])
+    if isinstance(refs, list) and refs:
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            section = f"#{ref.get('section')}" if ref.get("section") else ""
+            digest = ref.get("content_sha256", "")
+            source_status = _source_ref_status(root, ref)
+            lines.append(f"- [{ref.get('path', '')}{section}]({_record_source_link(str(ref.get('path') or ''))}) `{digest}` status=`{source_status}`")
+    else:
+        lines.append("- Missing source refs; do not treat this record as current knowledge.")
+    lines.extend(["", "### Event Timeline", ""])
+    if events:
+        for event in sorted(events, key=lambda item: str(item.get("id") or "")):
+            reason = str(event.get("reason") or event.get("review_note") or "")
+            suffix = f" - {reason}" if reason else ""
+            lines.append(f"- `{event.get('id', '')}` `{event.get('type', '')}`{suffix}")
+    else:
+        lines.append("- No lifecycle events found.")
+    lines.extend(["", "## Navigation", "", f"- [Index](../INDEX.md)", f"- [{kind_page}](../{kind_page})", "- [History](../history.md)"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _origin_and_review_lines(record: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    review = record.get("review") if isinstance(record.get("review"), dict) else {}
+    if review:
+        lines.append(f"- Reviewed by: `{review.get('reviewed_by', '')}`")
+        if review.get("reviewed_at"):
+            lines.append(f"- Reviewed at: `{review.get('reviewed_at')}`")
+        if review.get("review_note"):
+            lines.append(f"- Review note: {review.get('review_note')}")
     approval_context = _approval_context(record)
     if approval_context:
         lines.append(f"- Approved from candidate: `{approval_context['candidate_id']}`")
@@ -415,31 +552,15 @@ def _record_section(root: Path, record: dict[str, Any], *, superseded_ids: set[s
             )
             if related:
                 lines.append(f"- Related at approval: `{related}`")
-    lines.extend([
-        "",
-        "### Claim",
-        "",
-        str(record.get("claim") or "").strip() or "(empty)",
-        "",
-        "### Summary",
-        "",
-        str(record.get("summary") or "").strip() or "(empty)",
-        "",
-        "### Sources",
-        "",
-    ])
-    refs = record.get("source_refs", [])
-    if isinstance(refs, list) and refs:
-        for ref in refs:
-            if not isinstance(ref, dict):
-                continue
-            section = f"#{ref.get('section')}" if ref.get("section") else ""
-            digest = ref.get("content_sha256", "")
-            source_status = _source_ref_status(root, ref)
-            lines.append(f"- `{ref.get('path', '')}{section}` `{digest}` status=`{source_status}`")
-    else:
-        lines.append("- Missing source refs; do not treat this record as current knowledge.")
-    lines.append("")
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
+    if derived:
+        lines.append(f"- Origin kind: `{derived.get('kind', '')}`")
+        for key in ("task_id", "verification_artifact", "record_id", "record_digest"):
+            if derived.get(key):
+                lines.append(f"- {key}: `{derived.get(key)}`")
+    if not lines:
+        lines.append("- No approval provenance recorded.")
     return lines
 
 
@@ -460,6 +581,151 @@ def _event_digest_basis(event: dict[str, Any]) -> dict[str, Any]:
         "candidate_id": event.get("candidate_id", ""),
         "superseded_by": event.get("superseded_by", ""),
     }
+
+
+def _record_page_name(record_id: str) -> str:
+    return f"records/{record_id}.md"
+
+
+def _record_sibling_link(record_id: str) -> str:
+    return f"{record_id}.md"
+
+
+def _record_source_link(path: str) -> str:
+    if path.startswith("docs/"):
+        return "../../../" + path.removeprefix("docs/")
+    return "../../../" + path
+
+
+def _file_target_page_name(path: str) -> str:
+    return f"targets/files/{quote(path, safe='')}.md"
+
+
+def _broken_internal_links(*, output_dir: Path, page_name: str, content: str, page_names: set[str]) -> list[str]:
+    if not page_name.endswith(".md"):
+        return []
+    page_path = output_dir / page_name
+    output_real = output_dir.resolve()
+    broken: list[str] = []
+    for match in re.finditer(r"\[[^\]]+\]\(([^)]+)\)", content):
+        link = match.group(1).split("#", 1)[0]
+        if not link or link.startswith(("http://", "https://", "mailto:")):
+            continue
+        target = (page_path.parent / link).resolve()
+        try:
+            target.relative_to(output_real)
+        except ValueError:
+            continue
+        rel = target.relative_to(output_real).as_posix()
+        if rel not in page_names:
+            broken.append(match.group(1))
+    return broken
+
+
+def _file_targets(records: list[dict[str, Any]]) -> list[str]:
+    targets: set[str] = set()
+    for record in records:
+        targets.update(_record_file_targets(record))
+    return sorted(targets)
+
+
+def _record_file_targets(record: dict[str, Any]) -> list[str]:
+    targets: set[str] = set()
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
+    changed_files = derived.get("changed_files") if isinstance(derived.get("changed_files"), list) else []
+    for item in changed_files:
+        path = str(item or "")
+        if path and not path.startswith(".repometa/"):
+            targets.add(path)
+    scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+    paths = scope.get("paths") if isinstance(scope.get("paths"), list) else []
+    for item in paths:
+        path = str(item or "")
+        if path:
+            targets.add(path)
+    return sorted(targets)
+
+
+def _file_target_page(root: Path, target: str, records: list[dict[str, Any]], *, superseded_ids: set[str], deprecated_ids: set[str]) -> str:
+    matching = [record for record in records if target in _record_file_targets(record)]
+    current = [record for record in matching if _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids) == "reviewed"]
+    historical = [record for record in matching if _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids) != "reviewed"]
+    lines = [
+        f"# Target: {target}",
+        "",
+        "Non-authoritative generated target page.",
+        "",
+        "## Current Knowledge",
+        "",
+    ]
+    if current:
+        for record in sorted(current, key=lambda item: str(item.get("id") or "")):
+            lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="../../records/"))
+    else:
+        lines.append("No current records.")
+    lines.extend(["", "## Historical Knowledge", ""])
+    if historical:
+        for record in sorted(historical, key=lambda item: str(item.get("id") or "")):
+            lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="../../records/"))
+    else:
+        lines.append("No historical records.")
+    lines.extend(["", "## Navigation", "", "- [Index](../../INDEX.md)", "- [History](../../history.md)"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _history_page(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any]], *, superseded_ids: set[str], deprecated_ids: set[str]) -> str:
+    lines = [
+        "# Knowledge History",
+        "",
+        "Non-authoritative generated lifecycle view.",
+        "",
+        "## Records",
+        "",
+    ]
+    for record in sorted(records, key=lambda item: str(item.get("id") or "")):
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        record_id = str(record.get("id") or "")
+        lines.append(f"- [{record.get('title', record_id)}](records/{record_id}.md) `{status}` `{record_id}`")
+    lines.extend(["", "## Events", ""])
+    if events:
+        for event in sorted(events, key=lambda item: str(item.get("id") or "")):
+            lines.append(f"- `{event.get('id', '')}` `{event.get('type', '')}` record=`{event.get('record_id', '')}` candidate=`{event.get('candidate_id', '')}`")
+    else:
+        lines.append("No lifecycle events.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _search_index(root: Path, records: list[dict[str, Any]], *, superseded_ids: set[str], deprecated_ids: set[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for record in sorted(records, key=lambda item: str(item.get("id") or "")):
+        record_id = str(record.get("id") or "")
+        rows.append(
+            {
+                "record_id": record_id,
+                "repo_id": str(record.get("repo_id") or ""),
+                "kind": str(record.get("kind") or ""),
+                "status": _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids),
+                "title": str(record.get("title") or ""),
+                "claim": str(record.get("claim") or ""),
+                "summary": str(record.get("summary") or ""),
+                "applies_to": {"files": _record_file_targets(record), "symbols": [], "topics": []},
+                "source_paths": sorted(
+                    str(ref.get("path") or "")
+                    for ref in record.get("source_refs", [])
+                    if isinstance(ref, dict) and str(ref.get("path") or "")
+                ),
+                "page_path": _record_page_name(record_id),
+            }
+        )
+    return rows
+
+
+def _one_line(text: str, *, limit: int = 180) -> str:
+    value = " ".join(text.strip().split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
 
 
 def _approval_context(record: dict[str, Any]) -> dict[str, Any]:

@@ -1563,7 +1563,7 @@ Next exact slice: <one user-visible capability>
 | Phase 2 — Evidence Context v1 | COMMITTED | context query returns actionable JSON/Markdown groups with Graph caller evidence, source authority refs, and stale knowledge exclusion | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 2 entry | `779e2e6` | none |
 | Phase 3 — Agent Context Pack v1 | COMMITTED | three fresh-copy repo tasks generated Markdown packs, used pack evidence before editing, passed focused verification, and finished with receipts | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 3 entry | `7a9cf0d` | none |
 | Phase 4 — Reviewed Knowledge v1 | COMMITTED | receipt candidate review Markdown, reviewer/note approval provenance, next-pack reuse, supersede, stale refresh | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 4 entry | `dd05e85` | none |
-| Phase 5 — llmwiki v1 | NOT_STARTED | linked static wiki | pending | pending | none |
+| Phase 5 — llmwiki v1 | FIELD_VERIFIED | navigable static wiki with index, kind pages, records, file targets, history, search index, lifecycle/source freshness | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 5 entry | pending `feat(knowledge): render navigable static wiki` | none |
 | Phase 6 — Closed-loop Field Proof | NOT_STARTED | three Golden Workflows | pending | pending | none |
 | Phase 7 — Release and Completion | NOT_STARTED | release artifact E2E | pending | pending | none |
 

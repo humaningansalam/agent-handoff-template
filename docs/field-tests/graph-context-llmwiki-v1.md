@@ -54,3 +54,14 @@
 - Human inspection: useful. The review Markdown was sufficient to approve without reading raw JSON, and approval events/records carried reviewer label, review note, source digest set, candidate id, timestamp, and supersession relation. The Context Pack reuse proved reviewed knowledge affects the next task without becoming task scope authority.
 - Result: PASS
 - Commit candidate: `feat(knowledge): make candidate review and provenance actionable`
+
+## 2026-06-25 - Phase 5 / llmwiki v1 Useful Static Product
+
+- Copy source: fresh copy at `/tmp/repoctl-phase5.yFOhW9`
+- Repository shape: single repo with `auth.py`, task completion receipt-derived failure mode, current and superseded decisions, one intentionally stale decision source, and generated wiki output under `docs/knowledge/generated`
+- User scenario: render a static wiki, answer five human navigation questions from generated Markdown only, and verify `knowledge render --check` catches currentness/link integrity without rewriting pages.
+- Commands: `./scripts/repoctl knowledge render --repo-id main --json`; `./scripts/repoctl knowledge render --repo-id main --check --json`; manual inspection of `INDEX.md`, `decisions.md`, `records/<id>.md`, `targets/files/auth.py.md`, `history.md`, and `search-index.json`
+- Observed output: `INDEX.md` linked Decisions, Invariants, Failure Modes, History, and Search index with lifecycle counts; `decisions.md` separated current and historical records; per-record pages showed lifecycle status, claim, source section/currentness, reviewer/provenance, supersession, and navigation; `targets/files/auth.py.md` showed the current file-target failure mode; `history.md` linked current, superseded, and stale records; `search-index.json` exposed deterministic record rows with `applies_to.files`.
+- Human inspection: useful. The five questions were answerable without raw JSON: current Graph authority decision from `INDEX.md → decisions.md → record`, auth file failure mode from `targets/files/auth.py.md`, source section from the record page, replacement from the superseded record/history link, and stale source from the stale record page with `status=\`digest_mismatch\``.
+- Result: PASS
+- Commit candidate: `feat(knowledge): render navigable static wiki`

@@ -612,6 +612,7 @@ def approve_knowledge_candidate(
         "created_from": {
             "candidate_id": candidate_id,
             "candidate_digest": candidate.get("candidate_digest", ""),
+            "candidate_derived_from": candidate.get("derived_from", {}) if isinstance(candidate.get("derived_from"), dict) else {},
             "candidate_check": {
                 "passed": True,
                 "warning_codes": sorted(problem.code for problem in quality_results if problem.severity == "warning"),
