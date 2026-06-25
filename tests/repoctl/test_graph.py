@@ -520,6 +520,96 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     assert missing["problems"][0]["code"] == "graph_query_not_found"
 
 
+def test_graph_query_symbol_callers_and_callees(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "auth").mkdir()
+    (repo / "auth/flow.py").write_text(
+        'def validate_token(token: str) -> bool:\n    return token == "ok"\n\n\ndef login(token: str) -> str:\n    if validate_token(token):\n        return "ok"\n    return "denied"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--symbol", "validate_token", "--json"]) == 0
+    symbol_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert symbol_result["query"] == {"type": "symbol", "symbol": "validate_token"}
+    assert symbol_result["matches"][0]["qualified_name"] == "validate_token"
+    assert symbol_result["matches"][0]["path"] == "auth/flow.py"
+
+    assert main(["graph", "query", "--callers-of", "validate_token", "--in-file", "auth/flow.py", "--json"]) == 0
+    callers_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert callers_result["query"] == {"type": "callers_of", "symbol": "validate_token", "in_file": "auth/flow.py"}
+    assert any(path["edge"] == "CALLS" and path["from"]["qualified_name"] == "login" and path["to"]["qualified_name"] == "validate_token" for path in callers_result["paths"])
+
+    assert main(["graph", "query", "--callees-of", "login", "--in-file", "auth/flow.py", "--json"]) == 0
+    callees_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(path["edge"] == "CALLS" and path["from"]["qualified_name"] == "login" and path["to"]["qualified_name"] == "validate_token" for path in callees_result["paths"])
+
+
+def test_graph_query_symbol_ambiguity_fails_closed(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "web").mkdir()
+    (repo / "api").mkdir()
+    (repo / "web/auth.py").write_text("def login():\n    return 'web'\n", encoding="utf-8")
+    (repo / "api/auth.py").write_text("def login():\n    return 'api'\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--symbol", "login", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "graph_query_ambiguous_symbol"
+    result = payload["data"]["result"]
+    assert {match["path"] for match in result["matches"]} == {"api/auth.py", "web/auth.py"}
+
+    assert main(["graph", "query", "--symbol", "login", "--in-file", "api/auth.py", "--json"]) == 0
+    narrowed = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert narrowed["matches"][0]["path"] == "api/auth.py"
+
+
+def test_graph_query_impact_file_uses_import_and_call_edges(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "services").mkdir()
+    (repo / "handlers").mkdir()
+    (repo / "services/token_service.py").write_text("def issue_token(user_id: str) -> str:\n    return f'token:{user_id}'\n", encoding="utf-8")
+    (repo / "handlers/login.py").write_text(
+        "from services.token_service import issue_token\n\n\ndef login(user_id: str) -> str:\n    return issue_token(user_id)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--impact-file", "services/token_service.py", "--depth", "2", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert result["query"] == {"type": "impact_file", "path": "services/token_service.py", "depth": 2}
+    assert any(path["edge"] == "IMPORTS_FILE" and path["from"]["path"] == "handlers/login.py" for path in result["paths"])
+    assert any(path["edge"] == "CALLS" and path["from"]["qualified_name"] == "login" and path["to"]["qualified_name"] == "issue_token" for path in result["paths"])
+
+
+def test_graph_query_js_ts_impact_is_file_level(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "frontend/src/api").mkdir(parents=True)
+    (repo / "frontend/src/client.ts").write_text("import { issueToken } from './api/tokens';\nexport const login = () => issueToken();\n", encoding="utf-8")
+    (repo / "frontend/src/api/tokens.ts").write_text("export const issueToken = () => 'token';\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--impact-file", "frontend/src/api/tokens.ts", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(path["edge"] == "IMPORTS_FILE" and path["from"]["path"] == "frontend/src/client.ts" for path in result["paths"])
+    assert not any(path["edge"] == "CALLS" for path in result["paths"])
+
+
 def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

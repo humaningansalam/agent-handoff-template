@@ -1,6 +1,6 @@
 [project]
 name = "agent-handoff-template-workspace"
-version = "0.2.137"
+version = "0.2.138"
 description = "Workspace maintenance tooling for the agent handoff template"
 requires-python = ">=3.11"
 dependencies = []

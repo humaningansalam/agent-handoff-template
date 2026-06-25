@@ -1968,7 +1968,19 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
                 print(problem.message)
         return 1 if _has_errors(build_problems) else 0
 
-    result, query_problems = query_graph(snapshot, file=args.file or "", topic=args.topic or "", import_ref=args.import_ref or "")
+    result, query_problems = query_graph(
+        snapshot,
+        file=args.file or "",
+        topic=args.topic or "",
+        import_ref=args.import_ref or "",
+        symbol=args.symbol or "",
+        callers_of=args.callers_of or "",
+        callees_of=args.callees_of or "",
+        impact_file=args.impact_file or "",
+        impact_symbol=args.impact_symbol or "",
+        in_file=args.in_file or "",
+        depth=args.depth,
+    )
     payload = {
         "ok": result is not None and not _has_errors(query_problems),
         "command": "graph query",
@@ -1985,7 +1997,17 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         _json(payload)
     else:
         if result is not None:
-            print(f"graph query {result['query']} nodes={len(result['nodes'])} edges={len(result['edges'])}")
+            print(f"graph query {result['query']} matches={len(result.get('matches', []))} paths={len(result.get('paths', []))} nodes={len(result['nodes'])} edges={len(result['edges'])}")
+            for match in result.get("matches", [])[:10]:
+                label = match.get("qualified_name") or match.get("path") or match.get("raw_import") or match.get("topic") or match.get("id")
+                location = match.get("path") or ""
+                print(f"match {label} {location}".rstrip())
+            for path in result.get("paths", [])[:20]:
+                source = path.get("from", {})
+                target_node = path.get("to", {})
+                source_label = source.get("qualified_name") or source.get("path") or source.get("id")
+                target_label = target_node.get("qualified_name") or target_node.get("path") or target_node.get("id")
+                print(f"path {source_label} --{path.get('edge')}--> {target_label} ({path.get('reason')})")
         for problem in query_problems:
             print(problem.message)
     return 1 if _has_errors(query_problems) else 0
@@ -3094,6 +3116,13 @@ def build_parser() -> argparse.ArgumentParser:
     graph_query.add_argument("--file", default="")
     graph_query.add_argument("--topic", default="")
     graph_query.add_argument("--import", dest="import_ref", default="")
+    graph_query.add_argument("--symbol", default="")
+    graph_query.add_argument("--callers-of", dest="callers_of", default="")
+    graph_query.add_argument("--callees-of", dest="callees_of", default="")
+    graph_query.add_argument("--impact-file", dest="impact_file", default="")
+    graph_query.add_argument("--impact-symbol", dest="impact_symbol", default="")
+    graph_query.add_argument("--in-file", dest="in_file", default="")
+    graph_query.add_argument("--depth", type=int, default=1)
     graph_query.add_argument("--json", action="store_true")
     graph_query.set_defaults(func=cmd_graph_query)
 

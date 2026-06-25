@@ -18,11 +18,17 @@ Direct single-repo layout may omit `--repo-id` when `repos/.git` is the only tar
 ./scripts/repoctl graph query --repo-id web --file src/app.py --json
 ./scripts/repoctl graph query --repo-id web --topic auth --json
 ./scripts/repoctl graph query --repo-id web --import axios --json
+./scripts/repoctl graph query --repo-id web --symbol validate_token --json
+./scripts/repoctl graph query --repo-id web --symbol validate_token --in-file auth/flow.py --json
+./scripts/repoctl graph query --repo-id web --callers-of validate_token --in-file auth/flow.py --json
+./scripts/repoctl graph query --repo-id web --callees-of login --in-file auth/flow.py --json
+./scripts/repoctl graph query --repo-id web --impact-file services/token_service.py --depth 2 --json
+./scripts/repoctl graph query --repo-id web --impact-symbol issue_token --in-file services/token_service.py --depth 2 --json
 ```
 
 Query does not parse `graph build` stdout, require a snapshot file, or use a database.
 
-Current public query selectors are limited to `--file`, `--topic`, and `--import`. Symbol, caller, callee, and impact selectors are planned product work in `docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md` Phase 1 and must not be documented as shipped until implemented.
+Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, or `--impact-symbol`. `--in-file` narrows symbol selectors. `--depth` bounds impact traversal.
 
 ## Snapshot
 
@@ -118,6 +124,8 @@ CALLS
 `IMPORTS_FILE` points from the importing file node to the resolved imported file node. It is added only when resolution is unambiguous.
 
 `CALLS` points from a precise provider symbol node to another precise provider symbol node. Current support covers Python provider-confirmed same-file calls, same-class method calls, and selected cross-file calls through imported Python functions. String matching alone must not create `CALLS`.
+
+Impact and caller/callee queries consume `CALLS` and `IMPORTS_FILE` evidence that already exists in the snapshot. They must not create new call edges by name matching query strings.
 
 `HAS_TOPIC` uses repo-local topic nodes. Same topic text in two repositories is not the same graph entity.
 
@@ -224,9 +232,19 @@ Rules:
     "type": "file",
     "path": "src/app.py"
   },
+  "matches": [],
   "nodes": [],
-  "edges": []
+  "edges": [],
+  "paths": [],
+  "completeness": {},
+  "warnings": []
 }
 ```
 
 Query selectors are exact typed selectors. Clients must not pass an `id` string and expect repoctl to split it.
+
+`matches` contains the selector's direct node candidates. `paths` contains ordered evidence for caller, callee, and impact traversal; each path includes `from`, `edge`, `to`, `reason`, and `source`.
+
+Simple symbol names are fail-closed. If a symbol selector matches multiple precise symbols, `graph query` exits nonzero with `graph_query_ambiguous_symbol` and returns candidate matches with path, qualified name, symbol kind, provider, and source range so the caller can retry with `--in-file` or a qualified name.
+
+Unsupported or incomplete provider coverage is reported through `completeness` and `warnings`; query must not claim a complete call graph when only file-level import impact is available.

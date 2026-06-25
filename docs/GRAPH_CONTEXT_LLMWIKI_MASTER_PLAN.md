@@ -1552,14 +1552,14 @@ Next exact slice: <one user-visible capability>
 
 - `docs/PRD.md` was a placeholder and is now the short product scope plus this plan link.
 - `docs/adr/repoctl-graph-v0.md` described the original no-resolution baseline while current Graph build already emits precise provider symbols, `CALLS`, `RESOLVES_TO`, `IMPORTS_FILE`, and expanded completeness fields.
-- `docs/contracts/repoctl-graph-contract.md` now records those additive current capabilities while preserving that public `graph query` still only ships `--file`, `--topic`, and `--import`.
-- Phase 1 therefore starts with the real product gap: public `--symbol`, caller, callee, and impact selectors over already-derived Graph evidence.
+- `docs/contracts/repoctl-graph-contract.md` records additive Graph capabilities and now documents the shipped public selector surface.
+- Phase 1 closed the real product gap: public `--symbol`, caller, callee, and impact selectors over already-derived Graph evidence.
 - Fresh-copy Phase 0 smoke passed for graph build, file query, context query, wiki render/check, and workspace check.
 
 | Phase | State | User-visible demo | Fresh-copy evidence | Commit(s) | Blocker |
 |---|---|---|---|---|---|
-| Phase 0 — Contract Lock | FIELD_VERIFIED | PRD points to this master plan; Graph ADR/contract record current capabilities and Phase 1 gap | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 0 entry | pending `docs(product): lock graph-to-llmwiki completion contract` | none |
-| Phase 1 — Graph Product API | NOT_STARTED | symbol/callers/callees/impact | pending | pending | none |
+| Phase 0 — Contract Lock | COMMITTED | PRD points to this master plan; Graph ADR/contract record current capabilities and Phase 1 gap | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 0 entry | `37c9a63` | none |
+| Phase 1 — Graph Product API | FIELD_VERIFIED | symbol/callers/callees/impact public CLI selectors return matches, paths, completeness, and ambiguity candidates | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 1 entry | pending `feat(graph): expose symbol callers and impact queries` | none |
 | Phase 2 — Evidence Context v1 | NOT_STARTED | actionable JSON/Markdown bundle | pending | pending | none |
 | Phase 3 — Agent Context Pack v1 | NOT_STARTED | real task uses pack | pending | pending | none |
 | Phase 4 — Reviewed Knowledge v1 | NOT_STARTED | receipt→review→approve→next pack | pending | pending | none |
