@@ -9,7 +9,7 @@ from typing import Any
 
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
-from .context import build_context_bundle
+from .context import build_context_bundle, render_context_markdown
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, run_task_context_pack_benchmark
 from .graph import build_graph, query_graph
@@ -2016,7 +2016,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
 def cmd_context_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens, explain=args.explain)
+    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens, explain=args.explain, mode=args.mode or "")
     payload = {
         "ok": bundle is not None and not _has_errors(problems),
         "command": "context query",
@@ -2029,8 +2029,14 @@ def cmd_context_query(args: argparse.Namespace) -> int:
             }
         ],
     }
-    if args.json:
+    output_format = "json" if args.json else args.format
+    if output_format == "json":
         _json(payload)
+    elif output_format == "markdown":
+        if bundle is not None:
+            print(render_context_markdown(bundle), end="")
+        for problem in problems:
+            print(problem.message)
     else:
         if bundle is not None:
             print(f"context bundle {bundle.bundle_digest} repository={target.id} packed={len(bundle.packed_context)} candidates={len(bundle.candidates)}")
@@ -3132,6 +3138,8 @@ def build_parser() -> argparse.ArgumentParser:
     context_query.add_argument("query")
     context_query.add_argument("--repo-id")
     context_query.add_argument("--budget-tokens", type=int, default=3000)
+    context_query.add_argument("--mode", default="")
+    context_query.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     context_query.add_argument("--explain", action="store_true")
     context_query.add_argument("--json", action="store_true")
     context_query.set_defaults(func=cmd_context_query)

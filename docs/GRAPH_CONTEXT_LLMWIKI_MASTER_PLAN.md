@@ -1559,8 +1559,8 @@ Next exact slice: <one user-visible capability>
 | Phase | State | User-visible demo | Fresh-copy evidence | Commit(s) | Blocker |
 |---|---|---|---|---|---|
 | Phase 0 — Contract Lock | COMMITTED | PRD points to this master plan; Graph ADR/contract record current capabilities and Phase 1 gap | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 0 entry | `37c9a63` | none |
-| Phase 1 — Graph Product API | FIELD_VERIFIED | symbol/callers/callees/impact public CLI selectors return matches, paths, completeness, and ambiguity candidates | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 1 entry | pending `feat(graph): expose symbol callers and impact queries` | none |
-| Phase 2 — Evidence Context v1 | NOT_STARTED | actionable JSON/Markdown bundle | pending | pending | none |
+| Phase 1 — Graph Product API | COMMITTED | symbol/callers/callees/impact public CLI selectors return matches, paths, completeness, and ambiguity candidates | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 1 entry | `310e9f1` | none |
+| Phase 2 — Evidence Context v1 | FIELD_VERIFIED | context query returns actionable JSON/Markdown groups with Graph caller evidence, source authority refs, and stale knowledge exclusion | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 2 entry | pending `feat(context): return actionable evidence groups` | none |
 | Phase 3 — Agent Context Pack v1 | NOT_STARTED | real task uses pack | pending | pending | none |
 | Phase 4 — Reviewed Knowledge v1 | NOT_STARTED | receipt→review→approve→next pack | pending | pending | none |
 | Phase 5 — llmwiki v1 | NOT_STARTED | linked static wiki | pending | pending | none |

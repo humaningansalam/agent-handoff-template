@@ -65,6 +65,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - **Task system guide**: `docs/README.md`
 - **JSON output contract**: `docs/contracts/repoctl-json-contract.md`
 - **repoctl module boundaries**: `docs/contracts/repoctl-module-boundaries.md`
+- **Context query contract**: `docs/contracts/repoctl-context-contract.md`
 - **Repo metadata identity ADR**: `docs/adr/repometa-identity-v0.md`
 - **Field-test workflow**: `docs/workflows/v0-foundation-field-test.md`
 - **Repo metadata rules**: `docs/workflows/repo-metadata.md`
@@ -79,5 +80,6 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - `.repometa` provides file-level discovery and changed-file metadata gates; `repoctl index code` extracts read-only technical facts, and neither is a generated graph.
 - `repoctl graph build` emits a read-only deterministic snapshot over repository files, raw/resolved imports, repo-local topics, task completion receipts, and precise provider symbols/calls.
 - `repoctl graph query` supports exact file/topic/import lookup plus symbol, callers, callees, and bounded file/symbol impact queries.
+- `repoctl context query` groups source documents, Graph evidence, task receipts, and reviewed knowledge into actionable JSON or Markdown evidence bundles.
 - Future MCP should be transport over repoctl contracts, not a second mutation path.
 - Future Graph and llmwiki layers should derive from task evidence, `.repometa`, and index facts without replacing their authority.

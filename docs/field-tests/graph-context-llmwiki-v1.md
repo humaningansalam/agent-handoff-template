@@ -21,3 +21,14 @@
 - Human inspection: useful. The non-JSON output gives enough direct evidence to decide what file/symbol to inspect next, and the ambiguous result avoids guessing while still listing retry candidates.
 - Result: PASS
 - Commit candidate: `feat(graph): expose symbol callers and impact queries`
+
+## 2026-06-25 - Phase 2 / Evidence Context v1
+
+- Copy source: fresh copy at `/tmp/repoctl-phase2-final.1Wl6N7/workspace`
+- Repository shape: single repo with Python caller fixture plus existing ADR, contract, Graph, Knowledge, and render surfaces
+- User scenario: ask a call-impact question, ask an authority question, then drift a reviewed knowledge source and confirm stale knowledge does not enter default context.
+- Commands: `./scripts/repoctl context query "What calls validate_token?" --repo-id main --mode call-impact --format markdown`; `./scripts/repoctl context query "Why must generated wiki not become source authority?" --repo-id main --mode authority --format markdown`; `./scripts/repoctl knowledge candidate build --source docs/adr/evidence-context-authority-v0.md --repo-id main --json`; `./scripts/repoctl knowledge approve <KC> --repo-id main --json`; `./scripts/repoctl context query "Evidence Context authority" --repo-id main --json`
+- Observed output: call-impact Markdown included `Callers And Dependents` with `login --CALLS--> validate_token`; authority Markdown put `docs/adr/evidence-context-authority-v0.md` Authority Rules and related contracts in `Must Read`; stale source drift returned zero default `knowledge_results` and lifecycle reported one stale record excluded.
+- Human inspection: useful. The Markdown is not a JSON dump; it separates must-read sources, change surface, callers/dependents, verification hints, reviewed knowledge, supporting evidence, and warnings so the next action is visible.
+- Result: PASS
+- Commit candidate: `feat(context): return actionable evidence groups`

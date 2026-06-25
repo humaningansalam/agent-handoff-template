@@ -302,6 +302,48 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert payload["warnings"][0]["code"] == "context_not_authoritative"
 
 
+def test_context_query_returns_actionable_groups_for_call_impact(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "auth").mkdir()
+    (repo / "auth/flow.py").write_text(
+        'def validate_token(token: str) -> bool:\n    return token == "ok"\n\n\ndef login(token: str) -> str:\n    if validate_token(token):\n        return "ok"\n    return "denied"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["context", "query", "What calls validate_token?", "--mode", "call-impact", "--json"]) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert bundle["query"]["mode"] == "call_impact"
+    groups = bundle["groups"]
+    assert any(item["source_ref"]["kind"] == "graph_query" for item in groups["callers_and_dependents"])
+    assert any("login --CALLS--> validate_token" in item["excerpt"] for item in groups["callers_and_dependents"])
+    assert all(item["repo_id"] == "main" for items in groups.values() for item in items)
+
+
+def test_context_query_markdown_uses_same_grouped_sources(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "auth.py").write_text("def validate_token():\n    return True\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["context", "query", "Where is validate_token defined?", "--format", "markdown"]) == 0
+
+    output = capsys.readouterr().out
+    assert "# Context Bundle" in output
+    assert "## Must Read" in output
+    assert "## Likely Change Surface" in output
+    assert "<graph-query:symbol:" in output
+    assert "validate_token" in output
+
+
 def test_context_query_is_deterministic(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)

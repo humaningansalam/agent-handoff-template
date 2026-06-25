@@ -63,6 +63,7 @@ class ContextBundle:
     packed_context: list[ContextCandidate]
     budget: dict[str, int]
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
+    groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     schema: str = "repoctl.context.bundle"
     schema_version: int = 1
     authoritative: bool = False
@@ -80,6 +81,7 @@ class ContextBundle:
             "candidates": [candidate.to_dict() for candidate in sorted(self.candidates, key=_candidate_sort_key)],
             "packed_context": [candidate.to_dict() for candidate in sorted(self.packed_context, key=_candidate_sort_key)],
             "knowledge_results": sorted(self.knowledge_results, key=_knowledge_sort_key),
+            "groups": {key: value for key, value in sorted(self.groups.items())},
             "budget": self.budget,
         }
         if include_digest:
@@ -96,6 +98,7 @@ class ContextBundle:
             packed_context=self.packed_context,
             budget=self.budget,
             knowledge_results=self.knowledge_results,
+            groups=self.groups,
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,
