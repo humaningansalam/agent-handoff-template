@@ -2507,26 +2507,123 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     data, problems = show_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    check_data: dict[str, Any] = {}
+    check_problems: list[Problem] = []
+    if not problems:
+        check_data, check_problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
     payload = {
-        "ok": not _has_errors(problems),
+        "ok": not _has_errors([*problems, *check_problems]),
         "command": "knowledge candidate show",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
+        "data": {**data, "review_summary": check_data} if data else data,
+        "problems": [problem.to_dict() for problem in [*problems, *check_problems] if problem.severity == "error"],
         "warnings": [
             {
                 "code": "knowledge_candidate_not_authoritative",
                 "message": "knowledge candidates are review inputs only; they are not canonical knowledge records",
             }
-        ],
+        ]
+        + [problem.to_dict() for problem in check_problems if problem.severity == "warning"],
     }
     if args.json:
         _json(payload)
     else:
-        candidate = data.get("candidate", {}) if data else {}
-        print(f"knowledge candidate {candidate.get('id', args.candidate_id)}")
-        for problem in problems:
+        if args.format == "markdown":
+            print(_render_knowledge_candidate_review_markdown(data, check_data, repo_id=args.repo_id))
+        else:
+            candidate = data.get("candidate", {}) if data else {}
+            print(f"knowledge candidate {candidate.get('id', args.candidate_id)}")
+            if data:
+                print(f"kind={candidate.get('kind', '')} claim={candidate.get('claim', '')}")
+        for problem in [*problems, *check_problems]:
             print(problem.message)
-    return 1 if _has_errors(problems) else 0
+    return 1 if _has_errors([*problems, *check_problems]) else 0
+
+
+def _render_knowledge_candidate_review_markdown(data: dict[str, Any], check_data: dict[str, Any], *, repo_id: str) -> str:
+    candidate = data.get("candidate", {}) if isinstance(data.get("candidate"), dict) else {}
+    lines = [
+        f"# Knowledge Candidate Review: {candidate.get('id', '')}",
+        "",
+        "## Candidate",
+        "",
+        f"- Repo: `{repo_id}`",
+        f"- Kind: `{candidate.get('kind', '')}`",
+        f"- Title: {candidate.get('title', '')}",
+        f"- Claim: {candidate.get('claim', '')}",
+        f"- Authoritative: `{str(candidate.get('authoritative', ''))}`",
+        "",
+        "## Summary",
+        "",
+        str(candidate.get("summary") or "").strip() or "_No summary._",
+        "",
+        "## Origin",
+        "",
+    ]
+    derived = candidate.get("derived_from") if isinstance(candidate.get("derived_from"), dict) else {}
+    if derived:
+        lines.append(f"- Kind: `{derived.get('kind', '')}`")
+        for key in ("task_id", "repo_id", "verification_artifact", "path", "pack_digest", "record_id", "record_digest"):
+            if derived.get(key):
+                lines.append(f"- {key}: `{derived.get(key)}`")
+        changed_files = derived.get("changed_files") if isinstance(derived.get("changed_files"), list) else []
+        if changed_files:
+            lines.append("- Changed files: " + ", ".join(f"`{item}`" for item in changed_files))
+        related_symbols = derived.get("related_symbols") if isinstance(derived.get("related_symbols"), list) else []
+        if related_symbols:
+            lines.append("- Related symbols: " + ", ".join(f"`{item}`" for item in related_symbols))
+    else:
+        lines.append("- Kind: `authority_document`")
+    lines.extend(["", "## Source Refs", ""])
+    for ref in candidate.get("source_refs", []) if isinstance(candidate.get("source_refs"), list) else []:
+        if not isinstance(ref, dict):
+            continue
+        lines.append(
+            f"- `{ref.get('path', '')}` section `{ref.get('section', '')}` kind `{ref.get('kind', '')}` digest `{ref.get('content_sha256', '')}`"
+        )
+    lines.extend(["", "## Source Currentness", ""])
+    for status in _candidate_source_statuses_for_review(check_data, candidate):
+        lines.append(
+            f"- `{status.get('path', '')}` exists=`{status.get('exists', False)}` digest_matches=`{status.get('digest_matches', False)}`"
+        )
+    lines.extend(["", "## Related Current Records", ""])
+    related = check_data.get("related_records") if isinstance(check_data.get("related_records"), list) else []
+    if related:
+        for item in related:
+            lines.append(f"- `{item.get('record_id', '')}` status `{item.get('status', '')}` relation `{item.get('relation', '')}`")
+    else:
+        lines.append("- None found.")
+    lines.extend(["", "## Review Check", ""])
+    lines.append(f"- Passed: `{check_data.get('passed', False)}`")
+    for problem in check_data.get("problems", []) if isinstance(check_data.get("problems"), list) else []:
+        lines.append(f"- Error `{problem.get('code', '')}`: {problem.get('message', '')}")
+    for warning in check_data.get("warnings", []) if isinstance(check_data.get("warnings"), list) else []:
+        lines.append(f"- Warning `{warning.get('code', '')}`: {warning.get('message', '')}")
+    lines.extend(
+        [
+            "",
+            "## Next Commands",
+            "",
+            f"- Approve: `./scripts/repoctl knowledge approve {candidate.get('id', '')} --repo-id {repo_id} --reviewed-by <label> --note-file /tmp/review-note.md --json`",
+            f"- Reject: `./scripts/repoctl knowledge reject {candidate.get('id', '')} --repo-id {repo_id} --reason-file /tmp/reject-reason.md --json`",
+            f"- Supersede: `./scripts/repoctl knowledge approve {candidate.get('id', '')} --repo-id {repo_id} --supersedes K-... --reviewed-by <label> --note-file /tmp/review-note.md --json`",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _candidate_source_statuses_for_review(check_data: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    statuses = check_data.get("source_ref_statuses")
+    if isinstance(statuses, list):
+        return [status for status in statuses if isinstance(status, dict)]
+    return [
+        {
+            "path": ref.get("path", ""),
+            "exists": "",
+            "digest_matches": "",
+        }
+        for ref in candidate.get("source_refs", [])
+        if isinstance(ref, dict)
+    ]
 
 
 def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
@@ -2601,7 +2698,29 @@ def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
 def cmd_knowledge_approve(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = approve_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, supersedes=args.supersedes)
+    review_note = ""
+    note_problems: list[Problem] = []
+    if args.note_file:
+        note_path = Path(args.note_file)
+        if not note_path.is_absolute():
+            note_path = root / note_path
+        if not note_path.is_file():
+            note_problems.append(Problem("error", "knowledge_approve_note_missing", "approval note file is missing", note_path.as_posix()))
+        else:
+            review_note = note_path.read_text(encoding="utf-8").strip()
+            if not review_note:
+                note_problems.append(Problem("error", "knowledge_approve_note_empty", "approval note file is empty", note_path.as_posix()))
+    if note_problems:
+        data, problems = {}, note_problems
+    else:
+        data, problems = approve_knowledge_candidate(
+            root,
+            repo_id=args.repo_id,
+            candidate_id=args.candidate_id,
+            supersedes=args.supersedes,
+            reviewed_by=args.reviewed_by,
+            review_note=review_note,
+        )
     record = data.get("record", {}) if data else {}
     payload = {
         "ok": not _has_errors(problems),
@@ -3245,6 +3364,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_show = knowledge_candidate_sub.add_parser("show")
     knowledge_candidate_show.add_argument("candidate_id")
     knowledge_candidate_show.add_argument("--repo-id", required=True)
+    knowledge_candidate_show.add_argument("--format", choices=["text", "markdown"], default="text")
     knowledge_candidate_show.add_argument("--json", action="store_true")
     knowledge_candidate_show.set_defaults(func=cmd_knowledge_candidate_show)
     knowledge_candidate_check = knowledge_candidate_sub.add_parser("check")
@@ -3284,6 +3404,8 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_approve.add_argument("candidate_id")
     knowledge_approve.add_argument("--repo-id", required=True)
     knowledge_approve.add_argument("--supersedes", action="append", default=[])
+    knowledge_approve.add_argument("--reviewed-by", default="human")
+    knowledge_approve.add_argument("--note-file")
     knowledge_approve.add_argument("--json", action="store_true")
     knowledge_approve.set_defaults(func=cmd_knowledge_approve)
     knowledge_show = knowledge_sub.add_parser("show")

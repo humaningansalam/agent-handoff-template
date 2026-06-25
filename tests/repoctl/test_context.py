@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -29,6 +30,60 @@ def _write_context_docs(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "docs/workflows/generated.md").write_text("# Workflow\n\nGenerated output is not an authority.\n", encoding="utf-8")
+
+
+def _sha256_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_completion_receipt(root: Path, *, task_id: str = "T-20260625010101Z", repo_id: str = "main") -> None:
+    archive_rel = f"docs/archive/tasks/{task_id}--knowledge-receipt.md"
+    archive_text = f"""---
+id: {task_id}
+title: "Token validation invariant"
+status: done
+owner: "codex"
+repo_ref: ""
+repo_id: "{repo_id}"
+created: 20260625T010101Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# {task_id} - Token validation invariant
+
+## Goal
+
+Keep token validation centralized.
+
+## Verification
+
+`uv run pytest tests/test_auth.py` passed.
+"""
+    archive_path = root / archive_rel
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text(archive_text, encoding="utf-8")
+    archive_hash = _sha256_text(archive_text)
+    receipt = {
+        "schema": "repoctl.task.completion",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "task_id": task_id,
+        "status": "done",
+        "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
+        "archive_path": archive_rel,
+        "content_sha256": archive_hash,
+        "changed_entries": [{"change": "modified", "path": "auth.py"}],
+        "verification": {
+            "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
+            "archive_path": archive_rel,
+            "content_sha256": archive_hash,
+        },
+    }
+    receipt_path = root / "docs/tasks/.repoctl-state/completions" / f"{task_id}.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _write_context_benchmark_corpus(root: Path, fixture: Path | None = None) -> None:
@@ -2326,3 +2381,84 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     assert stale_bundle["completeness"]["knowledge_lifecycle"]["excluded_statuses"] == {"stale": 1}
     assert stale_bundle["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {}
     assert any(problem["code"] == "knowledge_stale_record_excluded" for problem in stale_payload["problems"])
+
+
+def test_knowledge_candidate_show_markdown_is_reviewable(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+
+    assert main(["knowledge", "candidate", "show", candidate_id, "--repo-id", "main", "--format", "markdown"]) == 0
+
+    output = capsys.readouterr().out
+    assert "# Knowledge Candidate Review:" in output
+    assert "## Candidate" in output
+    assert "Evidence Context comes before reviewed knowledge" in output
+    assert "## Source Refs" in output
+    assert "docs/adr/evidence-context-authority-v0.md" in output
+    assert "digest_matches=`True`" in output
+    assert "## Related Current Records" in output
+    assert "## Next Commands" in output
+    assert "--note-file /tmp/review-note.md" in output
+
+
+def test_knowledge_approve_records_reviewer_note_and_digest_set(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    note = tmp_path / "review-note.md"
+    note.write_text("Reviewed source refs and approved as reusable project decision.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--reviewed-by", "codex-field-test", "--note-file", note.as_posix(), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    record = payload["data"]["record"]
+    event = payload["data"]["event"]
+    assert record["review"]["reviewed_by"] == "codex-field-test"
+    assert record["review"]["review_note"] == "Reviewed source refs and approved as reusable project decision."
+    assert record["review"]["source_digest_set"] == [record["source_refs"][0]["content_sha256"]]
+    assert event["reviewed_by"] == "codex-field-test"
+    assert event["review_note"] == "Reviewed source refs and approved as reusable project decision."
+    assert event["source_digest_set"] == record["review"]["source_digest_set"]
+    assert event["supersedes"] == []
+
+
+def test_receipt_candidate_review_exposes_origin_and_changed_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_context_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    _write_completion_receipt(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260625010101Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+
+    build_payload = json.loads(capsys.readouterr().out)
+    candidate = build_payload["data"]["candidate"]
+    candidate_id = candidate["id"]
+    assert candidate["derived_from"]["kind"] == "completion_receipt"
+    assert candidate["derived_from"]["task_id"] == "T-20260625010101Z"
+    assert candidate["derived_from"]["verification_artifact"] == "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
+    assert candidate["derived_from"]["changed_files"] == ["auth.py"]
+
+    assert main(["knowledge", "candidate", "show", candidate_id, "--repo-id", "main", "--format", "markdown"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Kind: `completion_receipt`" in output
+    assert "task_id: `T-20260625010101Z`" in output
+    assert "verification_artifact: `docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md`" in output
+    assert "Changed files: `auth.py`" in output
+    assert "kind `completion_receipt`" in output
+    assert "kind `task_artifact`" in output

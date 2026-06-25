@@ -63,6 +63,7 @@ This directory contains the live task registry, task files, workflows, and archi
 - Check all pending candidates: `./scripts/repoctl knowledge candidate check --all --repo-id main --json`
 - Check candidates across all lifecycle states: `./scripts/repoctl knowledge candidate check --all --all-states --repo-id main --json`
 - List candidates with check summaries: `./scripts/repoctl knowledge candidate list --repo-id main --with-checks --json`
+- Review a candidate as Markdown before approval: `./scripts/repoctl knowledge candidate show KC-... --repo-id main --format markdown`
 - Refresh a stale candidate without mutating it: `./scripts/repoctl knowledge candidate refresh KC-... --repo-id main --json`
 - Refresh all stale candidates non-destructively: `./scripts/repoctl knowledge candidate refresh --all-stale --repo-id main --json`
 - Refresh stale reviewed records into review-only candidates: `./scripts/repoctl knowledge candidate refresh --all-stale --include-records --repo-id main --json`
@@ -70,8 +71,8 @@ This directory contains the live task registry, task files, workflows, and archi
 - Show knowledge workflow status and check summaries: `./scripts/repoctl knowledge status --repo-id main --json`
 - List append-only knowledge events: `./scripts/repoctl knowledge event list --repo-id main --json`
 - Show one knowledge event: `./scripts/repoctl knowledge event show E-... --repo-id main --json`
-- Approve a candidate into reviewed knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --json`
-- Approve a replacement decision: `./scripts/repoctl knowledge approve KC-... --repo-id main --supersedes K-... --json`
+- Approve a candidate into reviewed knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --reviewed-by <label> --note-file /tmp/review-note.md --json`
+- Approve a replacement decision: `./scripts/repoctl knowledge approve KC-... --repo-id main --supersedes K-... --reviewed-by <label> --note-file /tmp/review-note.md --json`
 - Reject a candidate with review evidence: `./scripts/repoctl knowledge reject KC-... --repo-id main --reason-file /tmp/reason.md --json`
 - Deprecate a record with append-only lifecycle evidence: `./scripts/repoctl knowledge deprecate K-... --repo-id main --reason-file /tmp/reason.md --json`
 - Show a reviewed knowledge record: `./scripts/repoctl knowledge show K-... --repo-id main --json`
@@ -112,6 +113,6 @@ This directory contains the live task registry, task files, workflows, and archi
 - `repoctl knowledge candidate refresh` creates a new candidate plus an event; it does not edit the stale candidate in place.
 - `repoctl knowledge candidate refresh --include-records` turns stale reviewed records into non-authoritative candidates with original-record provenance; approval supersedes the original record instead of editing it.
 - `repoctl knowledge candidate list` and `knowledge status` derive candidate review state from append-only events.
-- `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; `knowledge query` excludes stale and superseded records by default.
+- `repoctl knowledge approve` creates reviewed records under `docs/knowledge/records/` and append-only events under `docs/knowledge/events/`; reviewer labels, review notes, source digest sets, timestamps, and supersession links are stored as provenance; `knowledge query` excludes stale and superseded records by default.
 - `repoctl knowledge render` writes ignored non-authoritative pages under `docs/knowledge/generated/` for `main` and `docs/knowledge/generated/<repo-id>/` for other repo IDs; `knowledge render --check` verifies those pages are current without rewriting them.
 - Files under `examples/` are reference examples only; repoctl does not use them as creation templates.

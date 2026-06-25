@@ -133,6 +133,7 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
     title = _receipt_title(receipt, artifact_text)
     summary = _receipt_summary(receipt, artifact_text)
     receipt_text = (root / receipt_rel).read_text(encoding="utf-8")
+    changed_files = _receipt_changed_files(receipt)
     source_refs = [
         {
             "kind": "completion_receipt",
@@ -170,7 +171,14 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
             ],
         },
         "conflict_detected": False,
-        "derived_from": {"kind": "completion_receipt", "task_id": normalized_task_id},
+        "derived_from": {
+            "kind": "completion_receipt",
+            "task_id": normalized_task_id,
+            "repo_id": repo_id,
+            "verification_artifact": artifact_rel,
+            "changed_files": changed_files,
+            "related_symbols": [],
+        },
     }
     candidate["candidate_digest"] = digest_data(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
@@ -338,6 +346,7 @@ def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) ->
         "passed": not any(problem.severity == "error" for problem in check_problems),
         "checks": _candidate_check_flags(candidate, check_problems),
         "related_records": _candidate_related_records(root, candidate),
+        "source_ref_statuses": _source_ref_statuses(root, candidate),
     }, check_problems
 
 
@@ -556,7 +565,15 @@ def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_reco
     }, problems
 
 
-def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, supersedes: list[str] | None = None) -> tuple[dict[str, Any], list[Problem]]:
+def approve_knowledge_candidate(
+    root: Path,
+    *,
+    repo_id: str,
+    candidate_id: str,
+    supersedes: list[str] | None = None,
+    reviewed_by: str = "human",
+    review_note: str = "",
+) -> tuple[dict[str, Any], list[Problem]]:
     candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
     if problems:
         return {}, problems
@@ -572,6 +589,14 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
     record_id = "K" + candidate_id[2:]
     if record_id in supersedes:
         return {}, [Problem("error", "knowledge_supersedes_self", "knowledge record cannot supersede itself", record_id)]
+    reviewer = reviewed_by.strip() or "human"
+    note = review_note.strip()
+    source_digest_set = sorted(
+        str(ref.get("content_sha256") or "")
+        for ref in candidate.get("source_refs", [])
+        if isinstance(ref, dict) and str(ref.get("content_sha256") or "")
+    )
+    approved_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     record = {
         "schema": "repoctl.knowledge.record",
         "schema_version": 1,
@@ -593,7 +618,13 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
                 "related_records": _candidate_related_records(root, candidate),
             },
         },
-        "review": {"status": "reviewed", "reviewed_by": "human"},
+        "review": {
+            "status": "reviewed",
+            "reviewed_by": reviewer,
+            "review_note": note,
+            "reviewed_at": approved_at,
+            "source_digest_set": source_digest_set,
+        },
         "authoritative": True,
     }
     record["record_digest"] = digest_data(record)
@@ -612,6 +643,11 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
         "record_id": record_id,
         "candidate_id": candidate_id,
         "record_digest": record["record_digest"],
+        "reviewed_by": reviewer,
+        "review_note": note,
+        "approved_at": approved_at,
+        "source_digest_set": source_digest_set,
+        "supersedes": supersedes,
     }
     event["event_digest"] = digest_data(event)
     event_path = _event_dir(root) / f"{event['id']}.json"
@@ -628,6 +664,7 @@ def approve_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, 
             "record_id": superseded_id,
             "superseded_by": record_id,
             "record_digest": record["record_digest"],
+            "approved_event_id": event["id"],
         }
         superseded_event["event_digest"] = digest_data(superseded_event)
         superseded_path = _event_dir(root) / f"{superseded_event['id']}.json"
@@ -976,6 +1013,20 @@ def _receipt_summary(receipt: dict[str, Any], artifact_text: str) -> str:
         if changed:
             parts.append(f"Changed files: {changed}")
     return "\n\n".join(part.strip() for part in parts if part.strip())[:1000]
+
+
+def _receipt_changed_files(receipt: dict[str, Any]) -> list[str]:
+    changed_entries = receipt.get("changed_entries")
+    if not isinstance(changed_entries, list):
+        return []
+    paths: list[str] = []
+    for item in changed_entries:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if path:
+            paths.append(path)
+    return sorted(dict.fromkeys(paths))
 
 
 def _artifact_heading(text: str) -> str:
@@ -1341,7 +1392,8 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
                 problems.append(Problem("error", "knowledge_candidate_source_ref_invalid", "candidate source ref is invalid", candidate_id))
                 continue
             rel = str(ref.get("path") or "")
-            if _source_ref_excluded(rel):
+            ref_kind = str(ref.get("kind") or "document")
+            if ref_kind in {"document", "authority_document"} and _source_ref_excluded(rel):
                 problems.append(Problem("error", "knowledge_candidate_source_excluded", "candidate source is excluded from knowledge ingestion", rel))
             if not str(ref.get("content_sha256") or "").startswith("sha256:"):
                 problems.append(Problem("error", "knowledge_candidate_source_hash_invalid", "candidate source hash is invalid", rel))
