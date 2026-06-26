@@ -1,239 +1,179 @@
-BLOCKED_REPORT_INCOMPLETE
+TECH_DECISION_READY
 
 # Technology Benchmark Report: Graph → Task Brief → Reviewed Knowledge → llmwiki
 
 ## 1. Executive verdict
-- Intended product loop actually achieved?: PARTIAL
-- Current architecture best enough to keep?: INCONCLUSIVE
-- Recommended stack: current S2 repoctl Graph + Context/Pack remains the only runnable stack in this checkout; do not declare it the winner until S3/S4 are run or explicitly rejected by a human.
-- One-paragraph reason: The current repoctl product loop is implemented enough to run Graph selectors, Context query, Context Pack, knowledge candidate/status/query commands, and static wiki render/check. Existing field-test notes report Phase 3-7 PASS. However, the technology-choice verification cannot close because the required benchmark map file is missing, S3/S4 provider/retrieval alternatives are not installed or implemented in this checkout, S5 has no approved records in the current workspace, and S0/S2 measurements show strong S2 gains on materialized fixture retrieval but not enough evidence to prove the architecture is best.
-- Human decision needed: decide whether to fund one bounded S3/S4 probe before continuing product development, or accept current S2/S5 as the operational stack despite missing alternative measurements.
+- Intended product loop actually achieved?: YES
+- Current architecture best enough to keep?: KEEP
+- Recommended stack: KEEP current S2/S5 architecture: repoctl custom Graph provider + Context/Task Pack + reviewed Knowledge lifecycle + custom static Markdown llmwiki; keep S3/S4/S6 as measured optional probes, not default product work.
+- One-paragraph reason: The bounded retest restored the missing benchmark map, ran S0/S2/S3/S4 over the same materialized fixture and budgets, created an approved-record S5 snapshot, and replayed the multi-repo fixture. S2 beat S0 and the disposable S4 hybrid on required context recall and provenance: S2 Recall@5 `0.917`, Recall@10 `1.0`, Precision@5 `0.383`; S4 Recall@5 `0.708`, Recall@10 `0.875`, Precision@5 `0.300`; S0 Recall@5 `0.292`, Precision@5 `0.067`. S3 was runnable only as a disposable `scip-typescript` probe and did not improve the mixed fixture. S5 proved approved-record query, next-pack reuse, wiki render/check reuse, and stale default exclusion.
+- Human decision needed: approve keeping S2/S5 as the default architecture and deferring S3/S4/S6 to measured optional upgrades.
 
 ## 2. What we were trying to build
-- Product loop: Task request -> code localization and impact evidence -> Task Brief / Context Pack -> agent edits with less blind exploration -> tests and completion receipt -> reviewed knowledge candidate -> explicit approval -> next Task Brief reuse -> static llmwiki navigation.
-- Non-goals: MCP, graph DB migration, vector-first retrieval, autonomous agent runtime, new production dependencies during verification, and benchmark framework expansion for its own sake.
-- Success criteria: prove the current loop is actually built, compare at least S0/S2/S3/S4 and S5 for knowledge-sensitive tasks, use shared snapshots/tasks/gold context/budgets, preserve provenance, and identify required Master Plan changes before more product work.
+- Product loop: Task request → code localization and impact evidence → Task Brief / Context Pack → agent edits with less blind exploration → tests and completion receipt → reviewed knowledge candidate → explicit approval → next Task Brief reuse → static llmwiki navigation.
+- Non-goals: MCP, graph DB migration, vector-first retrieval, autonomous agent runtime, committed production dependencies for provider experiments, and benchmark framework expansion.
+- Success criteria: restore the benchmark map, compare S0/S2/S3/S4 on the same materialized task fixture and budget, include S5 knowledge-sensitive behavior, replay multi-repo isolation, and produce a reviewable KEEP/REVISE/INCONCLUSIVE decision.
 
 ## 3. Current implementation audit
 | Capability | Current behavior | Evidence command/path | Useful? | Gap |
 |---|---|---|---|---|
-| Graph public query | CLI exposes file/topic/import plus symbol, callers, callees, impact-file, impact-symbol, in-file, and depth selectors. | `./scripts/repoctl graph query --help` | YES | No external SCIP/tree-sitter provider comparison is runnable here. |
-| Context query | CLI returns query bundles with token budget, format, explain, and JSON options. | `./scripts/repoctl context query --help` | YES | Current benchmark precision is modest; ranking vs S4 is unproven. |
-| Context Pack | CLI packs task startup context with task ID, repo ID, budget, explain, output, and Markdown/JSON formats. | `./scripts/repoctl context pack --help` | YES | Pack benchmark fixture must be materialized before use; not a one-command benchmark in a bare checkout. |
-| Context benchmark | Existing command measures recall, precision, forbidden refs, source integrity, graph edge recall, packed recall, and knowledge recall. | `./scripts/repoctl context benchmark --help` | YES | It benchmarks S2 only; S0/S3/S4 adapters are not first-class systems. |
-| Reviewed Knowledge | Candidate/status/approve/reject/deprecate/query/render commands exist. | `./scripts/repoctl knowledge --help` | YES | Current workspace has `record_count=0`; S5 cannot be scored as a real knowledge layer here. |
-| llmwiki render/check | Static generated pages and manifest can be checked without rewriting. | `.repoctl-state/technology-benchmark/wiki/render-check.json` | PARTIAL | Check passes for an empty wiki; no per-record navigation can be judged with zero records. |
-| Field proof | Field-test doc records Phase 3-7 PASS and release-candidate `7/7`. | `docs/field-tests/graph-context-llmwiki-v1.md` | YES | It is not a side-by-side S0/S3/S4 technology bake-off. |
-| Required benchmark map | Directive requires `docs/GRAPH_CONTEXT_LLMWIKI_TECHNOLOGY_BENCHMARK_MAP.md`. | `rg --files docs` | NO | File is missing in this checkout; report uses directive labels S0-S6 directly. |
+| Benchmark map | Restored as a committed docs artifact after search found it absent from checkout and git history. | `docs/GRAPH_CONTEXT_LLMWIKI_TECHNOLOGY_BENCHMARK_MAP.md` | YES | The original file was absent; the restored map is derived from the directive's S0-S6 labels. |
+| Graph public query | CLI supports exact file/topic/import plus symbol, callers, callees, impact-file, impact-symbol, in-file, and depth selectors. | `./scripts/repoctl graph query --help` | YES | External providers remain optional; no default provider rewrite justified. |
+| Context query and benchmark | Existing command measures recall, precision, source integrity, forbidden refs, graph edge recall, packed recall, and knowledge recall. | `.repoctl-state/technology-benchmark/S2/context/context-benchmark-materialized.json` | YES | Precision is moderate, but S4 did not beat it. |
+| Context Pack | Existing pack and pack benchmark commands produce must-read startup context with non-authoritative warnings. | `.repoctl-state/technology-benchmark/S2/pack/pack-benchmark.json` | YES | Keep as Task Brief implementation surface; do not split more public concepts. |
+| Reviewed Knowledge | Candidate approval creates immutable record and event; query returns reviewed record; source drift makes it stale and excluded by default. | `.repoctl-state/technology-benchmark/S5/knowledge/*.json` | YES | Lifecycle is justified at current complexity; keep explicit approval. |
+| llmwiki render/check | Render/check reuses the approved record ID and source bundle with freshness/link checks. | `.repoctl-state/technology-benchmark/S5/knowledge/render-check-current.json` | YES | MkDocs retest is not justified yet because custom Markdown passes required freshness/navigation checks. |
+| Multi-repo isolation | Repo-id matched questions returned forbidden cross-repo ref count `0` for both `web` and `api`. | `.repoctl-state/technology-benchmark/multirepo/multirepo-filtered-summary.json` | YES | Running all fixture questions against a single repo intentionally shows cross-repo refs for opposite-repo questions; report uses matched repo_id rows. |
 
 ## 4. Benchmark design
 | Repository | Shape | Language | Tasks | Why included |
 |---|---|---|---|---|
-| R1 | Current workspace authority docs | Markdown/Python tooling | Authority and contract questions | Verifies source provenance and doc retrieval. |
-| R2 | Materialized `tests/fixtures/context-benchmark` under `/tmp/repoctl-tech-benchmark/repos` | Python | Symbol, caller, import, impact tasks | Exercises custom Python AST/import/call graph and impact evidence. |
-| R3 | Materialized fixture frontend files | TypeScript/JavaScript | Relative import impact tasks | Exercises JS/TS file/import impact without a precise JS provider. |
-| R4 | `tests/fixtures/context-benchmark-multirepo` present but not replayed in this run | Mixed | Multi-repo isolation tasks | Required by directive, but not fully scored in this report; high-impact limitation. |
+| R1 | Workspace docs and contracts | Markdown/Python tooling | Authority and contract questions | Verifies source provenance and doc retrieval. |
+| R2 | Materialized `tests/fixtures/context-benchmark` under `/tmp/repoctl-tech-benchmark2/repos` | Python | Symbol, caller, import, impact tasks | Exercises custom AST/import/call graph and impact evidence. |
+| R3 | Materialized fixture frontend files | TypeScript/JavaScript | Relative import impact tasks | Exercises JS/TS baseline and disposable `scip-typescript` probe. |
+| R4 | Collection workspace `repos/web` + `repos/api` under `/tmp/repoctl-tech-multirepo` | Python multi-repo | Same basename/symbol isolation tasks | Verifies explicit repo_id prevents same-name leakage. |
 
 | Task | Category | Gold files/symbols/docs/tests | Forbidden misleading context |
 |---|---|---|---|
-| Q-001..Q-024 | Authority, contract, code-location, impact, import-impact, method/reference/call impact | `tests/fixtures/context-benchmark/questions.jsonl` plus `expected-sources.json`; materialized corpus in `/tmp/repoctl-tech-benchmark` | Fixture `forbidden_refs`; S2 selected none. |
-| CP-001..CP-005 | Task Brief / Context Pack startup | `tests/fixtures/context-pack-benchmark/tasks.json` and `cases.json` | Not authority; pack warning `context_pack_not_authoritative` expected. |
-| Knowledge-sensitive query | Reviewed Knowledge | Current workspace records/events/candidates | No approved record exists; S5 scored as not usable in current state. |
+| Q-001..Q-024 | Authority, contract, code-location, impact, import-impact, method/reference/call impact | `tests/fixtures/context-benchmark/questions.jsonl` and `expected-sources.json` | Fixture `forbidden_refs`; S0/S2/S3/S4 selected `0`. |
+| CP-001..CP-005 | Task Brief startup | `tests/fixtures/context-pack-benchmark/tasks.json` and `cases.json` | Pack is non-authoritative; warnings are expected. |
+| S5-K-001 | Knowledge-sensitive source authority decision | Candidate from `docs/adr/evidence-context-authority-v0.md`, approved record `K-20260626084606Z--decision-a25661cb` | Stale source after digest drift must be excluded by default. |
+| Q-MR-001..Q-MR-008 | Multi-repo isolation | `tests/fixtures/context-benchmark-multirepo/*` | Opposite repo same basename/symbol refs. |
 
 | Budget | Value | Reason |
 |---|---:|---|
-| Context budget | 4000 tokens | Same value for S2 materialized fixture run. |
-| Pack budget | 5000 tokens | Same value for pack benchmark run. |
-| S0 max files shown | Top 5 | Matches Recall@5/Precision@5 comparison. |
-| Setup time | Disposable `/tmp/repoctl-tech-benchmark` copy | Avoids production changes while materializing fixtures. |
-| S3/S4/S6 budget | NOT_RUN | Providers/ranking stacks absent; running them would require new tooling/dependencies. |
+| max files/refs shown | 5 for Precision@5, 10 for Recall@10 | Same across S0/S2/S3/S4. |
+| Context budget | 4000 tokens | Matches S2 fixture benchmark and S4 temp scorer budget. |
+| Pack budget | 5000 tokens | Matches pack benchmark and S5 next-pack check. |
+| Setup/index time | Recorded separately | Prevents hiding provider setup cost in retrieval quality. |
+| Temporary artifacts | `/tmp/...` and `.repoctl-state/technology-benchmark/...` | No production dependency or adapter committed. |
 
 ## 5. System comparison scorecard
 | System | Context accuracy | Task success | Cost | Setup friction | Explainability | Product fit | Verdict |
 |---|---:|---:|---:|---:|---:|---:|---|
-| S0 Agent + rg/read only | 1 | 1 | 4 | 5 | 1 | 2 | Loses on structured provenance and graph refs; materialized fixture Recall@5 `0.042`. |
-| S2 Current repoctl Graph + Context Pack | 4 | 3 | 4 | 3 | 5 | 4 | Strong runnable baseline; context Recall@5 `0.917`, Recall@10 `1.0`, pack must-read recall `1.0`. |
-| S3 SCIP + lexical retrieval prototype | 0 | 0 | 0 | 0 | 0 | 0 | NOT_RUN: no SCIP/tree-sitter/LSP deps or binaries present. Impact high. |
-| S4 Hybrid exact/SCIP graph + FTS/BM25 + repo-map ranking | 0 | 0 | 0 | 0 | 0 | 0 | NOT_RUN: no runnable S3 provider or hybrid ranking layer. Impact high. |
-| S5 Hybrid + Reviewed Knowledge | 2 | 1 | 4 | 3 | 5 | 3 | Lifecycle exists but current workspace has `record_count=0`; knowledge-sensitive behavior not scored. |
-| S6 Embeddings/rerank | 0 | 0 | 0 | 0 | 0 | 0 | NOT_RUN: directive says run only after measured S4 gap; S4 did not run. |
+| S0 Agent + rg/read only | 2 | 2 | 5 | 5 | 1 | 2 | Loses: Recall@5 `0.292`, Precision@5 `0.067`, no structured provenance. |
+| S2 Current repoctl Graph + Context Pack | 5 | 4 | 4 | 4 | 5 | 5 | Winner: Recall@5 `0.917`, Recall@10 `1.0`, Precision@5 `0.383`, source integrity `true`. |
+| S3 SCIP/tree-sitter provider probe | 1 | 1 | 2 | 2 | 3 | 2 | Loses for current fixture: `scip-typescript` required temp config and scored Recall@5 `0.083`; no Python SCIP gain measured. |
+| S4 Hybrid exact provider + lexical + repo-map/dependency ranking | 3 | 3 | 3 | 3 | 4 | 3 | Loses: temp hybrid Recall@5 `0.708`, Recall@10 `0.875`, Precision@5 `0.300`; first edit rank improves but accuracy drops vs S2. |
+| S5 S2 + Reviewed Knowledge | 4 | 4 | 4 | 4 | 5 | 5 | Keep: approved record reused by query, pack, render/check, and stale exclusion works. |
+| S6 Embeddings/rerank | 0 | 0 | 0 | 0 | 0 | 0 | NOT_RUN by rule: S4 did not expose a retrieval gap that justifies embeddings/rerank. |
 
 ## 6. Provider bake-off
 | Provider | Accuracy | Install/index cost | Failure behavior | Keep/drop reason |
 |---|---|---|---|---|
-| Current repoctl Python AST/import/call provider | Strong on materialized Python fixture graph edges: graph_edge_recall `1.0`; supports public symbol/caller/callee/impact selectors | Already installed; no production dependency added | Emits completeness/problem data through repoctl outputs | KEEP as current runnable provider. |
-| tree-sitter fallback | NOT_RUN | No `tree-sitter` or `tree-sitter-languages` deps/binaries present | Unknown | RETEST only if a disposable install probe is approved. |
-| SCIP Python/TypeScript/JavaScript | NOT_RUN | No `scip`, `scip-python`, or related binary/dependency present | Unknown | RETEST before claiming custom provider is best. |
-| LSP oracle | NOT_RUN | No `pygls`/`lsprotocol` provider path present | Unknown | Optional reference only; not current default. |
-| CodeQL/Joern | NOT_RUN | Out of default task-context scope | Not assessed | DROP as default; maybe special-analysis reference later. |
+| Current repoctl Python AST/import/call provider | S2 materialized fixture graph_edge_recall `1.0`; context Recall@5 `0.917` | Already present; no production dependency added | Emits completeness/problem data through repoctl artifacts | KEEP as default provider. |
+| `scip-typescript` disposable probe | S3 Recall@5 `0.083`; only TS fixture documents visible; did not improve full benchmark | `npm exec @sourcegraph/scip-typescript`; failed without `tsconfig.json`; with temp `tsconfig.json`, index succeeded in `real 1.32s`, output `1373` bytes | Missing project config produced `no files got indexed`; successful probe remained temp-only | DROP as default now; revisit only for real TS projects with existing config. |
+| tree-sitter disposable availability | CLI install via `npm exec tree-sitter-cli -- --version` succeeded (`0.26.9`) but no grammar/index probe was needed after S4 lost | Requires temp grammar/parser setup to produce useful refs | Not integrated with repoctl contracts | DROP from default; keep as fallback candidate only after language coverage failure. |
+| SCIP Python / LSP | Python module/binary absent in current checkout; explorer found disposable `uv --with` can resolve related packages but no production provider path exists | Would require temp adapter and schema interpretation | High implementation uncertainty | RETEST only if future Python reference/caller failures beat current provider. |
 
 ## 7. Retrieval / Task Brief bake-off
 | System | Required recall | Precision | First correct edit surface | Token/line cost | Human answerability |
 |---|---:|---:|---|---|---|
-| S0 rg/read lexical approximation | Recall@5 `0.042`; Precision@5 `0.008` | Very low on graph refs and exact sections | Often absent from top 5 | Cheap but wastes human/agent interpretation | Low: no source status, grouping, or graph explanation. |
-| S2 context benchmark on unmaterialized current checkout | Recall@5 `0.208`; Precision@5 `0.208`; packed recall `0.25` | Misleading because corpus missing `12/12` | Poor for code tasks | Cheap | Useful only for authority docs. |
-| S2 context benchmark on materialized fixture | Recall@5 `0.917`; Recall@10 `1.0`; Precision@5 `0.383`; packed recall `1.0`; forbidden `0`; cross-repo refs `0`; integrity `true` | Moderate precision; strong recall and provenance | Strong for most code impact categories; contract category `0.5` | 4000-token budget, quick local run | High: source refs and graph evidence are inspectable. |
-| S2 task pack benchmark | mean must-read recall `1.0`; 5 cases; warning count `5` | Not a precision benchmark | Provides must-read startup evidence | 5000-token budget | High if warnings are respected as non-authoritative. |
-| S4 hybrid | NOT_RUN | NOT_RUN | Unknown | Unknown | High-impact missing comparison. |
+| S0 rg/read lexical approximation | Recall@5 `0.292`; Recall@10 `0.833` | Precision@5 `0.067` | Mean rank `7.75` | Low setup cost, high interpretation cost | Low: paths only, no lifecycle/source status. |
+| S2 context benchmark | Recall@5 `0.917`; Recall@10 `1.0` | Precision@5 `0.383` | Existing repoctl explanation/source refs; first rank not separately exported | 4000-token budget; no new dependency | High: digest/source refs/completeness and graph evidence. |
+| S4 temp hybrid | Recall@5 `0.708`; Recall@10 `0.875` | Precision@5 `0.300` | Mean rank `5.42`, better than S0 but below S2 accuracy | Temp scorer only; uses graph + BM25 + SCIP TS refs | Medium-high: explainable reasons but not a product command. |
+| S2 task pack benchmark | mean must-read recall `1.0`; required must-read count `6`; warning count `5` | Not a precision benchmark | Must-read docs are surfaced | 5000-token budget | High if non-authoritative warnings are respected. |
 
 ## 8. Reviewed Knowledge bake-off
 | Option | Approval UX | Stale safety | Next-task reuse | Complexity | Verdict |
 |---|---|---|---|---|---|
-| Plain ADR/Markdown notes only | Simple but no review state | Digest/currentness is manual | Reuse depends on retrieval only | Low | Insufficient for knowledge-sensitive loop. |
-| Current reviewed knowledge lifecycle | Commands exist for candidate, approve, reject, deprecate, check, query, render; candidates exist in state | Designed for stale/superseded/deprecated exclusion | Field tests claim next-pack reuse, but current workspace has no records | Medium | RETEST with at least one approved record in the benchmark snapshot. |
-| Lighter lifecycle | Not implemented | Unknown | Unknown | Lower | Consider only if human review effort proves too high. |
+| Plain ADR/Markdown notes only | Simple but no approval event or reviewed status | Manual only | Retrieval may find source docs but cannot distinguish current reviewed decision | Low | Loses for knowledge-sensitive tasks. |
+| Current reviewed knowledge lifecycle | Candidate from source, approve with reviewer/note, immutable record, append-only event | Source digest drift changes record status to stale; default query returns `0`, `--include-stale` returns the record | `context pack` included record `K-20260626084606Z--decision-a25661cb`; render/check reused same record ID | Medium | KEEP: complexity is justified by currentness and reuse. |
+| Lighter lifecycle | Not implemented | Would need to re-prove stale exclusion | Unknown | Lower | Not needed now. |
 
 ## 9. llmwiki renderer bake-off
 | Option | Navigation | Freshness/link check | Custom code burden | Verdict |
 |---|---|---|---|---|
-| Current custom Markdown output | Generates `INDEX.md`, kind pages, history, and `search-index.json`; empty current workspace limits navigation judgment | `knowledge render --check` reports `current=true`, no missing/stale/broken pages | Existing custom code in repoctl | KEEP for now, but evidence is weak with zero records. |
-| MkDocs-compatible generated content | NOT_RUN | NOT_RUN | Could reduce custom navigation/rendering burden | RETEST if reviewed records exist and current navigation becomes a burden. |
+| Current custom Markdown output | Render produced index/kind/history/per-record pages for record `K-20260626084606Z--decision-a25661cb` | `knowledge render --check` returned `current=true`, `broken_links=[]`, record_count `1` before drift | Existing code, no new dependency | KEEP. |
+| MkDocs-compatible generated content | NOT_RUN | NOT_RUN | Might reduce custom rendering later | Do not schedule now; current renderer passed bounded evidence. |
 | Other docs tooling | NOT_RUN | NOT_RUN | Unknown | DROP from current decision. |
 
 ## 10. End-to-end replay
-Task request -> localization -> brief -> edit/test -> receipt -> knowledge -> next brief -> wiki.
-- Scenario A: Field-test Phase 3 says Graph impact helped choose files, Context Pack was consumed before editing, focused verification passed, and task finish created receipts. This proves the loop shape exists but is not a technology bake-off.
-- Scenario B: Field-test Phase 4 says receipt-to-candidate, review Markdown, reviewer/note approval provenance, next-pack reuse, supersede, stale refresh, and reject path passed. Current checkout has no approved records, so this cannot be replay-scored here.
-- Scenario C: Field-test Phase 5-7 says wiki navigation/check, closed-loop proof, full pytest, repoctl gates, release archive, and extracted-artifact smoke passed. This supports product viability but not whether S3/S4 would be a better stack.
+Task request → localization → brief → edit/test → receipt → knowledge → next brief → wiki.
+- Scenario A: S2 materialized benchmark localizes source docs, graph files, Python symbols/callers, and impact refs with Recall@5 `0.917`, Recall@10 `1.0`, and forbidden refs `0`.
+- Scenario B: S5 approved `KC-20260626084606Z--decision-a25661cb` into `K-20260626084606Z--decision-a25661cb`; `knowledge query`, `context pack`, and `knowledge render --check` all reused that record identity while current.
+- Scenario C: After appending a drift marker to the source ADR in the disposable workspace, `knowledge check` reported `knowledge_source_digest_drift`, default `knowledge query` returned `0`, and `--include-stale` returned the stale record.
 
 ## 11. Decision
 Decision needed: Graph-to-wiki v1 technology stack
-Measured winner: INCONCLUSIVE; S2 is the measured runnable winner only because S3/S4/S6 were not runnable.
-Why: S2 materially beats S0 on the materialized fixture and has strong provenance, but the required SCIP/hybrid alternatives were not actually measured and S5 is empty in the current workspace.
-Tradeoffs: keeping S2 avoids new dependencies and preserves repoctl contracts; revising toward SCIP/S4 might improve references/callers and first-correct-edit ranking but has unmeasured setup and maintenance cost.
-Rejected: S0 as primary product path, because it lacks provenance/grouping and scored very low on required context; S6 because the directive only allows it after a measured S4 gap.
-Recommendation: INCONCLUSIVE
+Measured winner: S2/S5 current architecture
+Why: S2 has the best measured retrieval accuracy and provenance; S4 did not beat S2; S3 adds setup/config cost without current accuracy gain; S5 proves reviewed record reuse and stale exclusion.
+Tradeoffs: S4 had better first-correct-surface mean rank than S0 and may become useful later, but its current temp probe lowers recall/precision relative to S2 and would add uncommitted adapter work. `scip-typescript` can be useful for real TS repos with existing config, but the current fixture does not justify making it primary.
+Rejected: S0 as product path; S3 as default provider; S4 as default retrieval stack; S6 because S4 did not expose a gap.
+Recommendation: KEEP current S2/S5 architecture
 
 ## 12. Required Master Plan changes
 | Current plan item | Keep/change/remove | Reason | Replacement text or action |
 |---|---|---|---|
-| Progress Ledger claims Phase 6/7 field-verified as product completion evidence | Keep as field evidence, but add technology-decision caveat | Field proof is not a S0/S3/S4 technology bake-off | Add: `Technology-choice verification remains separate from field proof; do not use field proof alone to claim provider/retrieval stack optimality.` |
-| Current custom provider as implicit default | Change | S3/S4 not measured; custom provider may be fine but not proven best | Add a vertical-slice decision gate: disposable SCIP/tree-sitter probe before expanding Graph provider work. |
-| Context and Pack as separate public layers | Change candidate | Report suggests product may be clearer as Task Brief over Context internals, but evidence is not final | Add decision question: collapse public UX to `Task Brief` while keeping Context as internal evidence bundle if retest confirms no separate user value. |
-| Reviewed Knowledge current lifecycle | Keep with retest | Commands exist; current workspace has no approved records to score S5 | Require one approved-record benchmark snapshot before more knowledge UX expansion. |
-| llmwiki custom Markdown | Keep short-term | Current check passes and avoids new deps, but empty records weaken evidence | Retest MkDocs-compatible render only after reviewed records exist and navigation burden is measurable. |
-| Optional embeddings/rerank | Keep deferred | S4 has not run; no measured retrieval gap justifies S6 | Do not schedule S6 until S4 measured recall/order gap exists. |
+| S2 Graph/Context/Pack as default product path | Keep | Measured winner on same materialized fixture and budget | No rewrite required before product work continues. |
+| Reviewed Knowledge lifecycle | Keep | Approved-record query, next-pack reuse, render/check, and stale exclusion all passed | No rewrite required; keep explicit human approval and immutable records. |
+| S3/S4 provider/retrieval alternatives | Change to optional measured upgrade only | Bounded retest did not beat S2 | Add only if future failures show S2 recall/precision gap on real tasks. |
+| S6 embeddings/rerank | Keep deferred | S4 did not show a gap | No scheduled work. |
+| Benchmark map reference | Keep restored map | Required directive input was absent | Keep `docs/GRAPH_CONTEXT_LLMWIKI_TECHNOLOGY_BENCHMARK_MAP.md` as the comparison map. |
+| Public product concepts | Keep current implementation, avoid adding more | Context/Pack/Knowledge/wiki loop is field-evidenced and measured | If wording is simplified later, use Task Brief as UX label without changing authority boundaries. |
 
 ## 13. Known limitations
 | Limitation | Impact | Current fallback | Reason deferred | Revisit trigger | Severity |
 |---|---|---|---|---|---|
-| `docs/GRAPH_CONTEXT_LLMWIKI_TECHNOLOGY_BENCHMARK_MAP.md` missing | Cannot verify against the intended benchmark map document | Use directive S0-S6 labels directly | File absent in current checkout | Add/recover map file | High |
-| S3/S4 not runnable | Prevents strong KEEP/REVISE stack decision | Keep S2 as operational baseline | No deps/binaries/provider adapters present | One disposable SCIP/tree-sitter/S4 probe | High |
-| S5 has no approved records in current workspace | Knowledge-sensitive scoring is weak | Candidate/status/query commands and field-test claims | Avoid manufacturing records during verification | Approved-record benchmark snapshot | High |
-| Multi-repo fixture not replayed | Cross-repo leakage evidence incomplete in this report | S2 materialized single-repo run had `cross_repo refs=0` | Time/scope; avoid new framework | Run existing multi-repo fixture in a bound disposable workspace | Medium |
-| S0 baseline is a deterministic approximation | Could understate a skilled human/agent using rg/read | Report labels it as approximation | No agent runtime benchmark requested | Manual S0 replay with same task budget | Medium |
-| Current wiki has zero records | Navigation quality cannot be judged | `render --check` validates empty pages | Need reviewed records first | Approved knowledge fixture | Medium |
+| Restored map is reconstructed from directive, not recovered from original file history | Low-medium | Report states search commands and absence | Original file absent from checkout and git history | Original map is found elsewhere | Medium |
+| S4 is a disposable scorer, not a product command | Medium | S2 remains product path | User explicitly disallowed committed adapters/frameworks | Real task shows S2 ranking failure | Medium |
+| S3 `scip-typescript` needed temp `tsconfig.json` | Medium | Current Graph provider and lexical JS/TS file evidence | No committed dependency/config allowed | Real TS repo already has config and S2 misses refs | Medium |
+| Multi-repo fixture CLI scores all fixture questions per selected repo | Low | Filtered repo_id-matching rows prove explicit repo selection has `0` leakage | Existing benchmark command behavior not changed during verification | Need first-class multi-repo aggregate report | Low |
+| S0 is deterministic approximation, not a live human agent | Medium | Uses same task texts/gold refs/budget | No agent runtime benchmark framework allowed | Human wants live-agent A/B replay | Medium |
 
 ## 14. Evidence index
 | Artifact | What it proves | Path |
 |---|---|---|
-| Directive | Required process, systems, report outline, scoring rules | `docs/TECH_SELECTION_VERIFICATION_DIRECTIVE.md` |
-| Missing map search | Required benchmark map absent | `rg --files docs` output in session |
-| CLI help | Current public Graph/Context/Knowledge commands exist | `./scripts/repoctl graph query --help`, `./scripts/repoctl context --help`, `./scripts/repoctl knowledge --help` |
-| S0 baseline artifact | Same-question lexical baseline over materialized snapshot | `.repoctl-state/technology-benchmark/S0/rg/rg-baseline-materialized.json` |
-| S2 materialized context artifact | 24-question context recall/precision/source integrity | `.repoctl-state/technology-benchmark/S2/context/context-benchmark-materialized.json` |
-| S2 pack artifact | 5-case must-read recall for task packs | `.repoctl-state/technology-benchmark/S2/pack/pack-benchmark.json` |
-| S5 status artifact | Current reviewed record count and candidate state | `.repoctl-state/technology-benchmark/S5/knowledge/status.json` |
-| S5 query artifact | Current knowledge query returns zero records | `.repoctl-state/technology-benchmark/S5/knowledge/query.json` |
-| Wiki check artifact | Current generated wiki freshness/link check for empty records | `.repoctl-state/technology-benchmark/wiki/render-check.json` |
+| Restored benchmark map | S0-S6 system map and decision rules are back in checkout | `docs/GRAPH_CONTEXT_LLMWIKI_TECHNOLOGY_BENCHMARK_MAP.md` |
+| S2 context benchmark | Current repoctl context accuracy on materialized fixture | `.repoctl-state/technology-benchmark/S2/context/context-benchmark-materialized.json` |
+| S0/S3/S4 hybrid probe | Same-task comparative metrics for lexical baseline, SCIP TS probe, temp hybrid scorer | `.repoctl-state/technology-benchmark/S4/hybrid/hybrid-results.json` |
+| Provider availability | Local and disposable provider availability checks | `.repoctl-state/technology-benchmark/probe/provider-availability.txt`, `.repoctl-state/technology-benchmark/S3/provider/*` |
+| Pack benchmark | Task Brief must-read recall | `.repoctl-state/technology-benchmark/S2/pack/pack-benchmark.json` |
+| S5 approved record | Candidate, approval, query, pack, render/check, drift, and stale exclusion artifacts | `.repoctl-state/technology-benchmark/S5/knowledge/` |
+| Multi-repo replay | repo_id-matched forbidden/cross-repo counts `0` for web/api | `.repoctl-state/technology-benchmark/multirepo/multirepo-filtered-summary.json` |
 | Field-test proof | Prior product-loop field verification entries | `docs/field-tests/graph-context-llmwiki-v1.md` |
 
 ## 15. Appendix: explorer findings
 ## Explorer Finding
 
-- Explorer model requested: gpt-5.3-codex-spark first, gpt-5.4-mini fallback
+- Explorer model requested: gpt-5.3-codex-spark
 - Actual model used: gpt-5.4-mini
-- Area: current product audit / end-to-end
-- Repository/task set: directive, field-test doc, repoctl CLI and knowledge modules
-- Systems compared: S0/S2/S5
-
-### Claim
-The intended loop is implemented end-to-end in repoctl and field-evidenced, but this inspection does not prove the stack is best relative to S0/S3/S4.
-
-### Evidence
-- Commands run: `nl -ba tools/repoctl/cli.py`, `nl -ba tools/repoctl/knowledge_candidates.py`, `nl -ba tools/repoctl/knowledge_render.py`, `nl -ba docs/field-tests/graph-context-llmwiki-v1.md`
-- Files/artifacts inspected: `tools/repoctl/cli.py`, `tools/repoctl/knowledge_candidates.py`, `tools/repoctl/knowledge_render.py`, `docs/field-tests/graph-context-llmwiki-v1.md`
-- Metric values: field tests Phase 3 PASS, Phase 4 PASS, Phase 5 PASS, Phase 6 PASS, Phase 7 PASS; release-candidate gate `7/7`; historical context benchmark mean Recall@5 `0.944444`; pack benchmark mean must-read recall `1.0`
-- Example output excerpt: `Graph impact helped choose files, Context Pack was consumed before editing`
-
-### Interpretation
-- What this means for the intended product loop: The code paths and field tests show task -> pack -> receipt -> reviewed knowledge -> wiki -> next pack exists.
-- What it does not prove: Fresh side-by-side S0/S2/S5/S3/S4 technology superiority.
-- Risk or uncertainty: Implementation fidelity is strong, but technology-choice evidence is incomplete.
-
-### Recommendation
-KEEP
-
-### Follow-up needed
-Run explicit S0/S2/S5/S3/S4 benchmark before final stack decision.
-
-## Explorer Finding
-
-- Explorer model requested: gpt-5.3-codex-spark first, gpt-5.4-mini fallback
-- Actual model used: gpt-5.4-mini
-- Area: provider
-- Repository/task set: repoctl Graph provider checkout
+- Fallback reason: the multi-agent model override list available in this environment did not include `gpt-5.3-codex-spark`; the highest requested available fallback was `gpt-5.4-mini`.
+- Area: provider/retrieval
+- Repository/task set: workspace root plus `tests/fixtures/context-benchmark`
 - Systems compared: S2/S3/S4
 
 ### Claim
-S2 is the only provider stack validated in this checkout; S3/S4 are absent, so the current Python AST/import/call provider is runnable but not proven best.
+A bounded disposable S3 probe is feasible here without production edits, and the existing fixture-driven benchmark flow can compare artifacts; a true production S4 path is absent, so S4 must remain a temporary scorer/probe unless later justified.
 
 ### Evidence
-- Commands run: `rg -n 'tree-sitter|SCIP|lsp|pygls|lsprotocol' pyproject.toml uv.lock tools tests docs`, targeted graph tests
-- Files/artifacts inspected: `tools/repoctl/graph_code_provider.py`, `tools/repoctl/graph_import_resolver.py`, `tools/repoctl/code_index.py`, `tools/repoctl/graph.py`, `docs/contracts/repoctl-graph-contract.md`, `pyproject.toml`, `uv.lock`
-- Metric values: no provider deps beyond pytest in `pyproject.toml`; `tree_sitter=False`, `scip=False`, `lsprotocol=False`, binaries `scip=NOT_FOUND`, `tree-sitter=NOT_FOUND`; targeted graph tests passed
-- Example output excerpt: `Current v1 provider support is python_ast.`
+- Commands run: `rg -n "tree-sitter|SCIP|scip|BM25|repo-map" pyproject.toml uv.lock tools tests docs scripts -S`; `./scripts/repoctl context benchmark --help`; `./scripts/repoctl graph query --help`; provider availability commands; targeted context benchmark tests.
+- Files/artifacts inspected: `pyproject.toml`, `tools/repoctl/context_retrieval.py`, `tools/repoctl/context_graph.py`, `tools/repoctl/context_benchmark.py`, `tests/fixtures/context-benchmark/questions.jsonl`, `tests/fixtures/context-benchmark/expected-sources.json`.
+- Metric values: system binaries `tree-sitter=NOT_FOUND`, `scip=NOT_FOUND`; disposable `uv --with` resolved parser/LSP packages; targeted benchmark tests `2 passed, 18 deselected`.
+- Example output excerpt: `2 passed, 18 deselected in 1.42s`.
 
 ### Interpretation
-- What this means for the intended product loop: Current graph can support Python localization today.
-- What it does not prove: SCIP/tree-sitter/LSP would not improve precision or coverage.
-- Risk or uncertainty: S3/S4 require new disposable tooling before real bake-off.
+- What this means for the intended product loop: existing repoctl benchmark artifacts are enough to compare bounded candidates without production changes.
+- What it does not prove: a production S4 implementation exists.
+- Risk or uncertainty: repo-map ranking remains a temp scoring idea, not a shipped repoctl feature.
 
 ### Recommendation
 RETEST
 
 ### Follow-up needed
-Run a disposable SCIP/tree-sitter/LSP probe before claiming provider winner.
-
-## Explorer Finding
-
-- Explorer model requested: gpt-5.3-codex-spark first, gpt-5.4-mini fallback
-- Actual model used: gpt-5.4-mini
-- Area: retrieval / knowledge / wiki
-- Repository/task set: context benchmark fixture and current workspace
-- Systems compared: S0/S2/S3/S4/S5/S6
-
-### Claim
-S2 adds meaningful provenance and grouping over rg/read, but the current checkout alone cannot justify the full technology stack because the initial corpus was unmaterialized, reviewed knowledge is empty, and S3/S4/S6 are not runnable.
-
-### Evidence
-- Commands run: `./scripts/repoctl context benchmark`, `./scripts/repoctl context query`, `./scripts/repoctl knowledge query`, `./scripts/repoctl knowledge render --check`, `rg ... docs/adr docs/contracts README.md`
-- Files/artifacts inspected: `docs/adr/evidence-context-authority-v0.md`, `docs/contracts/repoctl-context-contract.md`, `docs/contracts/repoctl-graph-contract.md`, `README.md`
-- Metric values: unmaterialized context benchmark Recall@5 `0.208333`, Precision@5 `0.208333`, packed recall `0.25`, fixture missing `12/12`; current knowledge query `result_count=0`; render check current for empty wiki
-- Example output excerpt: `knowledge_result_count=0`
-
-### Interpretation
-- What this means for the intended product loop: S2 is useful for authority docs and provenance.
-- What it does not prove: Full loop readiness in the current checkout without materialized corpus and records.
-- Risk or uncertainty: Sparse current state weakens S5 and S4 conclusions.
-
-### Recommendation
-RETEST
-
-### Follow-up needed
-Use a materialized fixture workspace with approved knowledge records and runnable S4.
+Completed in this report by running the temp S4 scorer under `.repoctl-state/technology-benchmark`.
 
 Decision needed: Graph-to-wiki v1 technology stack
-Measured winner: INCONCLUSIVE; S2 is the only measured runnable winner, not a proven best architecture.
-Why: S2 beats S0 on materialized retrieval and preserves provenance, but S3/S4 were not runnable and S5 has no approved records in the current workspace.
-Tradeoffs: Continuing with S2 is low-friction; revising toward SCIP/S4 may improve precision/call/reference coverage but currently has unknown setup and maintenance cost.
-Rejected: S0 as primary product path; S6 before S4 gap evidence.
-Recommendation: INCONCLUSIVE
+Measured winner: S2/S5 current architecture
+Why: S2 beats S0/S3/S4 on required recall, precision, and provenance; S5 proves reviewed record reuse and stale exclusion.
+Tradeoffs: S3/S4 may be useful later for real language-provider gaps, but current measured benefit does not justify default adoption.
+Rejected: S0 as product path; S3/S4 as default stack; S6 until S4 exposes a measured gap.
+Recommendation: KEEP current S2/S5 architecture
 Human options:
 A. Approve recommendation
-B. Reject and keep current plan
-C. Request one bounded retest: disposable S3/S4 provider + hybrid retrieval probe on the existing materialized context fixture and one approved-record knowledge snapshot
+B. Reject and revise toward S3/S4 hybrid despite lower bounded-probe accuracy
+C. Request one bounded retest: live-agent S0 vs S2/S5 task replay on a real product repo
 Blocked until decision: production integration / next product feature work
 Unaffected: read-only review of this report
 
-INCONCLUSIVE
+KEEP current S2/S5 architecture
