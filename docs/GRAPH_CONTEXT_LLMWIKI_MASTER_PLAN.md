@@ -1574,6 +1574,8 @@ Next exact slice: <one user-visible capability>
 - `docs/contracts/repoctl-graph-contract.md` records additive Graph capabilities and now documents the shipped public selector surface.
 - Phase 1 closed the real product gap: public `--symbol`, caller, callee, and impact selectors over already-derived Graph evidence.
 - Fresh-copy Phase 0 smoke passed for graph build, file query, context query, wiki render/check, and workspace check.
+- Technology choice was approved in `0d89516` after the bounded benchmark report `9780aae`: keep S2/S5 as the V1 best-enough default, keep S3/S4/S6 deferred until measured S2 gaps.
+- Release artifact root detection was corrected in `a29cbd2` by including literal preserved root files such as `docs/BOARD.md` in the archive bootstrap contents.
 
 | Phase | State | User-visible demo | Fresh-copy evidence | Commit(s) | Blocker |
 |---|---|---|---|---|---|
@@ -1583,8 +1585,8 @@ Next exact slice: <one user-visible capability>
 | Phase 3 — Agent Context Pack v1 | COMMITTED | three fresh-copy repo tasks generated Markdown packs, used pack evidence before editing, passed focused verification, and finished with receipts | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 3 entry | `7a9cf0d` | none |
 | Phase 4 — Reviewed Knowledge v1 | COMMITTED | receipt candidate review Markdown, reviewer/note approval provenance, next-pack reuse, supersede, stale refresh | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 4 entry | `dd05e85` | none |
 | Phase 5 — llmwiki v1 | COMMITTED | navigable static wiki with index, kind pages, records, file targets, history, search index, lifecycle/source freshness | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 5 entry | `4590fc0` | none |
-| Phase 6 — Closed-loop Field Proof | FIELD_VERIFIED | Golden A/B/C pass, fixture quality gates pass, next-pack reuse and stale refresh proven | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 6 entry | this commit | none |
-| Phase 7 — Release and Completion | FIELD_VERIFIED | full pytest, repoctl gates, release archive, extracted-artifact Graph/Context/Knowledge/wiki/field-gate smoke | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 7 entry | this commit | bare extracted artifact is an upgrade source; minimal workspace state is required for workspace-mutating commands |
+| Phase 6 — Closed-loop Field Proof | FIELD_VERIFIED | Golden A/B/C pass, fixture quality gates pass, next-pack reuse and stale refresh proven | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 6 entry | `c46c0d0` | none |
+| Phase 7 — Release and Completion | FIELD_VERIFIED | full pytest, repoctl gates, release archive, extracted-artifact Graph/Context/Knowledge/wiki/field-gate smoke | `docs/field-tests/graph-context-llmwiki-v1.md` Phase 7 entry; post-decision fresh extract smoke after preserve-file fix | `c46c0d0`, `9780aae`, `0d89516`, `a29cbd2` | none |
 
 ---
 
