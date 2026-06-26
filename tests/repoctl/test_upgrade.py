@@ -10,7 +10,7 @@ import pytest
 
 from tools.repoctl.cli import main
 from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
-from tests.repoctl.test_meta_check import write_repometa
+from tests.repoctl.meta.test_meta_check import write_repometa
 
 
 def write_workspace(root: Path) -> None:
@@ -304,7 +304,7 @@ def test_upgrade_create_paths_add_missing_workflow_without_overwriting_existing(
 def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     plan_file = tmp_path / "plan.json"
-    source = Path(__file__).resolve().parents[2]
+    source = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     write_workspace(workspace)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 
@@ -335,7 +335,7 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
 def test_upgrade_apply_supports_pack_to_reviewed_knowledge_flow(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     plan_file = tmp_path / "plan.json"
-    source = Path(__file__).resolve().parents[2]
+    source = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     write_workspace(workspace)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 

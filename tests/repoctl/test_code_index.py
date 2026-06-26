@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
-from tests.repoctl.test_check import write_workspace
-from tests.repoctl.test_meta_check import init_repo, write_repometa
+from tests.repoctl.workspace.test_check import write_workspace
+from tests.repoctl.meta.test_meta_check import init_repo, write_repometa
 
 
 def test_index_code_extracts_python_facts_without_writing_annotations(tmp_path: Path, monkeypatch, capsys) -> None:

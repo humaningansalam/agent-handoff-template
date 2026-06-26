@@ -9,7 +9,7 @@ import tarfile
 from pathlib import Path
 
 from tools.repoctl.release import build_release_archive
-from tests.repoctl.test_meta_check import write_repometa
+from tests.repoctl.meta.test_meta_check import write_repometa
 
 
 def _remove_empty_parents_for_test(path: Path, *, stop_at: Path) -> None:
@@ -81,7 +81,7 @@ def test_build_release_archive_uses_manifest_managed_paths(tmp_path: Path) -> No
 
 
 def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path: Path) -> None:
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
     archive_path = build_release_archive(source_root, tmp_path / "dist")
     extract_dir = tmp_path / "extract"
@@ -108,7 +108,7 @@ def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path
 
 
 def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -> None:
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
     archive_path = build_release_archive(source_root, tmp_path / "dist")
     extract_dir = tmp_path / "extract-context"
@@ -139,7 +139,7 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
 
 
 def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> None:
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
     archive_path = build_release_archive(source_root, tmp_path / "dist")
     extract_dir = tmp_path / "extract-field-gate"
@@ -327,7 +327,7 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
 
 
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
     prefix = f"{manifest['package']}-{manifest['version']}"
     archive_path = build_release_archive(source_root, tmp_path / "dist")
@@ -393,7 +393,7 @@ def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path)
 
 
 def test_release_workflow_pins_actions_and_verifies_existing_tag() -> None:
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     workflow = (source_root / ".github/workflows/release.yml").read_text(encoding="utf-8")
     mutable_uses = re.findall(r"uses:\s+[^@\s]+@v\d+", workflow)
 
@@ -404,7 +404,7 @@ def test_release_workflow_pins_actions_and_verifies_existing_tag() -> None:
 
 
 def test_generated_knowledge_views_are_ignored_but_records_are_tracked() -> None:
-    source_root = Path(__file__).resolve().parents[2]
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     ignored = subprocess.run(
         ["git", "check-ignore", "--stdin"],
         cwd=source_root,
