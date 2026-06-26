@@ -29,6 +29,25 @@ docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md
 
 이 계획은 기존 구현을 폐기하거나 처음부터 다시 만드는 계획이 아니다. 현재 존재하는 Graph, Context, Pack, Knowledge lifecycle, Render 구현을 재사용하고, **실제 사용자가 쓸 수 없는 빈 부분만 기능으로 완성**한다.
 
+## 0.1 Approved technology decision
+
+2026-06-26 human decision: **KEEP current S2/S5 architecture as the V1 default**.
+
+The decision is based on the bounded technology benchmark in `docs/TECHNOLOGY_BENCHMARK_REPORT.md` and the restored comparison map in `docs/GRAPH_CONTEXT_LLMWIKI_TECHNOLOGY_BENCHMARK_MAP.md`. It means this plan continues under the following default stack:
+
+- S2 repoctl custom Graph provider plus Context/Task Pack remains the default product path.
+- S5 Reviewed Knowledge lifecycle remains part of V1.
+- The current custom static Markdown llmwiki remains the V1 renderer.
+- S3/S4/S6 are not default product work for V1.
+
+This is not a claim of global optimality for all future repositories. The approved claim is only: **best-enough default architecture for V1 based on the bounded technology benchmark**.
+
+Future revisit triggers:
+
+- Revisit S3/S4 only if real tasks show measured S2 provider or retrieval gaps.
+- Revisit S6 embeddings/rerank only after S4 first shows a measured retrieval gap.
+- Do not add SCIP, tree-sitter, BM25, MkDocs, embedding, or reranker production work without such measured triggers and a new human decision.
+
 ---
 
 # 1. 실행자에게 내리는 최상위 명령
