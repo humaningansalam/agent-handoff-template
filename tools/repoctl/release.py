@@ -25,6 +25,17 @@ def _safe_path(value: str) -> Path:
     return rel
 
 
+def _literal_preserve_files(root: Path, manifest: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+    for value in manifest.get("preserve_paths", []):
+        if not isinstance(value, str) or any(char in value for char in "*?["):
+            continue
+        rel = _safe_path(value)
+        if (root / rel).is_file():
+            paths.append(rel)
+    return paths
+
+
 def build_release_archive(root: Path, out_dir: Path) -> Path:
     manifest = _load_manifest(root)
     version = str(manifest.get("version") or "0.0.0")
@@ -36,6 +47,7 @@ def build_release_archive(root: Path, out_dir: Path) -> Path:
         MANIFEST_REL,
         *[_safe_path(path) for path in manifest.get("replace_paths", [])],
         *[_safe_path(path) for path in manifest.get("create_paths", [])],
+        *_literal_preserve_files(root, manifest),
     ]
     seen: set[str] = set()
     prefix = f"{package}-{version}"
