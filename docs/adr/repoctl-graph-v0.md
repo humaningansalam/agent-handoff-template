@@ -4,7 +4,7 @@
 
 Accepted as the historical Graph v0 authority decision.
 
-Partially superseded for current product behavior by `docs/contracts/repoctl-graph-contract.md` and `docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md`.
+Partially superseded for current product behavior by `docs/contracts/repoctl-graph-contract.md` and `docs/contracts/repoctl-context-contract.md`.
 
 ## Context
 
