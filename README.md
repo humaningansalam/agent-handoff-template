@@ -24,7 +24,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 | Spec-driven tools | Spec -> plan -> tasks | Starts after task intent exists; preserves execution state and verification |
 | Claude/Codex agents | Autonomous coding loop | Provides the workspace/state substrate they operate against |
 | Claude plugins/hooks | Tool-specific enforcement | Core contract stays tool-agnostic through `AGENTS.md` |
-| Knowledge/memory systems | Long-term agent knowledge | Future llmwiki should promote stable knowledge from task evidence |
+| Knowledge/memory systems | Long-term agent knowledge | Reviewed Knowledge and llmwiki keep durable records separate from generated views |
 
 ## Use this when
 
@@ -68,7 +68,6 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - **repoctl module boundaries**: `docs/contracts/repoctl-module-boundaries.md`
 - **Context query contract**: `docs/contracts/repoctl-context-contract.md`
 - **Repo metadata identity ADR**: `docs/adr/repometa-identity-v0.md`
-- **Field-test workflow**: `docs/workflows/v0-foundation-field-test.md`
 - **Repo metadata rules**: `docs/workflows/repo-metadata.md`
 - **Optional workspace context**: `docs/PRD.md`
 - **Optional repo map**: `docs/REPOS.md`

@@ -25,7 +25,7 @@
     {
       "id": "same-file-reference-impact",
       "kind": "reference_impact_resolution",
-      "description": "same-file caller symbols should be measured separately from import impact before Graph v0.3 REFERENCES/CALLS work"
+      "description": "same-file caller symbols are measured separately from import impact"
     },
     {
       "id": "same-class-method-impact",

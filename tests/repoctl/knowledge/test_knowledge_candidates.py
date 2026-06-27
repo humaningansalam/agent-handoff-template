@@ -262,10 +262,10 @@ def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monke
     assert status_payload["data"]["candidate_checks"]["warning_codes"]["knowledge_candidate_duplicate_reviewed_claim"] >= 1
 
 
-def test_knowledge_candidate_rejects_plans_source(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_knowledge_candidate_rejects_state_source(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/plans/private-plan.md", "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--source", ".repoctl-state/knowledge/private-plan.md", "--repo-id", "main", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_source_excluded"
@@ -321,7 +321,7 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     add_task(tmp_path, "T-20260609184046Z--receipt-backed.md", task_body)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--receipt-backed.md\n\n## Backlog\n", encoding="utf-8")
     verification = tmp_path / "verification.md"
-    verification.write_text("- Command: pytest tests/repoctl/test_knowledge_candidates.py\n- Result: pass\n", encoding="utf-8")
+    verification.write_text("- Command: pytest tests/repoctl/knowledge/test_knowledge_candidates.py\n- Result: pass\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
@@ -352,7 +352,7 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert source_refs[1]["kind"] == "task_artifact"
     assert source_refs[1]["path"] == "docs/archive/tasks/T-20260609184046Z--receipt-backed.md"
     assert source_refs[1]["content_sha256"].startswith("sha256:")
-    assert "pytest tests/repoctl/test_knowledge_candidates.py" in candidate["summary"]
+    assert "pytest tests/repoctl/knowledge/test_knowledge_candidates.py" in candidate["summary"]
 
     assert main(["knowledge", "candidate", "show", candidate["id"], "--repo-id", "main", "--format", "markdown"]) == 0
     review = capsys.readouterr().out

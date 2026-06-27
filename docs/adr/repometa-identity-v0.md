@@ -29,7 +29,7 @@ Path identity is simple, reviewable, and matches the current task gate. When fil
 
 ## Topic boundary
 
-v0 `.repometa` topics are sparse human hints and policy bootstrap labels, not authoritative repo understanding. Future Graph/Index work should derive observed repo-specific topics from code structure, routes, imports, tests, configuration, and co-change signals; manual topics may remain as reviewed semantic hints and stale-topic warnings should surface conflicts.
+v0 `.repometa` topics are sparse human hints and policy bootstrap labels, not authoritative repo understanding. Graph/Index work derives observed repo-specific topics from code structure, routes, imports, tests, configuration, and co-change signals; manual topics may remain as reviewed semantic hints and stale-topic warnings should surface conflicts.
 
 ## Future compatibility
 
@@ -37,4 +37,4 @@ Graph may later use path, content hash, symbol hash, and code index facts as sig
 
 Monorepo layouts inside the selected product repo remain compatible with v0 because file identity is still repo-relative, for example `apps/web/src/page.tsx` or `packages/api/src/server.ts`.
 
-Multi-repo workspaces must use the repo registry namespace before Graph, MCP, or llmwiki rely on file IDs. A future file node might become `repo:<repo_id>:file:<path>` or an equivalent stable shape, but v0 must not guess that namespace from prose or arbitrary path strings.
+Multi-repo workspaces must use the repo registry namespace before Graph, Context, Knowledge, llmwiki, or any future MCP transport rely on file IDs. File identity must include an explicit repo namespace and must not be guessed from prose or arbitrary path strings.

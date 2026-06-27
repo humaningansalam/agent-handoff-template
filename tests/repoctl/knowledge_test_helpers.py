@@ -12,12 +12,12 @@ from tests.repoctl.repository.test_repositories import init_repo
 
 def _write_knowledge_docs(root: Path) -> None:
     (root / "docs/adr").mkdir(parents=True, exist_ok=True)
-    (root / "docs/plans").mkdir(parents=True, exist_ok=True)
+    (root / ".repoctl-state/knowledge").mkdir(parents=True, exist_ok=True)
     (root / "docs/adr/evidence-context-authority-v0.md").write_text(
         "# Evidence Context Authority\n\n## Decision\n\nContext returns source bundles but does not create authoritative knowledge.\n\n## Authority Rules\n\nReviewed knowledge requires explicit human approval.\n",
         encoding="utf-8",
     )
-    (root / "docs/plans/private-plan.md").write_text("# Private Plan\n\nDo not ingest this.\n", encoding="utf-8")
+    (root / ".repoctl-state/knowledge/private-plan.md").write_text("# Private Plan\n\nDo not ingest this.\n", encoding="utf-8")
 
 
 def _setup_knowledge_workspace(root: Path, monkeypatch) -> Path:

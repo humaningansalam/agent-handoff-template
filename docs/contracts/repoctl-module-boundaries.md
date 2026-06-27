@@ -1,6 +1,6 @@
 # repoctl module boundaries
 
-These boundaries keep repoctl stable before MCP, Graph, llmwiki, and broader repo-layout layers exist.
+These boundaries keep repoctl stable across task lifecycle, repository metadata, Graph, Context / Task Pack, Reviewed Knowledge, llmwiki rendering, and deferred transports.
 
 ## Ownership
 
@@ -10,12 +10,12 @@ These boundaries keep repoctl stable before MCP, Graph, llmwiki, and broader rep
 - `index` owns read-only technical facts such as language, imports, symbols, calls, dependencies, and observed effect hints.
 - `cli` owns argparse, JSON envelopes, human presentation, and command wiring only.
 
-## Future layer rules
+## Derived layer rules
 
-- Future MCP must call stable repoctl command handlers or consume the JSON contract; it must not parse human stdout.
-- Future Graph must derive relation data from index facts, task evidence, and `.repometa`; it must not store graph fields inside `.repometa` annotations.
-- Future Graph/Index owns observed repo-specific topics; `.repometa` topics are human hints and bootstrap labels, not the authoritative topic graph.
-- Future llmwiki must promote stable knowledge from task/archive evidence; it must not replace task frontmatter, Board, Backlog, or `.repometa` authority.
+- MCP, if added, must call stable repoctl command handlers or consume the JSON contract; it must not parse human stdout.
+- Graph derives relation data from index facts, task evidence, and `.repometa`; it must not store graph fields inside `.repometa` annotations.
+- Graph/Index owns observed repo-specific topics; `.repometa` topics are human hints and bootstrap labels, not the authoritative topic graph.
+- llmwiki renders reviewed knowledge and current evidence as a non-authoritative view; it must not replace task frontmatter, Board, Backlog, or `.repometa` authority.
 - Monorepo layouts should treat packages/apps/services inside the selected product repo as scoped surfaces, not as separate workspace roots.
 - Multi-repo support must use explicit repo selectors/namespaces; MCP, Graph, and llmwiki must not infer repo identity from path strings alone.
 
@@ -23,7 +23,7 @@ These boundaries keep repoctl stable before MCP, Graph, llmwiki, and broader rep
 
 The preferred single product git repository lives at `repos/`. That repository may be a monorepo internally, with apps, packages, services, infra, and docs under repo-relative paths.
 
-Configured multi-repo workspaces use stable repo IDs in task metadata, changed-file gates, JSON payloads, and future Graph/MCP schemas. Do not add ad hoc `repo2/`, `api/`, or `web/` mutation paths outside the registry.
+Configured multi-repo workspaces use stable repo IDs in task metadata, changed-file gates, JSON payloads, Graph, Context, Knowledge, and any future MCP transport. Do not add ad hoc `repo2/`, `api/`, or `web` mutation paths outside the registry.
 
 ## Forbidden shortcuts
 

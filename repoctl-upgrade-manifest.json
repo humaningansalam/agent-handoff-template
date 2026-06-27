@@ -71,15 +71,8 @@
     "tests/maintenance/test_safe_artifact_writer.py",
     "tests/maintenance/test_scope_guard.py",
     "tests/maintenance/test_workflow_contract.py",
-    "tests/repoctl/test_check.py",
     "tests/repoctl/test_code_index.py",
-    "tests/repoctl/test_context.py",
-    "tests/repoctl/test_graph.py",
-    "tests/repoctl/test_knowledge_candidates.py",
-    "tests/repoctl/test_meta_check.py",
     "tests/repoctl/test_release.py",
-    "tests/repoctl/test_repositories.py",
-    "tests/repoctl/test_task_lifecycle.py",
     "tests/repoctl/test_upgrade.py",
     "tools/__init__.py",
     "tools/agent_harness/__init__.py",
@@ -165,7 +158,6 @@
     "docs/workflows/TEMPLATE.md",
     "docs/workflows/prd-backlog-sequential.md",
     "docs/workflows/repo-metadata.md",
-    "docs/workflows/repoctl-upgrade.md",
-    "docs/workflows/v0-foundation-field-test.md"
+    "docs/workflows/repoctl-upgrade.md"
   ]
 }
