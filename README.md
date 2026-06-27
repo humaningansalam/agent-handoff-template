@@ -9,12 +9,12 @@ This is not an autonomous agent runtime. It provides deterministic task state, r
 This workspace separates:
 
 - workspace operations in the root repo
-- actual product code in `repos/` (preferred)
-- task state in `docs/tasks/*.md`
+- actual product code and product docs in `repos/` or `repos/<repo-id>/`
+- workspace task/control state in root `docs/**`
 - shared operating rules in `AGENTS.md`
 - sparse file-level metadata in `<product-repo>/.repometa`
 
-Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, and verification gates.
+Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, verification gates, Graph/Context evidence, Reviewed Knowledge records/events, and non-authoritative llmwiki rendering. Root `docs/**` is not a product documentation site; product PRDs, architecture, protocols, research, reports, and roadmaps belong under `repos/<repo-id>/docs/**`.
 
 ## Compared with adjacent tools
 
@@ -32,7 +32,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - you want task files to be the execution unit
 - you need a private workspace repo and a separate product code repo
 - multiple agent tools may operate in the same workspace
-- you want MCP, Graph, or llmwiki layers to sit on a stable workspace contract later
+- you want Graph, Context / Task Pack, Reviewed Knowledge, or llmwiki capabilities on a stable workspace contract
 
 ## 60-second start
 
@@ -55,6 +55,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 |   |-- workflows/
 |   |-- contracts/
 |   |-- adr/
+|   |-- knowledge/
 |   `-- archive/
 `-- repos/
 ```
@@ -69,11 +70,13 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - **Repo metadata identity ADR**: `docs/adr/repometa-identity-v0.md`
 - **Field-test workflow**: `docs/workflows/v0-foundation-field-test.md`
 - **Repo metadata rules**: `docs/workflows/repo-metadata.md`
-- **Optional project context**: `docs/PRD.md`
+- **Optional workspace context**: `docs/PRD.md`
+- **Optional repo map**: `docs/REPOS.md`
+- **Reviewed Knowledge state**: `docs/knowledge/records/`, `docs/knowledge/events/`
 
 ## Notes
 
-- `repos/` is the product code repository boundary.
+- `repos/` is the product code and product documentation boundary.
 - `docs/BOARD.md` is a live-task registry, not a status dashboard.
 - Task state lives in task frontmatter, not in the board.
 - Backlog items are raw planning blocks; agents read them and pass explicit task fields rather than relying on repoctl to parse intent.
@@ -81,5 +84,6 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - `repoctl graph build` emits a read-only deterministic snapshot over repository files, raw/resolved imports, repo-local topics, task completion receipts, and precise provider symbols/calls.
 - `repoctl graph query` supports exact file/topic/import lookup plus symbol, callers, callees, and bounded file/symbol impact queries.
 - `repoctl context query` groups source documents, Graph evidence, task receipts, and reviewed knowledge into actionable JSON or Markdown evidence bundles.
-- Future MCP should be transport over repoctl contracts, not a second mutation path.
-- Future Graph and llmwiki layers should derive from task evidence, `.repometa`, and index facts without replacing their authority.
+- Product documentation belongs in product repositories, not root `docs/**`.
+- Generated `docs/knowledge/generated/**` pages are ignored, non-authoritative views; records/events and original source refs remain the authority.
+- MCP, if ever added, should be transport over repoctl contracts, not a second mutation path.

@@ -1,44 +1,17 @@
-# Product Requirements
+# PRD (Optional)
 
-This workspace is building repoctl's Graph to Evidence Context to Reviewed Knowledge to llmwiki product loop.
+This file is optional adopter workspace context.
 
-The authoritative execution plan and completion criteria live in:
+Use it only when the workspace needs stable project or product context shared across multiple tasks. Product-specific PRDs, architecture notes, protocols, roadmaps, research, and reports belong under `repos/<repo-id>/docs/**`, not root `docs/**`.
 
-```text
-docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md
-```
+Keep this file minimal when the workspace does not need shared context.
 
-## Purpose
+## Current Control-Plane Capabilities
 
-repoctl should let agents and humans answer repository questions without rediscovering the same evidence every session:
+This template ships repoctl capabilities for repository Graph evidence, Evidence Context / Task Pack, Reviewed Knowledge, and non-authoritative llmwiki rendering. Those are completed repoctl capabilities, not active project plans in this file.
 
-- where files and symbols are defined
-- what imports or calls them
-- what changes are likely impacted
-- what must be read before a task starts
-- what decisions, invariants, and failure modes are current
-- where each answer comes from and whether the source is still current
+## Non-Goals
 
-## Scope
-
-In scope:
-
-- Graph evidence over source, imports, precise provider symbols/calls, `.repometa`, and task receipts
-- Evidence Context query bundles
-- Agent Context Pack for repo-scoped task startup
-- Reviewed Knowledge candidate, review, approval, stale, supersede, and deprecate lifecycle
-- Static llmwiki Markdown render with source and lifecycle navigation
-- Fresh-copy field proof and release artifact E2E
-
-Out of scope:
-
-- MCP implementation or transport
-- graph database migration
-- vector or embedding pipeline before measured need
-- web application llmwiki
-- new maintenance harnesses or benchmark frameworks
-
-## Completion Rule
-
-Completion is defined only by `docs/GRAPH_CONTEXT_LLMWIKI_MASTER_PLAN.md`.
-Phase completion, test counts, or "mostly done" reports do not override that plan.
+- Do not use root `docs/**` as product documentation.
+- Do not track live task status here; use `docs/BOARD.md` and task frontmatter.
+- Do not use this file as a benchmark report, release ledger, or execution log.
