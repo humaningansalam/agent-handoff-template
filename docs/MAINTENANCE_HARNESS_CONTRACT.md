@@ -71,7 +71,7 @@ Checker code, not an agent, classifies surface class/profile and derives the rou
 - `repos/**`
 - product-repo runtime 작업
 - 생성된 wiki output
-- secret, deployment, database, MCP/Notion write, live external mutation
+- secret, deployment, database, external service write, live external mutation
 
 Scope gate는 요청된 edit가 Project collaboration인지 repo maintenance인지 분리하고, maintenance success path에서 금지 surface와 live external mutation을 제외한다.
 

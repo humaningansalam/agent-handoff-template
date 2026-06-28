@@ -10,7 +10,7 @@ from typing import Any
 from tools.hooks.hook_failures import record_hook_failure
 from tools.agent_harness import paths as harness_paths
 from tools.hooks.maintenance.trace import maintenance_agent, record_active_event
-from tools.hooks.subagent_transcript import AGENT_OPERATIONS, append_event, base_event, redact_text
+from tools.hooks.subagent_transcript import AGENT_OPERATIONS, append_event, base_event, redact_text, trace_dir as transcript_trace_dir
 from tools.runtime.json_io import JsonIoError, write_json_atomic_under_root, write_text_atomic_under_root
 
 KNOWN_TRACE_FILES = (
@@ -50,7 +50,7 @@ def capture_trace(payload: dict[str, Any], root: Path) -> dict[str, Any] | None:
     if operation is None:
         return None
 
-    trace_dir = _trace_dir(root, operation)
+    trace_dir = transcript_trace_dir(root, operation)
     _clear_known_trace_files(trace_dir, root)
 
     write_text_atomic_under_root(trace_dir / "last-assistant-message.md", message, root)
@@ -105,10 +105,6 @@ def _last_message(payload: dict[str, Any]) -> str:
     if len(message) <= MAX_MESSAGE_CHARS:
         return message
     return message[-MAX_MESSAGE_CHARS:]
-
-
-def _trace_dir(root: Path, operation: str) -> Path:
-    return root / "ops" / "research-ops" / operation / "latest-trace"
 
 
 def _clear_known_trace_files(trace_dir: Path, root: Path) -> None:

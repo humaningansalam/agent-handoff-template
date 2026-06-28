@@ -1,6 +1,6 @@
 # Workspace Control Docs
 
-Root `docs/**` is the workspace task/control ledger for repoctl. It is not a product documentation site. Product docs belong under `repos/<repo-id>/docs/**`.
+Root `docs/**` contains the workspace task/control ledger, repoctl contracts/workflows, and root template PRD/context.
 
 ## What Lives Here
 
@@ -8,15 +8,15 @@ Root `docs/**` is the workspace task/control ledger for repoctl. It is not a pro
 - `tasks/` - active or reopenable task files plus creation templates.
 - `archive/tasks/` - non-live task originals after completion or cancellation.
 - `contracts/` - machine-facing repoctl JSON, Graph, Context, and module-boundary contracts.
-- `adr/` - durable repoctl/control-plane decisions.
+- `adr/` - empty adopter ADR slot; the template ships only `.gitkeep`.
 - `workflows/` - reusable workspace operating procedures.
 - `knowledge/records/` - approved Reviewed Knowledge records owned by the adopter workspace.
 - `knowledge/events/` - append-only Reviewed Knowledge lifecycle events.
-- `knowledge/generated/` - ignored, non-authoritative llmwiki render output.
-- `PRD.md` - optional shared context placeholder, not a product PRD by default.
+- `knowledge/generated/` - non-authoritative llmwiki render output.
+- `PRD.md` - root template PRD; after copying, adopters may delete it or replace it with private workspace PRD/context.
 - `REPOS.md` - optional adopter repo map when multiple product repositories need stable labels.
 
-Do not create root `docs/product/`, `docs/protocol/`, `docs/architecture/`, `docs/reports/`, `docs/research/`, `docs/public/`, `docs/private/`, or `docs/roadmap/`. Put product-specific material inside the relevant product repo.
+Root docs are adopter-owned private workspace docs. Keep reusable workspace contracts and workflows here. Keep product-repo-local public-safe documentation inside the relevant product repo under `repos/**` when appropriate. Large private PRD/context may be split under root `docs/prd/`.
 
 ## Common Commands
 
@@ -39,6 +39,6 @@ Do not create root `docs/product/`, `docs/protocol/`, `docs/architecture/`, `doc
 ## Boundaries
 
 - `repos/` is the product repository boundary and is ignored by the root repo.
-- Root `docs/**` controls work; it does not describe the product being built inside `repos/**`.
-- Graph, Context / Task Pack, Reviewed Knowledge, and llmwiki are shipped repoctl capabilities. Historical V1 implementation plans or benchmark reports are source-development evidence, not active adopter docs.
+- Root `docs/**` controls workspace operations and may hold the adopter-owned private root PRD/context.
+- Graph, Context / Task Pack, Reviewed Knowledge, and llmwiki are shipped repoctl capabilities.
 - Generated llmwiki pages must not be re-ingested as factual authority. Use records/events and original source refs instead.
