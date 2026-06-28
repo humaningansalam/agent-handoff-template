@@ -134,6 +134,7 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
     summary = _receipt_summary(receipt, artifact_text)
     receipt_text = (root / receipt_rel).read_text(encoding="utf-8")
     changed_files = _receipt_changed_files(receipt)
+    related_symbols, related_symbol_warnings = _receipt_related_symbols(root, repo_id=repo_id, changed_files=changed_files)
     source_refs = [
         {
             "kind": "completion_receipt",
@@ -177,14 +178,75 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
             "repo_id": repo_id,
             "verification_artifact": artifact_rel,
             "changed_files": changed_files,
-            "related_symbols": [],
+            "related_symbols": related_symbols,
         },
     }
+    if related_symbol_warnings:
+        candidate["derived_from"]["related_symbol_warnings"] = related_symbol_warnings
     candidate["candidate_digest"] = digest_data(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(destination, json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return {"candidate": candidate, "path": destination.relative_to(root).as_posix()}, []
+
+
+def _receipt_related_symbols(root: Path, *, repo_id: str, changed_files: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not changed_files:
+        return [], []
+    try:
+        from .graph import build_graph
+        from .repositories import require_repo_target
+
+        target = require_repo_target(root, repo_id=repo_id)
+        snapshot, problems, _meta = build_graph(root, target=target)
+    except Exception as exc:  # pragma: no cover - defensive; candidate creation must remain best-effort here.
+        return [], [{"code": "knowledge_candidate_related_symbols_unavailable", "message": str(exc)}]
+    warnings = [problem.to_dict() for problem in problems if problem.severity == "warning"]
+    if snapshot is None:
+        warnings.extend(problem.to_dict() for problem in problems if problem.severity == "error")
+        return [], warnings
+    changed = set(changed_files)
+    nodes = {node.id: node for node in snapshot.nodes}
+    anchors_by_symbol: dict[str, dict[str, Any]] = {}
+    for edge in snapshot.edges:
+        if edge.kind != "ANCHORS":
+            continue
+        anchor = nodes.get(edge.to_id)
+        if anchor is not None and anchor.kind == "anchor":
+            anchors_by_symbol[edge.from_id] = dict(anchor.identity)
+    symbols: dict[str, dict[str, Any]] = {}
+    for edge in snapshot.edges:
+        if edge.kind != "DEFINES":
+            continue
+        file_node = nodes.get(edge.from_id)
+        symbol_node = nodes.get(edge.to_id)
+        if file_node is None or symbol_node is None or file_node.kind != "file" or symbol_node.kind != "symbol":
+            continue
+        path = str(file_node.identity.get("path") or "")
+        if path not in changed:
+            continue
+        provider_facts = symbol_node.facts.get("provider") if isinstance(symbol_node.facts.get("provider"), dict) else {}
+        symbol: dict[str, Any] = {
+            "id": symbol_node.id,
+            "provider": str(symbol_node.identity.get("provider") or ""),
+            "provider_symbol_id": str(symbol_node.identity.get("provider_symbol_id") or ""),
+            "path": path,
+        }
+        for key in ("qualified_name", "name"):
+            value = str(provider_facts.get(key) or "")
+            if value:
+                symbol[key] = value
+        if provider_facts.get("kind"):
+            symbol["kind"] = str(provider_facts.get("kind") or "")
+            symbol["symbol_kind"] = str(provider_facts.get("kind") or "")
+        if edge.to_id in anchors_by_symbol:
+            symbol["range"] = {
+                key: anchors_by_symbol[edge.to_id][key]
+                for key in ("start_line", "start_col", "end_line", "end_col")
+                if key in anchors_by_symbol[edge.to_id]
+            }
+        symbols[symbol_node.id] = {key: value for key, value in symbol.items() if value not in ("", None, {})}
+    return sorted(symbols.values(), key=lambda item: (str(item.get("id") or ""), str(item.get("path") or ""), str(item.get("qualified_name") or item.get("name") or ""))), warnings
 
 
 def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = False) -> dict[str, Any]:

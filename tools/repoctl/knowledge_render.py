@@ -263,6 +263,8 @@ def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any
         pages[_record_page_name(record_id)] = _record_page(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, events=events_by_record.get(record_id, []))
     for target in _file_targets(records):
         pages[_file_target_page_name(target)] = _file_target_page(root, target, records, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+    for symbol in _symbol_targets(records):
+        pages[_symbol_target_page_name(symbol)] = _symbol_target_page(root, symbol, records, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
     pages["history.md"] = _history_page(root, records, events, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
     pages["search-index.json"] = json.dumps(_search_index(root, records, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     return pages
@@ -280,6 +282,12 @@ def _page_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     for target in _file_targets(records):
         by_page[_file_target_page_name(target)] = sorted(
             [record for record in records if target in _record_file_targets(record)],
+            key=lambda item: str(item.get("id") or ""),
+        )
+    for symbol in _symbol_targets(records):
+        symbol_id = _symbol_target_id(symbol)
+        by_page[_symbol_target_page_name(symbol)] = sorted(
+            [record for record in records if symbol_id in {_symbol_target_id(item) for item in _record_symbol_targets(record)}],
             key=lambda item: str(item.get("id") or ""),
         )
     return by_page
@@ -452,6 +460,7 @@ def _record_page(root: Path, record: dict[str, Any], *, superseded_ids: set[str]
     kind = str(record.get("kind") or "")
     kind_page = PAGE_BY_KIND.get(kind, "INDEX.md")
     targets = _record_file_targets(record)
+    symbol_targets = _record_symbol_targets(record)
     lines = [
         f"# {record.get('title', record.get('id', 'Untitled'))}",
         "",
@@ -494,8 +503,11 @@ def _record_page(root: Path, record: dict[str, Any], *, superseded_ids: set[str]
     if targets:
         for target in targets:
             lines.append(f"- File: [{target}](../{_file_target_page_name(target)})")
-    else:
-        lines.append("- No explicit file target.")
+    if symbol_targets:
+        for symbol in symbol_targets:
+            lines.append(f"- Symbol: [{_symbol_target_label(symbol)}](../{_symbol_target_page_name(symbol)})")
+    if not targets and not symbol_targets:
+        lines.append("- No explicit target.")
     lines.extend([
         "",
         "### Origin And Review",
@@ -629,6 +641,85 @@ def _file_targets(records: list[dict[str, Any]]) -> list[str]:
     return sorted(targets)
 
 
+def _symbol_targets(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    targets: dict[str, dict[str, Any]] = {}
+    for record in records:
+        for symbol in _record_symbol_targets(record):
+            symbol_id = _symbol_target_id(symbol)
+            if symbol_id:
+                targets[symbol_id] = symbol
+    return sorted(targets.values(), key=lambda item: (_symbol_target_id(item), str(item.get("path") or ""), str(item.get("qualified_name") or item.get("name") or "")))
+
+
+def _record_symbol_targets(record: dict[str, Any]) -> list[dict[str, Any]]:
+    targets: dict[str, dict[str, Any]] = {}
+    for item in _record_symbol_target_items(record):
+        symbol = _normalize_symbol_target(item)
+        if not symbol:
+            continue
+        targets[_symbol_target_id(symbol)] = symbol
+    return sorted(targets.values(), key=lambda item: (_symbol_target_id(item), str(item.get("path") or ""), str(item.get("qualified_name") or item.get("name") or "")))
+
+
+def _record_symbol_target_items(record: dict[str, Any]) -> list[Any]:
+    items: list[Any] = []
+    scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+    applies_to = record.get("applies_to") if isinstance(record.get("applies_to"), dict) else {}
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
+    for source in (scope.get("symbols"), applies_to.get("symbols"), derived.get("related_symbols"), derived.get("symbols")):
+        if isinstance(source, list):
+            items.extend(source)
+    return items
+
+
+def _normalize_symbol_target(item: Any) -> dict[str, Any]:
+    if isinstance(item, str):
+        symbol_id = item.strip()
+        return {"id": symbol_id} if symbol_id else {}
+    if not isinstance(item, dict):
+        return {}
+    symbol: dict[str, Any] = {}
+    for key in ("id", "provider", "provider_symbol_id", "path", "qualified_name", "name", "kind", "symbol_kind"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            symbol[key] = value
+    range_value = item.get("range")
+    if isinstance(range_value, dict):
+        normalized_range = {key: range_value[key] for key in ("start_line", "start_col", "end_line", "end_col") if key in range_value}
+        if normalized_range:
+            symbol["range"] = normalized_range
+    symbol_id = _symbol_target_id(symbol)
+    if not symbol_id:
+        return {}
+    symbol["id"] = symbol_id
+    return symbol
+
+
+def _symbol_target_id(symbol: dict[str, Any]) -> str:
+    explicit = str(symbol.get("id") or "").strip()
+    if explicit:
+        return explicit
+    provider = str(symbol.get("provider") or "").strip()
+    provider_symbol_id = str(symbol.get("provider_symbol_id") or "").strip()
+    if provider and provider_symbol_id:
+        return f"{provider}:{provider_symbol_id}"
+    path = str(symbol.get("path") or "").strip()
+    name = str(symbol.get("qualified_name") or symbol.get("name") or "").strip()
+    if path and name:
+        return f"{path}:{name}"
+    return ""
+
+
+def _symbol_target_label(symbol: dict[str, Any]) -> str:
+    return str(symbol.get("qualified_name") or symbol.get("name") or symbol.get("provider_symbol_id") or _symbol_target_id(symbol))
+
+
+def _symbol_target_page_name(symbol_or_id: dict[str, Any] | str) -> str:
+    symbol_id = _symbol_target_id(symbol_or_id) if isinstance(symbol_or_id, dict) else str(symbol_or_id)
+    return f"targets/symbols/{quote(symbol_id, safe='')}.md"
+
+
 def _record_file_targets(record: dict[str, Any]) -> list[str]:
     targets: set[str] = set()
     created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
@@ -659,6 +750,49 @@ def _file_target_page(root: Path, target: str, records: list[dict[str, Any]], *,
         "## Current Knowledge",
         "",
     ]
+    if current:
+        for record in sorted(current, key=lambda item: str(item.get("id") or "")):
+            lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="../../records/"))
+    else:
+        lines.append("No current records.")
+    lines.extend(["", "## Historical Knowledge", ""])
+    if historical:
+        for record in sorted(historical, key=lambda item: str(item.get("id") or "")):
+            lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="../../records/"))
+    else:
+        lines.append("No historical records.")
+    lines.extend(["", "## Navigation", "", "- [Index](../../INDEX.md)", "- [History](../../history.md)"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _symbol_target_page(root: Path, symbol: dict[str, Any], records: list[dict[str, Any]], *, superseded_ids: set[str], deprecated_ids: set[str]) -> str:
+    symbol_id = _symbol_target_id(symbol)
+    matching = [record for record in records if symbol_id in {_symbol_target_id(item) for item in _record_symbol_targets(record)}]
+    current = [record for record in matching if _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids) == "reviewed"]
+    historical = [record for record in matching if _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids) != "reviewed"]
+    lines = [
+        f"# Symbol Target: {_symbol_target_label(symbol)}",
+        "",
+        "Non-authoritative generated symbol target page.",
+        "",
+        "## Symbol Identity",
+        "",
+        f"- id: `{symbol_id}`",
+    ]
+    for key, label in (
+        ("provider", "provider"),
+        ("provider_symbol_id", "provider_symbol_id"),
+        ("path", "file path"),
+        ("qualified_name", "qualified_name"),
+        ("name", "name"),
+        ("kind", "kind"),
+        ("symbol_kind", "symbol_kind"),
+    ):
+        if symbol.get(key):
+            lines.append(f"- {label}: `{symbol[key]}`")
+    if isinstance(symbol.get("range"), dict):
+        lines.append(f"- range: `{json.dumps(symbol['range'], ensure_ascii=False, sort_keys=True)}`")
+    lines.extend(["", "## Current Knowledge", ""])
     if current:
         for record in sorted(current, key=lambda item: str(item.get("id") or "")):
             lines.extend(_record_summary_item(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, page_prefix="../../records/"))
@@ -709,7 +843,7 @@ def _search_index(root: Path, records: list[dict[str, Any]], *, superseded_ids: 
                 "title": str(record.get("title") or ""),
                 "claim": str(record.get("claim") or ""),
                 "summary": str(record.get("summary") or ""),
-                "applies_to": {"files": _record_file_targets(record), "symbols": [], "topics": []},
+                "applies_to": {"files": _record_file_targets(record), "symbols": [_symbol_search_index_entry(symbol) for symbol in _record_symbol_targets(record)], "topics": []},
                 "source_paths": sorted(
                     str(ref.get("path") or "")
                     for ref in record.get("source_refs", [])
@@ -719,6 +853,18 @@ def _search_index(root: Path, records: list[dict[str, Any]], *, superseded_ids: 
             }
         )
     return rows
+
+
+def _symbol_search_index_entry(symbol: dict[str, Any]) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": _symbol_target_id(symbol),
+        "label": _symbol_target_label(symbol),
+        "page_path": _symbol_target_page_name(symbol),
+    }
+    for key in ("provider", "provider_symbol_id", "path", "qualified_name", "name", "kind", "symbol_kind"):
+        if symbol.get(key):
+            entry[key] = symbol[key]
+    return entry
 
 
 def _one_line(text: str, *, limit: int = 180) -> str:
