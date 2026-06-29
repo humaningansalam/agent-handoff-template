@@ -1927,10 +1927,14 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
     snapshot, problems, meta = build_graph(root, target=target)
+    summary = _graph_snapshot_summary(snapshot, meta=meta) if snapshot is not None else None
+    data = {"summary": summary, **meta}
+    if args.full:
+        data["snapshot"] = snapshot.to_dict() if snapshot is not None else None
     payload = {
         "ok": snapshot is not None and not _has_errors(problems),
         "command": "graph build",
-        "data": {"snapshot": snapshot.to_dict() if snapshot is not None else None, **meta},
+        "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
@@ -1947,6 +1951,30 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _graph_snapshot_summary(snapshot: Any, *, meta: dict[str, Any]) -> dict[str, Any]:
+    node_counts: dict[str, int] = {}
+    edge_counts: dict[str, int] = {}
+    for node in snapshot.nodes:
+        node_counts[node.kind] = node_counts.get(node.kind, 0) + 1
+    for edge in snapshot.edges:
+        edge_counts[edge.kind] = edge_counts.get(edge.kind, 0) + 1
+    return {
+        "repository": snapshot.repository,
+        "snapshot_digest": snapshot.snapshot_digest,
+        "schema_version": snapshot.schema_version,
+        "source_count": len(snapshot.sources),
+        "node_count": len(snapshot.nodes),
+        "edge_count": len(snapshot.edges),
+        "node_counts": dict(sorted(node_counts.items())),
+        "edge_counts": dict(sorted(edge_counts.items())),
+        "completeness": snapshot.completeness,
+        "capabilities": snapshot.capabilities,
+        "index": meta.get("index", {}),
+        "precise_provider": meta.get("precise_provider", {}),
+        "precise_calls": meta.get("precise_calls", {}),
+    }
 
 
 def cmd_graph_query(args: argparse.Namespace) -> int:
@@ -3243,6 +3271,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_sub = graph.add_subparsers(dest="graph_command", required=True, parser_class=RepoctlArgumentParser)
     graph_build = graph_sub.add_parser("build")
     graph_build.add_argument("--repo-id")
+    graph_build.add_argument("--full", action="store_true", help="include full nodes/edges snapshot; default JSON is compact summary")
     graph_build.add_argument("--json", action="store_true")
     graph_build.set_defaults(func=cmd_graph_build)
     graph_query = graph_sub.add_parser("query")

@@ -20,7 +20,7 @@ def test_graph_imports_are_raw_import_refs(tmp_path: Path, monkeypatch, capsys) 
     (repo / "frontend/src/app.ts").write_text("import axios from 'axios';\nexport const run = () => fetch('/');\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     raw_import_id = import_ref_id("main", "typescript", "axios")
@@ -44,7 +44,7 @@ def test_graph_resolves_repo_local_python_imports(tmp_path: Path, monkeypatch, c
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     import_node_id = import_ref_id("main", "python", "utils.tokens.issue_token")
@@ -77,7 +77,7 @@ def test_graph_resolves_relative_python_imports(tmp_path: Path, monkeypatch, cap
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     import_node_id = import_ref_id("main", "python", ".tokens.issue_token")
@@ -100,7 +100,7 @@ def test_graph_skips_ambiguous_python_import_resolution(tmp_path: Path, monkeypa
     (repo / "consumer/app.py").write_text("from pkg.mod import VALUE\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     import_node_id = import_ref_id("main", "python", "pkg.mod.VALUE")
@@ -119,7 +119,7 @@ def test_graph_resolves_js_ts_relative_imports(tmp_path: Path, monkeypatch, caps
     (repo / "frontend/src/api/tokens.ts").write_text("export const issueToken = () => 'token';\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     import_node_id = import_ref_id("main", "typescript", "./api/tokens")
@@ -141,7 +141,7 @@ def test_graph_skips_ambiguous_js_ts_relative_import_resolution(tmp_path: Path, 
     (repo / "frontend/src/api/tokens.js").write_text("export const issueToken = () => 'js';\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     import_node_id = import_ref_id("main", "typescript", "./api/tokens")

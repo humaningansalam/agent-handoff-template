@@ -7,7 +7,7 @@ from typing import Any
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source
 from .graph_model import GraphSnapshot, digest_data
 from .repositories import RepoTarget
-from .tasks import Problem, load_completion_receipts
+from .tasks import Problem, collect_completion_receipts
 
 
 DOCUMENT_PATTERNS = (
@@ -39,7 +39,8 @@ def collect_context_sources(
         except OSError as exc:
             problems.append(Problem("error", "context_source_unreadable", str(exc), path.relative_to(root).as_posix()))
 
-    receipts = load_completion_receipts(root, repo_id=target.id)
+    receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
+    problems.extend(receipt_problems)
     for receipt in receipts:
         rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
         text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)

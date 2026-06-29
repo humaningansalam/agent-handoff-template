@@ -30,13 +30,55 @@ def test_graph_build_direct_repo_uses_main(tmp_path: Path, monkeypatch, capsys) 
     (repo / "app.py").write_text("import hashlib\n\ndef run():\n    return hashlib.sha256(b'x').hexdigest()\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     snapshot = _snapshot(payload)
     assert snapshot["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
     assert any(node["id"] == "repo:main" and node["kind"] == "repository" for node in snapshot["nodes"])
     assert any(node["id"] == file_id("main", "app.py") and node["kind"] == "file" for node in snapshot["nodes"])
+
+
+def test_graph_build_json_is_summary_first_without_full(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert "snapshot" not in payload["data"]
+    summary = payload["data"]["summary"]
+    assert summary["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
+    assert summary["node_counts"]["file"] == 1
+    assert summary["edge_counts"]["CONTAINS"] == 1
+
+
+def test_graph_build_excludes_generated_dependency_dirs_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (repo / ".venv/lib/python3.11/site-packages/pkg").mkdir(parents=True)
+    (repo / ".venv/lib/python3.11/site-packages/pkg/noise.py").write_text("def vendor():\n    return 1\n", encoding="utf-8")
+    (repo / ".next/server/chunks").mkdir(parents=True)
+    (repo / ".next/server/chunks/noise.js").write_text("export const generated = true\n", encoding="utf-8")
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__/app.cpython-311.pyc").write_bytes(b"pyc")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--full", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    paths = {node["identity"].get("path") for node in snapshot["nodes"] if node["kind"] == "file"}
+    assert "app.py" in paths
+    assert ".venv/lib/python3.11/site-packages/pkg/noise.py" not in paths
+    assert ".next/server/chunks/noise.js" not in paths
+    assert "__pycache__/app.cpython-311.pyc" not in paths
 
 def test_graph_build_configured_multi_requires_repo_id(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -47,7 +89,7 @@ def test_graph_build_configured_multi_requires_repo_id(tmp_path: Path, monkeypat
     write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 2
+    assert main(["graph", "build", "--full", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_selector_required"
@@ -65,7 +107,7 @@ def test_graph_build_configured_multi_includes_only_selected_repo(tmp_path: Path
     write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--repo-id", "web", "--json"]) == 0
+    assert main(["graph", "build", "--repo-id", "web", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     assert snapshot["repository"]["id"] == "web"
@@ -78,7 +120,7 @@ def test_graph_build_unconfigured_collection_fails(tmp_path: Path, monkeypatch, 
     init_repo(tmp_path / "repos/api")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--repo-id", "web", "--json"]) == 2
+    assert main(["graph", "build", "--repo-id", "web", "--full", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_identity_unbound"
@@ -97,7 +139,7 @@ def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monk
     before = {path.as_posix(): path.read_text(encoding="utf-8") for path in (repo / ".repometa").rglob("*.json")}
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     file_node = next(node for node in snapshot["nodes"] if node["id"] == file_id("main", rel))
@@ -184,7 +226,7 @@ def test_graph_parse_error_keeps_file_node_and_marks_completeness(tmp_path: Path
     (repo / "bad.py").write_text("def broken(:\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     assert snapshot["completeness"]["code_facts_complete"] is False
@@ -212,7 +254,7 @@ def test_graph_python_ast_provider_adds_symbol_and_anchor_nodes(tmp_path: Path, 
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     assert "symbol" in snapshot["capabilities"]
@@ -239,7 +281,7 @@ def test_graph_python_ast_provider_distinguishes_nested_function_from_method(tmp
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     kinds = {node["facts"]["provider"]["qualified_name"]: node["facts"]["provider"]["kind"] for node in snapshot["nodes"] if node["kind"] == "symbol"}

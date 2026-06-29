@@ -91,11 +91,14 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     problems.extend(task_graph_problems)
     mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
     problems.extend(mandatory_problems)
-    packed_context = _dedupe_candidates([*mandatory_candidates, *(bundle.packed_context if bundle is not None else [])])
+    fallback_candidates, fallback_problems = _startup_fallback_candidates(root, task)
+    problems.extend(fallback_problems)
+    packed_context = _dedupe_candidates([*mandatory_candidates, *fallback_candidates, *(bundle.packed_context if bundle is not None else [])])
     groups = _group_candidates(packed_context)
     groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
     groups["task_graph_evidence"] = task_graph_evidence
     groups.update(_agent_pack_groups(groups, bundle))
+    warnings = [*_pack_warnings(bundle, task), *_pack_quality_warnings(groups, task)]
     data = {
         "schema": "repoctl.context.task_pack",
         "schema_version": 1,
@@ -106,6 +109,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             "status": task.status,
             "repo_id": str(task.frontmatter.get("repo_id") or ""),
             "area": str(task.frontmatter.get("area") or ""),
+            "content_digest": _task_content_digest(task),
         },
         "seed": {
             "source": "task_fields_for_retrieval_only",
@@ -115,7 +119,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         "groups": groups,
         "metrics": _pack_metrics(groups, bundle),
         "bundle": bundle.to_dict() if bundle is not None else None,
-        "warnings": _pack_warnings(bundle, task),
+        "warnings": warnings,
     }
     data["pack_digest"] = digest_data(data)
     return data, problems, meta
@@ -331,6 +335,13 @@ def _task_seed_query(task: Task) -> str:
     return "\n".join(part.strip() for part in parts if part.strip())
 
 
+def _task_content_digest(task: Task) -> str:
+    try:
+        return digest_data({"content": task.path.read_text(encoding="utf-8")})
+    except OSError:
+        return ""
+
+
 CONTEXT_DOC_RE = re.compile(r"`([^`]+)`")
 
 
@@ -372,6 +383,41 @@ def _context_doc_paths(task: Task) -> list[str]:
         seen.add(rel_path)
         paths.append(rel_path)
     return paths
+
+
+STARTUP_FALLBACK_DOCS = (
+    "docs/PRD.md",
+    "README.md",
+    "docs/README.md",
+)
+
+
+def _startup_fallback_candidates(root: Path, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
+    candidates: list[ContextCandidate] = []
+    problems: list[Problem] = []
+    if _context_doc_paths(task):
+        return candidates, problems
+    for rel_path in STARTUP_FALLBACK_DOCS:
+        path = root / rel_path
+        if not path.is_file():
+            continue
+        try:
+            chunks = chunk_markdown_file(root, path)
+        except OSError as exc:
+            problems.append(Problem("warning", "context_pack_startup_doc_unreadable", str(exc), rel_path))
+            continue
+        for chunk in chunks[:4]:
+            candidates.append(
+                ContextCandidate(
+                    source_ref=chunk.source_ref,
+                    text=chunk.text,
+                    score=75.0,
+                    score_breakdown={"startup_fallback": 1.0},
+                    selection_reasons=["Startup fallback source before structured Discovery is available"],
+                    graph_path=[],
+                )
+            )
+    return candidates, problems
 
 
 IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
@@ -851,13 +897,24 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
     for candidate in candidates:
         ref = candidate.source_ref
         item = candidate.to_dict()
-        if ref.kind in {"completion_receipt", "task_artifact"} or "Verification" in ref.section:
+        if ref.kind in {"completion_receipt", "task_artifact"} or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
             groups["verification_hints"].append(item)
-        elif ref.path == "AGENTS.md" or ref.path.startswith("docs/contracts/") or ref.path.startswith("docs/adr/"):
+        elif ref.path in {"AGENTS.md", "README.md", "docs/README.md", "docs/PRD.md"} or ref.path.startswith("docs/contracts/") or ref.path.startswith("docs/adr/"):
             groups["must_read"].append(item)
         else:
             groups["maybe_relevant"].append(item)
     return groups
+
+
+def _looks_like_test_or_workflow_ref(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        "/test" in lowered
+        or "tests/" in lowered
+        or lowered.startswith("test")
+        or lowered.startswith(".github/workflows/")
+        or lowered.startswith("docs/workflows/")
+    )
 
 
 def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextBundle | None) -> dict[str, list[dict[str, Any]]]:
@@ -1066,4 +1123,23 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
                     "message": f"context pack excluded {count} {status} knowledge record(s) from default reviewed knowledge",
                 }
             )
+    return warnings
+
+
+def _pack_quality_warnings(groups: dict[str, list[dict[str, Any]]], task: Task) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+    if not _section(task, "Discovery").strip():
+        warnings.append(
+            {
+                "code": "context_pack_no_structured_discovery",
+                "message": "task has no structured Discovery yet; pack uses fallback PRD/README/context evidence and should be refreshed after file review",
+            }
+        )
+    if not groups.get("must_read"):
+        warnings.append(
+            {
+                "code": "context_pack_no_must_read",
+                "message": "context pack selected no must_read evidence; inspect PRD/README/task docs directly before editing",
+            }
+        )
     return warnings

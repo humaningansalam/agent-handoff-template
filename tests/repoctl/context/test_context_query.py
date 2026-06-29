@@ -35,6 +35,18 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert payload["warnings"][0]["code"] == "context_not_authoritative"
 
 
+def test_context_query_prioritizes_product_docs_for_project_queries(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_context_workspace(tmp_path, monkeypatch)
+
+    assert main(["context", "query", "current project architecture and recent decisions", "--repo-id", "main", "--budget-tokens", "1200", "--json"]) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    packed_paths = [item["source_ref"]["path"] for item in bundle["packed_context"]]
+    assert "docs/PRD.md" in packed_paths
+    prd_candidate = next(item for item in bundle["candidates"] if item["source_ref"]["path"] == "docs/PRD.md")
+    assert "product/recent evidence priority" in prd_candidate["selection_reasons"]
+
+
 def test_context_query_returns_actionable_groups_for_call_impact(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "auth").mkdir()

@@ -53,7 +53,20 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path, check: bool = Fa
     manifest, manifest_digest = _render_manifest(repo_id=repo_id, output_rel=output_rel, record_count=len(records), event_count=len(events), render_digest=render_digest, rendered=rendered)
     manifest_path = output_dir / "manifest.json"
     if check:
-        check_problems, check_data = _check_rendered_output(root=root, output_dir=output_dir, manifest_path=manifest_path, manifest={**manifest, "manifest_digest": manifest_digest}, pages=pages)
+        if not records and not events and not manifest_path.exists():
+            check_problems: list[Problem] = []
+            check_data = {
+                "current": True,
+                "status": "empty_not_initialized",
+                "missing_pages": [],
+                "stale_pages": [],
+                "unreadable_pages": [],
+                "broken_links": [],
+                "stale_owned_pages": [],
+                "next_actions": ["Approve reviewed knowledge records before rendering a durable llmwiki view."],
+            }
+        else:
+            check_problems, check_data = _check_rendered_output(root=root, output_dir=output_dir, manifest_path=manifest_path, manifest={**manifest, "manifest_digest": manifest_digest}, pages=pages)
         return {
             "schema": "repoctl.knowledge.render",
             "schema_version": 1,

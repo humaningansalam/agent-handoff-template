@@ -575,6 +575,33 @@ def load_completion_receipts(root: Path, *, repo_id: str | None = None) -> list[
     return receipts
 
 
+def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tuple[list[dict[str, Any]], list[Problem]]:
+    directory = _state_dir(root) / "completions"
+    if not directory.is_dir():
+        return [], []
+    receipts: list[dict[str, Any]] = []
+    problems: list[Problem] = []
+    for path in sorted(directory.glob("T-*.json")):
+        rel = path.relative_to(root).as_posix()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt is unreadable: {rel}", rel))
+            continue
+        if repo_id is not None and isinstance(data, dict) and str(data.get("repo_id") or "") != repo_id:
+            continue
+        if not isinstance(data, dict):
+            problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt has invalid schema: {rel}", rel))
+            continue
+        try:
+            _validate_completion_receipt(path, root, data)
+        except RepoctlError as exc:
+            problems.append(Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel))
+            continue
+        receipts.append(data)
+    return receipts, problems
+
+
 def _entry_key(entry: ChangedEntry) -> tuple[str, str, str]:
     return entry
 
@@ -1106,6 +1133,20 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     if moves:
         archive_texts[root / new_path] = text
     changed_entries = [_entry_to_dict(entry) for entry in (repo_delta or {}).get("changes", [])]
+    repo_evidence = {
+        "start_head": start_head,
+        "finish_head": current_head,
+        "git_available": bool(current_head_state.available),
+        "meta_gate": meta_gate or {},
+        "delta": {
+            "changed_count": len(changed_entries),
+            "current_count": int((repo_delta or {}).get("current_count") or 0),
+            "baseline_available": bool((repo_delta or {}).get("baseline_available")),
+            "baseline_count": int((repo_delta or {}).get("baseline_count") or 0),
+            "preexisting_count": int((repo_delta or {}).get("preexisting_count") or 0),
+            "baseline_conflicts": list((repo_delta or {}).get("baseline_conflicts") or []),
+        },
+    }
     receipt = {
         "schema": "repoctl.task.completion",
         "schema_version": 1,
@@ -1117,6 +1158,7 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         "archive_path": new_path if archived else "",
         "content_sha256": _sha256_text(text),
         "changed_entries": changed_entries,
+        "repo_evidence": repo_evidence,
         "verification": {
             "task_path": new_path,
             "archive_path": new_path if archived else "",

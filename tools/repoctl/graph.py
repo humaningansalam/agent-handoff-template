@@ -10,7 +10,7 @@ from .graph_import_resolver import resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .repositories import RepoTarget
-from .tasks import Problem, load_completion_receipts
+from .tasks import Problem, collect_completion_receipts
 
 
 def _has_errors(problems: list[Problem]) -> bool:
@@ -162,7 +162,8 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             nodes.setdefault(topic_node_id, GraphNode(id=topic_node_id, kind="topic", identity={"repo_id": repo_id, "topic": topic}))
             add_edge(GraphEdge("HAS_TOPIC", file_node.id, topic_node_id, "declared", "repometa_annotation"))
 
-    task_receipts = load_completion_receipts(root, repo_id=repo_id)
+    task_receipts, receipt_problems = collect_completion_receipts(root, repo_id=repo_id)
+    problems.extend(receipt_problems)
     for receipt in task_receipts:
         receipt_task_id = str(receipt.get("task_id") or "")
         if not receipt_task_id:
@@ -341,11 +342,12 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             "inventory_complete": True,
             "identity_collisions": 0,
             "metadata_store_valid": True,
-            "receipt_set_complete": True,
+            "receipt_set_complete": not receipt_problems,
+            "invalid_completion_receipts": len(receipt_problems),
             "index_truncated": False,
             "code_facts_complete": parse_error_count == 0,
             "parse_error_count": parse_error_count,
-            "provider_failures": [],
+            "provider_failures": [problem.to_dict() for problem in receipt_problems],
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),

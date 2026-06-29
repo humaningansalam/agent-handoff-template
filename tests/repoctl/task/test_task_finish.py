@@ -160,6 +160,9 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     assert receipt["task_path"] == payload["new_path"]
     assert receipt["archive_path"] == payload["new_path"]
     assert receipt["changed_entries"] == []
+    assert receipt["repo_evidence"]["git_available"] is False
+    assert receipt["repo_evidence"]["meta_gate"]["reason"] == "no_repo_directory"
+    assert receipt["repo_evidence"]["delta"]["changed_count"] == 0
     assert receipt["verification"]["content_sha256"] == receipt["content_sha256"]
 
 

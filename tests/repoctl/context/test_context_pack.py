@@ -50,6 +50,53 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
+def test_context_pack_uses_startup_fallback_without_discovery(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_context_workspace(tmp_path, monkeypatch)
+    task_id = "T-20260622010109Z"
+    task_path = tmp_path / "docs/tasks" / f"{task_id}--fallback.md"
+    task_path.write_text(
+        f"""---
+id: {task_id}
+title: "Implement product startup flow"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260622T010109Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# {task_id} - Implement product startup flow
+
+## Context Docs
+
+## Discovery
+
+## Goal
+
+Use project context without structured discovery yet.
+
+## Handoff
+
+- Next exact step: read startup evidence.
+- First file to open: `docs/PRD.md`
+- First command to run: `./scripts/repoctl context pack --task {task_id} --repo-id main --json`
+- Done when: startup evidence is visible.
+""",
+        encoding="utf-8",
+    )
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    must_read_paths = {item["source_ref"]["path"] for item in payload["data"]["groups"]["must_read"]}
+    warning_codes = {warning["code"] for warning in payload["warnings"]}
+    assert "docs/PRD.md" in must_read_paths
+    assert "context_pack_no_structured_discovery" in warning_codes
+
+
 def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "auth").mkdir()

@@ -16,6 +16,20 @@ from tests.repoctl.knowledge_test_helpers import (
 )
 
 
+def test_knowledge_render_check_empty_workspace_is_neutral(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["data"]["record_count"] == 0
+    assert payload["data"]["event_count"] == 0
+    assert payload["data"]["check"]["status"] == "empty_not_initialized"
+    assert payload["problems"] == []
+    assert not (tmp_path / "docs/knowledge/generated/manifest.json").exists()
+
+
 def test_knowledge_render_rejects_invalid_lifecycle_events(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 

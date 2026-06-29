@@ -23,7 +23,7 @@ def test_graph_resolves_same_file_python_calls(tmp_path: Path, monkeypatch, caps
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     validate_id = symbol_id("main", "python_ast", "python_ast:auth/flow.py:validate_token:function:1:0:2:24")
@@ -45,7 +45,7 @@ def test_graph_resolves_same_class_python_method_calls(tmp_path: Path, monkeypat
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     validate_id = symbol_id("main", "python_ast", "python_ast:auth/method_flow.py:TokenFlow.validate:method:2:4:3:28")
@@ -70,7 +70,7 @@ def test_graph_resolves_cross_file_python_imported_function_calls(tmp_path: Path
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     issue_id = symbol_id("main", "python_ast", "python_ast:services/token_service.py:issue_token:function:1:0:2:29")
@@ -97,7 +97,7 @@ def test_graph_skips_shadowed_cross_file_python_imported_function_calls(tmp_path
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     issue_id = symbol_id("main", "python_ast", "python_ast:services/token_service.py:issue_token:function:1:0:2:29")

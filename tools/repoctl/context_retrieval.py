@@ -91,11 +91,21 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, snapshot: Graph
 
     candidates: list[ContextCandidate] = []
     for key, breakdown in scores.items():
-        if breakdown["exact"] <= 0 and breakdown["fts"] <= 0 and breakdown["graph"] <= 0:
-            continue
         graph_weight = 2.0 if code_query else 0.15
         chunk = by_key[key]
-        score = breakdown["exact"] * 2.0 + breakdown["fts"] * 1.2 + breakdown["authority"] + breakdown["graph"] * graph_weight + _code_node_kind_boost(chunk, query_lower, code_query=code_query)
+        product_boost = _product_evidence_boost(chunk, query_lower)
+        if breakdown["exact"] <= 0 and breakdown["fts"] <= 0 and breakdown["graph"] <= 0 and product_boost <= 0:
+            continue
+        if product_boost > 0:
+            reasons[key].add("product/recent evidence priority")
+        score = (
+            breakdown["exact"] * 2.0
+            + breakdown["fts"] * 1.2
+            + breakdown["authority"]
+            + breakdown["graph"] * graph_weight
+            + _code_node_kind_boost(chunk, query_lower, code_query=code_query)
+            + product_boost
+        )
         if score <= 0:
             continue
         candidates.append(
@@ -238,6 +248,26 @@ def _code_node_kind_boost(chunk: DocumentChunk, query_lower: str, *, code_query:
         return 0.4
     if "file" in query_lower and section.startswith("file "):
         return 0.4
+    return 0.0
+
+
+def _product_evidence_boost(chunk: DocumentChunk, query_lower: str) -> float:
+    path = chunk.source_ref.path
+    kind = chunk.source_ref.kind
+    product_query = any(term in query_lower for term in ("project", "product", "architecture", "current", "recent", "최근", "현재", "프로젝트", "구조", "결정"))
+    decision_query = any(term in query_lower for term in ("decision", "decisions", "why", "invariant", "failure", "receipt", "결정", "불변식", "장애", "실패", "검증"))
+    if not product_query and not decision_query:
+        return 0.0
+    if path == "docs/PRD.md":
+        return 0.9
+    if path in {"README.md", "docs/README.md"}:
+        return 0.55
+    if kind == "completion_receipt":
+        return 0.8 if decision_query else 0.45
+    if kind == "task_artifact":
+        return 0.65 if decision_query else 0.35
+    if path.startswith("docs/contracts/") and product_query and not decision_query:
+        return -0.2
     return 0.0
 
 

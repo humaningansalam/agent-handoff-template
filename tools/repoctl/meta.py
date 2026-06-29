@@ -22,6 +22,48 @@ INTERNAL_SCAN_SKIP_DIR_NAMES = {
     ".git",
     ".repometa",
 }
+DEFAULT_INDEXING_EXCLUDES = [
+    ".git/**",
+    ".repometa/**",
+    ".venv/**",
+    "venv/**",
+    "env/**",
+    "node_modules/**",
+    ".next/**",
+    "dist/**",
+    "build/**",
+    "coverage/**",
+    ".pytest_cache/**",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    ".tox/**",
+    ".nox/**",
+    ".cache/**",
+    ".gstack/**",
+    ".gradle/**",
+    ".dart_tool/**",
+    "Library/**",
+    "Temp/**",
+    "Logs/**",
+    "UserSettings/**",
+    "__pycache__/**",
+    "**/__pycache__/**",
+    "*.egg-info/**",
+    "*.pyc",
+    "*.pyo",
+    "*.log",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.png",
+    "**/*.jpg",
+    "**/*.jpeg",
+    "**/*.gif",
+    "**/*.webp",
+    "**/*.zip",
+    "**/*.tar",
+    "**/*.gz",
+    "**/*.log",
+]
 REQUIRED_ANNOTATION = {"role", "purpose", "topics"}
 FORBIDDEN_ANNOTATION_FIELDS = {
     "id",
@@ -39,20 +81,7 @@ FORBIDDEN_ANNOTATION_FIELDS = {
 }
 DEFAULT_POLICY: dict[str, Any] = {
     "schema_version": 1,
-    "indexing": {
-        "exclude": [
-            ".git/**",
-            ".repometa/**",
-            "**/*.png",
-            "**/*.jpg",
-            "**/*.jpeg",
-            "**/*.gif",
-            "**/*.webp",
-            "**/*.zip",
-            "**/*.tar",
-            "**/*.gz",
-        ]
-    },
+    "indexing": {"exclude": DEFAULT_INDEXING_EXCLUDES},
     "vocab": {
         "roles": {
             "base": [
@@ -423,8 +452,19 @@ def _match_any(path: str, patterns: list[str]) -> bool:
 def _policy_excludes(policy: dict[str, Any]) -> list[str]:
     indexing = policy.get("indexing", {})
     if not isinstance(indexing, dict):
-        return []
-    return _as_list(indexing.get("exclude"))
+        return list(DEFAULT_INDEXING_EXCLUDES)
+    return _dedupe_list([*DEFAULT_INDEXING_EXCLUDES, *_as_list(indexing.get("exclude"))])
+
+
+def _dedupe_list(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _areas_for(path: str, policy: dict[str, Any]) -> list[str]:

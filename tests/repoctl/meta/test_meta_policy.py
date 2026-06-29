@@ -39,8 +39,8 @@ BASE_POLICY = {
 def test_default_policy_is_ecosystem_neutral() -> None:
     excludes = set(DEFAULT_POLICY["indexing"]["exclude"])
     directory_excludes = {pattern for pattern in excludes if pattern.endswith("/**") and not pattern.startswith("**/")}
-    assert directory_excludes == {".git/**", ".repometa/**"}
-    assert {"**/*.png", "**/*.zip"} <= excludes
+    assert {".git/**", ".repometa/**", ".venv/**", "node_modules/**", ".next/**", ".gradle/**", ".dart_tool/**"} <= directory_excludes
+    assert {"**/*.png", "**/*.zip", "**/*.pyc", "**/*.log"} <= excludes
 
 
 def test_project_policy_can_exclude_project_local_outputs(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -211,4 +211,3 @@ def test_meta_check_rejects_partial_coverage_exclude_overlap(tmp_path: Path, mon
 
     payload = json.loads(capsys.readouterr().out)
     assert any(problem["code"] == "policy_coverage_excluded" for problem in payload["problems"])
-

@@ -40,7 +40,7 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     assert receipt["repo_id"] == "main"
     assert receipt["changed_entries"] == [{"change": "modified", "path": "app.py"}]
 
-    assert main(["graph", "build", "--repo-id", "main", "--json"]) == 0
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     assert any(source["kind"] == "task_completion" and source["assertion"] == "recorded" for source in snapshot["sources"])
@@ -89,7 +89,7 @@ def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, 
     (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 0
+    assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
     assert any(node["id"] == file_id("main", "deleted.py") and node["facts"]["receipt"]["present_in_current_inventory"] is False for node in snapshot["nodes"])
@@ -113,14 +113,14 @@ def test_graph_ignores_invalid_receipt_for_other_repo_but_rejects_selected_repo(
     (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps({"schema": "future", "schema_version": 99, "repo_id": "api"}) + "\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--repo-id", "web", "--json"]) == 0
+    assert main(["graph", "build", "--repo-id", "web", "--full", "--json"]) == 0
     capsys.readouterr()
 
     (receipt_dir / "T-20260609184047Z.json").write_text(
         json.dumps({"schema": "repoctl.task.completion", "schema_version": 1, "repo_id": "web", "task_id": "BAD", "status": "banana"}) + "\n",
         encoding="utf-8",
     )
-    assert main(["graph", "build", "--repo-id", "web", "--json"]) == 2
+    assert main(["graph", "build", "--repo-id", "web", "--full", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "invalid_completion_receipt"
 
@@ -156,8 +156,10 @@ def test_graph_rejects_receipt_with_fake_hash(tmp_path: Path, monkeypatch, capsy
     (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "build", "--json"]) == 2
+    assert main(["graph", "build", "--full", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "invalid_completion_receipt"
-
+    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
+    assert payload["data"]["snapshot"]["completeness"]["invalid_completion_receipts"] == 1
+    assert any(node["id"] == file_id("main", "app.py") for node in payload["data"]["snapshot"]["nodes"])
