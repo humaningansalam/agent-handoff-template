@@ -207,7 +207,7 @@ def test_context_benchmark_compare_detects_source_digest_drift(tmp_path: Path, m
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
     capsys.readouterr()
     candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged after benchmark artifact.\n", encoding="utf-8")
 
     assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--require-current-sources", "--json"]) == 1
@@ -226,14 +226,14 @@ def test_context_benchmark_compare_detects_missing_source_after_rename(tmp_path:
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
     capsys.readouterr()
     candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
-    source.rename(tmp_path / "docs/adr/evidence-context-authority-renamed.md")
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
+    source.rename(tmp_path / "docs/contracts/repoctl-context-contract-renamed.md")
 
     assert main(["context", "benchmark-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--require-current-sources", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert any(problem["code"] == "context_benchmark_artifact_source_missing" for problem in payload["problems"])
-    assert any(item["path"] == "docs/adr/evidence-context-authority-v0.md" for item in payload["data"]["source_drift"])
+    assert any(item["path"] == "docs/contracts/repoctl-context-contract.md" for item in payload["data"]["source_drift"])
 
 
 def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -256,8 +256,8 @@ def test_context_benchmark_scores_reviewed_knowledge(tmp_path: Path, monkeypatch
     assert q2["metrics"]["knowledge_superseded_record_excluded"] == 0
     assert payload["data"]["summary"]["by_category"]["contract"]["mean_knowledge_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["contract"]["knowledge_expected_questions"] == 1
-    assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
-    assert q2["required_knowledge_found_at_5"][0]["section"] == "Decision"
+    assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
+    assert q2["required_knowledge_found_at_5"][0]["section"] == "repoctl Context contract"
     assert q2["knowledge_score_results"][0]["has_field_breakdown"] is True
     assert "exact_claim" in q2["knowledge_score_results"][0]["score_breakdown_keys"]
     assert q2["knowledge_source_statuses"][0]["digest_matches"] is True
@@ -461,7 +461,7 @@ def test_context_benchmark_knowledge_source_current_gate_fails_on_stale_record(t
     _, fixture = _setup_benchmark_workspace(tmp_path, monkeypatch)
 
     _approve_knowledge_source(capsys)
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged after approval.\n", encoding="utf-8")
 
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--require-knowledge-source-current", "--json"]) == 1
@@ -488,7 +488,7 @@ def test_context_benchmark_counts_superseded_knowledge_exclusion(tmp_path: Path,
     assert contract["mean_knowledge_recall_at_5"] == 1.0
     q2 = next(result for result in payload["data"]["results"] if result["id"] == "Q-002")
     assert q2["metrics"]["knowledge_superseded_record_excluded"] >= 1
-    assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert q2["required_knowledge_found_at_5"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
 
     assert main(["knowledge", "query", "source authorities remain after context retrieval", "--repo-id", "main", "--include-superseded", "--json"]) == 0
 
@@ -512,7 +512,7 @@ def test_context_benchmark_counts_deprecated_knowledge_exclusion(tmp_path: Path,
     assert contract["mean_knowledge_recall_at_5"] == 0.0
     q2 = next(result for result in payload["data"]["results"] if result["id"] == "Q-002")
     assert q2["metrics"]["knowledge_deprecated_record_excluded"] >= 1
-    assert q2["missing_required_knowledge_at_5"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert q2["missing_required_knowledge_at_5"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
 
     assert main(["knowledge", "query", "source authorities remain after context retrieval", "--repo-id", "main", "--include-deprecated", "--json"]) == 0
 

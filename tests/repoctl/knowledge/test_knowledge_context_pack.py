@@ -24,7 +24,7 @@ def test_knowledge_candidate_builds_from_context_pack_authority_source(tmp_path:
         task_id="T-20260622070707Z",
         slug="pack-backed",
         title="Promote context pack authority",
-        query="Evidence Context authority",
+        query="repoctl Context contract",
         goal="Create a candidate from a context pack without making the pack an authority source.",
         first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622070707Z.json --repo-id main --json",
     )
@@ -39,7 +39,7 @@ def test_knowledge_candidate_builds_from_context_pack_authority_source(tmp_path:
     payload = json.loads(capsys.readouterr().out)
     candidate = payload["data"]["candidate"]
     assert candidate["authoritative"] is False
-    assert candidate["source_refs"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert candidate["source_refs"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
     assert candidate["source_refs"][0]["content_sha256"].startswith("sha256:")
     assert candidate["derived_from"] == {
         "kind": "context_pack",
@@ -98,7 +98,7 @@ def test_context_pack_promotes_to_reviewed_knowledge_cleanly(tmp_path: Path, mon
         task_id="T-20260622090909Z",
         slug="pack-clean",
         title="Promote clean context pack",
-        query="Evidence Context authority",
+        query="repoctl Context contract",
         goal="Promote a current context pack into reviewed knowledge.",
         first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622090909Z.json --repo-id main --json",
     )
@@ -143,7 +143,7 @@ def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(
         task_id="T-20260622080808Z",
         slug="pack-drift",
         title="Reject stale context pack",
-        query="Evidence Context authority",
+        query="repoctl Context contract",
         goal="Reject stale context pack inputs.",
         first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622080808Z.json --repo-id main --json",
     )
@@ -166,10 +166,10 @@ def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(
     generated_payload = json.loads(capsys.readouterr().out)
     assert generated_payload["problems"][0]["code"] == "knowledge_candidate_pack_generated"
 
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged after pack.\n", encoding="utf-8")
 
     assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--json"]) == 1
     drift_payload = json.loads(capsys.readouterr().out)
     assert drift_payload["problems"][0]["code"] == "knowledge_candidate_pack_source_drift"
-    assert drift_payload["problems"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert drift_payload["problems"][0]["path"] == "docs/contracts/repoctl-context-contract.md"

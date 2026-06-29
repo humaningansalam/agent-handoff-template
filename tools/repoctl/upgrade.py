@@ -90,19 +90,23 @@ def _load_manifest(source_root: Path) -> dict[str, Any]:
         raise RepoctlError(f"invalid upgrade manifest JSON: {error}", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix()) from error
     replace_paths = manifest.get("replace_paths")
     create_paths = manifest.get("create_paths", [])
+    remove_paths = manifest.get("remove_paths", [])
     preserve_paths = manifest.get("preserve_paths")
     if not isinstance(replace_paths, list) or not all(isinstance(path, str) for path in replace_paths):
         raise RepoctlError("upgrade manifest replace_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
     if not isinstance(create_paths, list) or not all(isinstance(path, str) for path in create_paths):
         raise RepoctlError("upgrade manifest create_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
+    if not isinstance(remove_paths, list) or not all(isinstance(path, str) for path in remove_paths):
+        raise RepoctlError("upgrade manifest remove_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
     if not isinstance(preserve_paths, list) or not all(isinstance(path, str) for path in preserve_paths):
         raise RepoctlError("upgrade manifest preserve_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
     manifest["replace_paths"] = sorted({_safe_rel(path) for path in replace_paths})
     manifest["create_paths"] = sorted({_safe_rel(path) for path in create_paths})
+    manifest["remove_paths"] = sorted({_safe_rel(path) for path in remove_paths})
     manifest["preserve_paths"] = sorted({_safe_rel(path) for path in preserve_paths})
-    managed = [*manifest["replace_paths"], *manifest["create_paths"]]
+    managed = [*manifest["replace_paths"], *manifest["create_paths"], *manifest["remove_paths"]]
     if len(set(managed)) != len(managed):
-        raise RepoctlError("upgrade manifest paths cannot appear in both replace_paths and create_paths", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
+        raise RepoctlError("upgrade manifest paths cannot appear in more than one managed path list", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
     for path in managed:
         if _is_preserved(path, manifest["preserve_paths"]):
             raise RepoctlError(f"upgrade path is both managed and preserved: {path}", code="invalid_upgrade_manifest", path=path)
@@ -130,6 +134,7 @@ def _plan_payload(root: Path, source_root: Path, manifest: dict[str, Any], opera
         "manifest_path": MANIFEST_REL.as_posix(),
         "replace_paths": manifest["replace_paths"],
         "create_paths": manifest["create_paths"],
+        "remove_paths": manifest["remove_paths"],
         "preserve_paths": manifest["preserve_paths"],
         "operations": [operation.to_dict() for operation in operations],
         "conflicts": conflicts,
@@ -192,6 +197,23 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
                 size=len(source_bytes),
             )
         )
+    for rel in manifest["remove_paths"]:
+        target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
+        if not target_path.exists():
+            continue
+        if not target_path.is_file():
+            conflicts.append({"code": "remove_target_not_file", "path": rel, "message": "remove target exists but is not a file"})
+            continue
+        target_bytes = target_path.read_bytes()
+        operations.append(
+            UpgradeOperation(
+                path=rel,
+                action="remove",
+                source_hash="",
+                target_hash=_hash_bytes(target_bytes),
+                size=len(target_bytes),
+            )
+        )
     return _plan_payload(root, source_root, manifest, operations, conflicts)
 
 
@@ -213,6 +235,21 @@ def _atomic_copy_file(source: Path, target: Path) -> None:
         if tmp.exists() and not tmp.is_symlink():
             tmp.unlink()
         raise
+
+
+def _prune_empty_parents(root: Path, start: Path) -> None:
+    root_resolved = root.resolve()
+    current = start
+    while current != root:
+        try:
+            current.resolve().relative_to(root_resolved)
+        except ValueError as exc:
+            raise RepoctlError(f"upgrade cleanup path escapes workspace: {current}", code="invalid_upgrade_target", path=str(current)) from exc
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
 
 
 def _rollback_applied(root: Path, applied: list[dict[str, str]], backups: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -274,10 +311,10 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
         raise RepoctlError("upgrade plan package does not match source manifest", code="invalid_upgrade_plan")
     if str(plan.get("source_version") or "") != str(manifest.get("version") or ""):
         raise RepoctlError("upgrade plan version does not match source manifest", code="invalid_upgrade_plan")
-    for key in ("replace_paths", "create_paths", "preserve_paths"):
+    for key in ("replace_paths", "create_paths", "remove_paths", "preserve_paths"):
         if sorted(plan.get(key) or []) != manifest[key]:
             raise RepoctlError(f"upgrade plan {key} does not match source manifest", code="invalid_upgrade_plan")
-    managed = set(manifest["replace_paths"]) | set(manifest["create_paths"])
+    managed = set(manifest["replace_paths"]) | set(manifest["create_paths"]) | set(manifest["remove_paths"])
     preserved = manifest["preserve_paths"]
     for operation in plan["operations"]:
         rel = _safe_rel(str(operation.get("path", "")))
@@ -322,21 +359,29 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         try:
             for operation in plan["operations"]:
                 rel = _safe_rel(str(operation["path"]))
-                source_path = _assert_contained_path(source_root, rel, code="invalid_upgrade_source", require_file=True)
+                action = str(operation.get("action") or "replace")
                 target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
-                if not source_path.is_file():
-                    raise RepoctlError(f"managed source file disappeared: {rel}", code="managed_source_missing", path=rel)
-                source_hash = _hash_file(source_path)
-                if source_hash != operation.get("source_hash"):
-                    raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
                 if target_path.is_file():
                     backup_path = backup_root / rel
                     _assert_contained_path(root, backup_path.relative_to(root).as_posix(), code="invalid_upgrade_target")
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target_path, backup_path)
                     backups.append({"path": rel, "backup_path": backup_path.relative_to(root).as_posix()})
-                _atomic_copy_file(source_path, target_path)
-                applied.append({"path": rel, "action": str(operation.get("action") or "replace")})
+                if action == "remove":
+                    if target_path.exists():
+                        if not target_path.is_file():
+                            raise RepoctlError(f"remove target is not a file: {rel}", code="invalid_upgrade_target", path=rel)
+                        target_path.unlink()
+                        _prune_empty_parents(root, target_path.parent)
+                else:
+                    source_path = _assert_contained_path(source_root, rel, code="invalid_upgrade_source", require_file=True)
+                    if not source_path.is_file():
+                        raise RepoctlError(f"managed source file disappeared: {rel}", code="managed_source_missing", path=rel)
+                    source_hash = _hash_file(source_path)
+                    if source_hash != operation.get("source_hash"):
+                        raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
+                    _atomic_copy_file(source_path, target_path)
+                applied.append({"path": rel, "action": action})
         except Exception as error:
             rolled_back = _rollback_applied(root, applied, backups)
             rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"

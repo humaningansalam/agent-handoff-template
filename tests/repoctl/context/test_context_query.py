@@ -30,7 +30,7 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert bundle["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
     assert bundle["source_snapshots"]["graph_digest"].startswith("sha256:")
     refs = [candidate["source_ref"] for candidate in bundle["packed_context"]]
-    assert any(ref["path"] == "docs/adr/repoctl-graph-v0.md" and ref.get("section") == "Decision" for ref in refs)
+    assert any(ref["path"] == "docs/contracts/repoctl-graph-contract.md" and ref.get("section") == "repoctl Graph contract" for ref in refs)
     assert all(ref["content_sha256"].startswith("sha256:") for ref in refs)
     assert payload["warnings"][0]["code"] == "context_not_authoritative"
 
@@ -103,11 +103,11 @@ def test_context_multirepo_field_loop_keeps_context_and_knowledge_namespaced(tmp
     fixture = Path("tests/fixtures/context-benchmark-multirepo").resolve()
     _write_context_benchmark_collection_corpus(tmp_path, fixture)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "web", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "web", "--json"]) == 0
     web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
     web_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "api", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "api", "--json"]) == 0
     api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
     api_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -127,7 +127,7 @@ def test_knowledge_check_reports_record_source_diagnostics(tmp_path: Path, monke
     repo = _setup_context_workspace(tmp_path, monkeypatch)
 
     record_id = _approve_knowledge_source(capsys)["data"]["record"]["id"]
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged after approval.\n", encoding="utf-8")
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
@@ -139,7 +139,7 @@ def test_knowledge_check_reports_record_source_diagnostics(tmp_path: Path, monke
     assert record["error_count"] == 1
     assert record["problem_codes"] == {"knowledge_source_digest_drift": 1}
     source_status = record["source_statuses"][0]
-    assert source_status["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert source_status["path"] == "docs/contracts/repoctl-context-contract.md"
     assert source_status["exists"] is True
     assert source_status["digest_matches"] is False
     assert source_status["expected_sha256"].startswith("sha256:")
@@ -150,15 +150,15 @@ def test_knowledge_check_reports_record_source_diagnostics(tmp_path: Path, monke
 def test_knowledge_refresh_all_stale_can_create_candidate_from_stale_record(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     approved_payload = json.loads(capsys.readouterr().out)
     record_id = approved_payload["data"]["record"]["id"]
     record_path = tmp_path / approved_payload["data"]["record_path"]
     original_record_text = record_path.read_text(encoding="utf-8")
-    source_path = tmp_path / "docs/adr/evidence-context-authority-v0.md"
-    source_path.write_text("# ADR: Evidence Context Authority v0\n\n## Decision\n\nChanged after approval and needs review.\n", encoding="utf-8")
+    source_path = tmp_path / "docs/contracts/repoctl-context-contract.md"
+    source_path.write_text("# ADR: repoctl Context contract v0\n\n## Decision\n\nChanged after approval and needs review.\n", encoding="utf-8")
 
     assert main(["knowledge", "candidate", "refresh", "--all-stale", "--include-records", "--repo-id", "main", "--json"]) == 0
 
@@ -211,7 +211,7 @@ def test_knowledge_refresh_all_stale_reports_missing_record_source(tmp_path: Pat
     repo = _setup_context_workspace(tmp_path, monkeypatch)
 
     record_id = _approve_knowledge_source(capsys)["data"]["record"]["id"]
-    (tmp_path / "docs/adr/evidence-context-authority-v0.md").unlink()
+    (tmp_path / "docs/contracts/repoctl-context-contract.md").unlink()
 
     assert main(["knowledge", "candidate", "refresh", "--all-stale", "--include-records", "--repo-id", "main", "--json"]) == 1
 
@@ -243,7 +243,7 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     assert bundle["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
     assert all(candidate["source_ref"]["kind"] != "knowledge_record" for candidate in bundle["packed_context"])
 
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
 
     assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--json"]) == 0
@@ -311,7 +311,7 @@ def test_knowledge_render_builds_navigable_record_target_and_search_pages(tmp_pa
 def test_knowledge_render_check_reports_broken_links(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()

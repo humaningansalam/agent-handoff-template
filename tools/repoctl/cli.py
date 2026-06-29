@@ -2904,7 +2904,7 @@ def _default_knowledge_render_output(repo_id: str) -> Path:
 
 
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
+    root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else find_workspace_root()
     data = plan_upgrade(root, source=args.source)
     problems = [{"severity": "error", **conflict} for conflict in data.get("conflicts", [])]
     payload = {
@@ -2931,7 +2931,7 @@ def cmd_upgrade_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_upgrade_apply(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
+    root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else find_workspace_root()
     data = apply_upgrade(root, plan_file=args.plan_file)
     payload = {
         "ok": True,
@@ -3451,11 +3451,13 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)
     upgrade_plan = upgrade_sub.add_parser("plan")
+    upgrade_plan.add_argument("--workspace-root", help="workspace to upgrade; defaults to the current workspace")
     upgrade_plan.add_argument("--from", dest="source", required=True, help="repoctl release checkout or extracted artifact directory")
     upgrade_plan.add_argument("--output", help="optional path for a plan artifact; omitted keeps the command read-only")
     upgrade_plan.add_argument("--json", action="store_true")
     upgrade_plan.set_defaults(func=cmd_upgrade_plan)
     upgrade_apply = upgrade_sub.add_parser("apply")
+    upgrade_apply.add_argument("--workspace-root", help="workspace to upgrade; defaults to the current workspace")
     upgrade_apply.add_argument("--plan-file", required=True)
     upgrade_apply.add_argument("--json", action="store_true")
     upgrade_apply.set_defaults(func=cmd_upgrade_apply)

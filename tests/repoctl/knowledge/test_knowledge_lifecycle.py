@@ -21,7 +21,7 @@ from tests.repoctl.knowledge_test_helpers import (
 def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     note = tmp_path / "review-note.md"
     note.write_text("Reviewed source refs and approved as reusable project decision.\n", encoding="utf-8")
@@ -91,11 +91,11 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     explain = explain_payload["data"]["results"][0]["explain"]
     assert explain["status"] == "reviewed"
     assert explain["stale"] is False
-    assert explain["source_ref_statuses"][0]["path"] == "docs/adr/evidence-context-authority-v0.md"
+    assert explain["source_ref_statuses"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
     assert explain["source_ref_statuses"][0]["exists"] is True
     assert explain["source_ref_statuses"][0]["digest_matches"] is True
 
-    source = tmp_path / "docs/adr/evidence-context-authority-v0.md"
+    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
 
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 0
@@ -329,7 +329,7 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
 def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     reason = tmp_path / "reject.md"
     reason.write_text("Candidate is too broad for reviewed knowledge.\n", encoding="utf-8")

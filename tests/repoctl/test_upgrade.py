@@ -265,6 +265,136 @@ def test_upgrade_manifest_rejects_managed_preserve_overlap(tmp_path: Path, monke
     assert payload["problems"][0]["code"] == "invalid_upgrade_manifest"
 
 
+def test_upgrade_remove_paths_delete_only_manifested_legacy_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    (workspace / "docs/adr").mkdir(parents=True)
+    (workspace / "docs/plans").mkdir(parents=True)
+    (workspace / "docs/adr/repoctl-graph-v0.md").write_text("old graph adr\n", encoding="utf-8")
+    (workspace / "docs/plans/repoctl-graph-roadmap.md").write_text("old graph plan\n", encoding="utf-8")
+    prd_before = (workspace / "docs/PRD.md").read_text(encoding="utf-8")
+    repo_before = (workspace / "repos/app.py").read_text(encoding="utf-8")
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "remove_paths": ["docs/adr/repoctl-graph-v0.md", "docs/plans/repoctl-graph-roadmap.md"],
+            "preserve_paths": ["repos/**", "docs/BOARD.md", "docs/PRD.md", "docs/tasks/T-*.md", "docs/archive/tasks/**"],
+        },
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert [(operation["action"], operation["path"]) for operation in plan_payload["data"]["operations"]] == [
+        ("remove", "docs/adr/repoctl-graph-v0.md"),
+        ("remove", "docs/plans/repoctl-graph-roadmap.md"),
+    ]
+    assert main(["upgrade", "apply", "--plan-file", str(plan_file), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert [(operation["action"], operation["path"]) for operation in payload["data"]["applied"]] == [
+        ("remove", "docs/adr/repoctl-graph-v0.md"),
+        ("remove", "docs/plans/repoctl-graph-roadmap.md"),
+    ]
+    assert not (workspace / "docs/adr/repoctl-graph-v0.md").exists()
+    assert not (workspace / "docs/plans/repoctl-graph-roadmap.md").exists()
+    assert not (workspace / "docs/plans").exists()
+    assert (workspace / "docs/PRD.md").read_text(encoding="utf-8") == prd_before
+    assert (workspace / "repos/app.py").read_text(encoding="utf-8") == repo_before
+    assert len(list((workspace / "docs/tasks/.repoctl-state/upgrades").glob("*/backup/docs/adr/repoctl-graph-v0.md"))) == 1
+
+
+def test_upgrade_workspace_root_allows_source_runner_to_clean_target_workspace(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    (workspace / "docs/adr").mkdir(parents=True)
+    (workspace / "docs/adr/repoctl-graph-v0.md").write_text("old graph adr\n", encoding="utf-8")
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "remove_paths": ["docs/adr/repoctl-graph-v0.md"],
+            "preserve_paths": ["docs/PRD.md", "repos/**"],
+        },
+    )
+
+    assert main(["upgrade", "plan", "--workspace-root", str(workspace), "--from", str(source), "--output", str(plan_file), "--json"]) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert plan_payload["data"]["workspace_root"] == workspace.resolve().as_posix()
+    assert [(operation["action"], operation["path"]) for operation in plan_payload["data"]["operations"]] == [("remove", "docs/adr/repoctl-graph-v0.md")]
+    assert main(["upgrade", "apply", "--workspace-root", str(workspace), "--plan-file", str(plan_file), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert not (workspace / "docs/adr/repoctl-graph-v0.md").exists()
+
+
+def test_upgrade_remove_paths_cannot_target_preserved_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    write_workspace(workspace)
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "remove_paths": ["docs/PRD.md"],
+            "preserve_paths": ["docs/PRD.md", "repos/**"],
+        },
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "invalid_upgrade_manifest"
+    assert (workspace / "docs/PRD.md").read_text(encoding="utf-8") == "project prd\n"
+
+
+def test_upgrade_remove_paths_reject_directory_targets(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    write_workspace(workspace)
+    (workspace / "docs/plans").mkdir(parents=True)
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "remove_paths": ["docs/plans"],
+            "preserve_paths": ["docs/PRD.md", "repos/**"],
+        },
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["data"]["conflicts"][0]["code"] == "remove_target_not_file"
+    assert (workspace / "docs/plans").is_dir()
+
+
 def test_upgrade_create_paths_add_missing_workflow_without_overwriting_existing(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     source = tmp_path / "source"
@@ -366,11 +496,11 @@ depends_on: []
 
 ## Context Docs
 
-- `docs/adr/evidence-context-authority-v0.md`
+- `docs/contracts/repoctl-context-contract.md`
 
 ## Discovery
 
-- Candidate query: Evidence Context authority
+- Candidate query: repoctl Context contract
 - Candidate files reviewed: `repos/app.py`
 - Chosen files: `repos/app.py`
 
@@ -381,7 +511,7 @@ Promote a context pack into reviewed knowledge after upgrade.
 ## Handoff
 
 - Next exact step: build candidate from context pack.
-- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- First file to open: `docs/contracts/repoctl-context-contract.md`
 - First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260624101010Z.json --repo-id main --json`
 - Done when: reviewed knowledge is queryable and render output is current.
 """,

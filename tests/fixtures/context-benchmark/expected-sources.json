@@ -23,7 +23,12 @@
       }
     ],
     "forbidden_refs": [],
-    "required_knowledge_source_refs": [],
+    "required_knowledge_source_refs": [
+      {
+        "path": "docs/contracts/repoctl-context-contract.md",
+        "section": "repoctl Context contract"
+      }
+    ],
     "required_source_refs": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
@@ -195,7 +200,7 @@
     "required_source_refs": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
-        "section": "repoctl module boundaries"
+        "section": "Derived layer rules"
       }
     ]
   },

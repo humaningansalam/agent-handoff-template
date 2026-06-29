@@ -148,6 +148,10 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
     (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
     (package_root / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
+    (package_root / "docs/PRD.md").write_text(
+        "# PRD\n\n## Evidence And Context\n\nEvidence Context comes before reviewed knowledge. It retrieves source-bound evidence before any human-reviewed knowledge record is promoted.\n",
+        encoding="utf-8",
+    )
     (package_root / "repos").mkdir(exist_ok=True)
     subprocess.run(["git", "init"], cwd=package_root / "repos", stdout=subprocess.DEVNULL, check=True)
     write_repometa(package_root / "repos")

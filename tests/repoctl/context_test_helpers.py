@@ -15,16 +15,20 @@ def _write_context_docs(root: Path) -> None:
     (root / "docs/adr").mkdir(parents=True, exist_ok=True)
     (root / "docs/contracts").mkdir(parents=True, exist_ok=True)
     (root / "docs/workflows").mkdir(parents=True, exist_ok=True)
-    (root / "docs/adr/repoctl-graph-v0.md").write_text(
-        "# ADR: repoctl Graph v0\n\n## Decision\n\nGraph is a read-only derived evidence snapshot. Source authorities remain repo registry, code index, .repometa, and task completion receipts.\n",
+    (root / "docs/PRD.md").write_text(
+        "# PRD\n\n## Evidence And Context\n\nEvidence Context comes before reviewed knowledge. It retrieves source-bound evidence before any human-reviewed knowledge record is promoted.\n",
         encoding="utf-8",
     )
-    (root / "docs/adr/evidence-context-authority-v0.md").write_text(
-        "# ADR: Evidence Context Authority v0\n\n## Decision\n\nEvidence Context comes before reviewed knowledge and keeps source bundles separate.\n\n## Authority Rules\n\nEvidence Context is read-only and non-authoritative. Context retrieval does not replace Graph, task, Board, Backlog, or .repometa authority.\n",
+    (root / "docs/contracts/repoctl-graph-contract.md").write_text(
+        "# repoctl Graph contract\n\nGraph is a read-only derived evidence snapshot. Source authorities remain repo registry, code index, repometa, and task completion receipts.\n",
+        encoding="utf-8",
+    )
+    (root / "docs/contracts/repoctl-context-contract.md").write_text(
+        "# repoctl Context contract\n\nContext retrieval returns read-only source bundles and source authorities remain separate after retrieval. Context retrieval is read-only and non-authoritative. It does not replace Graph, task, Board, Backlog, or repometa authority.\n",
         encoding="utf-8",
     )
     (root / "docs/contracts/repoctl-module-boundaries.md").write_text(
-        "# repoctl module boundaries\n\n## Future layer rules\n\nContext must not replace task, Board, Backlog, Graph, or .repometa authority.\n",
+        "# repoctl module boundaries\n\n## Derived layer rules\n\nA future layer rule prevents Context from replacing task, Board, Backlog, Graph, or repometa authority.\n",
         encoding="utf-8",
     )
     (root / "docs/workflows/generated.md").write_text("# Workflow\n\nGenerated output is not an authority.\n", encoding="utf-8")
@@ -92,7 +96,7 @@ def _write_context_pack_task(
     title: str,
     query: str,
     goal: str,
-    context_doc: str = "docs/adr/evidence-context-authority-v0.md",
+    context_doc: str = "docs/contracts/repoctl-context-contract.md",
     reviewed: str = "repos/app.py",
     chosen: str = "repos/app.py",
     first_command: str | None = None,
@@ -184,11 +188,11 @@ def _write_context_benchmark_collection_corpus(root: Path, fixture: Path) -> Non
 
 
 def _approve_superseded_context_knowledge(capsys) -> tuple[str, str]:
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     first_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", first_candidate_id, "--repo-id", "main", "--json"]) == 0
     old_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     replacement_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
     new_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -196,7 +200,7 @@ def _approve_superseded_context_knowledge(capsys) -> tuple[str, str]:
 
 
 def _approve_deprecated_context_knowledge(tmp_path: Path, capsys) -> str:
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -227,22 +231,22 @@ depends_on: []
 
 ## Context Docs
 
-- `docs/adr/evidence-context-authority-v0.md`
+- `docs/contracts/repoctl-context-contract.md`
 
 ## Discovery
 
-- Candidate query: evidence context authority
+- Candidate query: context contract authority
 - Candidate files reviewed: `repos/app.py`
 - Chosen files: `repos/app.py`
 
 ## Goal
 
-Use evidence context authority for task startup.
+Use context contract authority for task startup.
 
 ## Handoff
 
-- Next exact step: inspect evidence context authority.
-- First file to open: `docs/adr/evidence-context-authority-v0.md`
+- Next exact step: inspect context contract authority.
+- First file to open: `docs/contracts/repoctl-context-contract.md`
 - First command to run: `./scripts/repoctl context pack --task T-20260624020202Z --repo-id main --json`
 - Done when: mandatory source refs are packed.
 """,
@@ -307,7 +311,7 @@ depends_on: []
 
 ## Context Docs
 
-- `docs/adr/repoctl-graph-v0.md`
+- `docs/contracts/repoctl-graph-contract.md`
 
 ## Discovery
 
@@ -322,7 +326,7 @@ Preserve Graph as a read-only derived evidence snapshot.
 ## Handoff
 
 - Next exact step: inspect Graph authority decision.
-- First file to open: `docs/adr/repoctl-graph-v0.md`
+- First file to open: `docs/contracts/repoctl-graph-contract.md`
 - First command to run: `./scripts/repoctl context pack --task T-20260624040404Z --repo-id main --json`
 - Done when: Graph authority source refs are packed.
 """,
@@ -348,7 +352,7 @@ depends_on: []
 ## Context Docs
 
 - `docs/contracts/repoctl-module-boundaries.md`
-- `docs/adr/evidence-context-authority-v0.md`
+- `docs/contracts/repoctl-context-contract.md`
 
 ## Discovery
 

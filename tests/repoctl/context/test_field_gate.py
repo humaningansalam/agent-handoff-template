@@ -84,11 +84,11 @@ def test_release_candidate_field_gate_fails_on_stale_reviewed_knowledge(tmp_path
     shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
-    (tmp_path / "docs/adr/evidence-context-authority-v0.md").write_text("# Drifted\n\n## Decision\n\nChanged after approval.\n", encoding="utf-8")
+    (tmp_path / "docs/contracts/repoctl-context-contract.md").write_text("# Drifted\n\n## Decision\n\nChanged after approval.\n", encoding="utf-8")
 
     assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--json"]) == 1
 
@@ -190,11 +190,11 @@ def test_field_gate_compare_accepts_failed_run_artifact(tmp_path: Path, monkeypa
     capsys.readouterr()
     assert main(["field-gate", "cleanup", "--artifact", baseline.as_posix(), "--json"]) == 0
     capsys.readouterr()
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
-    (tmp_path / "docs/adr/evidence-context-authority-v0.md").write_text("# Drifted\n\n## Decision\n\nChanged after approval.\n", encoding="utf-8")
+    (tmp_path / "docs/contracts/repoctl-context-contract.md").write_text("# Drifted\n\n## Decision\n\nChanged after approval.\n", encoding="utf-8")
 
     assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", candidate.as_posix(), "--json"]) == 1
     failed_run_payload = json.loads(capsys.readouterr().out)

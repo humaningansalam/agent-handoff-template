@@ -38,7 +38,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
         "pack_digest": data["pack_digest"],
     }
     assert data["seed"]["source"] == "task_fields_for_retrieval_only"
-    assert any(item["source_ref"]["path"] == "docs/adr/evidence-context-authority-v0.md" for item in data["groups"]["must_read"])
+    assert any(item["source_ref"]["path"] == "docs/contracts/repoctl-context-contract.md" for item in data["groups"]["must_read"])
     assert data["groups"]["reviewed_knowledge"] == []
     assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
     assert data["metrics"]["group_counts"]["must_read"] == len(data["groups"]["must_read"])
@@ -46,7 +46,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert data["metrics"]["unique_must_read_source_count"] >= 1
     assert data["metrics"]["estimated_tokens"] == data["bundle"]["budget"]["estimated_tokens"]
     assert data["metrics"]["requested_tokens"] == 1200
-    assert any(ref["path"] == "docs/adr/evidence-context-authority-v0.md" for ref in data["metrics"]["must_read_source_refs"])
+    assert any(ref["path"] == "docs/contracts/repoctl-context-contract.md" for ref in data["metrics"]["must_read_source_refs"])
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
@@ -146,7 +146,7 @@ def test_context_pack_does_not_write_failed_artifact(tmp_path: Path, monkeypatch
         query="source authority knowledge",
         goal="Do not write failed context pack artifacts.",
     )
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     event_id = json.loads(capsys.readouterr().out)["data"]["event"]["id"]
@@ -174,11 +174,11 @@ def test_context_pack_groups_reviewed_knowledge(tmp_path: Path, monkeypatch, cap
         query="source authority knowledge",
         goal="Use reviewed knowledge source authority.",
     )
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     old_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     replacement_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -209,7 +209,7 @@ def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> 
         query="source authority knowledge",
         goal="Use reviewed knowledge source authority.",
     )
-    assert main(["knowledge", "candidate", "build", "--source", "docs/adr/evidence-context-authority-v0.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
@@ -329,8 +329,8 @@ def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, m
     }
     assert found_paths == {
         "AGENTS.md",
-        "docs/adr/evidence-context-authority-v0.md",
-        "docs/adr/repoctl-graph-v0.md",
+        "docs/contracts/repoctl-context-contract.md",
+        "docs/contracts/repoctl-graph-contract.md",
         "docs/contracts/repoctl-module-boundaries.md",
     }
     assert payload["data"]["gates"]["min_must_read_recall"] == 1.0
@@ -382,7 +382,7 @@ def test_context_pack_benchmark_compare_gates_recall_regression(tmp_path: Path, 
     candidate_data["summary"]["mean_must_read_recall"] = 0.0
     candidate_data["results"][0]["metrics"]["must_read_recall"] = 0.0
     candidate_data["results"][0]["required_must_read_found"] = []
-    candidate_data["results"][0]["missing_required_must_read"] = [{"kind": "document", "path": "docs/adr/evidence-context-authority-v0.md", "section": "Decision"}]
+    candidate_data["results"][0]["missing_required_must_read"] = [{"kind": "document", "path": "docs/contracts/repoctl-context-contract.md", "section": "repoctl Context contract"}]
     candidate_data["benchmark_digest"] = digest_data({key: value for key, value in candidate_data.items() if key not in {"benchmark_digest", "artifact"}})
     candidate.write_text(json.dumps(candidate_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
