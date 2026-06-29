@@ -3,31 +3,31 @@
     "acceptable_optional_refs": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
-        "section": "Future layer rules"
+        "section": "repoctl module boundaries"
       }
     ],
     "forbidden_refs": [],
     "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
-        "path": "docs/adr/repoctl-graph-v0.md",
-        "section": "Decision"
+        "path": "docs/contracts/repoctl-graph-contract.md",
+        "section": "repoctl Graph contract"
       }
     ]
   },
   "Q-002": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
-    "required_knowledge_source_refs": [
+    "acceptable_optional_refs": [
       {
-        "path": "docs/adr/evidence-context-authority-v0.md",
-        "section": "Decision"
+        "path": "docs/PRD.md",
+        "section": "Evidence And Context"
       }
     ],
+    "forbidden_refs": [],
+    "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
-        "path": "docs/adr/evidence-context-authority-v0.md",
-        "section": "Authority Rules"
+        "path": "docs/contracts/repoctl-context-contract.md",
+        "section": "repoctl Context contract"
       }
     ]
   },
@@ -152,35 +152,50 @@
     ]
   },
   "Q-009": {
-    "acceptable_optional_refs": [],
+    "acceptable_optional_refs": [
+      {
+        "path": "docs/contracts/repoctl-context-contract.md",
+        "section": "repoctl Context contract"
+      }
+    ],
     "forbidden_refs": [],
     "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
-        "path": "docs/adr/repoctl-graph-v0.md",
-        "section": "Decision"
+        "path": "docs/contracts/repoctl-graph-contract.md",
+        "section": "repoctl Graph contract"
       }
     ]
   },
   "Q-010": {
-    "acceptable_optional_refs": [],
+    "acceptable_optional_refs": [
+      {
+        "path": "docs/contracts/repoctl-context-contract.md",
+        "section": "repoctl Context contract"
+      }
+    ],
     "forbidden_refs": [],
     "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
-        "path": "docs/adr/evidence-context-authority-v0.md",
-        "section": "Decision"
+        "path": "docs/PRD.md",
+        "section": "Evidence And Context"
       }
     ]
   },
   "Q-011": {
-    "acceptable_optional_refs": [],
+    "acceptable_optional_refs": [
+      {
+        "path": "docs/README.md",
+        "section": "Boundaries"
+      }
+    ],
     "forbidden_refs": [],
     "required_knowledge_source_refs": [],
     "required_source_refs": [
       {
-        "path": "docs/adr/evidence-context-authority-v0.md",
-        "section": "Authority Rules"
+        "path": "docs/contracts/repoctl-module-boundaries.md",
+        "section": "repoctl module boundaries"
       }
     ]
   },
@@ -191,7 +206,7 @@
     "required_source_refs": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
-        "section": "Future layer rules"
+        "section": "Derived layer rules"
       }
     ]
   },

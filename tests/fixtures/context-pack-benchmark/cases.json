@@ -8,7 +8,7 @@
       "required_must_read_refs": [
         {
           "kind": "document",
-          "path": "docs/adr/evidence-context-authority-v0.md"
+          "path": "docs/contracts/repoctl-context-contract.md"
         }
       ]
     },
@@ -28,7 +28,7 @@
       "required_must_read_refs": [
         {
           "kind": "document",
-          "path": "docs/adr/repoctl-graph-v0.md"
+          "path": "docs/contracts/repoctl-graph-contract.md"
         }
       ]
     },
@@ -42,7 +42,7 @@
         },
         {
           "kind": "document",
-          "path": "docs/adr/evidence-context-authority-v0.md"
+          "path": "docs/contracts/repoctl-context-contract.md"
         }
       ]
     },

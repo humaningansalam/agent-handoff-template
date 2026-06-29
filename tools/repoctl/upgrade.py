@@ -375,7 +375,6 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         "backups": backups,
         "receipt_path": (UPGRADE_STATE_REL / run_id / "receipt.json").as_posix(),
         "verification_commands": [
-            "UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q tests/repoctl tests/maintenance",
             "./scripts/repoctl check --json",
             "./scripts/repoctl meta check --json",
         ],
