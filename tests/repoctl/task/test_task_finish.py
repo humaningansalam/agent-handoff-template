@@ -560,6 +560,64 @@ def test_task_finish_blocks_when_repo_head_changed_after_start_with_clean_worktr
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repo_head_changed_since_start"
+    assert any(action["command"].startswith("./scripts/repoctl task finish T-20260609184046Z --use-committed-diff") for action in payload["next_actions"])
+
+
+def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
+    task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task)
+    verification = tmp_path / "verification.md"
+    verification.write_text("verified after product commit\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, "T-20260609184046Z", query="app change", reviewed="repos/app.py", chosen="repos/app.py")
+    (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["meta_gate"]["status"] == "passed"
+    assert payload["finish_summary"]["task_new_changes"] == 1
+    assert payload["finish_summary"]["committed_range"]["base"]
+    assert payload["finish_summary"]["committed_range"]["head"]
+    receipt = json.loads((tmp_path / payload["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["changed_entries"] == [{"change": "modified", "path": "app.py"}]
+    assert receipt["repo_evidence"]["delta"]["changed_count"] == 1
+
+
+def test_task_finish_committed_diff_blocks_invalid_start_head(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
+    task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task)
+    verification = tmp_path / "verification.md"
+    verification.write_text("verified after product commit\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    baseline = tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json"
+    payload = json.loads(baseline.read_text(encoding="utf-8"))
+    payload["head"] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    baseline.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    record_discovery(tmp_path, "T-20260609184046Z", query="app change", reviewed="repos/app.py", chosen="repos/app.py")
+    (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 2
+
+    error_payload = json.loads(capsys.readouterr().out)
+    assert error_payload["problems"][0]["code"] == "repo_commit_range_unavailable"
+    assert not (tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json").exists()
 
 
 def test_task_finish_blocks_backlog_origin_placeholder_discovery_variants(tmp_path: Path, monkeypatch, capsys) -> None:

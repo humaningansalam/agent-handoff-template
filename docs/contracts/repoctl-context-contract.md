@@ -29,18 +29,27 @@ Hyphenated aliases such as `call-impact` are accepted.
 
 The JSON payload is `repoctl.context.bundle` with `authoritative: false`.
 
-The bundle includes:
+Default `--json` output is the compact agent-facing view. It includes:
 
 ```text
 query.mode
 source_snapshots
 completeness
+groups
+selected_source_refs
+budget
+knowledge_result_count
+bundle_digest
+```
+
+`selected_source_refs` is derived from the full packed evidence, not the display-limited group items. Use it when an agent needs the complete source-ref set for the selected pack.
+
+Use `--full --json` to include raw retrieval/debug fields:
+
+```text
 candidates
 packed_context
 knowledge_results
-groups
-budget
-bundle_digest
 ```
 
 `groups` organizes packed evidence into:
@@ -87,7 +96,7 @@ Markdown output is a view. It must not be ingested as a future Context, Knowledg
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
-The pack is non-authoritative and must be read before editing repo files for repo-scoped tasks when available. It contains:
+The pack is non-authoritative and must be read before editing repo files for repo-scoped tasks when available. Default `--json` output is compact and contains:
 
 ```text
 must_read
@@ -97,6 +106,8 @@ verification
 reviewed_knowledge
 warnings
 ```
+
+Use `--full --json` to include the raw nested Context bundle and debug candidate details.
 
 Legacy JSON groups such as `maybe_relevant` and `verification_hints` remain for compatibility. The agent-facing groups are aliases over the same source references plus direct task Graph evidence.
 

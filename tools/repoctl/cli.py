@@ -9,9 +9,10 @@ from typing import Any
 
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
-from .context import build_context_bundle, render_context_markdown
+from .context import build_context_bundle, compact_context_bundle, render_context_markdown
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .git import repo_commit_range_entries, repo_git_head
 from .graph import build_graph, query_graph
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
@@ -20,7 +21,7 @@ from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
-from .tasks import Problem, REPO_REQUIRED_AREAS, append_task_log, block_task, cancel_task, create_task_file, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, start_task, update_task_discovery, validate_tasks, validate_verification_file
+from .tasks import Problem, REPO_REQUIRED_AREAS, append_task_log, block_task, cancel_task, create_task_file, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, start_task, task_repo_head_at_start, update_task_discovery, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, write_plan
 
 
@@ -49,6 +50,56 @@ def _complete_json_envelope(data: Any) -> None:
         data.setdefault("warnings", [])
         data.setdefault("problems", [])
         data.setdefault("next_actions", _next_actions_for_problems([*data.get("problems", []), *data.get("warnings", [])], data=data.get("data", data)))
+
+
+def _workspace_root_or_cwd() -> Path:
+    try:
+        return find_workspace_root()
+    except Exception:
+        return Path.cwd()
+
+
+def _version_data(root: Path) -> dict[str, Any]:
+    pyproject_version = _read_pyproject_version(root / "pyproject.toml")
+    manifest_version = ""
+    manifest_path = root / "repoctl-upgrade-manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict):
+                manifest_version = str(manifest.get("version") or "")
+        except (OSError, json.JSONDecodeError):
+            manifest_version = ""
+    return {
+        "version": pyproject_version or manifest_version or "unknown",
+        "pyproject_version": pyproject_version,
+        "manifest_version": manifest_version,
+        "workspace_root": root.as_posix(),
+        "manifest_path": "repoctl-upgrade-manifest.json" if manifest_path.exists() else "",
+    }
+
+
+def _read_pyproject_version(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    in_project = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "[project]":
+            in_project = True
+            continue
+        if in_project and stripped.startswith("[") and stripped.endswith("]"):
+            return ""
+        if in_project and stripped.startswith("version"):
+            _key, _sep, value = stripped.partition("=")
+            return value.strip().strip('"')
+    return ""
+
+
+def _wants_json_output(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "json", False)) or str(getattr(args, "format", "")) == "json"
 
 
 def _workspace_output_path(root: Path, output: str, *, code: str) -> tuple[Path | None, Problem | None]:
@@ -110,6 +161,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Initialize repos/ as an independent git repository", command="git -C repos init")
         elif code == "repo_head_changed_since_start":
             add("Restart task baseline after reviewing repo HEAD change", command=f"./scripts/repoctl task start {task_id} --force-dirty --json")
+            add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --verification-file /tmp/{task_id}-verification.md --json")
         elif code == "repo_changes_on_cancel":
             add("Revert or finish repos/ changes before canceling", command="git -C repos status --short")
             add("Explicitly cancel with dirty repo evidence", command=f"./scripts/repoctl task cancel {task_id} --verification-file /tmp/{task_id}-cancel.md --allow-dirty-cancel --json")
@@ -851,6 +903,17 @@ def _command_name(args: argparse.Namespace) -> str:
     return ".".join(parts) if parts else "repoctl"
 
 
+def _error_data(args: argparse.Namespace) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    task_id = str(getattr(args, "task_id", "") or getattr(args, "task", "") or "")
+    repo_id = str(getattr(args, "repo_id", "") or "")
+    if task_id:
+        data["task_id"] = task_id
+    if repo_id:
+        data["repo_id"] = repo_id
+    return data
+
+
 def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tuple[dict[str, Any], list[Problem], list[str]]:
     tasks = load_tasks(root)
     board_path = root / "docs/BOARD.md"
@@ -1454,9 +1517,11 @@ def _repo_target_for_task_command(root: Path, task: Any) -> RepoTarget | None:
     return layout.targets[0] if len(layout.targets) == 1 else None
 
 
-def _finish_meta_gate(root: Path, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     task = resolve_task(root, task_id)
     target = _repo_target_for_task_command(root, task)
+    if use_committed_diff and target is None:
+        raise RepoctlError("committed diff finish requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
     if target is None:
         delta = repo_changes_since_task_start(root, task_id)
         if delta.get("changes"):
@@ -1485,6 +1550,35 @@ def _finish_meta_gate(root: Path, task_id: str) -> tuple[dict[str, Any], dict[st
             "baseline_conflicts": [],
         }
     delta = repo_changes_since_task_start(root, task_id)
+    if use_committed_diff:
+        pending_task_changes = delta.get("changes") or []
+        if pending_task_changes:
+            changed = ", ".join(str(entry[1]) for entry in pending_task_changes[:8])
+            suffix = "" if len(pending_task_changes) <= 8 else f", ... +{len(pending_task_changes) - 8} more"
+            raise RepoctlError(
+                f"committed diff finish requires no uncommitted task changes after the commit: {changed}{suffix}",
+                code="repo_dirty_after_committed_diff",
+                path=str(pending_task_changes[0][1]),
+            )
+        start_head = task_repo_head_at_start(root, task_id)
+        if not start_head:
+            raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
+        current_head, head_state = repo_git_head(root, target)
+        if not head_state.available:
+            raise RepoctlError(f"committed diff finish cannot read repository HEAD: {head_state.reason}", code="repo_git_unavailable", path=head_state.repo_path or target.display_path)
+        committed_changes, range_state = repo_commit_range_entries(root, base=start_head, target=target)
+        if not range_state.available:
+            raise RepoctlError(f"committed diff finish cannot read task commit range: {range_state.reason}", code="repo_commit_range_unavailable", path=range_state.repo_path or target.display_path)
+        delta = {
+            "changes": committed_changes,
+            "baseline_available": True,
+            "baseline_count": int(delta.get("baseline_count") or 0),
+            "current_count": int(delta.get("current_count") or 0),
+            "preexisting_count": int(delta.get("preexisting_count") or 0),
+            "baseline_conflicts": list(delta.get("baseline_conflicts") or []),
+            "repo_git": range_state,
+            "committed_range": {"base": start_head, "head": current_head},
+        }
     task_changes = delta["changes"]
     changed_files, status_problems, meta_summary = meta_status(root, changed=True, changes=task_changes, target=target)
     repo_exists = bool(target and target.root_path.exists()) or (root / "repos").exists()
@@ -1519,6 +1613,29 @@ def _finish_meta_gate(root: Path, task_id: str) -> tuple[dict[str, Any], dict[st
             "summary": meta_summary.get("summary", {}),
         }
     return meta_gate, delta
+
+
+def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    repo_git = delta.get("repo_git")
+    task_new_files = [str(entry[1]) for entry in delta.get("changes", [])]
+    summary = {
+        "meta_gate_status": str(meta_gate.get("status") or "unknown"),
+        "meta_gate_reason": str(meta_gate.get("reason") or ""),
+        "task_new_changes": len(task_new_files),
+        "task_new_files": task_new_files[:20],
+        "task_new_files_truncated": len(task_new_files) > 20,
+        "current_dirty_files": int(delta.get("current_count") or 0),
+        "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
+        "baseline_available": bool(delta.get("baseline_available")),
+        "baseline_conflicts": list(delta.get("baseline_conflicts") or []),
+        "repo_git_available": bool(repo_git and repo_git.available),
+        "repo_git_reason": str(repo_git.reason) if repo_git and not repo_git.available else "",
+        "attention_required": bool(delta.get("baseline_conflicts")) or str(meta_gate.get("status") or "") not in {"passed", "skipped"},
+    }
+    committed_range = delta.get("committed_range")
+    if isinstance(committed_range, dict) and committed_range:
+        summary["committed_range"] = committed_range
+    return summary
 
 
 def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) -> dict[str, Any]:
@@ -1634,9 +1751,10 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     verification_file = _verification_file_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, suffix="verification", command="finish")
     validate_verification_file(root, verification_file)
     with repoctl_lock(root):
-        meta_gate, delta = _finish_meta_gate(root, args.task_id)
-        result = finish_task(root, args.task_id, verification_file=verification_file, meta_gate=meta_gate, repo_delta=delta)
+        meta_gate, delta = _finish_meta_gate(root, args.task_id, use_committed_diff=args.use_committed_diff)
+        result = finish_task(root, args.task_id, verification_file=verification_file, meta_gate=meta_gate, repo_delta=delta, allow_head_changed=args.use_committed_diff)
         _write_task_result(root, result)
+    finish_summary = _finish_summary(meta_gate, delta)
     data = {
         "task_id": args.task_id,
         "status": "done",
@@ -1645,6 +1763,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "archived": result["archived"],
         "truncated": result["truncated"],
         "meta_gate": meta_gate,
+        "finish_summary": finish_summary,
         "completion_receipt": result["receipt_path"].relative_to(root).as_posix(),
     }
     payload = {
@@ -1659,6 +1778,13 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         _json(payload)
     else:
         print(f"Finished: {args.task_id}")
+        print(
+            "Repo changes: "
+            f"task_new={finish_summary['task_new_changes']} "
+            f"preexisting_dirty={finish_summary['preexisting_dirty_files']} "
+            f"current_dirty={finish_summary['current_dirty_files']} "
+            f"meta_gate={finish_summary['meta_gate_status']}"
+        )
         if result["archived"]:
             print(f"Archived: {result['new_path']}")
     return 0
@@ -2045,10 +2171,13 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
     bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens, explain=args.explain, mode=args.mode or "")
+    bundle_data = None
+    if bundle is not None:
+        bundle_data = bundle.to_dict() if args.full else compact_context_bundle(bundle)
     payload = {
         "ok": bundle is not None and not _has_errors(problems),
         "command": "context query",
-        "data": {"bundle": bundle.to_dict() if bundle is not None else None, **meta},
+        "data": {"bundle": bundle_data, **meta},
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
@@ -2228,10 +2357,11 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
     data, problems, meta = build_task_context_pack(root, target=target, task_id=args.task, budget_tokens=args.budget_tokens, explain=args.explain)
+    payload_data = {**data, **meta} if args.full else {**compact_task_context_pack(data), **meta}
     payload = {
         "ok": not _has_errors(problems),
         "command": "context pack",
-        "data": {**data, **meta},
+        "data": payload_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": data.get("warnings", []),
     }
@@ -2246,7 +2376,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
             if data and output_format == "json":
                 payload["data"]["artifact"] = {
                     "path": output.relative_to(root).as_posix(),
-                    "pack_digest": data.get("pack_digest", ""),
+                    "pack_digest": payload["data"].get("pack_digest", ""),
                 }
             _complete_json_envelope(payload)
             if output_format == "markdown":
@@ -2409,10 +2539,13 @@ def cmd_context_pack_benchmark_compare(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    source_modes = [bool(args.source), bool(args.from_receipt), bool(args.from_pack)]
+    from_task = getattr(args, "from_task", "")
+    source_modes = [bool(args.source), bool(args.from_receipt), bool(args.from_pack), bool(from_task)]
     if sum(1 for enabled in source_modes if enabled) != 1:
         data: dict[str, Any] = {}
-        problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, or --from-pack")]
+        problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, --from-pack, or --from-task")]
+    elif from_task:
+        data, problems = build_knowledge_candidate_from_receipt(root, task_id=from_task, repo_id=args.repo_id, kind=args.kind)
     elif args.from_receipt:
         data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind)
     elif args.from_pack:
@@ -2421,7 +2554,7 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
         data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge candidate build",
+        "command": "knowledge candidate suggest" if getattr(args, "knowledge_candidate_command", "") == "suggest" else "knowledge candidate build",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -3149,6 +3282,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.add_argument("task_id")
     task_finish.add_argument("--verification-file")
     task_finish.add_argument("--use-task-verification", action="store_true", help="use the current ## Verification section as the finish evidence")
+    task_finish.add_argument("--use-committed-diff", action="store_true", help="validate recorded task-start HEAD through current HEAD when product changes were committed before finish")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block")
@@ -3298,6 +3432,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_query.add_argument("--mode", default="")
     context_query.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     context_query.add_argument("--explain", action="store_true")
+    context_query.add_argument("--full", action="store_true", help="include raw candidates and full packed context in JSON output")
     context_query.add_argument("--json", action="store_true")
     context_query.set_defaults(func=cmd_context_query)
     context_benchmark = context_sub.add_parser("benchmark")
@@ -3342,6 +3477,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack.add_argument("--explain", action="store_true")
     context_pack.add_argument("--output")
     context_pack.add_argument("--format", choices=["text", "json", "markdown"], default="text")
+    context_pack.add_argument("--full", action="store_true", help="include raw bundle/candidates in JSON output")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
     context_pack_compare = context_sub.add_parser("pack-compare")
@@ -3381,10 +3517,17 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_build.add_argument("--source")
     knowledge_candidate_build.add_argument("--from-receipt")
     knowledge_candidate_build.add_argument("--from-pack")
+    knowledge_candidate_build.add_argument("--from-task", dest="from_task")
     knowledge_candidate_build.add_argument("--repo-id", required=True)
     knowledge_candidate_build.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
     knowledge_candidate_build.add_argument("--json", action="store_true")
-    knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build)
+    knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build, knowledge_candidate_command="build")
+    knowledge_candidate_suggest = knowledge_candidate_sub.add_parser("suggest")
+    knowledge_candidate_suggest.add_argument("--from-task", dest="from_task", required=True)
+    knowledge_candidate_suggest.add_argument("--repo-id", required=True)
+    knowledge_candidate_suggest.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
+    knowledge_candidate_suggest.add_argument("--json", action="store_true")
+    knowledge_candidate_suggest.set_defaults(func=cmd_knowledge_candidate_build, source="", from_receipt="", from_pack="", knowledge_candidate_command="suggest")
     knowledge_candidate_list = knowledge_candidate_sub.add_parser("list")
     knowledge_candidate_list.add_argument("--repo-id", required=True)
     knowledge_candidate_list.add_argument("--with-checks", action="store_true")
@@ -3496,6 +3639,30 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if raw_argv in (["--version"], ["version"], ["version", "--json"]):
+        data = _version_data(_workspace_root_or_cwd())
+        if "--json" in raw_argv:
+            _json({"ok": True, "command": "version", "data": data, "problems": [], "warnings": []})
+        else:
+            print(data["version"])
+        return 0
+    if raw_argv == ["help"]:
+        parser.print_help()
+        return 0
+    if raw_argv and raw_argv[0] == "llmwiki":
+        raw_argv = ["knowledge", "render", *raw_argv[1:]]
+    if len(raw_argv) >= 2 and raw_argv[:2] == ["upgrade", "status"]:
+        data = {
+            **_version_data(_workspace_root_or_cwd()),
+            "status": "source_required_for_upgrade_diff",
+            "next_command": "./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --json",
+        }
+        if "--json" in raw_argv:
+            _json({"ok": True, "command": "upgrade status", "data": data, "problems": [], "warnings": []})
+        else:
+            print(f"repoctl upgrade status version={data['version']} status={data['status']}")
+            print(data["next_command"])
+        return 0
     try:
         args = parser.parse_args(raw_argv)
     except RepoctlArgparseError as error:
@@ -3507,17 +3674,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except RepoctlError as error:
-        if getattr(args, "json", False):
+        if _wants_json_output(args):
             problem = {"severity": "error", "code": error.code, "message": str(error)}
             if error.path:
                 problem["path"] = error.path
-            _json({"ok": False, "command": _command_name(args), "data": {"task_id": getattr(args, "task_id", "")}, "problems": [problem], "warnings": []})
+            _json({"ok": False, "command": _command_name(args), "data": _error_data(args), "problems": [problem], "warnings": []})
         else:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2
     except OSError as error:
         message = str(error)
-        if getattr(args, "json", False):
+        if _wants_json_output(args):
             _json({"ok": False, "command": _command_name(args), "data": {}, "problems": [{"severity": "error", "code": "io_error", "message": message}], "warnings": []})
         else:
             print(f"repoctl: {message}", file=sys.stderr)

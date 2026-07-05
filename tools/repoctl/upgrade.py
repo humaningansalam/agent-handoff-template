@@ -117,6 +117,19 @@ def _is_preserved(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
+def _preserve_seed_paths(source_root: Path, manifest: dict[str, Any]) -> list[str]:
+    seeds: list[str] = []
+    for value in manifest["preserve_paths"]:
+        if any(char in value for char in "*?["):
+            continue
+        rel = _safe_rel(value)
+        if Path(rel).name != ".gitkeep":
+            continue
+        if (source_root / rel).is_file():
+            seeds.append(rel)
+    return sorted(set(seeds))
+
+
 def _source_root(source: str | Path) -> Path:
     root = Path(source).expanduser().resolve()
     if not root.is_dir():
@@ -212,6 +225,24 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
                 source_hash="",
                 target_hash=_hash_bytes(target_bytes),
                 size=len(target_bytes),
+            )
+        )
+    for rel in _preserve_seed_paths(source_root, manifest):
+        source_path = _assert_contained_path(source_root, rel, code="invalid_upgrade_source")
+        target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
+        if target_path.exists():
+            continue
+        if not source_path.is_file():
+            conflicts.append({"code": "managed_source_missing", "path": rel, "message": "preserve seed source file is missing"})
+            continue
+        source_bytes = source_path.read_bytes()
+        operations.append(
+            UpgradeOperation(
+                path=rel,
+                action="seed_preserve",
+                source_hash=_hash_bytes(source_bytes),
+                target_hash="",
+                size=len(source_bytes),
             )
         )
     return _plan_payload(root, source_root, manifest, operations, conflicts)
@@ -315,12 +346,17 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
         if sorted(plan.get(key) or []) != manifest[key]:
             raise RepoctlError(f"upgrade plan {key} does not match source manifest", code="invalid_upgrade_plan")
     managed = set(manifest["replace_paths"]) | set(manifest["create_paths"]) | set(manifest["remove_paths"])
+    preserve_seeds = set(_preserve_seed_paths(source_root, manifest))
     preserved = manifest["preserve_paths"]
     for operation in plan["operations"]:
         rel = _safe_rel(str(operation.get("path", "")))
-        if rel not in managed:
+        action = str(operation.get("action") or "")
+        if action == "seed_preserve":
+            if rel not in preserve_seeds:
+                raise RepoctlError(f"upgrade plan contains unmanaged preserve seed path: {rel}", code="invalid_upgrade_plan", path=rel)
+        elif rel not in managed:
             raise RepoctlError(f"upgrade plan contains unmanaged path: {rel}", code="invalid_upgrade_plan", path=rel)
-        if _is_preserved(rel, preserved):
+        if _is_preserved(rel, preserved) and action != "seed_preserve":
             raise RepoctlError(f"upgrade plan attempts to modify preserved path: {rel}", code="invalid_upgrade_plan", path=rel)
     expected = plan_upgrade(root, source=source_root)
     if expected.get("conflicts"):

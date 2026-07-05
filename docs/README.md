@@ -26,14 +26,18 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Show task: `./scripts/repoctl task show T-... --json`
 - Append log: `./scripts/repoctl task log append T-... "message" --json`
 - Finish task: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
+- Finish after an accidental product commit: `./scripts/repoctl task finish T-... --use-committed-diff --verification-file /tmp/T-...-verification.md --json`
+- Show version: `./scripts/repoctl --version` or `./scripts/repoctl version --json`
 - Check workspace: `./scripts/repoctl check --json`
 - Check metadata: `./scripts/repoctl meta check --json`
 - Query Graph: `./scripts/repoctl graph query --repo-id main --file path --json`
-- Query Context: `./scripts/repoctl context query "question" --repo-id main --json`
-- Pack task context: `./scripts/repoctl context pack --task T-... --repo-id main --json`
+- Query Context compact JSON: `./scripts/repoctl context query "question" --repo-id main --json`
+- Query Context raw/debug JSON: `./scripts/repoctl context query "question" --repo-id main --full --json`
+- Pack task context compact JSON: `./scripts/repoctl context pack --task T-... --repo-id main --json`
 - Build knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
+- Suggest knowledge candidate from a finished task receipt: `./scripts/repoctl knowledge candidate suggest --from-task T-... --repo-id main --kind invariant --json`
 - Approve knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --reviewed-by <label> --note-file /tmp/review.md --json`
-- Render llmwiki view: `./scripts/repoctl knowledge render --repo-id main --json`
+- Render llmwiki view: `./scripts/repoctl knowledge render --repo-id main --json` or `./scripts/repoctl llmwiki --repo-id main --json`
 - Check llmwiki view: `./scripts/repoctl knowledge render --repo-id main --check --json`
 
 ## Boundaries

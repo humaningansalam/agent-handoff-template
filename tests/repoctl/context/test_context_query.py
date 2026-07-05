@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.context import compact_context_bundle
+from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
 from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
 from tests.repoctl.context_test_helpers import (
     _write_completion_receipt,
@@ -15,6 +17,34 @@ from tests.repoctl.context_test_helpers import (
     write_repometa,
     write_workspace,
 )
+
+
+def test_compact_context_keeps_all_selected_refs_beyond_group_cap() -> None:
+    packed = [
+        ContextCandidate(
+            source_ref=ContextSourceRef(kind="document", path=f"docs/contracts/source-{index}.md", section="Decision", line_start=1, line_end=2, content_sha256=f"sha256:{index}"),
+            text=f"source {index}",
+            score=100.0 - index,
+            score_breakdown={"test": 1.0},
+        )
+        for index in range(10)
+    ]
+    bundle = ContextBundle(
+        repository={"id": "main", "path": "repos", "identity_source": "reserved"},
+        query={"text": "test"},
+        source_snapshots={},
+        completeness={},
+        candidates=packed,
+        packed_context=packed,
+        budget={"requested_tokens": 1000, "estimated_tokens": 10},
+        groups={"must_read": [candidate.to_dict() for candidate in packed]},
+    ).with_digest()
+
+    compact = compact_context_bundle(bundle, max_group_items=2)
+
+    assert len(compact["groups"]["must_read"]) == 2
+    assert len(compact["selected_source_refs"]) == 10
+    assert compact["budget"]["group_counts"]["must_read"] == 10
 
 
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -29,20 +59,29 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert bundle["authoritative"] is False
     assert bundle["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
     assert bundle["source_snapshots"]["graph_digest"].startswith("sha256:")
-    refs = [candidate["source_ref"] for candidate in bundle["packed_context"]]
+    assert bundle["view"] == "compact"
+    refs = [candidate["source_ref"] for candidate in bundle["selected_source_refs"]]
     assert any(ref["path"] == "docs/contracts/repoctl-graph-contract.md" and ref.get("section") == "repoctl Graph contract" for ref in refs)
     assert all(ref["content_sha256"].startswith("sha256:") for ref in refs)
     assert payload["warnings"][0]["code"] == "context_not_authoritative"
 
 
 def test_context_query_prioritizes_product_docs_for_project_queries(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_context_workspace(tmp_path, monkeypatch)
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "README.md").write_text("# Product Architecture\n\nRuntime product architecture and current decisions live here.\n", encoding="utf-8")
+    (repo / "package.json").write_text('{"name": "product-runtime", "scripts": {"test": "pytest"}}\n', encoding="utf-8")
 
     assert main(["context", "query", "current project architecture and recent decisions", "--repo-id", "main", "--budget-tokens", "1200", "--json"]) == 0
 
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    packed_paths = [item["source_ref"]["path"] for item in bundle["packed_context"]]
+    packed_paths = [item["source_ref"]["path"] for item in bundle["selected_source_refs"]]
+    assert "repos/README.md" in packed_paths
+    assert "repos/package.json" in packed_paths
     assert "docs/PRD.md" in packed_paths
+    assert "candidates" not in bundle
+
+    assert main(["context", "query", "current project architecture and recent decisions", "--repo-id", "main", "--budget-tokens", "1200", "--full", "--json"]) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     prd_candidate = next(item for item in bundle["candidates"] if item["source_ref"]["path"] == "docs/PRD.md")
     assert "product/recent evidence priority" in prd_candidate["selection_reasons"]
 
@@ -242,7 +281,7 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
 
     record_id = _approve_knowledge_source(capsys, build_args=["--kind", "decision"])["data"]["record"]["id"]
 
-    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--explain", "--json"]) == 0
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--explain", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     bundle = payload["data"]["bundle"]
@@ -258,7 +297,7 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
 
-    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--full", "--json"]) == 0
     stale_payload = json.loads(capsys.readouterr().out)
     stale_bundle = stale_payload["data"]["bundle"]
     assert stale_bundle["knowledge_results"] == []

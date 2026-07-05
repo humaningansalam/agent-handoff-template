@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
 from tests.repoctl.context_test_helpers import (
+    _setup_context_multirepo_workspace,
     _setup_context_workspace,
     _write_context_pack_task,
     _write_pack_benchmark_task,
@@ -32,6 +33,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert artifact == payload
     assert payload["command"] == "context pack"
     assert data["authoritative"] is False
+    assert data["view"] == "compact"
     assert data["pack_digest"].startswith("sha256:")
     assert data["artifact"] == {
         "path": ".repoctl-state/context-pack/T-20260622010101Z.json",
@@ -40,18 +42,19 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert data["seed"]["source"] == "task_fields_for_retrieval_only"
     assert any(item["source_ref"]["path"] == "docs/contracts/repoctl-context-contract.md" for item in data["groups"]["must_read"])
     assert data["groups"]["reviewed_knowledge"] == []
-    assert data["bundle"]["budget"]["estimated_tokens"] <= 1200
     assert data["metrics"]["group_counts"]["must_read"] == len(data["groups"]["must_read"])
     assert data["metrics"]["group_counts"]["reviewed_knowledge"] == 0
     assert data["metrics"]["unique_must_read_source_count"] >= 1
-    assert data["metrics"]["estimated_tokens"] == data["bundle"]["budget"]["estimated_tokens"]
     assert data["metrics"]["requested_tokens"] == 1200
     assert any(ref["path"] == "docs/contracts/repoctl-context-contract.md" for ref in data["metrics"]["must_read_source_refs"])
+    assert "bundle" not in data
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
 def test_context_pack_uses_startup_fallback_without_discovery(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_context_workspace(tmp_path, monkeypatch)
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "README.md").write_text("# Product Startup\n\nProduct-specific startup context.\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname = \"product-startup\"\n", encoding="utf-8")
     task_id = "T-20260622010109Z"
     task_path = tmp_path / "docs/tasks" / f"{task_id}--fallback.md"
     task_path.write_text(
@@ -93,8 +96,60 @@ Use project context without structured discovery yet.
     payload = json.loads(capsys.readouterr().out)
     must_read_paths = {item["source_ref"]["path"] for item in payload["data"]["groups"]["must_read"]}
     warning_codes = {warning["code"] for warning in payload["warnings"]}
+    assert "repos/README.md" in must_read_paths
+    assert "repos/pyproject.toml" in must_read_paths
     assert "docs/PRD.md" in must_read_paths
     assert "context_pack_no_structured_discovery" in warning_codes
+
+
+def test_context_pack_startup_fallback_uses_selected_collection_repo(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_context_multirepo_workspace(tmp_path, monkeypatch)
+    (tmp_path / "repos/web/README.md").write_text("# Web Product\n\nSelected web product context.\n", encoding="utf-8")
+    (tmp_path / "repos/web/package.json").write_text('{"name": "web-product"}\n', encoding="utf-8")
+    (tmp_path / "repos/api/README.md").write_text("# API Product\n\nWrong repo context.\n", encoding="utf-8")
+    task_id = "T-20260622010110Z"
+    (tmp_path / "docs/tasks" / f"{task_id}--web-fallback.md").write_text(
+        f"""---
+id: {task_id}
+title: "Use web startup fallback"
+status: doing
+owner: "codex"
+repo_ref: ""
+repo_id: "web"
+created: 20260622T010110Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# {task_id} - Use web startup fallback
+
+## Context Docs
+
+## Discovery
+
+## Goal
+
+Use selected web repository startup context.
+
+## Handoff
+
+- Next exact step: read startup evidence.
+- First file to open: `repos/web/README.md`
+- First command to run: `./scripts/repoctl context pack --task {task_id} --repo-id web --json`
+- Done when: web startup evidence is visible.
+""",
+        encoding="utf-8",
+    )
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "web", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    must_read_paths = {item["source_ref"]["path"] for item in payload["data"]["groups"]["must_read"]}
+    assert "repos/web/README.md" in must_read_paths
+    assert "repos/web/package.json" in must_read_paths
+    assert "repos/api/README.md" not in must_read_paths
+    assert "repos/README.md" not in must_read_paths
 
 
 def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -152,7 +207,7 @@ def test_context_pack_warns_on_incomplete_graph_code_facts(tmp_path: Path, monke
         chosen="repos/broken.py",
         first_command="./scripts/repoctl context pack --task T-20260622010102Z --repo-id main --json",
     )
-    assert main(["context", "pack", "--task", "T-20260622010102Z", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "pack", "--task", "T-20260622010102Z", "--repo-id", "main", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["bundle"]["completeness"]["graph_completeness"]["parse_error_count"] == 1
@@ -230,7 +285,7 @@ def test_context_pack_groups_reviewed_knowledge(tmp_path: Path, monkeypatch, cap
     assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
 
-    assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--explain", "--json"]) == 0
+    assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--explain", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     reviewed = payload["data"]["groups"]["reviewed_knowledge"]
@@ -263,7 +318,7 @@ def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> 
     baseline = tmp_path / ".repoctl-state/context-pack/baseline.json"
     candidate = tmp_path / ".repoctl-state/context-pack/candidate.json"
 
-    assert main(["context", "pack", "--task", "T-20260622030303Z", "--repo-id", "main", "--explain", "--output", baseline.as_posix(), "--json"]) == 0
+    assert main(["context", "pack", "--task", "T-20260622030303Z", "--repo-id", "main", "--explain", "--full", "--output", baseline.as_posix(), "--json"]) == 0
     capsys.readouterr()
     candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
 

@@ -103,6 +103,59 @@ def _parse_name_status(line: str) -> list[ChangedEntry]:
     return []
 
 
+def _parse_name_status_z(data: bytes) -> list[ChangedEntry]:
+    tokens = [token.decode("utf-8", errors="surrogateescape") for token in data.split(b"\0") if token]
+    entries: list[ChangedEntry] = []
+    index = 0
+    while index < len(tokens):
+        code = tokens[index]
+        index += 1
+        if not code:
+            continue
+        change_type = code[0]
+        if change_type in {"R", "C"}:
+            if index + 1 >= len(tokens):
+                break
+            old_path = normalize_repo_path(tokens[index])
+            path = normalize_repo_path(tokens[index + 1])
+            index += 2
+            if path:
+                entries.append(("renamed" if change_type == "R" else "copied", path, old_path))
+            continue
+        if index >= len(tokens):
+            break
+        path = normalize_repo_path(tokens[index])
+        index += 1
+        if path:
+            mapping = {"A": "added", "M": "modified", "D": "deleted", "T": "modified"}
+            entries.append((mapping.get(change_type, "modified"), path, ""))
+    return entries
+
+
+def repo_commit_range_entries(root: Path, *, base: str, head: str = "HEAD", target: RepoTarget | None = None) -> tuple[list[ChangedEntry], RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    if not state.available:
+        return [], state
+    assert selected is not None
+    repo = selected.root_path
+    for revision in (base, head):
+        result = subprocess.run(["git", "rev-parse", "--verify", f"{revision}^{{commit}}"], cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if result.returncode != 0:
+            return [], RepoGitState(False, f"{selected.display_path}/ cannot resolve commit: {revision}", selected.id, selected.display_path)
+    result = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--name-status", "-z", "--find-renames", f"{base}..{head}"], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    if result.returncode != 0:
+        return [], RepoGitState(False, f"{selected.display_path}/ cannot diff commit range: {base}..{head}", selected.id, selected.display_path)
+    data = result.stdout
+    seen: set[ChangedEntry] = set()
+    changes: list[ChangedEntry] = []
+    for item in _parse_name_status_z(data):
+        if item not in seen:
+            seen.add(item)
+            changes.append(item)
+    return changes, state
+
+
 def repo_changed_entries(root: Path, target: RepoTarget | None = None) -> tuple[list[ChangedEntry], RepoGitState]:
     selected = _target(root, target)
     state = repo_git_state(root, selected)

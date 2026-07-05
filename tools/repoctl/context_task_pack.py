@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .context import build_context_bundle
-from .context_chunks import chunk_markdown_file
+from .context_chunks import chunk_markdown_file, chunk_text_source
 from .context_model import ContextBundle, ContextCandidate
 from .context_pack import estimate_tokens
 from .graph_model import digest_data
@@ -91,7 +91,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     problems.extend(task_graph_problems)
     mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
     problems.extend(mandatory_problems)
-    fallback_candidates, fallback_problems = _startup_fallback_candidates(root, task)
+    fallback_candidates, fallback_problems = _startup_fallback_candidates(root, target=target, task=task)
     problems.extend(fallback_problems)
     packed_context = _dedupe_candidates([*mandatory_candidates, *fallback_candidates, *(bundle.packed_context if bundle is not None else [])])
     groups = _group_candidates(packed_context)
@@ -181,6 +181,67 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def compact_task_context_pack(data: dict[str, Any], *, max_group_items: int = 12, excerpt_chars: int = 360) -> dict[str, Any]:
+    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    canonical_groups = ("must_read", "likely_change", "impact", "verification", "reviewed_knowledge", "warnings")
+    compact_groups = {
+        group: [_compact_pack_item(item, excerpt_chars=excerpt_chars) for item in (groups.get(group) or [])[:max_group_items]]
+        for group in canonical_groups
+    }
+    group_counts = {name: len(items) for name, items in sorted(groups.items()) if isinstance(items, list)}
+    compact = {
+        "schema": data.get("schema", "repoctl.context.task_pack"),
+        "schema_version": data.get("schema_version", 1),
+        "view": "compact",
+        "authoritative": data.get("authoritative", False),
+        "task": data.get("task", {}),
+        "seed": data.get("seed", {}),
+        "groups": compact_groups,
+        "metrics": {
+            **(data.get("metrics") if isinstance(data.get("metrics"), dict) else {}),
+            "group_counts": group_counts,
+            "omitted_group_items": {
+                name: max(0, count - len(compact_groups.get(name, [])))
+                for name, count in group_counts.items()
+            },
+        },
+        "warnings": data.get("warnings", []),
+        "source_pack_digest": data.get("pack_digest", ""),
+    }
+    compact["pack_digest"] = digest_data(compact)
+    return compact
+
+
+def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in ("status", "record_id", "code", "selection_reason"):
+        if item.get(key):
+            compact[key] = item[key]
+    ref = item.get("source_ref")
+    if isinstance(ref, dict):
+        compact["source_ref"] = ref
+    record = item.get("record")
+    if isinstance(record, dict):
+        compact["record"] = {key: record.get(key) for key in ("id", "kind", "status", "title") if record.get(key)}
+    score_breakdown = item.get("score_breakdown")
+    if isinstance(score_breakdown, dict) and score_breakdown:
+        compact["score_breakdown"] = score_breakdown
+    excerpt = item.get("excerpt") or item.get("claim")
+    if excerpt:
+        compact["excerpt"] = _truncate_text(str(excerpt), excerpt_chars)
+    graph_path = item.get("graph_path")
+    if isinstance(graph_path, list) and graph_path:
+        compact["graph_path_count"] = len(graph_path)
+    return compact
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    compact = " ".join(value.strip().split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)].rstrip() + "..."
 
 
 def compare_task_context_packs(
@@ -385,24 +446,23 @@ def _context_doc_paths(task: Task) -> list[str]:
     return paths
 
 
-STARTUP_FALLBACK_DOCS = (
-    "docs/PRD.md",
-    "README.md",
-    "docs/README.md",
-)
-
-
-def _startup_fallback_candidates(root: Path, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
+def _startup_fallback_candidates(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
     candidates: list[ContextCandidate] = []
     problems: list[Problem] = []
     if _context_doc_paths(task):
         return candidates, problems
-    for rel_path in STARTUP_FALLBACK_DOCS:
+    for rel_path, score in _startup_fallback_docs(task, target=target):
         path = root / rel_path
         if not path.is_file():
             continue
         try:
-            chunks = chunk_markdown_file(root, path)
+            if _is_product_manifest_path(rel_path):
+                chunks = [chunk_text_source(root, rel_path, path.read_text(encoding="utf-8"), kind="product_manifest", section=path.name)]
+            else:
+                chunks = chunk_markdown_file(root, path)
+        except UnicodeDecodeError as exc:
+            problems.append(Problem("warning", "context_pack_startup_doc_non_utf8", str(exc), rel_path))
+            continue
         except OSError as exc:
             problems.append(Problem("warning", "context_pack_startup_doc_unreadable", str(exc), rel_path))
             continue
@@ -411,13 +471,58 @@ def _startup_fallback_candidates(root: Path, task: Task) -> tuple[list[ContextCa
                 ContextCandidate(
                     source_ref=chunk.source_ref,
                     text=chunk.text,
-                    score=75.0,
+                    score=score,
                     score_breakdown={"startup_fallback": 1.0},
                     selection_reasons=["Startup fallback source before structured Discovery is available"],
                     graph_path=[],
                 )
             )
     return candidates, problems
+
+
+def _startup_fallback_docs(task: Task, *, target: RepoTarget) -> list[tuple[str, float]]:
+    repo_id = str(task.frontmatter.get("repo_id") or "").strip()
+    area = str(task.frontmatter.get("area") or "").strip()
+    repo_scoped = bool(repo_id) or area in {"repo", "frontend", "backend", "fullstack", "mobile", "infra", "test", "tests"}
+    repo_prefix = target.display_path.rstrip("/")
+    if repo_scoped:
+        docs = [
+            (f"{repo_prefix}/README.md", 95.0),
+            (f"{repo_prefix}/package.json", 92.0),
+            (f"{repo_prefix}/pyproject.toml", 92.0),
+            (f"{repo_prefix}/pubspec.yaml", 92.0),
+            (f"{repo_prefix}/Cargo.toml", 92.0),
+            (f"{repo_prefix}/go.mod", 92.0),
+            (f"{repo_prefix}/docs/README.md", 88.0),
+            (f"{repo_prefix}/docs/PRD.md", 85.0),
+            ("docs/PRD.md", 78.0),
+            ("AGENTS.md", 70.0),
+            ("README.md", 55.0),
+            ("docs/README.md", 50.0),
+        ]
+    else:
+        docs = [
+            ("docs/PRD.md", 80.0),
+            ("AGENTS.md", 75.0),
+            ("README.md", 70.0),
+            ("docs/README.md", 65.0),
+        ]
+    seen: set[str] = set()
+    unique: list[tuple[str, float]] = []
+    for rel_path, score in docs:
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        unique.append((rel_path, score))
+    return unique
+
+
+def _is_product_manifest_path(path: str) -> bool:
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return name in {"package.json", "pyproject.toml", "pubspec.yaml", "cargo.toml", "go.mod", "requirements.txt"} or (
+        name.startswith("requirements-") and name.endswith(".txt")
+    )
 
 
 IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
@@ -899,11 +1004,26 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
         item = candidate.to_dict()
         if ref.kind in {"completion_receipt", "task_artifact"} or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
             groups["verification_hints"].append(item)
-        elif ref.path in {"AGENTS.md", "README.md", "docs/README.md", "docs/PRD.md"} or ref.path.startswith("docs/contracts/") or ref.path.startswith("docs/adr/"):
+        elif _must_read_ref_path(ref.path):
             groups["must_read"].append(item)
         else:
             groups["maybe_relevant"].append(item)
     return groups
+
+
+def _must_read_ref_path(path: str) -> bool:
+    lowered = path.lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return (
+        path in {"AGENTS.md", "README.md", "docs/README.md", "docs/PRD.md"}
+        or path.startswith("docs/contracts/")
+        or path.startswith("docs/adr/")
+        or lowered == "repos/readme.md"
+        or lowered.startswith("repos/") and name in {"package.json", "pyproject.toml", "pubspec.yaml", "cargo.toml", "go.mod", "requirements.txt"}
+        or lowered.startswith("repos/") and name.startswith("requirements-") and name.endswith(".txt")
+        or lowered.startswith("repos/docs/")
+        or lowered.startswith("repos/") and lowered.endswith("/readme.md")
+    )
 
 
 def _looks_like_test_or_workflow_ref(path: str) -> bool:
@@ -1035,7 +1155,7 @@ def _pack_metrics(groups: dict[str, list[dict[str, Any]]], bundle: Any) -> dict[
         for name, items in sorted(groups.items())
     }
     must_read_refs = _source_ref_keys(groups.get("must_read", []))
-    verification_refs = _source_ref_keys(groups.get("verification_hints", []))
+    verification_refs = _source_ref_keys(groups.get("verification", []) or groups.get("verification_hints", []))
     budget = bundle.budget if bundle is not None else {}
     return {
         "group_counts": group_counts,

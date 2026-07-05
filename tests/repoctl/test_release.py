@@ -90,6 +90,10 @@ def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
 
     assert (package_root / "tools/repoctl/repositories.py").is_file()
+    assert (package_root / "docs/adr/.gitkeep").is_file()
+    assert (package_root / "docs/archive/tasks/.gitkeep").is_file()
+    assert (package_root / "docs/knowledge/events/.gitkeep").is_file()
+    assert (package_root / "docs/knowledge/records/.gitkeep").is_file()
     (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
     (package_root / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
     result = subprocess.run(

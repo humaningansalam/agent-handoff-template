@@ -363,6 +363,51 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert "kind `task_artifact`" in review
 
 
+def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    task_body = task_text("T-20260609184047Z", status="todo").replace("State the outcome in one clear sentence.", "Document the stable task-pack invariant.")
+    add_task(tmp_path, "T-20260609184047Z--task-pack-invariant.md", task_body)
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184047Z--task-pack-invariant.md\n\n## Backlog\n", encoding="utf-8")
+    verification = tmp_path / "verification.md"
+    verification.write_text("- Command: pytest tests/repoctl/knowledge/test_knowledge_candidates.py\n- Result: pass\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184047Z", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", "T-20260609184047Z", "--verification-file", verification.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    candidate = payload["data"]["candidate"]
+    assert payload["command"] == "knowledge candidate suggest"
+    assert candidate["authoritative"] is False
+    assert candidate["status"] == "candidate"
+    assert candidate["review"]["status"] == "pending"
+    assert candidate["derived_from"]["kind"] == "completion_receipt"
+    assert candidate["derived_from"]["task_id"] == "T-20260609184047Z"
+    assert candidate["source_refs"][0]["kind"] == "completion_receipt"
+    assert not (tmp_path / "docs/knowledge/records").exists()
+
+
+def test_knowledge_candidate_suggest_from_task_requires_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184048Z", "--repo-id", "main", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "knowledge candidate suggest"
+    assert payload["problems"][0]["code"] == "knowledge_candidate_receipt_missing"
+
+
 def test_knowledge_candidate_build_requires_one_source_mode(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 

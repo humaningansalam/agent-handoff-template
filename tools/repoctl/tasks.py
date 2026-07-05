@@ -291,7 +291,7 @@ def resolve_live_task(root: Path, task_id: str) -> Task:
     task_id = normalize_task_id(task_id)
     matches = sorted((root / "docs/tasks").glob(f"{task_id}--*.md"))
     if not matches:
-        raise RepoctlError(f"task not found: {task_id}")
+        raise RepoctlError(f"task not found: {task_id}", code="task_not_found")
     if len(matches) > 1:
         raise RepoctlError(f"ambiguous task id: {task_id}")
     return load_task(matches[0], root)
@@ -301,7 +301,7 @@ def resolve_task(root: Path, task_id: str) -> Task:
     task_id = normalize_task_id(task_id)
     matches = sorted((root / "docs/tasks").glob(f"{task_id}--*.md")) + sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md"))
     if not matches:
-        raise RepoctlError(f"task not found: {task_id}")
+        raise RepoctlError(f"task not found: {task_id}", code="task_not_found")
     if len(matches) > 1:
         raise RepoctlError(f"ambiguous task id: {task_id}")
     return load_task(matches[0], root)
@@ -1051,7 +1051,7 @@ def validate_verification_file(root: Path, verification_file: Path) -> None:
         raise RepoctlError(f"verification file cannot be read: {verification_file}", code="missing_verification_file", path=verification_file.as_posix())
 
 
-def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None) -> dict[str, Any]:
+def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None, allow_head_changed: bool = False) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -1069,8 +1069,10 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     if (repo_changed or repo_scoped) and current_head_state.available and meta_gate and meta_gate.get("reason") != "no_repo_directory":
         if not start_head:
             raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
-        if current_head != start_head:
+        if current_head != start_head and not allow_head_changed:
             raise RepoctlError("repo HEAD changed since task start; finish before committing repos/ changes so changed-file gates can validate the actual work", code="repo_head_changed_since_start", path=task.rel_path)
+        if current_head != start_head and allow_head_changed and not (repo_delta or {}).get("committed_range"):
+            raise RepoctlError("task finish with changed repo HEAD requires committed diff evidence from the recorded task start head", code="committed_diff_required", path=task.rel_path)
     if repo_changed and area not in REPO_REQUIRED_AREAS and not str(task.frontmatter.get("repo_id") or ""):
         raise RepoctlError("task that changes repos/ must set area to one of: repo, backend, frontend, infra, mobile or set repo_id for the selected product repository", code="repository_selector_required", path=task.rel_path)
     if repo_changed and not _discovery_recorded(task, target):
@@ -1455,6 +1457,11 @@ def _repo_head_from_state(root: Path, task: Task) -> str:
     if baseline is None:
         return ""
     return str(baseline.get("head") or "")
+
+
+def task_repo_head_at_start(root: Path, task_id: str) -> str:
+    task = resolve_task(root, task_id)
+    return _repo_head_from_state(root, task) or _repo_head_at_start(task)
 
 
 def _assert_repo_baseline_matches(root: Path, task: Task, target: RepoTarget | None) -> None:

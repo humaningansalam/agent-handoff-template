@@ -148,6 +148,76 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 240) -> dict[str, Any]:
+    """Return the default agent-facing view without raw candidate/debug payloads."""
+    groups = {
+        group: [_compact_group_item(item, excerpt_chars=excerpt_chars) for item in items[:max_group_items]]
+        for group, items in sorted(bundle.groups.items())
+    }
+    group_counts = {group: len(items) for group, items in sorted(bundle.groups.items())}
+    selected_refs = _selected_source_refs(bundle.packed_context)
+    omitted = {
+        "candidate_count": len(bundle.candidates),
+        "packed_context_count": len(bundle.packed_context),
+        "group_counts": group_counts,
+    }
+    return {
+        "schema": bundle.schema,
+        "schema_version": bundle.schema_version,
+        "view": "compact",
+        "authoritative": bundle.authoritative,
+        "repository": bundle.repository,
+        "query": bundle.query,
+        "source_snapshots": dict(sorted(bundle.source_snapshots.items())),
+        "completeness": bundle.completeness,
+        "groups": groups,
+        "selected_source_refs": selected_refs,
+        "budget": {**bundle.budget, **omitted},
+        "knowledge_result_count": len(bundle.knowledge_results),
+        "bundle_digest": bundle.bundle_digest,
+    }
+
+
+def _selected_source_refs(candidates: list[ContextCandidate]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int, int]] = set()
+    for candidate in sorted(candidates, key=lambda item: (-item.score, item.source_ref.path, item.source_ref.section, item.source_ref.line_start)):
+        ref = candidate.source_ref
+        key = ref.key()
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append({"source_ref": ref.to_dict()})
+    return refs
+
+
+def _compact_group_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in ("repo_id", "status", "record_id", "code", "selection_reason"):
+        if item.get(key):
+            compact[key] = item[key]
+    ref = item.get("source_ref")
+    if isinstance(ref, dict):
+        compact["source_ref"] = ref
+    score_breakdown = item.get("score_breakdown")
+    if isinstance(score_breakdown, dict) and score_breakdown:
+        compact["score_breakdown"] = score_breakdown
+    excerpt = item.get("excerpt")
+    if excerpt:
+        compact["excerpt"] = _truncate(str(excerpt), excerpt_chars)
+    graph_path = item.get("graph_path")
+    if isinstance(graph_path, list) and graph_path:
+        compact["graph_path_count"] = len(graph_path)
+    return compact
+
+
+def _truncate(value: str, limit: int) -> str:
+    compact = " ".join(value.strip().split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 3)].rstrip() + "..."
+
+
 def _query_tokens(query: str) -> list[str]:
     return re.findall(r"[A-Za-z_][A-Za-z0-9_./:-]*|[./][A-Za-z0-9_./:-]+", query)
 
@@ -298,6 +368,8 @@ def _candidate_group(candidate: ContextCandidate) -> str:
     text = candidate.text.lower()
     if ref.kind == "graph_query" and candidate.graph_path:
         return "callers_and_dependents"
+    if _is_low_value_generated_or_unsupported(candidate):
+        return "supporting_evidence"
     if ref.kind == "graph_node" or ref.kind == "graph_query":
         return "likely_change_surface"
     if path.startswith("docs/adr/") or path.startswith("docs/contracts/") or path == "agents.md" or section in {"decision", "authority rules", "future layer rules"}:
@@ -318,3 +390,30 @@ def _candidate_group_item(candidate: ContextCandidate, *, repo_id: str, status: 
         "excerpt": candidate.text,
         "graph_path": candidate.graph_path,
     }
+
+
+def _is_low_value_generated_or_unsupported(candidate: ContextCandidate) -> bool:
+    path = candidate.source_ref.path.lower()
+    text = candidate.text.lower()
+    noisy_parts = (
+        "/.cxx/",
+        "/.dart_tool/",
+        "/.firebase/",
+        "/.gradle/",
+        "/.next/",
+        "/.pytest_cache/",
+        "/.temp/",
+        "/__pycache__/",
+        "/build/",
+        "/dist/",
+        "/egg-info/",
+        "/node_modules/",
+        "/temp/",
+    )
+    noisy_suffixes = (".pkl", ".pyc", ".tsbuildinfo", ".lock", ".log")
+    return (
+        any(part in path for part in noisy_parts)
+        or path.endswith(noisy_suffixes)
+        or "parse_status" in text
+        and any(marker in text for marker in ('"skipped"', "unsupported", "non-utf8"))
+    )

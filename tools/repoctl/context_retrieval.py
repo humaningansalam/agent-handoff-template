@@ -168,6 +168,8 @@ def _authority_score(chunk: DocumentChunk) -> float:
         return 0.25
     if path.startswith("docs/workflows/"):
         return 0.2
+    if _is_product_doc_path(path) or kind == "product_manifest":
+        return 0.3
     if kind.startswith("graph_"):
         return 0.05
     return 0.1
@@ -260,8 +262,14 @@ def _product_evidence_boost(chunk: DocumentChunk, query_lower: str) -> float:
         return 0.0
     if path == "docs/PRD.md":
         return 0.9
+    if _is_product_readme_path(path):
+        return 1.0
+    if kind == "product_manifest":
+        return 0.85
+    if _is_product_doc_path(path):
+        return 0.75
     if path in {"README.md", "docs/README.md"}:
-        return 0.55
+        return 0.2 if product_query else 0.55
     if kind == "completion_receipt":
         return 0.8 if decision_query else 0.45
     if kind == "task_artifact":
@@ -269,6 +277,16 @@ def _product_evidence_boost(chunk: DocumentChunk, query_lower: str) -> float:
     if path.startswith("docs/contracts/") and product_query and not decision_query:
         return -0.2
     return 0.0
+
+
+def _is_product_readme_path(path: str) -> bool:
+    lowered = path.lower()
+    return lowered == "repos/readme.md" or lowered.startswith("repos/") and lowered.endswith("/readme.md")
+
+
+def _is_product_doc_path(path: str) -> bool:
+    lowered = path.lower()
+    return lowered.startswith("repos/docs/") or lowered.startswith("repos/") and "/docs/" in lowered
 
 
 def _excerpt(text: str, *, limit: int = 900) -> str:

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "replace_paths": [
     ".claude/agents/README.md",
     ".claude/agents/maintenance-cartographer.md",
@@ -106,6 +106,7 @@
     "tests/repoctl/task/test_task_lifecycle.py",
     "tests/repoctl/task/test_task_parent_lifecycle.py",
     "tests/repoctl/task_lifecycle_helpers.py",
+    "tests/repoctl/test_cli_discoverability.py",
     "tests/repoctl/test_code_index.py",
     "tests/repoctl/test_release.py",
     "tests/repoctl/test_upgrade.py",
@@ -183,8 +184,11 @@
     "docs/BOARD.md",
     "docs/PRD.md",
     "docs/REPOS.md",
+    "docs/archive/tasks/.gitkeep",
     "docs/archive/tasks/**",
+    "docs/knowledge/events/.gitkeep",
     "docs/knowledge/events/**",
+    "docs/knowledge/records/.gitkeep",
     "docs/knowledge/records/**",
     "docs/repoctl.json",
     "docs/tasks/.repoctl-state/**",

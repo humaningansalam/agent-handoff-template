@@ -70,6 +70,7 @@ Scope matrix:
 - Use `./scripts/repoctl task show T-... --json` to inspect a task and `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
 - Finish tasks with a verification artifact outside every product repo: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
 - If `## Verification` is already complete, `./scripts/repoctl task finish T-... --use-task-verification --json` may reuse it.
+- Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `./scripts/repoctl task finish T-... --use-committed-diff --verification-file /tmp/T-...-verification.md --json`; it validates the recorded start HEAD through current HEAD and still runs changed-file metadata gates.
 - Use `./scripts/repoctl task block T-... --verification-file /tmp/T-...-blocker.md --json` when acceptance fails but work should remain live.
 
 ## Working Commands

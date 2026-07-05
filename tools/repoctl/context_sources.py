@@ -18,6 +18,22 @@ DOCUMENT_PATTERNS = (
     "docs/contracts/*.md",
     "docs/workflows/*.md",
 )
+PRODUCT_DOCUMENT_PATTERNS = (
+    "README.md",
+    "README.*.md",
+    "docs/README.md",
+    "docs/PRD.md",
+    "docs/*.md",
+)
+PRODUCT_MANIFEST_PATTERNS = (
+    "package.json",
+    "pyproject.toml",
+    "pubspec.yaml",
+    "Cargo.toml",
+    "go.mod",
+    "requirements.txt",
+    "requirements-*.txt",
+)
 
 EXCLUDED_PARTS = {".repoctl-state", "generated"}
 
@@ -32,12 +48,21 @@ def collect_context_sources(
 ) -> tuple[list[DocumentChunk], dict[str, str], dict[str, Any], list[Problem]]:
     chunks: list[DocumentChunk] = []
     problems: list[Problem] = []
-    document_paths = _document_paths(root)
+    document_paths = _document_paths(root, target=target)
     for path in document_paths:
         try:
             chunks.extend(chunk_markdown_file(root, path))
         except OSError as exc:
             problems.append(Problem("error", "context_source_unreadable", str(exc), path.relative_to(root).as_posix()))
+    manifest_paths = _product_manifest_paths(root, target=target)
+    for path in manifest_paths:
+        try:
+            rel = path.relative_to(root).as_posix()
+            chunks.append(chunk_text_source(root, rel, path.read_text(encoding="utf-8"), kind="product_manifest", section=path.name))
+        except UnicodeDecodeError as exc:
+            problems.append(Problem("warning", "context_manifest_non_utf8", str(exc), path.relative_to(root).as_posix()))
+        except OSError as exc:
+            problems.append(Problem("error", "context_manifest_unreadable", str(exc), path.relative_to(root).as_posix()))
 
     receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
     problems.extend(receipt_problems)
@@ -54,32 +79,46 @@ def collect_context_sources(
     if snapshot is None:
         completeness = {
             "documents_checked": len(document_paths),
+            "manifests_checked": len(manifest_paths),
             "receipts_checked": len(receipts),
             "graph_available": False,
             "graph_meta": graph_meta,
         }
-        return chunks, {"document_manifest_digest": _manifest_digest(chunks), "receipt_manifest_digest": digest_data(receipts)}, completeness, problems
+        return chunks, {
+            "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest"}]),
+            "receipt_manifest_digest": digest_data(receipts),
+        }, completeness, problems
 
     graph_chunks = _graph_chunks(root, snapshot.to_dict())
     chunks.extend(graph_chunks)
     completeness = {
         "documents_checked": len(document_paths),
+        "manifests_checked": len(manifest_paths),
         "receipts_checked": len(receipts),
         "graph_available": True,
         "graph_completeness": snapshot.completeness,
     }
     source_snapshots = {
-        "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind == "document"]),
+        "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest"}]),
         "receipt_manifest_digest": digest_data(receipts),
         "graph_digest": snapshot.snapshot_digest,
     }
     return chunks, source_snapshots, completeness, problems
 
 
-def _document_paths(root: Path) -> list[Path]:
+def _document_paths(root: Path, *, target: RepoTarget) -> list[Path]:
     paths: set[Path] = set()
     for pattern in DOCUMENT_PATTERNS:
         paths.update(path for path in root.glob(pattern) if path.is_file())
+    for pattern in PRODUCT_DOCUMENT_PATTERNS:
+        paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
+    return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
+
+
+def _product_manifest_paths(root: Path, *, target: RepoTarget) -> list[Path]:
+    paths: set[Path] = set()
+    for pattern in PRODUCT_MANIFEST_PATTERNS:
+        paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
     return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
 
 

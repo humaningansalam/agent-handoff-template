@@ -109,7 +109,7 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
 
     assert main(["context", "query", "Knowledge Index", "--repo-id", "main", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
-    refs = [candidate["source_ref"]["path"] for candidate in context_payload["data"]["bundle"]["candidates"]]
+    refs = [item["source_ref"]["path"] for item in context_payload["data"]["bundle"]["selected_source_refs"]]
     assert all(not path.startswith("docs/knowledge/generated/") for path in refs)
 
 

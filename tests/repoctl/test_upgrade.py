@@ -431,6 +431,91 @@ def test_upgrade_create_paths_add_missing_workflow_without_overwriting_existing(
     assert (workspace / "docs/workflows/repo-metadata.md").read_text(encoding="utf-8") == "upstream metadata workflow\n"
 
 
+def test_upgrade_seeds_preserved_gitkeep_slots_without_touching_adopter_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    (workspace / "docs/knowledge/records").mkdir(parents=True)
+    (workspace / "docs/knowledge/events").mkdir(parents=True)
+    (workspace / "docs/knowledge/records/K-adopter.json").write_text('{"id":"K-adopter"}\n', encoding="utf-8")
+    (workspace / "docs/knowledge/events/E-adopter.json").write_text('{"id":"E-adopter"}\n', encoding="utf-8")
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "preserve_paths": [
+                "docs/knowledge/records/.gitkeep",
+                "docs/knowledge/records/**",
+                "docs/knowledge/events/.gitkeep",
+                "docs/knowledge/events/**",
+                "docs/PRD.md",
+                "repos/**",
+            ],
+        },
+    )
+    (source / "docs/knowledge/records").mkdir(parents=True)
+    (source / "docs/knowledge/events").mkdir(parents=True)
+    (source / "docs/knowledge/records/.gitkeep").write_text("", encoding="utf-8")
+    (source / "docs/knowledge/events/.gitkeep").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert [(operation["action"], operation["path"]) for operation in plan_payload["data"]["operations"]] == [
+        ("seed_preserve", "docs/knowledge/events/.gitkeep"),
+        ("seed_preserve", "docs/knowledge/records/.gitkeep"),
+    ]
+    assert main(["upgrade", "apply", "--plan-file", str(plan_file), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert (workspace / "docs/knowledge/records/.gitkeep").is_file()
+    assert (workspace / "docs/knowledge/events/.gitkeep").is_file()
+    assert (workspace / "docs/knowledge/records/K-adopter.json").read_text(encoding="utf-8") == '{"id":"K-adopter"}\n'
+    assert (workspace / "docs/knowledge/events/E-adopter.json").read_text(encoding="utf-8") == '{"id":"E-adopter"}\n'
+
+
+def test_upgrade_apply_rejects_forged_preserve_seed_for_non_gitkeep_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(
+        source,
+        manifest={
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": [],
+            "create_paths": [],
+            "preserve_paths": ["docs/PRD.md", "repos/**"],
+        },
+    )
+    (source / "docs/PRD.md").write_text("pwned\n", encoding="utf-8")
+    prd_before = (workspace / "docs/PRD.md").read_text(encoding="utf-8")
+    plan = plan_upgrade(workspace, source=source)
+    plan["operations"] = [
+        {
+            "path": "docs/PRD.md",
+            "action": "seed_preserve",
+            "source_hash": "not-bound-to-preserve-seed",
+            "target_hash": "",
+            "size": 6,
+        }
+    ]
+    write_plan(plan_file, plan)
+
+    with pytest.raises(Exception):
+        apply_upgrade(workspace, plan_file=plan_file)
+
+    assert (workspace / "docs/PRD.md").read_text(encoding="utf-8") == prd_before
+
+
 def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     plan_file = tmp_path / "plan.json"
