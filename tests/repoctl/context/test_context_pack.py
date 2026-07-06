@@ -51,6 +51,34 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
 
 
+def test_context_pack_compact_filters_noisy_graph_items(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "data").mkdir()
+    (repo / "data/runtime.csv").write_text("runtime,state\n1,ignored\n", encoding="utf-8")
+    (repo / "public").mkdir()
+    (repo / "public/logo.svg").write_text("<svg></svg>\n", encoding="utf-8")
+    _write_context_pack_task(
+        tmp_path,
+        task_id="T-20260622010111Z",
+        slug="compact-noise",
+        title="Inspect runtime graph noise",
+        query="runtime data logo graph evidence",
+        goal="Keep compact context focused on actionable evidence.",
+        reviewed="repos/app.py",
+        chosen="repos/app.py",
+    )
+
+    assert main(["context", "pack", "--task", "T-20260622010111Z", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    compact_text = json.dumps(payload["data"], ensure_ascii=False)
+    assert "repos/data/runtime.csv" not in compact_text
+    assert "repos/public/logo.svg" not in compact_text
+    assert payload["data"]["summary"]["read_first_count"] >= 1
+    assert len(compact_text) < 24000
+    assert any(warning["code"] == "context_pack_graph_capability" for warning in payload["warnings"])
+
+
 def test_context_pack_uses_startup_fallback_without_discovery(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "README.md").write_text("# Product Startup\n\nProduct-specific startup context.\n", encoding="utf-8")

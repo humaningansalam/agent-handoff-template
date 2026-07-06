@@ -256,7 +256,27 @@ def _code_node_kind_boost(chunk: DocumentChunk, query_lower: str, *, code_query:
 def _product_evidence_boost(chunk: DocumentChunk, query_lower: str) -> float:
     path = chunk.source_ref.path
     kind = chunk.source_ref.kind
-    product_query = any(term in query_lower for term in ("project", "product", "architecture", "current", "recent", "최근", "현재", "프로젝트", "구조", "결정"))
+    product_query = any(
+        term in query_lower
+        for term in (
+            "project",
+            "product",
+            "architecture",
+            "current",
+            "recent",
+            "read first",
+            "what should i read",
+            "what to read",
+            "최근",
+            "현재",
+            "프로젝트",
+            "구조",
+            "결정",
+            "먼저 읽",
+            "시작하려면",
+            "읽어야",
+        )
+    )
     decision_query = any(term in query_lower for term in ("decision", "decisions", "why", "invariant", "failure", "receipt", "결정", "불변식", "장애", "실패", "검증"))
     if not product_query and not decision_query:
         return 0.0

@@ -41,7 +41,8 @@ def build_context_bundle(
     query_mode = classify_context_mode(query, explicit_mode=mode)
     graph_candidates, graph_warnings = _graph_context_candidates(snapshot, query=query, mode=query_mode)
     candidates = retrieve_context(query, chunks, snapshot=snapshot, limit=40)
-    candidates = _dedupe_candidates([*graph_candidates, *candidates])
+    startup_candidates = _startup_query_candidates(chunks, target=target, mode=query_mode)
+    candidates = _dedupe_candidates([*startup_candidates, *graph_candidates, *candidates])
     packed, budget = pack_candidates(candidates, budget_tokens=budget_tokens)
     knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(root, repo_id=target.id, query=query, include_stale=False, limit=10, explain=explain)
     problems.extend(knowledge_problems)
@@ -90,6 +91,8 @@ def classify_context_mode(query: str, *, explicit_mode: str = "") -> str:
     if normalized:
         return normalized
     lowered = query.lower()
+    if _is_startup_reading_query(lowered):
+        return "startup_reading"
     if any(term in lowered for term in ("failure", "failed", "장애", "실패")):
         return "failure_mode"
     if any(term in lowered for term in ("invariant", "must", "contract", "깨뜨", "계약")):
@@ -220,6 +223,68 @@ def _truncate(value: str, limit: int) -> str:
 
 def _query_tokens(query: str) -> list[str]:
     return re.findall(r"[A-Za-z_][A-Za-z0-9_./:-]*|[./][A-Za-z0-9_./:-]+", query)
+
+
+def _is_startup_reading_query(lowered_query: str) -> bool:
+    return any(
+        term in lowered_query
+        for term in (
+            "read first",
+            "start work",
+            "start development",
+            "what should i read",
+            "what to read",
+            "먼저 읽",
+            "먼저 봐",
+            "시작하려면",
+            "읽어야",
+        )
+    )
+
+
+def _startup_query_candidates(chunks: list[Any], *, target: RepoTarget, mode: str) -> list[ContextCandidate]:
+    if mode != "startup_reading":
+        return []
+    wanted = _startup_source_priority(target)
+    selected: list[ContextCandidate] = []
+    seen_paths: set[str] = set()
+    for chunk in chunks:
+        path = chunk.source_ref.path
+        score = wanted.get(path)
+        if score is None or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        selected.append(
+            ContextCandidate(
+                source_ref=chunk.source_ref,
+                text=_truncate(chunk.text, 700),
+                score=score,
+                score_breakdown={"startup_reading": 1.0},
+                selection_reasons=["startup/read-first source"],
+                graph_path=[],
+            )
+        )
+    return sorted(selected, key=lambda candidate: (-candidate.score, candidate.source_ref.path))[:8]
+
+
+def _startup_source_priority(target: RepoTarget) -> dict[str, float]:
+    repo_prefix = target.display_path.rstrip("/")
+    paths = [
+        (f"{repo_prefix}/README.md", 30.0),
+        (f"{repo_prefix}/package.json", 29.0),
+        (f"{repo_prefix}/pyproject.toml", 29.0),
+        (f"{repo_prefix}/pubspec.yaml", 29.0),
+        (f"{repo_prefix}/Cargo.toml", 29.0),
+        (f"{repo_prefix}/go.mod", 29.0),
+        (f"{repo_prefix}/docs/README.md", 28.0),
+        (f"{repo_prefix}/docs/PRD.md", 27.0),
+        ("AGENTS.md", 26.0),
+        ("docs/BOARD.md", 25.0),
+        ("docs/PRD.md", 24.0),
+        ("README.md", 15.0),
+        ("docs/README.md", 14.0),
+    ]
+    return {path: score for path, score in paths}
 
 
 def _graph_context_candidates(snapshot: Any, *, query: str, mode: str) -> tuple[list[ContextCandidate], list[dict[str, str]]]:
@@ -358,6 +423,19 @@ def _context_groups(
                     "selection_reason": f"Graph parse errors: {graph_completeness.get('parse_error_count', 0)}",
                 }
             )
+    graph_meta = completeness.get("graph_meta") if isinstance(completeness.get("graph_meta"), dict) else {}
+    precise_provider = graph_meta.get("precise_provider") if isinstance(graph_meta.get("precise_provider"), dict) else {}
+    provider = str(precise_provider.get("provider") or "")
+    if provider:
+        languages = precise_provider.get("languages") if isinstance(precise_provider.get("languages"), list) else []
+        groups["warnings_and_completeness"].append(
+            {
+                "repo_id": repo_id,
+                "status": "warning",
+                "code": "context_graph_capability",
+                "selection_reason": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
+            }
+        )
     return groups
 
 
@@ -366,13 +444,15 @@ def _candidate_group(candidate: ContextCandidate) -> str:
     path = ref.path.lower()
     section = ref.section.lower()
     text = candidate.text.lower()
+    if candidate.score_breakdown.get("startup_reading"):
+        return "must_read"
     if ref.kind == "graph_query" and candidate.graph_path:
         return "callers_and_dependents"
     if _is_low_value_generated_or_unsupported(candidate):
         return "supporting_evidence"
     if ref.kind == "graph_node" or ref.kind == "graph_query":
         return "likely_change_surface"
-    if path.startswith("docs/adr/") or path.startswith("docs/contracts/") or path == "agents.md" or section in {"decision", "authority rules", "future layer rules"}:
+    if path.startswith("docs/adr/") or path.startswith("docs/contracts/") or path in {"agents.md", "docs/prd.md"} or section in {"decision", "authority rules", "future layer rules"}:
         return "must_read"
     if ref.kind == "completion_receipt" or "verification" in text or "test" in path or "test" in text:
         return "tests_and_verification"

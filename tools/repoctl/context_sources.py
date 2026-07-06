@@ -13,6 +13,7 @@ from .tasks import Problem, collect_completion_receipts
 DOCUMENT_PATTERNS = (
     "AGENTS.md",
     "README.md",
+    "docs/BOARD.md",
     "docs/PRD.md",
     "docs/adr/*.md",
     "docs/contracts/*.md",
@@ -110,6 +111,7 @@ def collect_context_sources(
         "receipt_problem_count": len(receipt_warnings),
         "receipt_problem_paths": sorted(problem.path or "" for problem in receipt_warnings if problem.path),
         "graph_available": True,
+        "graph_meta": graph_meta,
         "graph_completeness": snapshot.completeness,
     }
     source_snapshots = {

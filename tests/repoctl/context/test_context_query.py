@@ -86,6 +86,22 @@ def test_context_query_prioritizes_product_docs_for_project_queries(tmp_path: Pa
     assert "product/recent evidence priority" in prd_candidate["selection_reasons"]
 
 
+def test_context_query_read_first_populates_must_read(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "README.md").write_text("# Product\n\nRead this product overview first.\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname = \"read-first-product\"\n", encoding="utf-8")
+
+    assert main(["context", "query", "이 프로젝트에서 다음 개발을 시작하려면 무엇을 먼저 읽어야 하나?", "--repo-id", "main", "--json"]) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert bundle["query"]["mode"] == "startup_reading"
+    must_read_paths = [item["source_ref"]["path"] for item in bundle["groups"]["must_read"]]
+    assert "repos/README.md" in must_read_paths
+    assert "repos/pyproject.toml" in must_read_paths
+    assert "docs/PRD.md" in must_read_paths
+    assert "AGENTS.md" in must_read_paths
+
+
 def test_context_query_returns_actionable_groups_for_call_impact(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "auth").mkdir()

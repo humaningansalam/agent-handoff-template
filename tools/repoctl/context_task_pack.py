@@ -183,11 +183,21 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def compact_task_context_pack(data: dict[str, Any], *, max_group_items: int = 12, excerpt_chars: int = 360) -> dict[str, Any]:
+COMPACT_GROUP_LIMITS = {
+    "must_read": 7,
+    "likely_change": 5,
+    "impact": 5,
+    "verification": 5,
+    "reviewed_knowledge": 5,
+    "warnings": 8,
+}
+
+
+def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180) -> dict[str, Any]:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
     canonical_groups = ("must_read", "likely_change", "impact", "verification", "reviewed_knowledge", "warnings")
     compact_groups = {
-        group: [_compact_pack_item(item, excerpt_chars=excerpt_chars) for item in (groups.get(group) or [])[:max_group_items]]
+        group: [_compact_pack_item(item, excerpt_chars=excerpt_chars) for item in _compact_group_items(groups.get(group) or [], group)]
         for group in canonical_groups
     }
     group_counts = {name: len(items) for name, items in sorted(groups.items()) if isinstance(items, list)}
@@ -197,7 +207,7 @@ def compact_task_context_pack(data: dict[str, Any], *, max_group_items: int = 12
         "view": "compact",
         "authoritative": data.get("authoritative", False),
         "task": data.get("task", {}),
-        "seed": data.get("seed", {}),
+        "seed": _compact_seed(data.get("seed") if isinstance(data.get("seed"), dict) else {}),
         "groups": compact_groups,
         "metrics": {
             **(data.get("metrics") if isinstance(data.get("metrics"), dict) else {}),
@@ -210,8 +220,46 @@ def compact_task_context_pack(data: dict[str, Any], *, max_group_items: int = 12
         "warnings": data.get("warnings", []),
         "source_pack_digest": data.get("pack_digest", ""),
     }
+    compact["summary"] = _compact_pack_summary(compact_groups, compact["metrics"])
     compact["pack_digest"] = digest_data(compact)
     return compact
+
+
+def _compact_group_items(items: list[Any], group: str) -> list[dict[str, Any]]:
+    limit = COMPACT_GROUP_LIMITS[group]
+    filtered = [item for item in items if isinstance(item, dict) and not _is_noisy_pack_item(item)]
+    if group in {"must_read", "warnings"}:
+        selected = filtered
+    else:
+        selected = filtered[:limit]
+    return selected[:limit]
+
+
+def _compact_seed(seed: dict[str, Any]) -> dict[str, Any]:
+    query = str(seed.get("query") or "")
+    compact = {
+        "source": seed.get("source", ""),
+        "used_sections": seed.get("used_sections", []),
+    }
+    if query.strip():
+        compact["query_preview"] = _truncate_text(query, 240)
+    return compact
+
+
+def _compact_pack_summary(groups: dict[str, list[dict[str, Any]]], metrics: dict[str, Any]) -> dict[str, Any]:
+    top_refs: list[dict[str, str]] = []
+    for group in ("must_read", "likely_change", "impact", "verification"):
+        for item in groups.get(group, [])[:3]:
+            ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+            path = str(ref.get("path") or "")
+            if path:
+                top_refs.append({"group": group, "path": path, "section": str(ref.get("section") or "")})
+    return {
+        "read_first_count": len(groups.get("must_read", [])),
+        "top_refs": top_refs[:10],
+        "requested_tokens": int(metrics.get("requested_tokens") or 0),
+        "estimated_tokens": int(metrics.get("estimated_tokens") or 0),
+    }
 
 
 def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
@@ -235,6 +283,27 @@ def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str,
     if isinstance(graph_path, list) and graph_path:
         compact["graph_path_count"] = len(graph_path)
     return compact
+
+
+def _is_noisy_pack_item(item: dict[str, Any]) -> bool:
+    ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    path = str(ref.get("path") or "").lower()
+    text = str(item.get("excerpt") or item.get("selection_reason") or "").lower()
+    noisy_parts = (
+        "/.cxx/",
+        "/.dart_tool/",
+        "/.gradle/",
+        "/.next/",
+        "/.pytest_cache/",
+        "/.temp/",
+        "/__pycache__/",
+        "/build/",
+        "/dist/",
+        "/logs/",
+        "/node_modules/",
+    )
+    noisy_suffixes = (".csv", ".ipynb", ".lock", ".log", ".pkl", ".pyc", ".svg", ".tsbuildinfo")
+    return any(part in path for part in noisy_parts) or path.endswith(noisy_suffixes) or "parse_status" in text and any(marker in text for marker in ("skipped", "unsupported"))
 
 
 def _truncate_text(value: str, limit: int) -> str:
@@ -1216,6 +1285,17 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
             }
         )
     graph_completeness = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
+    graph_meta = completeness.get("graph_meta") if isinstance(completeness.get("graph_meta"), dict) else {}
+    precise_provider = graph_meta.get("precise_provider") if isinstance(graph_meta.get("precise_provider"), dict) else {}
+    provider = str(precise_provider.get("provider") or "")
+    languages = precise_provider.get("languages") if isinstance(precise_provider.get("languages"), list) else []
+    if provider:
+        warnings.append(
+            {
+                "code": "context_pack_graph_capability",
+                "message": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
+            }
+        )
     parse_error_count = int(graph_completeness.get("parse_error_count") or 0)
     if parse_error_count > 0 or graph_completeness.get("code_facts_complete") is False:
         warnings.append(
