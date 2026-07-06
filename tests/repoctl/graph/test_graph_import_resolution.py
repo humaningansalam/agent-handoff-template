@@ -130,6 +130,35 @@ def test_graph_resolves_js_ts_relative_imports(tmp_path: Path, monkeypatch, caps
     assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in snapshot["edges"])
 
 
+def test_graph_resolves_dart_relative_and_local_package_imports(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "lib/src").mkdir(parents=True)
+    (repo / "pubspec.yaml").write_text("name: demo_app\n", encoding="utf-8")
+    (repo / "lib/main.dart").write_text(
+        "import './src/local.dart';\n"
+        "import 'package:demo_app/src/session.dart';\n",
+        encoding="utf-8",
+    )
+    (repo / "lib/src/local.dart").write_text("class Local {}\n", encoding="utf-8")
+    (repo / "lib/src/session.dart").write_text("class Session {}\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--full", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    source_file_id = file_id("main", "lib/main.dart")
+    local_import_id = import_ref_id("main", "dart", "./src/local.dart")
+    package_import_id = import_ref_id("main", "dart", "package:demo_app/src/session.dart")
+    assert any(source["kind"] == "dart_import_resolver" and source["assertion"] == "resolved" for source in snapshot["sources"])
+    assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == local_import_id and edge["to"] == file_id("main", "lib/src/local.dart") for edge in snapshot["edges"])
+    assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == package_import_id and edge["to"] == file_id("main", "lib/src/session.dart") for edge in snapshot["edges"])
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == file_id("main", "lib/src/session.dart") for edge in snapshot["edges"])
+    assert snapshot["completeness"]["language_capabilities"]["dart"]["precise_semantics"] is False
+
+
 def test_graph_skips_ambiguous_js_ts_relative_import_resolution(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -148,4 +177,3 @@ def test_graph_skips_ambiguous_js_ts_relative_import_resolution(tmp_path: Path, 
     assert any(edge["kind"] == "DECLARES_IMPORT" and edge["to"] == import_node_id for edge in snapshot["edges"])
     assert not any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id for edge in snapshot["edges"])
     assert not any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == file_id("main", "frontend/src/client.ts") for edge in snapshot["edges"])
-

@@ -70,6 +70,33 @@ def test_index_code_extracts_typescript_facts(tmp_path: Path, monkeypatch, capsy
     assert "net" in entry["observed_effects"]
 
 
+def test_index_code_extracts_dart_and_csharp_inventory(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "lib").mkdir()
+    (repo / "Assets/Scripts").mkdir(parents=True)
+    (repo / "lib/main.dart").write_text("import 'package:demo/app.dart';\nvoid main() {}\n", encoding="utf-8")
+    (repo / "Assets/Scripts/PlayerController.cs").write_text("namespace Game { public class PlayerController {} }\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["index", "code", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    dart_entry = next(file for file in payload["data"]["files"] if file["path"] == "lib/main.dart")
+    csharp_entry = next(file for file in payload["data"]["files"] if file["path"] == "Assets/Scripts/PlayerController.cs")
+    assert dart_entry["language"] == "dart"
+    assert dart_entry["imports"] == ["package:demo/app.dart"]
+    assert dart_entry["parse_status"] == "ok"
+    assert csharp_entry["language"] == "csharp"
+    assert csharp_entry["symbols"] == ["PlayerController"]
+    assert csharp_entry["parse_status"] == "ok"
+    assert payload["data"]["summary"]["languages"]["dart"] == 1
+    assert payload["data"]["summary"]["languages"]["csharp"] == 1
+
+
 def test_index_code_changed_requires_repo_git(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

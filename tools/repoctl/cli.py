@@ -177,6 +177,9 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Add required metadata annotation", command=f"./scripts/repoctl meta set {rel or '<path>'}{selector} --role <role> --purpose <purpose> --topic <topic> --json")
         elif code == "move_candidate":
             add("Repair metadata path explicitly", command="./scripts/repoctl meta move <old-path> <new-path> --json")
+        elif code == "inline_meta_residue":
+            add("Move inline metadata into .repometa", command="./scripts/repoctl meta set <path> --role <role> --purpose <purpose> --topic <topic> --json", path=path)
+            add("Remove inline @meta/frontmatter metadata from the source file", path=path)
         elif code in {"invalid_frontmatter", "missing_frontmatter", "invalid_status"}:
             add("Open and fix task frontmatter", path=path or f"docs/tasks/{task_id}.md")
         elif code == "task_not_found":
@@ -217,6 +220,9 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "knowledge_candidate_receipt_invalid":
             add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
             add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --dry-run --json")
+        elif code == "knowledge_records_empty":
+            add("Build a reviewable candidate from a source document", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --json")
+            add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --dry-run --json")
     return actions
 
 
@@ -3030,6 +3036,15 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
     include_superseded = args.include_superseded or args.include_history
     include_deprecated = args.include_deprecated or args.include_history
     data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=include_stale, include_superseded=include_superseded, include_deprecated=include_deprecated, limit=args.limit, explain=args.explain)
+    if int(data.get("available_record_count") or 0) == 0:
+        warnings.append(
+            Problem(
+                "warning",
+                "knowledge_records_empty",
+                "no reviewed knowledge records exist for this repo; this is normal before candidates are explicitly approved",
+                args.repo_id,
+            )
+        )
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge query",

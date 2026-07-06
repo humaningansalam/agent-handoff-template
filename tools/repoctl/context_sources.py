@@ -6,6 +6,7 @@ from typing import Any
 
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source
 from .graph_model import GraphSnapshot, digest_data
+from .language_profiles import collect_verification_hints, product_manifest_patterns
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipts
 
@@ -26,17 +27,7 @@ PRODUCT_DOCUMENT_PATTERNS = (
     "docs/PRD.md",
     "docs/*.md",
 )
-PRODUCT_MANIFEST_PATTERNS = (
-    "package.json",
-    "pyproject.toml",
-    "pubspec.yaml",
-    "Cargo.toml",
-    "go.mod",
-    "requirements.txt",
-    "requirements-*.txt",
-)
-
-EXCLUDED_PARTS = {".repoctl-state", "generated"}
+EXCLUDED_PARTS = {".repoctl-state", "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".firebase", ".dart_tool", "Library", "Temp", "Obj", "obj", "Build", "Builds", "Logs", "UserSettings", "node_modules", "dist", "build", "target"}
 
 
 def collect_context_sources(
@@ -64,6 +55,14 @@ def collect_context_sources(
             problems.append(Problem("warning", "context_manifest_non_utf8", str(exc), path.relative_to(root).as_posix()))
         except OSError as exc:
             problems.append(Problem("error", "context_manifest_unreadable", str(exc), path.relative_to(root).as_posix()))
+
+    for hint in collect_verification_hints(target.root_path):
+        source_path = target.root_path / hint.source_path
+        if not source_path.exists():
+            continue
+        rel = source_path.relative_to(root).as_posix()
+        text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
+        chunks.append(chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}"))
 
     receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
     receipt_warnings = [
@@ -98,7 +97,7 @@ def collect_context_sources(
             "graph_meta": graph_meta,
         }
         return chunks, {
-            "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest"}]),
+            "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest", "verification_hint"}]),
             "receipt_manifest_digest": digest_data(receipts),
         }, completeness, problems
 
@@ -115,7 +114,7 @@ def collect_context_sources(
         "graph_completeness": snapshot.completeness,
     }
     source_snapshots = {
-        "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest"}]),
+        "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest", "verification_hint"}]),
         "receipt_manifest_digest": digest_data(receipts),
         "graph_digest": snapshot.snapshot_digest,
     }
@@ -133,7 +132,7 @@ def _document_paths(root: Path, *, target: RepoTarget) -> list[Path]:
 
 def _product_manifest_paths(root: Path, *, target: RepoTarget) -> list[Path]:
     paths: set[Path] = set()
-    for pattern in PRODUCT_MANIFEST_PATTERNS:
+    for pattern in product_manifest_patterns():
         paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
     return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
 

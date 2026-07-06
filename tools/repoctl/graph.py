@@ -8,6 +8,7 @@ from .git import normalize_repo_path
 from .graph_code_provider import build_precise_calls, build_precise_symbols
 from .graph_import_resolver import resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
+from .language_profiles import graph_language_capabilities, limited_semantic_languages
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipts
@@ -256,7 +257,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
         precise_symbol_node_ids[precise_symbol.provider_symbol_id] = symbol_node_id
 
-    import_resolutions = resolve_code_imports(entries)
+    import_resolutions = resolve_code_imports(entries, repo=target.root_path)
 
     precise_calls, precise_call_meta = build_precise_calls(
         root,
@@ -325,7 +326,9 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         "python_ast_calls": [call.to_dict() for call in precise_calls],
         "python_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "python_import_resolver"],
         "js_ts_relative_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "js_ts_relative_import_resolver"],
+        "dart_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "dart_import_resolver"],
     }
+    language_capabilities = graph_language_capabilities({entry.language for entry in entries})
     snapshot = GraphSnapshot(
         repository=target.to_dict(),
         sources=[
@@ -337,6 +340,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             {"kind": "python_ast_calls", "assertion": "resolved", "digest": digest_data(source_payloads["python_ast_calls"])},
             {"kind": "python_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["python_import_resolver"])},
             {"kind": "js_ts_relative_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["js_ts_relative_import_resolver"])},
+            {"kind": "dart_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["dart_import_resolver"])},
         ],
         completeness={
             "inventory_complete": True,
@@ -348,12 +352,13 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             "code_facts_complete": parse_error_count == 0,
             "parse_error_count": parse_error_count,
             "provider_failures": [problem.to_dict() for problem in receipt_problems],
+            "language_capabilities": language_capabilities,
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
-        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls", "cross_file_import_calls"],
+        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls", "cross_file_import_calls", "language_capabilities"],
     ).with_digest()
-    return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta, "precise_calls": precise_call_meta}
+    return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta, "precise_calls": precise_call_meta, "language_capabilities": language_capabilities}
 
 
 def _node_by_id(snapshot: GraphSnapshot) -> dict[str, GraphNode]:
@@ -451,6 +456,16 @@ def _query_warnings(snapshot: GraphSnapshot) -> list[dict[str, str]]:
         )
     for failure in snapshot.completeness.get("provider_failures", []):
         warnings.append({"code": "graph_provider_failure", "message": str(failure)})
+    capabilities = snapshot.completeness.get("language_capabilities")
+    if isinstance(capabilities, dict):
+        limited = limited_semantic_languages(capabilities)
+        if limited:
+            warnings.append(
+                {
+                    "code": "graph_language_capability",
+                    "message": f"language providers for {limited} are inventory/evidence only; CALLS/REFERENCES require provider-confirmed edges",
+                }
+            )
     return warnings
 
 

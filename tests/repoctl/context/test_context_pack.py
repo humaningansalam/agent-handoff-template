@@ -130,6 +130,32 @@ Use project context without structured discovery yet.
     assert "context_pack_no_structured_discovery" in warning_codes
 
 
+def test_context_pack_includes_manifest_verification_hints(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "package.json").write_text(
+        '{"name": "demo", "scripts": {"test": "vitest run", "lint": "eslint .", "build": "vite build"}}\n',
+        encoding="utf-8",
+    )
+    _write_context_pack_task(
+        tmp_path,
+        task_id="T-20260622010112Z",
+        slug="verification-hints",
+        title="Improve frontend verification hints",
+        query="frontend verification",
+        goal="Surface project verification commands.",
+    )
+
+    assert main(["context", "pack", "--task", "T-20260622010112Z", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    verification = payload["data"]["groups"]["verification"]
+    command_text = "\n".join(item.get("excerpt", "") for item in verification)
+    assert "npm test" in command_text
+    assert "npm run lint" in command_text
+    assert "npm run build" in command_text
+    assert any(item["source_ref"]["kind"] == "verification_hint" and item["source_ref"]["path"] == "repos/package.json" for item in verification)
+
+
 def test_context_pack_startup_fallback_uses_selected_collection_repo(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_multirepo_workspace(tmp_path, monkeypatch)
     (tmp_path / "repos/web/README.md").write_text("# Web Product\n\nSelected web product context.\n", encoding="utf-8")

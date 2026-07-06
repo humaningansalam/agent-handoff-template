@@ -11,6 +11,7 @@ from .context_model import ContextBundle, ContextCandidate
 from .context_pack import estimate_tokens
 from .graph_model import digest_data
 from .graph import build_graph, query_graph
+from .language_profiles import collect_verification_hints, limited_semantic_languages
 from .markdown import find_section
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task
@@ -93,7 +94,9 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     problems.extend(mandatory_problems)
     fallback_candidates, fallback_problems = _startup_fallback_candidates(root, target=target, task=task)
     problems.extend(fallback_problems)
-    packed_context = _dedupe_candidates([*mandatory_candidates, *fallback_candidates, *(bundle.packed_context if bundle is not None else [])])
+    verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
+    problems.extend(verification_problems)
+    packed_context = _dedupe_candidates([*mandatory_candidates, *fallback_candidates, *verification_candidates, *(bundle.packed_context if bundle is not None else [])])
     groups = _group_candidates(packed_context)
     groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
     groups["task_graph_evidence"] = task_graph_evidence
@@ -292,17 +295,29 @@ def _is_noisy_pack_item(item: dict[str, Any]) -> bool:
     noisy_parts = (
         "/.cxx/",
         "/.dart_tool/",
+        "/.firebase/",
         "/.gradle/",
         "/.next/",
+        "/.nuxt/",
+        "/.parcel-cache/",
+        "/.playwright-browsers/",
         "/.pytest_cache/",
+        "/.svelte-kit/",
         "/.temp/",
+        "/.turbo/",
         "/__pycache__/",
         "/build/",
+        "/builds/",
         "/dist/",
+        "/library/",
         "/logs/",
         "/node_modules/",
+        "/obj/",
+        "/target/",
+        "/temp/",
+        "/usersettings/",
     )
-    noisy_suffixes = (".csv", ".ipynb", ".lock", ".log", ".pkl", ".pyc", ".svg", ".tsbuildinfo")
+    noisy_suffixes = (".csv", ".ipynb", ".lock", ".log", ".pkl", ".pyc", ".svg", ".tsbuildinfo", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
     return any(part in path for part in noisy_parts) or path.endswith(noisy_suffixes) or "parse_status" in text and any(marker in text for marker in ("skipped", "unsupported"))
 
 
@@ -558,10 +573,15 @@ def _startup_fallback_docs(task: Task, *, target: RepoTarget) -> list[tuple[str,
         docs = [
             (f"{repo_prefix}/README.md", 95.0),
             (f"{repo_prefix}/package.json", 92.0),
+            (f"{repo_prefix}/tsconfig.json", 90.0),
+            (f"{repo_prefix}/jsconfig.json", 90.0),
             (f"{repo_prefix}/pyproject.toml", 92.0),
             (f"{repo_prefix}/pubspec.yaml", 92.0),
+            (f"{repo_prefix}/analysis_options.yaml", 90.0),
             (f"{repo_prefix}/Cargo.toml", 92.0),
             (f"{repo_prefix}/go.mod", 92.0),
+            (f"{repo_prefix}/Packages/manifest.json", 90.0),
+            (f"{repo_prefix}/ProjectSettings/ProjectVersion.txt", 90.0),
             (f"{repo_prefix}/docs/README.md", 88.0),
             (f"{repo_prefix}/docs/PRD.md", 85.0),
             ("docs/PRD.md", 78.0),
@@ -589,9 +609,36 @@ def _startup_fallback_docs(task: Task, *, target: RepoTarget) -> list[tuple[str,
 def _is_product_manifest_path(path: str) -> bool:
     lowered = path.lower()
     name = lowered.rsplit("/", 1)[-1]
-    return name in {"package.json", "pyproject.toml", "pubspec.yaml", "cargo.toml", "go.mod", "requirements.txt"} or (
+    return name in {"package.json", "tsconfig.json", "jsconfig.json", "pyproject.toml", "pubspec.yaml", "analysis_options.yaml", "cargo.toml", "go.mod", "manifest.json", "projectversion.txt", "requirements.txt"} or (
         name.startswith("requirements-") and name.endswith(".txt")
     )
+
+
+def _verification_hint_candidates(root: Path, *, target: RepoTarget) -> tuple[list[ContextCandidate], list[Problem]]:
+    candidates: list[ContextCandidate] = []
+    problems: list[Problem] = []
+    for hint in collect_verification_hints(target.root_path):
+        source = target.root_path / hint.source_path
+        if not source.exists():
+            continue
+        try:
+            rel = source.relative_to(root).as_posix()
+            text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
+            chunk = chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}")
+        except OSError as exc:
+            problems.append(Problem("warning", "context_pack_verification_hint_unreadable", str(exc), hint.source_path))
+            continue
+        candidates.append(
+            ContextCandidate(
+                source_ref=chunk.source_ref,
+                text=chunk.text,
+                score=94.0,
+                score_breakdown={"verification_hint": 1.0},
+                selection_reasons=["Manifest-derived verification hint"],
+                graph_path=[],
+            )
+        )
+    return candidates, problems
 
 
 IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
@@ -1071,7 +1118,7 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
     for candidate in candidates:
         ref = candidate.source_ref
         item = candidate.to_dict()
-        if ref.kind in {"completion_receipt", "task_artifact"} or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
+        if ref.kind in {"completion_receipt", "task_artifact", "verification_hint"} or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
             groups["verification_hints"].append(item)
         elif _must_read_ref_path(ref.path):
             groups["must_read"].append(item)
@@ -1088,7 +1135,7 @@ def _must_read_ref_path(path: str) -> bool:
         or path.startswith("docs/contracts/")
         or path.startswith("docs/adr/")
         or lowered == "repos/readme.md"
-        or lowered.startswith("repos/") and name in {"package.json", "pyproject.toml", "pubspec.yaml", "cargo.toml", "go.mod", "requirements.txt"}
+        or lowered.startswith("repos/") and name in {"package.json", "tsconfig.json", "jsconfig.json", "pyproject.toml", "pubspec.yaml", "analysis_options.yaml", "cargo.toml", "go.mod", "manifest.json", "projectversion.txt", "requirements.txt"}
         or lowered.startswith("repos/") and name.startswith("requirements-") and name.endswith(".txt")
         or lowered.startswith("repos/docs/")
         or lowered.startswith("repos/") and lowered.endswith("/readme.md")
@@ -1294,6 +1341,15 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
             {
                 "code": "context_pack_graph_capability",
                 "message": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
+            }
+        )
+    language_capabilities = graph_meta.get("language_capabilities") if isinstance(graph_meta.get("language_capabilities"), dict) else {}
+    limited_languages = limited_semantic_languages(language_capabilities)
+    if limited_languages:
+        warnings.append(
+            {
+                "code": "context_pack_graph_language_capability",
+                "message": f"Graph language providers for {limited_languages} are inventory/evidence only; do not treat them as precise CALLS/REFERENCES.",
             }
         )
     parse_error_count = int(graph_completeness.get("parse_error_count") or 0)

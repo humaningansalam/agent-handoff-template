@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .language_profiles import index_csharp, index_dart, language_for_path
 from .meta import FileClassification, meta_inventory
 from .repositories import RepoTarget
 from .tasks import Problem
@@ -43,27 +44,6 @@ class CodeIndexEntry:
         return data
 
 
-LANGUAGE_BY_SUFFIX = {
-    ".py": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".mts": "typescript",
-    ".cts": "typescript",
-    ".sh": "shell",
-    ".bash": "shell",
-    ".zsh": "shell",
-    ".md": "markdown",
-    ".markdown": "markdown",
-    ".json": "json",
-    ".toml": "toml",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-}
-
 JS_IMPORT_RE = re.compile(r"(?:import\s+(?:[^'\"]+\s+from\s+)?|require\()\s*['\"]([^'\"]+)['\"]")
 JS_SYMBOL_RE = re.compile(r"\b(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)|\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=")
 JS_CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
@@ -83,12 +63,6 @@ EFFECT_CALLS = {
     "net": {"fetch", "axios", "requests.get", "requests.post", "urllib.request.urlopen"},
     "time": {"sleep", "datetime.now", "Date.now", "setTimeout", "setInterval"},
 }
-
-
-def _language_for(path: str) -> str:
-    if Path(path).name == "Dockerfile":
-        return "dockerfile"
-    return LANGUAGE_BY_SUFFIX.get(Path(path).suffix.lower(), "unknown")
 
 
 def _dedupe_sorted(values: list[str]) -> list[str]:
@@ -148,7 +122,7 @@ def _observed_effects_for(imports: list[str], calls: list[str]) -> list[str]:
 
 
 def _index_file(repo: Path, file: FileClassification) -> CodeIndexEntry:
-    language = _language_for(file.path)
+    language = language_for_path(file.path)
     if file.classification == "excluded":
         return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "skipped", "excluded by policy")
 
@@ -164,6 +138,10 @@ def _index_file(repo: Path, file: FileClassification) -> CodeIndexEntry:
         symbols, imports, calls, status, error = _index_python(text)
     elif language in {"javascript", "typescript"}:
         symbols, imports, calls, status, error = _index_js_like(text)
+    elif language == "dart":
+        symbols, imports, calls, status, error = index_dart(text)
+    elif language == "csharp":
+        symbols, imports, calls, status, error = index_csharp(text)
     else:
         symbols, imports, calls, status, error = [], [], [], "skipped", "unsupported language"
 
@@ -193,5 +171,9 @@ def build_code_index(root: Path, *, changed: bool = False, limit: int = 200, tar
         "ok": sum(1 for entry in entries if entry.parse_status == "ok"),
         "skipped": sum(1 for entry in entries if entry.parse_status == "skipped"),
         "parse_error": sum(1 for entry in entries if entry.parse_status == "parse_error"),
+        "languages": {
+            language: sum(1 for entry in entries if entry.language == language)
+            for language in sorted({entry.language for entry in entries})
+        },
     }
     return entries, problems, {**meta, "summary": summary, "authoritative": False}

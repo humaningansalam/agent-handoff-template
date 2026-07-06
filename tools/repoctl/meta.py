@@ -10,6 +10,7 @@ from typing import Any
 
 from .git import ChangedEntry, repo_changed_entries, repo_git_state
 from .io import RepoctlError, atomic_write
+from .language_profiles import default_indexing_excludes
 from .markdown import parse_frontmatter
 from .repositories import RepoTarget, default_repo_target, require_repo_target
 from .tasks import Problem
@@ -22,48 +23,7 @@ INTERNAL_SCAN_SKIP_DIR_NAMES = {
     ".git",
     ".repometa",
 }
-DEFAULT_INDEXING_EXCLUDES = [
-    ".git/**",
-    ".repometa/**",
-    ".venv/**",
-    "venv/**",
-    "env/**",
-    "node_modules/**",
-    ".next/**",
-    "dist/**",
-    "build/**",
-    "coverage/**",
-    ".pytest_cache/**",
-    ".mypy_cache/**",
-    ".ruff_cache/**",
-    ".tox/**",
-    ".nox/**",
-    ".cache/**",
-    ".gstack/**",
-    ".gradle/**",
-    ".dart_tool/**",
-    "Library/**",
-    "Temp/**",
-    "Logs/**",
-    "UserSettings/**",
-    "__pycache__/**",
-    "**/__pycache__/**",
-    "*.egg-info/**",
-    "*.pyc",
-    "*.pyo",
-    "*.log",
-    "**/*.pyc",
-    "**/*.pyo",
-    "**/*.png",
-    "**/*.jpg",
-    "**/*.jpeg",
-    "**/*.gif",
-    "**/*.webp",
-    "**/*.zip",
-    "**/*.tar",
-    "**/*.gz",
-    "**/*.log",
-]
+DEFAULT_INDEXING_EXCLUDES = default_indexing_excludes()
 REQUIRED_ANNOTATION = {"role", "purpose", "topics"}
 FORBIDDEN_ANNOTATION_FIELDS = {
     "id",

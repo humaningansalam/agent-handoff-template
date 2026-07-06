@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from posixpath import normpath
 
 from .code_index import CodeIndexEntry
@@ -24,8 +25,9 @@ class ImportResolution:
         }
 
 
-def resolve_code_imports(entries: list[CodeIndexEntry]) -> list[ImportResolution]:
+def resolve_code_imports(entries: list[CodeIndexEntry], *, repo: Path | None = None) -> list[ImportResolution]:
     file_paths = {entry.path for entry in entries}
+    dart_package_name = _dart_package_name(repo) if repo is not None else ""
     resolutions: list[ImportResolution] = []
     for entry in entries:
         if entry.parse_status != "ok":
@@ -37,6 +39,9 @@ def resolve_code_imports(entries: list[CodeIndexEntry]) -> list[ImportResolution
             elif entry.language in {"javascript", "typescript"}:
                 target_path = _resolve_js_ts_relative_import(raw_import, file_paths, importer_path=entry.path)
                 provider = "js_ts_relative_import_resolver"
+            elif entry.language == "dart":
+                target_path = _resolve_dart_import(raw_import, file_paths, importer_path=entry.path, package_name=dart_package_name)
+                provider = "dart_import_resolver"
             else:
                 continue
             if target_path:
@@ -97,3 +102,32 @@ def _js_ts_candidates(module_path: str) -> list[str]:
     values.extend(f"{module_path}{suffix}" for suffix in suffixes)
     values.extend(f"{module_path}/index{suffix}" for suffix in suffixes)
     return values
+
+
+def _resolve_dart_import(raw_import: str, file_paths: set[str], *, importer_path: str, package_name: str) -> str:
+    if raw_import.startswith(("./", "../")):
+        importer_dir = "/".join(importer_path.split("/")[:-1])
+        module_path = normpath(f"{importer_dir}/{raw_import}" if importer_dir else raw_import)
+        if module_path == "." or module_path.startswith("../"):
+            return ""
+        return module_path if module_path in file_paths and module_path.endswith(".dart") else ""
+    package_prefix = f"package:{package_name}/" if package_name else ""
+    if package_prefix and raw_import.startswith(package_prefix):
+        target = f"lib/{raw_import[len(package_prefix):]}"
+        return target if target in file_paths and target.endswith(".dart") else ""
+    return ""
+
+
+def _dart_package_name(repo: Path | None) -> str:
+    if repo is None:
+        return ""
+    path = repo / "pubspec.yaml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("name:"):
+            return stripped.split(":", 1)[1].strip().strip("'\"")
+    return ""

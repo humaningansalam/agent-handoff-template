@@ -11,6 +11,7 @@ from .context_sources import collect_context_sources
 from .graph import build_graph, query_graph
 from .graph_model import digest_data
 from .knowledge_candidates import query_knowledge_records
+from .language_profiles import limited_semantic_languages
 from .repositories import RepoTarget
 from .tasks import Problem
 
@@ -272,10 +273,15 @@ def _startup_source_priority(target: RepoTarget) -> dict[str, float]:
     paths = [
         (f"{repo_prefix}/README.md", 30.0),
         (f"{repo_prefix}/package.json", 29.0),
+        (f"{repo_prefix}/tsconfig.json", 28.5),
+        (f"{repo_prefix}/jsconfig.json", 28.5),
         (f"{repo_prefix}/pyproject.toml", 29.0),
         (f"{repo_prefix}/pubspec.yaml", 29.0),
+        (f"{repo_prefix}/analysis_options.yaml", 28.5),
         (f"{repo_prefix}/Cargo.toml", 29.0),
         (f"{repo_prefix}/go.mod", 29.0),
+        (f"{repo_prefix}/Packages/manifest.json", 28.5),
+        (f"{repo_prefix}/ProjectSettings/ProjectVersion.txt", 28.5),
         (f"{repo_prefix}/docs/README.md", 28.0),
         (f"{repo_prefix}/docs/PRD.md", 27.0),
         ("AGENTS.md", 26.0),
@@ -298,7 +304,7 @@ def _graph_context_candidates(snapshot: Any, *, query: str, mode: str) -> tuple[
         if len(token) < 2:
             continue
         graph_results: list[dict[str, Any]] = []
-        if "/" in token or token.endswith((".py", ".ts", ".tsx", ".js", ".jsx")):
+        if "/" in token or token.endswith((".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".cs")):
             if mode in {"file_impact", "call_impact"}:
                 key = ("impact_file", token)
                 if key not in seen_queries:
@@ -436,6 +442,17 @@ def _context_groups(
                 "selection_reason": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
             }
         )
+    language_capabilities = graph_meta.get("language_capabilities") if isinstance(graph_meta.get("language_capabilities"), dict) else {}
+    limited_languages = limited_semantic_languages(language_capabilities)
+    if limited_languages:
+        groups["warnings_and_completeness"].append(
+            {
+                "repo_id": repo_id,
+                "status": "warning",
+                "code": "context_graph_language_capability",
+                "selection_reason": f"Graph language providers for {limited_languages} are inventory/evidence only; do not treat them as precise CALLS/REFERENCES.",
+            }
+        )
     return groups
 
 
@@ -454,7 +471,7 @@ def _candidate_group(candidate: ContextCandidate) -> str:
         return "likely_change_surface"
     if path.startswith("docs/adr/") or path.startswith("docs/contracts/") or path in {"agents.md", "docs/prd.md"} or section in {"decision", "authority rules", "future layer rules"}:
         return "must_read"
-    if ref.kind == "completion_receipt" or "verification" in text or "test" in path or "test" in text:
+    if ref.kind in {"completion_receipt", "verification_hint"} or "verification" in text or "test" in path or "test" in text:
         return "tests_and_verification"
     return "supporting_evidence"
 
@@ -481,16 +498,27 @@ def _is_low_value_generated_or_unsupported(candidate: ContextCandidate) -> bool:
         "/.firebase/",
         "/.gradle/",
         "/.next/",
+        "/.nuxt/",
+        "/.parcel-cache/",
+        "/.playwright-browsers/",
         "/.pytest_cache/",
+        "/.svelte-kit/",
         "/.temp/",
+        "/.turbo/",
         "/__pycache__/",
         "/build/",
+        "/builds/",
         "/dist/",
         "/egg-info/",
+        "/library/",
+        "/logs/",
         "/node_modules/",
+        "/obj/",
+        "/target/",
         "/temp/",
+        "/usersettings/",
     )
-    noisy_suffixes = (".pkl", ".pyc", ".tsbuildinfo", ".lock", ".log")
+    noisy_suffixes = (".pkl", ".pyc", ".tsbuildinfo", ".lock", ".log", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
     return (
         any(part in path for part in noisy_parts)
         or path.endswith(noisy_suffixes)
