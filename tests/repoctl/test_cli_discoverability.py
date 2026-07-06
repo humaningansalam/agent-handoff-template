@@ -59,3 +59,14 @@ def test_format_json_errors_return_json(tmp_path: Path, monkeypatch, capsys) -> 
     assert payload["command"] == "context.pack"
     assert payload["data"] == {"task_id": "T-20260101000000Z", "repo_id": "main"}
     assert payload["problems"][0]["code"] == "task_not_found"
+    assert any(action["command"] == "./scripts/repoctl task list --json" for action in payload["next_actions"])
+
+
+def test_repository_errors_return_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_context_workspace(tmp_path, monkeypatch)
+
+    assert main(["repo", "show", "missing", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repository_not_found"
+    assert any(action["command"] == "./scripts/repoctl repo list --json" for action in payload["next_actions"])

@@ -117,7 +117,7 @@ def _write_candidate_from_chunk(
     return {"candidate": candidate, "path": destination.relative_to(root).as_posix()}, []
 
 
-def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id: str, kind: str) -> tuple[dict[str, Any], list[Problem]]:
+def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id: str, kind: str, write: bool = True) -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     normalized_task_id = normalize_task_id(task_id)
@@ -187,9 +187,15 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
         candidate["derived_from"]["related_symbol_warnings"] = related_symbol_warnings
     candidate["candidate_digest"] = digest_data(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
+    data = {"candidate": candidate, "path": destination.relative_to(root).as_posix()}
+    if not write:
+        data["dry_run"] = True
+        data["would_write_path"] = data["path"]
+        data["path"] = ""
+        return data, []
     destination.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(destination, json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    return {"candidate": candidate, "path": destination.relative_to(root).as_posix()}, []
+    return data, []
 
 
 def _receipt_related_symbols(root: Path, *, repo_id: str, changed_files: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1077,9 +1083,9 @@ def _receipt_title(receipt: dict[str, Any], artifact_text: str) -> str:
 def _receipt_summary(receipt: dict[str, Any], artifact_text: str) -> str:
     _frontmatter, body = _artifact_parts(artifact_text)
     parts = [
-        f"Task `{receipt.get('task_id', '')}` completed with status `{receipt.get('status', '')}`.",
         _artifact_section(body, "Goal"),
         _artifact_section(body, "Verification"),
+        f"Receipt provenance: task `{receipt.get('task_id', '')}` completed with status `{receipt.get('status', '')}`.",
     ]
     changed_entries = receipt.get("changed_entries")
     if isinstance(changed_entries, list) and changed_entries:

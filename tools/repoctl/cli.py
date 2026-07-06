@@ -179,6 +179,17 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Repair metadata path explicitly", command="./scripts/repoctl meta move <old-path> <new-path> --json")
         elif code in {"invalid_frontmatter", "missing_frontmatter", "invalid_status"}:
             add("Open and fix task frontmatter", path=path or f"docs/tasks/{task_id}.md")
+        elif code == "task_not_found":
+            add("List live tasks", command="./scripts/repoctl task list --json")
+            add("Open Board task registry", path="docs/BOARD.md")
+        elif code == "repository_not_found":
+            add("Inspect configured repositories", command="./scripts/repoctl repo list --json")
+            add("Adopt detected product repositories", command="./scripts/repoctl repo adopt --all --json")
+        elif code in {"repository_selector_required", "repository_identity_unbound"}:
+            add("Inspect repository identities", command="./scripts/repoctl repo list --json")
+            add("Pass an explicit repo id", command="./scripts/repoctl <command> --repo-id <id> --json")
+        elif code in {"invalid_task_id", "invalid_task_id_format"}:
+            add("Use task id format T-YYYYMMDDHHMMSSZ", command="./scripts/repoctl task list --json")
         elif code == "invalid_area":
             add("Use a broad area enum and keep detailed surface in task text", command="./scripts/repoctl task create --area frontend --slug <slug> \"<title>\" --json")
         elif code == "invalid_repo_ref":
@@ -203,6 +214,9 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Inspect plan conflicts before applying", path=path or "/tmp/repoctl-upgrade-plan.json")
         elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
             add("Apply the declared benchmark corpus before running this gate", path="tests/fixtures/context-benchmark/corpus.json")
+        elif code == "knowledge_candidate_receipt_invalid":
+            add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
+            add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --dry-run --json")
     return actions
 
 
@@ -2545,7 +2559,7 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
         data: dict[str, Any] = {}
         problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, --from-pack, or --from-task")]
     elif from_task:
-        data, problems = build_knowledge_candidate_from_receipt(root, task_id=from_task, repo_id=args.repo_id, kind=args.kind)
+        data, problems = build_knowledge_candidate_from_receipt(root, task_id=from_task, repo_id=args.repo_id, kind=args.kind, write=not getattr(args, "dry_run", False))
     elif args.from_receipt:
         data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind)
     elif args.from_pack:
@@ -3526,6 +3540,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_suggest.add_argument("--from-task", dest="from_task", required=True)
     knowledge_candidate_suggest.add_argument("--repo-id", required=True)
     knowledge_candidate_suggest.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
+    knowledge_candidate_suggest.add_argument("--dry-run", action="store_true")
     knowledge_candidate_suggest.add_argument("--json", action="store_true")
     knowledge_candidate_suggest.set_defaults(func=cmd_knowledge_candidate_build, source="", from_receipt="", from_pack="", knowledge_candidate_command="suggest")
     knowledge_candidate_list = knowledge_candidate_sub.add_parser("list")

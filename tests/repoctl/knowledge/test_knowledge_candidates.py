@@ -165,6 +165,7 @@ def test_knowledge_candidate_from_task_reports_target_invalid_receipt(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_receipt_invalid"
+    assert any("--dry-run" in action.get("command", "") for action in payload["next_actions"])
 
 
 def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -447,7 +448,11 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
-    task_body = task_text("T-20260609184047Z", status="todo").replace("State the outcome in one clear sentence.", "Document the stable task-pack invariant.")
+    task_body = task_text("T-20260609184047Z", status="todo").replace(
+        "## Execution Log",
+        "## Goal\n\nDocument the stable task-pack invariant.\n\n## Execution Log",
+        1,
+    )
     add_task(tmp_path, "T-20260609184047Z--task-pack-invariant.md", task_body)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184047Z--task-pack-invariant.md\n\n## Backlog\n", encoding="utf-8")
     verification = tmp_path / "verification.md"
@@ -459,6 +464,13 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert main(["task", "finish", "T-20260609184047Z", "--verification-file", verification.as_posix(), "--json"]) == 0
     capsys.readouterr()
 
+    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 0
+    dry_run_payload = json.loads(capsys.readouterr().out)
+    assert dry_run_payload["data"]["dry_run"] is True
+    assert dry_run_payload["data"]["path"] == ""
+    assert dry_run_payload["data"]["would_write_path"].endswith(".json")
+    assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
+
     assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -467,6 +479,8 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert candidate["authoritative"] is False
     assert candidate["status"] == "candidate"
     assert candidate["review"]["status"] == "pending"
+    assert not candidate["claim"].startswith("Task `T-20260609184047Z` completed")
+    assert "Document the stable task-pack invariant" in candidate["claim"]
     assert candidate["derived_from"]["kind"] == "completion_receipt"
     assert candidate["derived_from"]["task_id"] == "T-20260609184047Z"
     assert candidate["source_refs"][0]["kind"] == "completion_receipt"
