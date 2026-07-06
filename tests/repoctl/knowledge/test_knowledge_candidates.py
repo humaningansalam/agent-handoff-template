@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -86,6 +87,84 @@ def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: P
     approve_payload = json.loads(capsys.readouterr().out)
     assert approve_payload["data"]["record"]["created_from"]["candidate_check"]["related_records"][0]["status"] == "reviewed"
     assert approve_payload["warnings"][0]["code"] == "knowledge_candidate_duplicate_reviewed_claim"
+
+
+def test_knowledge_candidate_from_task_ignores_unrelated_invalid_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    task_id = "T-20260625010101Z"
+    archive_rel = f"docs/archive/tasks/{task_id}--knowledge-receipt.md"
+    archive_text = """---
+id: T-20260625010101Z
+title: "Token validation invariant"
+status: done
+owner: "codex"
+repo_ref: ""
+repo_id: "main"
+created: 20260625T010101Z
+area: "repo"
+parent: ""
+depends_on: []
+---
+
+# T-20260625010101Z - Token validation invariant
+
+## Goal
+
+Keep token validation centralized.
+
+## Verification
+
+`uv run pytest tests/test_auth.py` passed.
+"""
+    archive_path = tmp_path / archive_rel
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text(archive_text, encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(archive_text.encode("utf-8")).hexdigest()
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    valid_receipt = {
+        "schema": "repoctl.task.completion",
+        "schema_version": 1,
+        "repo_id": "main",
+        "task_id": task_id,
+        "status": "done",
+        "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
+        "archive_path": archive_rel,
+        "content_sha256": digest,
+        "changed_entries": [{"change": "modified", "path": "auth.py"}],
+        "verification": {
+            "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
+            "archive_path": archive_rel,
+            "content_sha256": digest,
+        },
+    }
+    receipt_dir.joinpath(f"{task_id}.json").write_text(json.dumps(valid_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_dir.joinpath("T-20260625010102Z.json").write_text(
+        json.dumps({"schema": "repoctl.task.completion", "schema_version": 1, "repo_id": "main", "task_id": "T-20260625010102Z", "status": "done"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert main(["knowledge", "candidate", "suggest", "--from-task", task_id, "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["data"]["candidate"]["derived_from"]["task_id"] == task_id
+
+
+def test_knowledge_candidate_from_task_reports_target_invalid_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    task_id = "T-20260625010101Z"
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt_dir.joinpath(f"{task_id}.json").write_text(
+        json.dumps({"schema": "repoctl.task.completion", "schema_version": 1, "repo_id": "main", "task_id": task_id, "status": "done"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert main(["knowledge", "candidate", "suggest", "--from-task", task_id, "--repo-id", "main", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "knowledge_candidate_receipt_invalid"
 
 
 def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Path, monkeypatch, capsys) -> None:

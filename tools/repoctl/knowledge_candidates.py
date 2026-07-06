@@ -12,7 +12,7 @@ from .context_chunks import chunk_markdown_file
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write
 from .markdown import find_section, parse_frontmatter
-from .tasks import Problem, load_completion_receipts, normalize_task_id
+from .tasks import Problem, collect_completion_receipts, normalize_task_id
 
 
 ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
@@ -121,8 +121,10 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     normalized_task_id = normalize_task_id(task_id)
-    receipt = _receipt_for_task(root, task_id=normalized_task_id, repo_id=repo_id)
+    receipt, receipt_problems = _receipt_for_task(root, task_id=normalized_task_id, repo_id=repo_id)
     if receipt is None:
+        if receipt_problems:
+            return {}, receipt_problems
         return {}, [Problem("error", "knowledge_candidate_receipt_missing", f"completion receipt not found for task: {normalized_task_id}")]
     receipt_rel = f"docs/tasks/.repoctl-state/completions/{normalized_task_id}.json"
     artifact_rel = str(receipt.get("archive_path") or receipt.get("task_path") or "")
@@ -1047,11 +1049,20 @@ def _primary_chunk(chunks: Any, kind: str) -> Any:
     return chunks[0]
 
 
-def _receipt_for_task(root: Path, *, task_id: str, repo_id: str) -> dict[str, Any] | None:
-    for receipt in load_completion_receipts(root, repo_id=repo_id):
+def _receipt_for_task(root: Path, *, task_id: str, repo_id: str) -> tuple[dict[str, Any] | None, list[Problem]]:
+    receipts, problems = collect_completion_receipts(root, repo_id=repo_id)
+    target_problem_path = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
+    target_problems = [
+        Problem("error", "knowledge_candidate_receipt_invalid", problem.message, problem.path)
+        for problem in problems
+        if problem.path == target_problem_path
+    ]
+    if target_problems:
+        return None, target_problems
+    for receipt in receipts:
         if str(receipt.get("task_id") or "") == task_id:
-            return receipt
-    return None
+            return receipt, []
+    return None, []
 
 
 def _receipt_title(receipt: dict[str, Any], artifact_text: str) -> str:

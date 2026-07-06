@@ -65,7 +65,16 @@ def collect_context_sources(
             problems.append(Problem("error", "context_manifest_unreadable", str(exc), path.relative_to(root).as_posix()))
 
     receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
-    problems.extend(receipt_problems)
+    receipt_warnings = [
+        Problem(
+            "warning",
+            "context_completion_receipt_invalid",
+            f"{problem.message}; receipt excluded from this Context bundle",
+            problem.path,
+        )
+        for problem in receipt_problems
+    ]
+    problems.extend(receipt_warnings)
     for receipt in receipts:
         rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
         text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
@@ -75,12 +84,15 @@ def collect_context_sources(
             if artifact_path.is_file():
                 chunks.extend(chunk_markdown_file(root, artifact_path, kind="task_artifact"))
 
-    problems.extend(graph_problems)
+    graph_context_problems = _context_graph_problems(graph_problems)
+    problems.extend(graph_context_problems)
     if snapshot is None:
         completeness = {
             "documents_checked": len(document_paths),
             "manifests_checked": len(manifest_paths),
             "receipts_checked": len(receipts),
+            "receipt_problem_count": len(receipt_warnings),
+            "receipt_problem_paths": sorted(problem.path or "" for problem in receipt_warnings if problem.path),
             "graph_available": False,
             "graph_meta": graph_meta,
         }
@@ -95,6 +107,8 @@ def collect_context_sources(
         "documents_checked": len(document_paths),
         "manifests_checked": len(manifest_paths),
         "receipts_checked": len(receipts),
+        "receipt_problem_count": len(receipt_warnings),
+        "receipt_problem_paths": sorted(problem.path or "" for problem in receipt_warnings if problem.path),
         "graph_available": True,
         "graph_completeness": snapshot.completeness,
     }
@@ -147,6 +161,23 @@ def _graph_chunks(root: Path, snapshot: dict[str, Any]) -> list[DocumentChunk]:
         text = json.dumps(node, ensure_ascii=False, sort_keys=True)
         chunks.append(chunk_text_source(root, f"<graph:{node.get('id', '')}>", text, kind="graph_node", section=f"{node.get('kind', 'node')} {label}"))
     return chunks
+
+
+def _context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:
+    mapped: list[Problem] = []
+    for problem in graph_problems:
+        if problem.code == "invalid_completion_receipt":
+            mapped.append(
+                Problem(
+                    "warning",
+                    "context_graph_completion_receipt_invalid",
+                    f"{problem.message}; graph task receipt evidence is incomplete for this Context bundle",
+                    problem.path,
+                )
+            )
+        else:
+            mapped.append(problem)
+    return mapped
 
 
 def _manifest_digest(chunks: list[DocumentChunk]) -> str:

@@ -140,6 +140,48 @@ def test_context_query_respects_budget(tmp_path: Path, monkeypatch, capsys) -> N
     assert bundle["budget"]["estimated_tokens"] <= 10
 
 
+def test_context_query_isolates_invalid_completion_receipts(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    (receipt_dir / "T-20260625010101Z.json").write_text(
+        json.dumps(
+            {
+                "schema": "repoctl.task.completion",
+                "schema_version": 1,
+                "repo_id": "main",
+                "task_id": "T-20260625010101Z",
+                "status": "done",
+                "task_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
+                "archive_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
+                "content_sha256": "sha256:" + "a" * 64,
+                "changed_entries": [{"change": "modified", "path": "app.py"}],
+                "verification": {
+                    "task_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
+                    "archive_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
+                    "content_sha256": "sha256:" + "a" * 64,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert main(["context", "query", "What should I read first for this project?", "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    warning_codes = {warning["code"] for warning in [*payload["warnings"], *payload["problems"]]}
+    assert "context_completion_receipt_invalid" in warning_codes
+    assert "context_graph_completion_receipt_invalid" in warning_codes
+    bundle = payload["data"]["bundle"]
+    assert bundle["completeness"]["receipt_problem_count"] == 1
+    assert bundle["completeness"]["graph_completeness"]["receipt_set_complete"] is False
+
+
 def test_context_query_configured_multi_requires_repo_id(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_multirepo_workspace(tmp_path, monkeypatch)
 
