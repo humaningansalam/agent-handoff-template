@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -148,6 +149,56 @@ def test_upgrade_preserves_unmigratable_archived_task_state(tmp_path: Path) -> N
     assert plan["conflicts"] == []
     assert plan["state_migrations"] == []
     assert state_path.read_text(encoding="utf-8") == original
+
+
+def test_upgrade_migrates_v1_completion_receipt_as_recorded_paths_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(source)
+    task_id = "T-20260608120000Z"
+    task_path = workspace / f"docs/archive/tasks/{task_id}--done.md"
+    task_text = "---\nid: T-20260608120000Z\nstatus: done\n---\n\n## Verification\n\n- pytest: passed\n"
+    task_path.write_text(task_text, encoding="utf-8")
+    content_sha256 = "sha256:" + hashlib.sha256(task_text.encode("utf-8")).hexdigest()
+    receipt_path = workspace / f"docs/tasks/.repoctl-state/completions/{task_id}.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema": "repoctl.task.completion",
+                "schema_version": 1,
+                "task_id": task_id,
+                "repo_id": "main",
+                "status": "done",
+                "completed_at": "20260608T121000Z",
+                "task_path": f"docs/archive/tasks/{task_id}--done.md",
+                "archive_path": f"docs/archive/tasks/{task_id}--done.md",
+                "content_sha256": content_sha256,
+                "changed_entries": [{"change": "modified", "path": "app.py"}],
+                "repo_evidence": {"start_head": "a" * 40, "finish_head": "a" * 40, "git_available": True},
+                "verification": {"content_sha256": content_sha256},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plan = plan_upgrade(workspace, source=source)
+    assert len(plan["receipt_migrations"]) == 1
+    write_plan(plan_file, plan)
+    result = apply_upgrade(workspace, plan_file=plan_file)
+
+    assert any(item == {"path": f"docs/tasks/.repoctl-state/completions/{task_id}.json", "action": "migrate_completion_receipt"} for item in result["applied"])
+    migrated = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 2
+    assert migrated["repo_evidence"]["mode"] == "none"
+    assert migrated["repo_evidence"]["attribution"] == "none"
+    assert migrated["changed_entries"] == [{"change": "modified", "path": "app.py"}]
+    assert migrated["verification"]["source"] == "task_section"
+    assert migrated["verification"]["source_sha256"].startswith("sha256:")
 
 
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:

@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .io import RepoctlError, atomic_write, repoctl_lock
-from .tasks import TASK_STATE_SCHEMA_VERSION
+from .markdown import find_section
+from .tasks import COMPLETION_RECEIPT_SCHEMA_VERSION, TASK_STATE_SCHEMA_VERSION
 
 MANIFEST_REL = Path("repoctl-upgrade-manifest.json")
 UPGRADE_STATE_REL = Path("docs/tasks/.repoctl-state/upgrades")
@@ -187,6 +188,10 @@ def _task_state_text(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def _sha256_text(value: str) -> str:
+    return _sha256(_hash_bytes(value.encode("utf-8")))
+
+
 def _task_state_belongs_to_live_task(root: Path, task_id: str) -> bool:
     task_paths = sorted((root / "docs/tasks").glob(f"{task_id}--*.md"))
     if not task_paths:
@@ -283,12 +288,122 @@ def _plan_task_state_migrations(root: Path) -> tuple[list[dict[str, Any]], list[
     return migrations, conflicts
 
 
+def _migrate_completion_receipt_payload(root: Path, path: Path, data: dict[str, Any]) -> dict[str, Any] | None:
+    if data.get("schema") != "repoctl.task.completion" or data.get("schema_version") != 1:
+        return None
+    task_id = str(data.get("task_id") or "")
+    repo_id = data.get("repo_id")
+    content_sha256 = str(data.get("content_sha256") or "")
+    if path.stem != task_id or not isinstance(repo_id, str) or not content_sha256.startswith("sha256:"):
+        return None
+    raw_task_path = str(data.get("task_path") or data.get("archive_path") or "")
+    candidates = [root / raw_task_path] if raw_task_path else []
+    candidates.extend(sorted((root / "docs/tasks").glob(f"{task_id}--*.md")))
+    candidates.extend(sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")))
+    artifact_path: Path | None = None
+    artifact_text = ""
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root.resolve())
+            text = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if _sha256_text(text) == content_sha256:
+            artifact_path = candidate
+            artifact_text = text
+            break
+    if artifact_path is None:
+        return None
+    try:
+        verification_section = find_section(artifact_text, "Verification")
+    except RepoctlError:
+        return None
+    verification_body = artifact_text[verification_section.body_start : verification_section.end].strip()
+    verification_text = verification_body.rstrip() + "\n"
+    verification_digest = _sha256_text(verification_text)
+    old_repo_evidence = data.get("repo_evidence") if isinstance(data.get("repo_evidence"), dict) else {}
+    old_delta = old_repo_evidence.get("delta") if isinstance(old_repo_evidence.get("delta"), dict) else {}
+    changed_entries = data.get("changed_entries") if isinstance(data.get("changed_entries"), list) else []
+    task_path = raw_task_path or artifact_path.relative_to(root).as_posix()
+    return {
+        "schema": "repoctl.task.completion",
+        "schema_version": COMPLETION_RECEIPT_SCHEMA_VERSION,
+        "task_id": task_id,
+        "repo_id": repo_id,
+        "status": "done",
+        "completed_at": str(data.get("completed_at") or ""),
+        "task_path_at_completion": task_path,
+        "content_sha256": content_sha256,
+        "changed_entries": changed_entries,
+        "repo_evidence": {
+            "mode": "none",
+            "attribution": "none",
+            "start_head": str(old_repo_evidence.get("start_head") or ""),
+            "observed_head": str(old_repo_evidence.get("finish_head") or old_repo_evidence.get("observed_head") or ""),
+            "git_available": bool(old_repo_evidence.get("git_available")),
+            "diff_fingerprint_sha256": "",
+            "meta_gate": old_repo_evidence.get("meta_gate") if isinstance(old_repo_evidence.get("meta_gate"), dict) else {},
+            "delta": {
+                "changed_count": int(old_delta.get("changed_count") or len(changed_entries)),
+                "current_count": int(old_delta.get("current_count") or 0),
+                "baseline_available": bool(old_delta.get("baseline_available")),
+                "baseline_count": int(old_delta.get("baseline_count") or 0),
+                "preexisting_count": int(old_delta.get("preexisting_count") or 0),
+                "baseline_conflicts": list(old_delta.get("baseline_conflicts") or []),
+                "scope": old_delta.get("scope") if isinstance(old_delta.get("scope"), dict) else {},
+            },
+        },
+        "verification": {
+            "source": "task_section",
+            "source_path": task_path,
+            "source_sha256": verification_digest,
+            "normalization": "normalize_final_newline",
+            "normalized_sha256": verification_digest,
+            "stored_sha256": verification_digest,
+            "truncated": False,
+        },
+    }
+
+
+def _plan_completion_receipt_migrations(root: Path) -> list[dict[str, Any]]:
+    migrations: list[dict[str, Any]] = []
+    receipt_dir = root / "docs/tasks/.repoctl-state/completions"
+    if not receipt_dir.is_dir():
+        return migrations
+    for path in sorted(receipt_dir.glob("T-*.json")):
+        rel = path.relative_to(root).as_posix()
+        try:
+            source_bytes = path.read_bytes()
+            data = json.loads(source_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        migrated = _migrate_completion_receipt_payload(root, path, data)
+        if migrated is None:
+            continue
+        target_bytes = _task_state_text(migrated).encode("utf-8")
+        migrations.append(
+            {
+                "path": rel,
+                "action": "migrate_completion_receipt",
+                "source_hash": _hash_bytes(source_bytes),
+                "target_hash": _hash_bytes(target_bytes),
+                "schema_from": 1,
+                "schema_to": COMPLETION_RECEIPT_SCHEMA_VERSION,
+            }
+        )
+    return migrations
+
+
 def _plan_payload(
     root: Path,
     source_root: Path,
     manifest: dict[str, Any],
     operations: list[UpgradeOperation],
     state_migrations: list[dict[str, Any]],
+    receipt_migrations: list[dict[str, Any]],
     conflicts: list[dict[str, str]],
 ) -> dict[str, Any]:
     source_paths = [*manifest["replace_paths"], *manifest["create_paths"], *_preserve_seed_paths(source_root, manifest)]
@@ -306,6 +421,7 @@ def _plan_payload(
         "preserve_paths": manifest["preserve_paths"],
         "operations": [operation.to_dict() for operation in operations],
         "state_migrations": state_migrations,
+        "receipt_migrations": receipt_migrations,
         "conflicts": conflicts,
     }
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -402,8 +518,9 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
             )
         )
     state_migrations, migration_conflicts = _plan_task_state_migrations(root)
+    receipt_migrations = _plan_completion_receipt_migrations(root)
     conflicts.extend(migration_conflicts)
-    return _plan_payload(root, source_root, manifest, operations, state_migrations, conflicts)
+    return _plan_payload(root, source_root, manifest, operations, state_migrations, receipt_migrations, conflicts)
 
 
 def write_plan(path: Path, payload: dict[str, Any]) -> None:
@@ -471,7 +588,12 @@ def _load_plan(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise RepoctlError(f"invalid upgrade plan JSON: {error}", code="invalid_upgrade_plan", path=str(path)) from error
-    if not isinstance(payload, dict) or not isinstance(payload.get("operations"), list) or not isinstance(payload.get("state_migrations", []), list):
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("operations"), list)
+        or not isinstance(payload.get("state_migrations", []), list)
+        or not isinstance(payload.get("receipt_migrations", []), list)
+    ):
         raise RepoctlError("invalid upgrade plan shape", code="invalid_upgrade_plan", path=str(path))
     expected_digest = _canonical_plan_hash(payload)
     if str(payload.get("plan_sha256") or "") != expected_digest:
@@ -525,6 +647,8 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
         raise RepoctlError("upgrade plan source digest does not match current source", code="upgrade_plan_stale")
     if plan.get("state_migrations", []) != expected.get("state_migrations", []):
         raise RepoctlError("upgrade plan task state migrations do not match current workspace state", code="upgrade_plan_stale")
+    if plan.get("receipt_migrations", []) != expected.get("receipt_migrations", []):
+        raise RepoctlError("upgrade plan completion receipt migrations do not match current workspace state", code="upgrade_plan_stale")
 
 
 def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
@@ -538,6 +662,12 @@ def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
         if current != expected:
             raise RepoctlError(f"upgrade plan is stale for {rel}", code="upgrade_plan_stale", path=rel)
     for migration in plan.get("state_migrations", []):
+        rel = _safe_rel(str(migration.get("path", "")))
+        target = _assert_contained_path(root, rel, code="invalid_upgrade_target", require_file=True)
+        current = _hash_file(target)
+        if current != str(migration.get("source_hash") or ""):
+            raise RepoctlError(f"upgrade plan is stale for {rel}", code="upgrade_plan_stale", path=rel)
+    for migration in plan.get("receipt_migrations", []):
         rel = _safe_rel(str(migration.get("path", "")))
         target = _assert_contained_path(root, rel, code="invalid_upgrade_target", require_file=True)
         current = _hash_file(target)
@@ -615,6 +745,24 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                 backup_target(rel, target_path)
                 atomic_write(target_path, migrated_text)
                 applied.append({"path": rel, "action": "migrate_task_state"})
+            for migration in plan.get("receipt_migrations", []):
+                rel = _safe_rel(str(migration.get("path", "")))
+                target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target", require_file=True)
+                try:
+                    data = json.loads(target_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise RepoctlError("completion receipt changed after upgrade plan", code="upgrade_plan_stale", path=rel) from exc
+                if not isinstance(data, dict):
+                    raise RepoctlError("completion receipt changed after upgrade plan", code="upgrade_plan_stale", path=rel)
+                migrated = _migrate_completion_receipt_payload(root, target_path, data)
+                if migrated is None:
+                    raise RepoctlError("completion receipt no longer requires the planned migration", code="upgrade_plan_stale", path=rel)
+                migrated_text = _task_state_text(migrated)
+                if _hash_bytes(migrated_text.encode("utf-8")) != str(migration.get("target_hash") or ""):
+                    raise RepoctlError("completion receipt migration output changed after upgrade plan", code="upgrade_plan_stale", path=rel)
+                backup_target(rel, target_path)
+                atomic_write(target_path, migrated_text)
+                applied.append({"path": rel, "action": "migrate_completion_receipt"})
         except Exception as error:
             rolled_back = _rollback_applied(root, applied, backups)
             rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
