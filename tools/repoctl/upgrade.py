@@ -849,16 +849,31 @@ def upgrade_status(root: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
             availability = "not_required"
             current_digest = ""
             if backups:
-                try:
-                    backup_path = _assert_contained_path(root, backup_rel, code="upgrade_receipt_invalid")
-                    if not backup_path.exists():
+                if backup_rel:
+                    try:
+                        backup_path = _assert_contained_path(root, backup_rel, code="upgrade_receipt_invalid")
+                        if not backup_path.exists():
+                            availability = "missing"
+                        else:
+                            current_digest = _canonical_tree_digest(backup_path)
+                            availability = "available" if recorded_digest and current_digest == recorded_digest else "digest_mismatch"
+                    except RepoctlError as exc:
+                        problems.append({"severity": "error", "code": exc.code, "message": str(exc), "path": exc.path or rel})
+                        availability = "invalid"
+                else:
+                    individual_paths: list[Path] = []
+                    for item in backups:
+                        backup_path_value = str(item.get("backup_path") or "") if isinstance(item, dict) else ""
+                        try:
+                            individual_paths.append(_assert_contained_path(root, backup_path_value, code="upgrade_receipt_invalid"))
+                        except RepoctlError as exc:
+                            problems.append({"severity": "error", "code": exc.code, "message": str(exc), "path": rel})
+                    if len(individual_paths) != len(backups):
+                        availability = "invalid"
+                    elif any(not backup_path.exists() for backup_path in individual_paths):
                         availability = "missing"
                     else:
-                        current_digest = _canonical_tree_digest(backup_path)
-                        availability = "available" if recorded_digest and current_digest == recorded_digest else "digest_mismatch"
-                except RepoctlError as exc:
-                    problems.append({"severity": "error", "code": exc.code, "message": str(exc), "path": exc.path or rel})
-                    availability = "invalid"
+                        availability = "digest_unavailable"
             receipts.append(
                 {
                     "run_id": str(receipt.get("run_id") or path.parent.name),

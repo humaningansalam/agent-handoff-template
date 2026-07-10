@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
-from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
+from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 from tests.repoctl.meta.test_meta_check import write_repometa
 
 
@@ -244,6 +244,32 @@ def test_upgrade_migrates_v1_completion_receipt_as_recorded_paths_only(tmp_path:
     assert migrated["changed_entries"] == [{"change": "modified", "path": "app.py"}]
     assert migrated["verification"]["source"] == "task_section"
     assert migrated["verification"]["source_sha256"].startswith("sha256:")
+
+
+def test_upgrade_status_accepts_individual_backups_without_recorded_digest(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace)
+    run_id = "20260618025741Z"
+    backup_rel = f"docs/tasks/.repoctl-state/upgrades/{run_id}/backup/tools/repoctl/tasks.py"
+    backup_path = workspace / backup_rel
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_text("old tasks module\n", encoding="utf-8")
+    receipt_path = workspace / f"docs/tasks/.repoctl-state/upgrades/{run_id}/receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "backups": [{"path": "tools/repoctl/tasks.py", "backup_path": backup_rel}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    status, problems = upgrade_status(workspace)
+
+    assert problems == []
+    assert status["latest"]["backup"]["availability"] == "digest_unavailable"
 
 
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:
