@@ -4,7 +4,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,7 +12,7 @@ from typing import Any
 
 from .io import RepoctlError, atomic_write, repoctl_lock
 from .markdown import find_section
-from .tasks import COMPLETION_RECEIPT_SCHEMA_VERSION, TASK_STATE_SCHEMA_VERSION
+from .tasks import COMPLETION_RECEIPT_SCHEMA_VERSION, NON_LIVE, TASK_STATE_SCHEMA_VERSION, load_task
 
 MANIFEST_REL = Path("repoctl-upgrade-manifest.json")
 UPGRADE_STATE_REL = Path("docs/tasks/.repoctl-state/upgrades")
@@ -198,11 +197,10 @@ def _task_state_belongs_to_live_task(root: Path, task_id: str) -> bool:
         return False
     for task_path in task_paths:
         try:
-            text = task_path.read_text(encoding="utf-8")
-        except OSError:
+            task = load_task(task_path, root)
+        except (OSError, RepoctlError):
             return True
-        match = re.search(r"(?m)^status:\s*(todo|doing|blocked|done|canceled)\s*$", text)
-        if match is None or match.group(1) in {"todo", "doing", "blocked"}:
+        if task.status not in NON_LIVE:
             return True
     return False
 
@@ -256,10 +254,10 @@ def _migrate_task_state_payload(data: dict[str, Any], *, task_id: str, rel: str)
 
 def _plan_task_state_migrations(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     migrations: list[dict[str, Any]] = []
-    conflicts: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
     state_dir = root / "docs/tasks/.repoctl-state"
     if not state_dir.is_dir():
-        return migrations, conflicts
+        return migrations, warnings
     for path in sorted(state_dir.glob("T-*.json")):
         rel = path.relative_to(root).as_posix()
         if not _task_state_belongs_to_live_task(root, path.stem):
@@ -284,8 +282,15 @@ def _plan_task_state_migrations(root: Path) -> tuple[list[dict[str, Any]], list[
                 }
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, RepoctlError) as exc:
-            conflicts.append({"code": "task_state_migration_failed", "path": rel, "message": str(exc)})
-    return migrations, conflicts
+            warnings.append(
+                {
+                    "severity": "warning",
+                    "code": "task_state_migration_deferred",
+                    "path": rel,
+                    "message": f"live task state was preserved without migration; lifecycle commands for this task remain blocked: {exc}",
+                }
+            )
+    return migrations, warnings
 
 
 def _migrate_completion_receipt_payload(root: Path, path: Path, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -404,6 +409,7 @@ def _plan_payload(
     operations: list[UpgradeOperation],
     state_migrations: list[dict[str, Any]],
     receipt_migrations: list[dict[str, Any]],
+    warnings: list[dict[str, str]],
     conflicts: list[dict[str, str]],
 ) -> dict[str, Any]:
     source_paths = [*manifest["replace_paths"], *manifest["create_paths"], *_preserve_seed_paths(source_root, manifest)]
@@ -422,6 +428,7 @@ def _plan_payload(
         "operations": [operation.to_dict() for operation in operations],
         "state_migrations": state_migrations,
         "receipt_migrations": receipt_migrations,
+        "warnings": warnings,
         "conflicts": conflicts,
     }
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -517,10 +524,9 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
                 size=len(source_bytes),
             )
         )
-    state_migrations, migration_conflicts = _plan_task_state_migrations(root)
+    state_migrations, migration_warnings = _plan_task_state_migrations(root)
     receipt_migrations = _plan_completion_receipt_migrations(root)
-    conflicts.extend(migration_conflicts)
-    return _plan_payload(root, source_root, manifest, operations, state_migrations, receipt_migrations, conflicts)
+    return _plan_payload(root, source_root, manifest, operations, state_migrations, receipt_migrations, migration_warnings, conflicts)
 
 
 def write_plan(path: Path, payload: dict[str, Any]) -> None:
@@ -593,6 +599,7 @@ def _load_plan(path: Path) -> dict[str, Any]:
         or not isinstance(payload.get("operations"), list)
         or not isinstance(payload.get("state_migrations", []), list)
         or not isinstance(payload.get("receipt_migrations", []), list)
+        or not isinstance(payload.get("warnings", []), list)
     ):
         raise RepoctlError("invalid upgrade plan shape", code="invalid_upgrade_plan", path=str(path))
     expected_digest = _canonical_plan_hash(payload)
@@ -649,6 +656,8 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
         raise RepoctlError("upgrade plan task state migrations do not match current workspace state", code="upgrade_plan_stale")
     if plan.get("receipt_migrations", []) != expected.get("receipt_migrations", []):
         raise RepoctlError("upgrade plan completion receipt migrations do not match current workspace state", code="upgrade_plan_stale")
+    if plan.get("warnings", []) != expected.get("warnings", []):
+        raise RepoctlError("upgrade plan warnings do not match current workspace state", code="upgrade_plan_stale")
 
 
 def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
@@ -799,6 +808,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
             "applied": applied,
             "backups": backups,
             "backup": backup,
+            "warnings": list(plan.get("warnings", [])),
         }
         receipt_path = root / UPGRADE_STATE_REL / run_id / "receipt.json"
         atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
@@ -807,6 +817,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         "applied": applied,
         "backups": backups,
         "backup": backup,
+        "warnings": list(plan.get("warnings", [])),
         "receipt_path": (UPGRADE_STATE_REL / run_id / "receipt.json").as_posix(),
         "verification_commands": [
             "./scripts/repoctl check --json",

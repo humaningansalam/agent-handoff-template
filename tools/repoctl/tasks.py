@@ -2021,6 +2021,19 @@ def children_by_parent(tasks: list[Task]) -> dict[str, list[Task]]:
     return result
 
 
+def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
+    problems: list[Problem] = []
+    for task in live_tasks(tasks):
+        path = _baseline_path(root, task.id)
+        if not path.is_file():
+            continue
+        try:
+            _read_task_state(root, task.id)
+        except RepoctlError as exc:
+            problems.append(Problem("error", exc.code or "task_state_invalid", str(exc), exc.path or path.relative_to(root).as_posix()))
+    return problems
+
+
 def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False) -> list[Problem]:
     problems: list[Problem] = []
     ids = {task.id for task in tasks if task.id}

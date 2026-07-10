@@ -24,8 +24,14 @@ def write_workspace(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "docs/PRD.md").write_text("project prd\n", encoding="utf-8")
-    (root / "docs/tasks/T-20260609120000Z--live.md").write_text("live task\n", encoding="utf-8")
-    (root / "docs/archive/tasks/T-20260608120000Z--done.md").write_text("archived task\n", encoding="utf-8")
+    (root / "docs/tasks/T-20260609120000Z--live.md").write_text(
+        "---\nid: T-20260609120000Z\ntitle: Live task\nstatus: doing\nowner: unassigned\ncreated: 20260609T120000Z\nparent: ''\ndepends_on: []\n---\n",
+        encoding="utf-8",
+    )
+    (root / "docs/archive/tasks/T-20260608120000Z--done.md").write_text(
+        "---\nid: T-20260608120000Z\ntitle: Done task\nstatus: done\nowner: unassigned\ncreated: 20260608T120000Z\nparent: ''\ndepends_on: []\n---\n",
+        encoding="utf-8",
+    )
     (root / "scripts/repoctl").write_text("old repoctl\n", encoding="utf-8")
     (root / "repos/app.py").write_text("print('product')\n", encoding="utf-8")
     (root / "AGENTS.md").write_text("rules\n", encoding="utf-8")
@@ -148,6 +154,45 @@ def test_upgrade_preserves_unmigratable_archived_task_state(tmp_path: Path) -> N
 
     assert plan["conflicts"] == []
     assert plan["state_migrations"] == []
+    assert state_path.read_text(encoding="utf-8") == original
+
+
+def test_upgrade_defers_unmigratable_live_task_state_without_blocking_apply(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(source)
+    state_path = workspace / "docs/tasks/.repoctl-state/T-20260609120000Z.json"
+    state_path.parent.mkdir(parents=True)
+    original = (
+        json.dumps(
+            {
+                "schema_version": 2,
+                "task_id": "T-20260609120000Z",
+                "created": "20260609T120000Z",
+                "repo_id": "main",
+                "repo_path": "repos",
+                "git_toplevel": (workspace / "repos").as_posix(),
+                "head": "a" * 40,
+                "repo_changes": [{"change": "modified", "path": "app.py"}],
+                "repo_change_fingerprints": {"modified\u0000app.py\u0000": "b" * 64},
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    state_path.write_text(original, encoding="utf-8")
+
+    plan = plan_upgrade(workspace, source=source)
+
+    assert plan["conflicts"] == []
+    assert plan["state_migrations"] == []
+    assert [warning["code"] for warning in plan["warnings"]] == ["task_state_migration_deferred"]
+    write_plan(plan_file, plan)
+    result = apply_upgrade(workspace, plan_file=plan_file)
+    assert result["warnings"] == plan["warnings"]
+    assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "new repoctl\n"
     assert state_path.read_text(encoding="utf-8") == original
 
 

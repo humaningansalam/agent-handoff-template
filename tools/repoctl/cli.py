@@ -21,7 +21,7 @@ from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
-from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownership, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_tasks, validate_verification_file
+from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownership, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -948,7 +948,7 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tu
     board_text = board_path.read_text(encoding="utf-8")
     board_paths = parse_board(board_text)
     _receipts, receipt_problems = collect_completion_receipts(root)
-    problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + check_board(root, board_paths, tasks, board_text) + receipt_problems + _generated_adapter_problems(root)
+    problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + validate_live_task_states(root, tasks) + check_board(root, board_paths, tasks, board_text) + receipt_problems + _generated_adapter_problems(root)
     live_paths = [task.rel_path for task in live_tasks(tasks)]
     payload = {
         "ok": not _has_errors(problems),
@@ -3320,7 +3320,7 @@ def cmd_upgrade_plan(args: argparse.Namespace) -> int:
         "command": "upgrade.plan",
         "data": data,
         "problems": problems,
-        "warnings": [],
+        "warnings": list(data.get("warnings", [])),
     }
     if args.output:
         write_plan(Path(args.output).expanduser(), data)
@@ -3346,7 +3346,7 @@ def cmd_upgrade_apply(args: argparse.Namespace) -> int:
         "command": "upgrade.apply",
         "data": data,
         "problems": [],
-        "warnings": [],
+        "warnings": list(data.get("warnings", [])),
     }
     if args.json:
         _json(payload)

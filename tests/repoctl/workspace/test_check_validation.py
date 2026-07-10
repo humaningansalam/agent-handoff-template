@@ -37,6 +37,24 @@ def test_check_warns_when_repo_scoped_task_omits_discovery_evidence(tmp_path: Pa
     assert "repoctl task discovery add" in warning["message"]
 
 
+def test_check_reports_unmigrated_live_task_state(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    text = task_text(task_id, status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_task(tmp_path, f"{task_id}--alpha.md", text)
+    (tmp_path / "docs/BOARD.md").write_text(f"# BOARD\n\n## Board\n\n- docs/tasks/{task_id}--alpha.md\n\n## Backlog\n", encoding="utf-8")
+    state_path = tmp_path / f"docs/tasks/.repoctl-state/{task_id}.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({"schema_version": 2, "task_id": task_id}) + "\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["check", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    problem = next(problem for problem in payload["problems"] if problem["code"] == "task_state_upgrade_required")
+    assert problem["path"] == f"docs/tasks/.repoctl-state/{task_id}.json"
+
+
 def test_check_accepts_structured_discovery_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
