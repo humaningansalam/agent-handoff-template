@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -186,6 +187,21 @@ def _task_state_text(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def _task_state_belongs_to_live_task(root: Path, task_id: str) -> bool:
+    task_paths = sorted((root / "docs/tasks").glob(f"{task_id}--*.md"))
+    if not task_paths:
+        return False
+    for task_path in task_paths:
+        try:
+            text = task_path.read_text(encoding="utf-8")
+        except OSError:
+            return True
+        match = re.search(r"(?m)^status:\s*(todo|doing|blocked|done|canceled)\s*$", text)
+        if match is None or match.group(1) in {"todo", "doing", "blocked"}:
+            return True
+    return False
+
+
 def _migrate_task_state_payload(data: dict[str, Any], *, task_id: str, rel: str) -> dict[str, Any] | None:
     if data.get("schema") == "repoctl.task.state" and data.get("schema_version") == TASK_STATE_SCHEMA_VERSION:
         return None
@@ -241,6 +257,8 @@ def _plan_task_state_migrations(root: Path) -> tuple[list[dict[str, Any]], list[
         return migrations, conflicts
     for path in sorted(state_dir.glob("T-*.json")):
         rel = path.relative_to(root).as_posix()
+        if not _task_state_belongs_to_live_task(root, path.stem):
+            continue
         try:
             source_bytes = path.read_bytes()
             data = json.loads(source_bytes.decode("utf-8"))

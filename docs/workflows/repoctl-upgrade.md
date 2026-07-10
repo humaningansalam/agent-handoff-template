@@ -35,7 +35,7 @@ It must preserve project state:
 - `create_paths` are canonical docs/examples that are copied only when missing.
 - `preserve_paths` are adopter-owned state and must not be overwritten.
 
-Task state is the only preserved state that upgrade may transform. A readable known schema is migrated atomically in place only when its original HEAD and required baseline fingerprints are already present. Upgrade does not infer missing history from the current HEAD or working tree. An unverifiable state is reported as a plan conflict and remains untouched; there is no separate legacy store or compatibility runtime.
+Task state is the only preserved state that upgrade may transform. Only state belonging to a live `todo`, `doing`, or `blocked` task is migration-critical. State left by done, canceled, archived, or missing tasks is preserved byte-for-byte because completed tasks never reuse that baseline. A readable known live schema is migrated atomically in place only when its original HEAD and required baseline fingerprints are already present. Upgrade does not infer missing history from the current HEAD or working tree. An unverifiable live state is reported as a plan conflict and remains untouched; there is no separate legacy store or compatibility runtime.
 
 Each apply receipt records the managed source digest and backup tree digest. `./scripts/repoctl upgrade status --json` calculates backup `availability` as `available`, `missing`, `digest_mismatch`, or `not_required` without modifying the receipt. Backups use manual retention in this version; there is no prune command.
 

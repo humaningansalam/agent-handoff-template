@@ -132,6 +132,24 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     assert status["data"]["latest"]["backup"]["availability"] == "available"
 
 
+def test_upgrade_preserves_unmigratable_archived_task_state(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    write_workspace(workspace)
+    write_source(source)
+    task_id = "T-20260608120000Z"
+    state_path = workspace / f"docs/tasks/.repoctl-state/{task_id}.json"
+    state_path.parent.mkdir(parents=True)
+    original = json.dumps({"task_id": task_id, "created": "20260608T120000Z", "repo_changes": []}, indent=2) + "\n"
+    state_path.write_text(original, encoding="utf-8")
+
+    plan = plan_upgrade(workspace, source=source)
+
+    assert plan["conflicts"] == []
+    assert plan["state_migrations"] == []
+    assert state_path.read_text(encoding="utf-8") == original
+
+
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     source = tmp_path / "source"
