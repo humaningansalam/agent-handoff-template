@@ -90,7 +90,20 @@ def start_task_for_finish(monkeypatch, capsys, root: Path, task_id: str = "T-202
 def record_discovery(root: Path, task_id: str, *, query: str, reviewed: str, chosen: str) -> None:
     task_path = next((root / "docs/tasks").glob(f"{task_id}--*.md"))
     text = task_path.read_text(encoding="utf-8")
-    discovery = f"## Discovery\n\n- Candidate query: `{query}`\n- Candidate files reviewed: `{reviewed}`\n- Chosen files: `{chosen}`\n\n"
+    reviewed_values = [value.strip() for value in reviewed.split(",") if value.strip()]
+    chosen_values = [value.strip() for value in chosen.split(",") if value.strip()]
+
+    def field(name: str, values: list[str]) -> str:
+        if len(values) == 1:
+            return f"- {name}: `{values[0]}`\n"
+        return f"- {name}:\n" + "".join(f"  - `{value}`\n" for value in values)
+
+    discovery = (
+        f"## Discovery\n\n- Candidate query: `{query}`\n"
+        + field("Candidate files reviewed", reviewed_values)
+        + field("Chosen files", chosen_values)
+        + "\n"
+    )
     if "## Discovery" in text:
         start = text.index("## Discovery")
         end = text.index("## Execution Log")

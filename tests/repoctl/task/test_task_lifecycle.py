@@ -100,6 +100,30 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
     assert not any(warning["code"] == "missing_discovery_evidence" for warning in check_payload["warnings"])
 
 
+def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reason(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "q1", "--reviewed", "repos/a.py", "--chosen", "repos/a.py", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "q2", "--reviewed", "repos/b.py", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--replace-chosen", "repos/b.py", "--json"]) == 2
+    missing_reason = json.loads(capsys.readouterr().out)
+    assert missing_reason["problems"][0]["code"] == "missing_scope_change_reason"
+
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--replace-chosen", "repos/b.py", "--reason", "implementation moved", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["discovery"]["candidate_query_history"] == ["q1", "q2"]
+    assert payload["data"]["discovery"]["chosen_files"] == ["repos/b.py"]
+    task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
+    assert "scope changed: removed repos/a.py; added repos/b.py; reason=implementation moved" in task_body
+
+
 def test_task_create_print_id_and_root_work_area(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -295,7 +319,9 @@ def test_task_lifecycle_keeps_created_document_language_when_workspace_setting_c
     archived = (tmp_path / finish_payload["new_path"]).read_text(encoding="utf-8")
     assert "작업을 검증하고 완료함" in archived
     assert "Repoctl 게이트 요약" in archived
-    assert "추가 작업 없음; 작업이 완료됨" in archived
+    assert "## Last Active Handoff" in archived
+    assert "## Closure" in archived
+    assert "repoctl 관리 범위가 아님" in archived
     assert "task finished and verified" not in archived
 
 
@@ -303,18 +329,48 @@ def test_json_argparse_errors_are_machine_readable(capsys) -> None:
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "missing_verification_file"
+    assert payload["problems"][0]["code"] == "task_not_found"
 
 
-def test_task_start_force_dirty_refreshes_doing_task_repo_head(tmp_path: Path, monkeypatch) -> None:
+def test_task_start_force_dirty_rejects_doing_task_and_preserves_initial_state(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     repo = tmp_path / "repos"
     init_committed_product_repo(repo)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    state_path = tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json"
+    initial_state = state_path.read_bytes()
 
-    refreshed = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert "repo head at start:" in refreshed
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "task_already_started"
+    assert state_path.read_bytes() == initial_state
+
+
+def test_task_block_resume_preserves_initial_head_and_dirty_baseline(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "old\n"})
+    blocker = tmp_path / "blocker.md"
+    blocker.write_text("waiting for review\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    state_path = tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json"
+    initial_state = state_path.read_bytes()
+    (repo / "app.py").write_text("new\n", encoding="utf-8")
+
+    assert main(["task", "block", "T-20260609184046Z", "--verification-file", str(blocker), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+
+    capsys.readouterr()
+    assert state_path.read_bytes() == initial_state

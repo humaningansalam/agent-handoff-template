@@ -29,7 +29,7 @@ This contract freezes the common envelope, not every command's full payload.
     {
       "severity": "error",
       "code": "missing_verification_file",
-      "message": "task finish requires --verification-file",
+      "message": "task finish requires an external verification file or a completed Verification section",
       "path": "docs/tasks/T-...--slug.md"
     }
   ],

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .io import LOCK_REL, RepoctlError, atomic_write
-from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_change_fingerprints, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status
+from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status, repo_path_fingerprints
 from .markdown import append_section_entry, find_section, parse_frontmatter, replace_frontmatter_line, replace_section
 from .repositories import RepoTarget, default_repo_target, repo_layout
 from .settings import document_language, validate_document_language
@@ -25,6 +25,8 @@ ID_RE = re.compile(r"^T-[0-9]{14}Z$")
 TASK_ID_WITH_SLUG_RE = re.compile(r"^(T-[0-9]{14}Z)--[a-z0-9]+(?:-[a-z0-9]+)*$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
+TASK_STATE_SCHEMA_VERSION = 3
+COMPLETION_RECEIPT_SCHEMA_VERSION = 2
 
 TASK_DOC_COPY: dict[str, dict[str, Any]] = {
     "en": {
@@ -45,6 +47,9 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "meta_gate_skipped": "- meta gate: skipped ({reason})",
         "meta_gate_status": "- meta gate: {status}",
         "repo_change_evidence": "Repo change evidence:",
+        "closure_done": "Implementation and verification completed.",
+        "closure_canceled": "Task canceled with recorded evidence.",
+        "git_delivery_outside": "Not managed by repoctl.",
         "done_handoff_next": "No further action; task is complete.",
         "canceled_handoff_next": "No further action; task is canceled.",
         "blocked_handoff_next": "Resolve the recorded blocker or update the task with new evidence.",
@@ -66,15 +71,19 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "shared_decisions": "Record cross-child decisions here as they are made.",
         "integration_done": "All child tasks are done or canceled and integration verification is recorded.",
         "task_goal": "Deliver `{title}` as the smallest verified change, with exact touched files, validation evidence, and restartable handoff recorded before finish.",
-        "task_plan": [
-            "Inspect the task record, Board, and relevant repos/docs surfaces before editing.",
-            "Identify the exact files to change and keep edits limited to that surface.",
-            "Implement the smallest complete change that satisfies the goal.",
-            "Run focused validation and `repoctl meta check --changed` when `repos/` files changed.",
-            "Write a temporary verification file outside `repos/`, then finish with repoctl.",
+        "task_handoff_next": "Start the task, inspect `{repo_hint}`, and record Discovery before editing.",
+        "task_handoff_done": "Chosen files match the actual changes, Verification is complete, and repoctl finish records the result.",
+        "task_scope": [
+            "Change only the files recorded in Discovery for this goal.",
+            "Keep `repos/.repometa` annotations valid when coverage requires them for changed product files.",
+            "Run focused validation and `repoctl meta check --changed` before finish.",
+            "Commit, push, PR, deploy, and release state are not managed by repoctl.",
         ],
-        "task_handoff_next": "Start the task, inspect `{repo_hint}`, and replace this generated scope with the exact files and validation plan.",
-        "task_handoff_done": "The task file names the real touched files, the change is verified, and repoctl finish records archive/Board state.",
+        "root_scope": [
+            "Change only the workspace/docs files needed for this goal.",
+            "Do not touch product files under `repos/` unless this becomes a repo-scoped task.",
+            "Commit, push, PR, deploy, and release state are not managed by repoctl.",
+        ],
         "in_scope": [
             "Identify and record the concrete files/docs that define this task.",
             "Make only the narrow changes needed for the stated goal.",
@@ -121,6 +130,9 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "meta_gate_skipped": "- meta gate: 건너뜀({reason})",
         "meta_gate_status": "- meta gate: {status}",
         "repo_change_evidence": "Repo 변경 증거:",
+        "closure_done": "구현과 검증을 완료함.",
+        "closure_canceled": "기록된 증거와 함께 작업을 취소함.",
+        "git_delivery_outside": "repoctl 관리 범위가 아님.",
         "done_handoff_next": "추가 작업 없음; 작업이 완료됨.",
         "canceled_handoff_next": "추가 작업 없음; 작업이 취소됨.",
         "blocked_handoff_next": "기록된 blocker를 해결하거나 새 증거로 작업을 업데이트한다.",
@@ -142,15 +154,19 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "shared_decisions": "작업 중 생긴 cross-child 결정을 여기에 기록한다.",
         "integration_done": "모든 child task가 done 또는 canceled이고 통합 검증이 기록됨.",
         "task_goal": "`{title}`를 가장 작은 검증 가능한 변경으로 완수한다. 정확한 변경 파일, 검증 증거, 재시작 가능한 handoff를 완료 전에 기록한다.",
-        "task_plan": [
-            "편집 전에 작업 기록, Board, 관련 repos/docs 표면을 확인한다.",
-            "변경할 정확한 파일을 식별하고 편집 범위를 그 표면으로 제한한다.",
-            "목표를 만족하는 가장 작은 완전한 변경을 구현한다.",
-            "집중 검증을 실행하고, `repos/` 파일이 바뀌었으면 `repoctl meta check --changed`를 실행한다.",
-            "`repos/` 밖 임시 검증 파일을 작성한 뒤 repoctl로 완료한다.",
+        "task_handoff_next": "작업을 시작하고 `{repo_hint}`를 확인한 뒤 편집 전에 Discovery를 기록한다.",
+        "task_handoff_done": "Chosen files와 실제 변경이 일치하고 Verification이 완료되며 repoctl finish가 결과를 기록함.",
+        "task_scope": [
+            "이 목표를 위해 Discovery에 기록한 파일만 변경한다.",
+            "변경한 제품 파일에 필요한 `repos/.repometa` annotation을 유효하게 유지한다.",
+            "완료 전에 집중 검증과 `repoctl meta check --changed`를 실행한다.",
+            "commit, push, PR, deploy, release 상태는 repoctl이 관리하지 않는다.",
         ],
-        "task_handoff_next": "작업을 시작하고 `{repo_hint}`를 확인한 뒤, 이 생성된 범위를 정확한 파일과 검증 계획으로 교체한다.",
-        "task_handoff_done": "작업 파일에 실제 변경 파일이 기록되고, 변경이 검증되며, repoctl finish가 archive/Board 상태를 기록함.",
+        "root_scope": [
+            "이 목표에 필요한 workspace/docs 파일만 변경한다.",
+            "repo-scoped task로 전환하지 않는 한 `repos/` 제품 파일을 편집하지 않는다.",
+            "commit, push, PR, deploy, release 상태는 repoctl이 관리하지 않는다.",
+        ],
         "in_scope": [
             "이 작업을 정의하는 구체적인 파일/docs를 식별하고 기록한다.",
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
@@ -245,8 +261,17 @@ class Task:
             "repo_ref": str(self.frontmatter.get("repo_ref") or ""),
             "repo_id": str(self.frontmatter.get("repo_id") or ""),
             "parent": self.parent,
+            "follow_up_of": str(self.frontmatter.get("follow_up_of") or ""),
             "depends_on": depends_on,
         }
+
+
+@dataclass(frozen=True)
+class VerificationInput:
+    source: str
+    text: str
+    source_sha256: str
+    source_path: str = ""
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -309,6 +334,8 @@ def resolve_task(root: Path, task_id: str) -> Task:
 
 def append_task_log(root: Path, task_id: str, message: str) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
+    if task.status not in LIVE:
+        raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
     if not message.strip():
         raise RepoctlError("task log message is required")
     text = task.path.read_text(encoding="utf-8")
@@ -339,7 +366,7 @@ def _dedupe_preserve(values: list[str]) -> list[str]:
     return result
 
 
-def _read_discovery_values(task: Task) -> dict[str, list[str]]:
+def task_discovery_values(task: Task) -> dict[str, list[str]]:
     try:
         section = find_section(task.body, "Discovery")
     except RepoctlError:
@@ -382,15 +409,24 @@ def update_task_discovery(
     query: str = "",
     reviewed: list[str] | None = None,
     chosen: list[str] | None = None,
+    replace_chosen: list[str] | None = None,
+    reason: str = "",
     note: str = "",
 ) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
+    if task.status not in LIVE:
+        raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
     reviewed = reviewed or []
     chosen = chosen or []
-    if not any([query.strip(), reviewed, chosen, note.strip()]):
-        raise RepoctlError("task discovery add requires --query, --reviewed, --chosen, or --note", code="missing_discovery_input", path=task.rel_path)
+    replace_chosen = replace_chosen or []
+    if chosen and replace_chosen:
+        raise RepoctlError("task discovery add accepts --chosen or --replace-chosen, not both", code="ambiguous_chosen_update", path=task.rel_path)
+    if replace_chosen and not reason.strip():
+        raise RepoctlError("--replace-chosen requires --reason", code="missing_scope_change_reason", path=task.rel_path)
+    if not any([query.strip(), reviewed, chosen, replace_chosen, note.strip()]):
+        raise RepoctlError("task discovery add requires --query, --reviewed, --chosen, --replace-chosen, or --note", code="missing_discovery_input", path=task.rel_path)
 
-    fields = _read_discovery_values(task)
+    fields = task_discovery_values(task)
     placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
 
     def without_placeholders(values: list[str]) -> list[str]:
@@ -398,9 +434,10 @@ def update_task_discovery(
 
     query_values = without_placeholders(fields.get("Candidate query", []))
     if query.strip():
-        query_values = [_strip_ticks(query)]
+        query_values = _dedupe_preserve([*query_values, _strip_ticks(query)])
     reviewed_values = _dedupe_preserve([*without_placeholders(fields.get("Candidate files reviewed", [])), *reviewed])
-    chosen_values = _dedupe_preserve([*without_placeholders(fields.get("Chosen files", [])), *chosen])
+    previous_chosen = _dedupe_preserve(without_placeholders(fields.get("Chosen files", [])))
+    chosen_values = _dedupe_preserve(replace_chosen) if replace_chosen else _dedupe_preserve([*previous_chosen, *chosen])
     note_values = _dedupe_preserve([*without_placeholders(fields.get("Notes", [])), *([note] if note.strip() else [])])
     target = _target_for_task(root, task)
     if target is not None:
@@ -422,15 +459,43 @@ def update_task_discovery(
         if "## Execution Log" not in current_text:
             raise
         text = current_text.replace("## Execution Log", f"## Discovery\n\n{discovery_body}\n## Execution Log", 1)
+    if replace_chosen:
+        removed = sorted(set(previous_chosen) - set(chosen_values))
+        added = sorted(set(chosen_values) - set(previous_chosen))
+        text = append_section_entry(
+            text,
+            "Execution Log",
+            f"- {utc_stamp()}: scope changed: removed {', '.join(removed) or 'none'}; added {', '.join(added) or 'none'}; reason={reason.strip()}",
+        )
     return {
         "task": task,
         "text": text,
         "discovery": {
-            "candidate_query": query_values[0] if query_values else "",
+            "candidate_query": query_values[-1] if query_values else "",
+            "candidate_query_history": query_values,
             "candidate_files_reviewed": reviewed_values,
             "chosen_files": chosen_values,
             "notes": note_values,
         },
+    }
+
+
+def discovery_scope_delta(task: Task, target: RepoTarget, changes: list[ChangedEntry]) -> dict[str, list[str]]:
+    values = task_discovery_values(task).get("Chosen files", [])
+    prefix = f"{target.display_path.rstrip('/')}/"
+    chosen: set[str] = set()
+    for value in values:
+        normalized = normalize_repo_path(value)
+        if normalized.startswith(prefix):
+            normalized = normalize_repo_path(normalized[len(prefix) :])
+        if normalized:
+            chosen.add(normalized)
+    actual = set(_entry_paths(changes))
+    return {
+        "actual_paths": sorted(actual),
+        "chosen_paths": sorted(chosen),
+        "unchosen_actual_paths": sorted(actual - chosen),
+        "unused_chosen_paths": sorted(chosen - actual),
     }
 
 
@@ -469,6 +534,16 @@ def _entry_to_dict(entry: ChangedEntry) -> dict[str, str]:
     return data
 
 
+def _entry_paths(entries: list[ChangedEntry]) -> list[str]:
+    paths: set[str] = set()
+    for _change, path, old_path in entries:
+        if path:
+            paths.add(path)
+        if old_path:
+            paths.add(old_path)
+    return sorted(paths)
+
+
 def _sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -492,8 +567,12 @@ def _valid_receipt_task_path(value: str, *, allow_empty: bool = False) -> bool:
     return bool(TASK_ID_WITH_SLUG_RE.match(filename[:-3]))
 
 
-def _read_receipt_artifact(root: Path, value: str) -> str:
-    path = root / value
+def _read_receipt_artifact(root: Path, task_id: str, value: str) -> str:
+    candidates = [root / value]
+    candidates.extend(sorted((root / "docs/tasks").glob(f"{task_id}--*.md")))
+    candidates.extend(sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")))
+    existing = next((candidate for candidate in candidates if candidate.is_file()), None)
+    path = existing or (root / value)
     try:
         resolved = path.resolve()
         root_resolved = root.resolve()
@@ -507,21 +586,30 @@ def _read_receipt_artifact(root: Path, value: str) -> str:
         raise RepoctlError(f"task completion receipt artifact is missing: {value}", code="invalid_completion_receipt", path=value) from exc
 
 
-def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -> None:
+def _completion_receipt_repo_id(path: Path, root: Path, data: dict[str, Any]) -> str:
     rel = path.relative_to(root).as_posix()
     task_id = str(data.get("task_id") or "")
-    if data.get("schema") != "repoctl.task.completion" or data.get("schema_version") != 1:
+    if data.get("schema") != "repoctl.task.completion" or data.get("schema_version") != COMPLETION_RECEIPT_SCHEMA_VERSION:
         raise RepoctlError(f"task completion receipt has invalid schema: {rel}", code="invalid_completion_receipt", path=rel)
     if not ID_RE.match(task_id) or path.stem != task_id:
         raise RepoctlError(f"task completion receipt task_id does not match filename: {rel}", code="invalid_completion_receipt", path=rel)
-    if data.get("status") != "done":
-        raise RepoctlError(f"task completion receipt has invalid status: {rel}", code="invalid_completion_receipt", path=rel)
-    repo_id = str(data.get("repo_id") or "")
+    raw_repo_id = data.get("repo_id")
+    if "repo_id" not in data or not isinstance(raw_repo_id, str):
+        raise RepoctlError(f"task completion receipt has invalid repo_id: {rel}", code="invalid_completion_receipt", path=rel)
+    repo_id = raw_repo_id
     if repo_id and not re.fullmatch(r"[a-z][a-z0-9_-]*", repo_id):
         raise RepoctlError(f"task completion receipt has invalid repo_id: {rel}", code="invalid_completion_receipt", path=rel)
-    task_path = str(data.get("task_path") or "")
-    archive_path = str(data.get("archive_path") or "")
-    if not _valid_receipt_task_path(task_path) or not _valid_receipt_task_path(archive_path, allow_empty=True):
+    return repo_id
+
+
+def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -> None:
+    rel = path.relative_to(root).as_posix()
+    task_id = str(data.get("task_id") or "")
+    _completion_receipt_repo_id(path, root, data)
+    if data.get("status") != "done":
+        raise RepoctlError(f"task completion receipt has invalid status: {rel}", code="invalid_completion_receipt", path=rel)
+    task_path = str(data.get("task_path_at_completion") or "")
+    if not _valid_receipt_task_path(task_path):
         raise RepoctlError(f"task completion receipt has invalid task path: {rel}", code="invalid_completion_receipt", path=rel)
     content_sha256 = str(data.get("content_sha256") or "")
     if not _valid_sha256(content_sha256):
@@ -529,18 +617,27 @@ def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -
     verification = data.get("verification")
     if not isinstance(verification, dict):
         raise RepoctlError(f"task completion receipt has invalid verification: {rel}", code="invalid_completion_receipt", path=rel)
-    verification_task_path = str(verification.get("task_path") or "")
-    verification_archive_path = str(verification.get("archive_path") or "")
-    verification_hash = str(verification.get("content_sha256") or "")
-    if not _valid_receipt_task_path(verification_task_path) or not _valid_receipt_task_path(verification_archive_path, allow_empty=True):
-        raise RepoctlError(f"task completion receipt has invalid verification path: {rel}", code="invalid_completion_receipt", path=rel)
-    if verification_task_path != task_path or verification_archive_path != archive_path:
-        raise RepoctlError(f"task completion receipt verification does not match task path: {rel}", code="invalid_completion_receipt", path=rel)
-    if verification_hash != content_sha256 or not _valid_sha256(verification_hash):
-        raise RepoctlError(f"task completion receipt has invalid verification hash: {rel}", code="invalid_completion_receipt", path=rel)
-    artifact_path = archive_path or task_path
-    if _sha256_text(_read_receipt_artifact(root, artifact_path)) != content_sha256:
+    if str(verification.get("source") or "") not in {"external_file", "task_section"}:
+        raise RepoctlError(f"task completion receipt has invalid verification source: {rel}", code="invalid_completion_receipt", path=rel)
+    for key in ("source_sha256", "normalized_sha256", "stored_sha256"):
+        if not _valid_sha256(str(verification.get(key) or "")):
+            raise RepoctlError(f"task completion receipt has invalid verification hash: {rel}", code="invalid_completion_receipt", path=rel)
+    if not isinstance(verification.get("truncated"), bool):
+        raise RepoctlError(f"task completion receipt has invalid verification truncation flag: {rel}", code="invalid_completion_receipt", path=rel)
+    if _sha256_text(_read_receipt_artifact(root, task_id, task_path)) != content_sha256:
         raise RepoctlError(f"task completion receipt hash does not match artifact: {rel}", code="invalid_completion_receipt", path=rel)
+    repo_evidence = data.get("repo_evidence")
+    if not isinstance(repo_evidence, dict):
+        raise RepoctlError(f"task completion receipt has invalid repo evidence: {rel}", code="invalid_completion_receipt", path=rel)
+    mode = str(repo_evidence.get("mode") or "")
+    if mode not in {"none", "working_tree_diff", "committed_range"}:
+        raise RepoctlError(f"task completion receipt has invalid repo evidence mode: {rel}", code="invalid_completion_receipt", path=rel)
+    attribution = str(repo_evidence.get("attribution") or "")
+    if attribution not in {"none", "task_working_tree", "range_observed"}:
+        raise RepoctlError(f"task completion receipt has invalid repo evidence attribution: {rel}", code="invalid_completion_receipt", path=rel)
+    fingerprint = str(repo_evidence.get("diff_fingerprint_sha256") or "")
+    if mode != "none" and not _valid_sha256(fingerprint):
+        raise RepoctlError(f"task completion receipt has invalid repo evidence fingerprint: {rel}", code="invalid_completion_receipt", path=rel)
     raw_entries = data.get("changed_entries")
     if not isinstance(raw_entries, list):
         raise RepoctlError(f"task completion receipt has invalid changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
@@ -566,10 +663,11 @@ def load_completion_receipts(root: Path, *, repo_id: str | None = None) -> list[
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RepoctlError(f"task completion receipt is unreadable: {path.relative_to(root).as_posix()}") from exc
-        if repo_id is not None and isinstance(data, dict) and str(data.get("repo_id") or "") != repo_id:
-            continue
         if not isinstance(data, dict):
             raise RepoctlError(f"task completion receipt has invalid schema: {path.relative_to(root).as_posix()}", code="invalid_completion_receipt", path=path.relative_to(root).as_posix())
+        receipt_repo_id = _completion_receipt_repo_id(path, root, data)
+        if repo_id is not None and receipt_repo_id != repo_id:
+            continue
         _validate_completion_receipt(path, root, data)
         receipts.append(data)
     return receipts
@@ -588,10 +686,15 @@ def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tu
         except (OSError, json.JSONDecodeError) as exc:
             problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt is unreadable: {rel}", rel))
             continue
-        if repo_id is not None and isinstance(data, dict) and str(data.get("repo_id") or "") != repo_id:
-            continue
         if not isinstance(data, dict):
             problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt has invalid schema: {rel}", rel))
+            continue
+        try:
+            receipt_repo_id = _completion_receipt_repo_id(path, root, data)
+        except RepoctlError as exc:
+            problems.append(Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel))
+            continue
+        if repo_id is not None and receipt_repo_id != repo_id:
             continue
         try:
             _validate_completion_receipt(path, root, data)
@@ -644,10 +747,48 @@ def _no_product_repo_state() -> RepoGitState:
     return RepoGitState(False, "task has no product repository target")
 
 
+def _write_task_state(root: Path, task_id: str, payload: dict[str, Any]) -> None:
+    path = _baseline_path(root, task_id)
+    existing: dict[str, Any] | None = None
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RepoctlError(f"task state is unreadable: {path.relative_to(root).as_posix()}", code="task_state_unreadable", path=path.relative_to(root).as_posix()) from exc
+        if not isinstance(loaded, dict):
+            raise RepoctlError(f"task state has invalid schema: {path.relative_to(root).as_posix()}", code="task_state_invalid", path=path.relative_to(root).as_posix())
+        existing = loaded
+    if existing is not None and existing.get("initial") != payload.get("initial"):
+        raise RepoctlError("initial task baseline is immutable", code="initial_baseline_mutation", path=path.relative_to(root).as_posix())
+    _state_dir(root).mkdir(parents=True, exist_ok=True)
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _read_task_state(root: Path, task_id: str) -> dict[str, Any] | None:
+    path = _baseline_path(root, task_id)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RepoctlError(f"task state is unreadable: {path.relative_to(root).as_posix()}", code="task_state_unreadable", path=path.relative_to(root).as_posix()) from exc
+    if not isinstance(data, dict):
+        raise RepoctlError(f"task state has invalid schema: {path.relative_to(root).as_posix()}", code="task_state_invalid", path=path.relative_to(root).as_posix())
+    if data.get("schema") != "repoctl.task.state" or data.get("schema_version") != TASK_STATE_SCHEMA_VERSION:
+        raise RepoctlError(
+            "task state schema requires an explicit repoctl upgrade; the initial baseline will not be inferred",
+            code="task_state_upgrade_required",
+            path=path.relative_to(root).as_posix(),
+        )
+    if str(data.get("task_id") or "") != task_id or not isinstance(data.get("initial"), dict) or not isinstance(data.get("ownership", {}), dict):
+        raise RepoctlError(f"task state has invalid schema: {path.relative_to(root).as_posix()}", code="task_state_invalid", path=path.relative_to(root).as_posix())
+    return data
+
+
 def _write_repo_baseline(root: Path, task: "Task", entries: list[ChangedEntry], git_state: RepoGitState, target: RepoTarget | None) -> None:
     if not git_state.available:
         return
-    fingerprints, _fingerprint_state = repo_change_fingerprints(root, entries, target)
+    path_fingerprints, _fingerprint_state = repo_path_fingerprints(root, _entry_paths(entries), target)
     git_toplevel = ""
     if target is not None:
         try:
@@ -655,36 +796,41 @@ def _write_repo_baseline(root: Path, task: "Task", entries: list[ChangedEntry], 
         except OSError:
             git_toplevel = target.root_path.as_posix()
     head, _head_state = repo_git_head(root, target)
-    _state_dir(root).mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 2,
+        "schema": "repoctl.task.state",
+        "schema_version": TASK_STATE_SCHEMA_VERSION,
         "task_id": task.id,
-        "created": utc_stamp(),
-        "repo_id": git_state.repo_id,
-        "repo_path": git_state.repo_path,
-        "git_toplevel": git_toplevel,
-        "head": head,
-        "repo_changes": [_entry_to_dict(entry) for entry in entries],
-        "repo_change_fingerprints": fingerprints,
+        "initial": {
+            "created": utc_stamp(),
+            "repo_id": git_state.repo_id,
+            "repo_path": git_state.repo_path,
+            "git_toplevel": git_toplevel,
+            "start_head": head,
+            "dirty_entries": [_entry_to_dict(entry) for entry in entries],
+            "dirty_path_fingerprints": path_fingerprints,
+        },
+        "ownership": {},
     }
-    atomic_write(_baseline_path(root, task.id), json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    _write_task_state(root, task.id, payload)
 
 
 def _repo_baseline_record(root: Path, target: RepoTarget) -> dict[str, Any] | None:
     entries, git_state = repo_changed_entries(root, target)
     if not git_state.available:
         return None
-    fingerprints, _fingerprint_state = repo_change_fingerprints(root, entries, target)
+    path_fingerprints, _fingerprint_state = repo_path_fingerprints(root, _entry_paths(entries), target)
     try:
         git_toplevel = target.root_path.resolve().as_posix()
     except OSError:
         git_toplevel = target.root_path.as_posix()
+    head, _head_state = repo_git_head(root, target)
     return {
         "repo_id": target.id,
         "repo_path": target.display_path,
         "git_toplevel": git_toplevel,
-        "repo_changes": [_entry_to_dict(entry) for entry in entries],
-        "repo_change_fingerprints": fingerprints,
+        "start_head": head,
+        "dirty_entries": [_entry_to_dict(entry) for entry in entries],
+        "dirty_path_fingerprints": path_fingerprints,
     }
 
 
@@ -692,26 +838,27 @@ def _write_product_repo_baselines(root: Path, task: "Task", targets: tuple[RepoT
     records = [record for target in targets if (record := _repo_baseline_record(root, target)) is not None]
     if not records:
         return
-    _state_dir(root).mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 2,
+        "schema": "repoctl.task.state",
+        "schema_version": TASK_STATE_SCHEMA_VERSION,
         "task_id": task.id,
-        "created": utc_stamp(),
-        "repositories": records,
+        "initial": {
+            "created": utc_stamp(),
+            "repositories": records,
+        },
+        "ownership": {},
     }
-    atomic_write(_baseline_path(root, task.id), json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    _write_task_state(root, task.id, payload)
 
 
 def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
-    path = _baseline_path(root, task_id)
-    if not path.is_file():
+    data = _read_task_state(root, task_id)
+    if data is None:
         return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RepoctlError(f"task repo dirty baseline is unreadable: {path.relative_to(root).as_posix()}") from exc
-    raw_entries = data.get("repo_changes", []) if isinstance(data, dict) else []
-    raw_repositories = data.get("repositories", []) if isinstance(data, dict) else []
+    path = _baseline_path(root, task_id)
+    initial = data["initial"]
+    raw_entries = initial.get("dirty_entries", [])
+    raw_repositories = initial.get("repositories", [])
     if raw_repositories:
         if not isinstance(raw_repositories, list):
             raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
@@ -720,7 +867,7 @@ def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
             if not isinstance(item, dict):
                 raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
             repositories.append(item)
-        return {"repositories": repositories, "entries": [], "fingerprints": {}, "repo_id": "", "repo_path": "", "git_toplevel": ""}
+        return {"repositories": repositories, "entries": [], "path_fingerprints": {}, "repo_id": "", "repo_path": "", "git_toplevel": "", "ownership": data.get("ownership", {})}
     if not isinstance(raw_entries, list):
         raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
     entries: list[ChangedEntry] = []
@@ -733,17 +880,18 @@ def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
         if not change or not path_value:
             raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
         entries.append((change, path_value, old_path))
-    raw_fingerprints = data.get("repo_change_fingerprints", {}) if isinstance(data, dict) else {}
+    raw_fingerprints = initial.get("dirty_path_fingerprints", {})
     if raw_fingerprints and not isinstance(raw_fingerprints, dict):
         raise RepoctlError(f"task repo dirty baseline is invalid: {path.relative_to(root).as_posix()}")
     fingerprints = {str(key): str(value) for key, value in raw_fingerprints.items()} if isinstance(raw_fingerprints, dict) else {}
     return {
         "entries": entries,
-        "fingerprints": fingerprints,
-        "repo_id": str(data.get("repo_id") or ""),
-        "repo_path": str(data.get("repo_path") or ""),
-        "git_toplevel": str(data.get("git_toplevel") or ""),
-        "head": str(data.get("head") or ""),
+        "path_fingerprints": fingerprints,
+        "repo_id": str(initial.get("repo_id") or ""),
+        "repo_path": str(initial.get("repo_path") or ""),
+        "git_toplevel": str(initial.get("git_toplevel") or ""),
+        "head": str(initial.get("start_head") or ""),
+        "ownership": data.get("ownership", {}),
     }
 
 
@@ -761,6 +909,107 @@ def _parse_baseline_entries(raw_entries: Any, state_path: Path, root: Path) -> l
             raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
         entries.append((change, path_value, old_path))
     return entries
+
+
+def resolve_task_baseline_ownership(root: Path, task_id: str, *, path: str, ownership: str) -> dict[str, Any]:
+    task = resolve_live_task(root, task_id)
+    if task.status not in LIVE:
+        raise RepoctlError("baseline ownership can only be resolved for a live task", code="task_not_live", path=task.rel_path)
+    if ownership not in {"task", "preexisting"}:
+        raise RepoctlError("baseline ownership must be task or preexisting", code="invalid_baseline_ownership", path=task.rel_path)
+    target = _target_for_task(root, task)
+    if target is None:
+        raise RepoctlError("baseline ownership requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
+    normalized = normalize_repo_path(path)
+    prefix = f"{target.display_path.rstrip('/')}/"
+    if normalized.startswith(prefix):
+        normalized = normalize_repo_path(normalized[len(prefix) :])
+    if not normalized:
+        raise RepoctlError("baseline ownership path must be repo-relative", code="invalid_baseline_path", path=path)
+    state = _read_task_state(root, task.id)
+    baseline = _read_repo_baseline(root, task.id)
+    if state is None or baseline is None:
+        raise RepoctlError("task has no initial repo baseline", code="repo_head_missing_at_start", path=task.rel_path)
+    baseline_fingerprint = str(baseline.get("path_fingerprints", {}).get(normalized) or "")
+    if not baseline_fingerprint:
+        raise RepoctlError("baseline ownership path was not dirty at task start", code="baseline_path_not_initially_dirty", path=normalized)
+    current_fingerprints, git_state = repo_path_fingerprints(root, [normalized], target)
+    if not git_state.available:
+        raise RepoctlError(f"cannot inspect baseline ownership path: {git_state.reason}", code="repo_git_unavailable", path=git_state.repo_path or target.display_path)
+    final_fingerprint = str(current_fingerprints.get(normalized) or "")
+    if ownership == "preexisting" and final_fingerprint != baseline_fingerprint:
+        raise RepoctlError(
+            "preexisting ownership requires the path to be restored exactly to its initial dirty state",
+            code="baseline_not_restored",
+            path=normalized,
+        )
+    updated = json.loads(json.dumps(state))
+    updated.setdefault("ownership", {})[normalized] = {
+        "ownership": ownership,
+        "decided_at": utc_stamp(),
+        "baseline_fingerprint": baseline_fingerprint,
+        "final_fingerprint": final_fingerprint,
+    }
+    _write_task_state(root, task.id, updated)
+    return {
+        "task": task,
+        "path": normalized,
+        "ownership": ownership,
+        "baseline_fingerprint": baseline_fingerprint,
+        "final_fingerprint": final_fingerprint,
+    }
+
+
+def committed_range_baseline_conflicts(root: Path, task_id: str, entries: list[ChangedEntry]) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    task = resolve_task(root, task_id)
+    target = _target_for_task(root, task)
+    baseline = _read_repo_baseline(root, task.id)
+    if target is None or baseline is None:
+        return [], {}
+    baseline_fingerprints = baseline.get("path_fingerprints") if isinstance(baseline.get("path_fingerprints"), dict) else {}
+    ownership = baseline.get("ownership") if isinstance(baseline.get("ownership"), dict) else {}
+    overlap = sorted(set(_entry_paths(entries)) & set(baseline_fingerprints))
+    current_fingerprints, _state = repo_path_fingerprints(root, overlap, target)
+    conflicts: list[str] = []
+    evidence: dict[str, dict[str, Any]] = {}
+    for path in overlap:
+        decision = ownership.get(path) if isinstance(ownership.get(path), dict) else {}
+        owner = str(decision.get("ownership") or "")
+        baseline_fingerprint = str(baseline_fingerprints.get(path) or "")
+        final_fingerprint = str(current_fingerprints.get(path) or "")
+        evidence[path] = {
+            "ownership": owner,
+            "decided_at": str(decision.get("decided_at") or ""),
+            "baseline_fingerprint": baseline_fingerprint,
+            "final_fingerprint": final_fingerprint,
+        }
+        if owner == "task":
+            continue
+        if owner == "preexisting" and final_fingerprint == baseline_fingerprint:
+            continue
+        conflicts.append(path)
+    return conflicts, evidence
+
+
+def task_baseline_ownership_evidence(root: Path, task_id: str) -> dict[str, dict[str, Any]]:
+    task = resolve_task(root, task_id)
+    target = _target_for_task(root, task)
+    baseline = _read_repo_baseline(root, task.id)
+    if target is None or baseline is None:
+        return {}
+    ownership = baseline.get("ownership") if isinstance(baseline.get("ownership"), dict) else {}
+    paths = sorted(path for path, decision in ownership.items() if isinstance(decision, dict))
+    current_fingerprints, _state = repo_path_fingerprints(root, paths, target)
+    evidence: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        decision = ownership[path]
+        evidence[path] = {
+            "ownership": str(decision.get("ownership") or ""),
+            "decided_at": str(decision.get("decided_at") or ""),
+            "baseline_fingerprint": str(decision.get("baseline_fingerprint") or ""),
+            "final_fingerprint": str(current_fingerprints.get(path) or ""),
+        }
+    return evidence
 
 
 def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
@@ -791,26 +1040,30 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
                         baseline_conflicts.append(repo_path)
                     continue
                 current, _git_state = repo_changed_entries(root, matched)
-                current_fingerprints, _fingerprint_state = repo_change_fingerprints(root, current, matched)
+                current_fingerprints, _fingerprint_state = repo_path_fingerprints(root, _entry_paths(current), matched)
                 state_path = _baseline_path(root, task_id)
-                baseline_entries = _parse_baseline_entries(record.get("repo_changes", []), state_path, root)
-                baseline_fingerprints = record.get("repo_change_fingerprints", {})
+                baseline_entries = _parse_baseline_entries(record.get("dirty_entries", []), state_path, root)
+                baseline_fingerprints = record.get("dirty_path_fingerprints", {})
                 if not isinstance(baseline_fingerprints, dict):
                     raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
                 baseline_count += len(baseline_entries)
                 current_count += len(current)
-                baseline_keys = {_entry_key(entry) for entry in baseline_entries}
+                baseline_paths = set(_entry_paths(baseline_entries))
                 for entry in current:
                     prefixed_entry = (entry[0], f"{repo_path}/{entry[1]}", f"{repo_path}/{entry[2]}" if entry[2] else "")
-                    if _entry_key(entry) not in baseline_keys:
+                    paths = set(_entry_paths([entry]))
+                    overlap = paths & baseline_paths
+                    if not overlap:
                         changes.append(prefixed_entry)
                         continue
-                    key = _entry_fingerprint_key(entry)
-                    baseline_fingerprint = str(baseline_fingerprints.get(key) or "")
-                    current_fingerprint = current_fingerprints.get(key)
-                    if not baseline_fingerprint or current_fingerprint != baseline_fingerprint:
-                        baseline_conflicts.append(prefixed_entry[1])
-                        changes.append(prefixed_entry)
+                    unchanged = paths <= baseline_paths and all(
+                        str(baseline_fingerprints.get(path) or "") and current_fingerprints.get(path) == str(baseline_fingerprints.get(path) or "")
+                        for path in overlap
+                    )
+                    if unchanged:
+                        continue
+                    baseline_conflicts.extend(f"{repo_path}/{path}" for path in overlap)
+                    changes.append(prefixed_entry)
             git_state = RepoGitState(True, repo_id="", repo_path="repos")
             return {
                 "changes": changes,
@@ -819,6 +1072,12 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
                 "current_count": current_count,
                 "preexisting_count": max(0, current_count - len(changes)),
                 "baseline_conflicts": sorted(set(baseline_conflicts)),
+                "initial_dirty_paths": sorted(
+                    f"{str(record.get('repo_path') or '')}/{path}".strip("/")
+                    for record in baseline["repositories"]
+                    for path in _entry_paths(_parse_baseline_entries(record.get("dirty_entries", []), _baseline_path(root, task_id), root))
+                ),
+                "ownership": dict(baseline.get("ownership") or {}),
                 "repo_git": git_state,
             }
         git_state = _no_product_repo_state()
@@ -830,30 +1089,38 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
             changes.extend((entry[0], f"{product_target.display_path}/{entry[1]}", f"{product_target.display_path}/{entry[2]}" if entry[2] else "") for entry in current)
         if changes:
             git_state = RepoGitState(True, repo_id="", repo_path="repos")
-        return {"changes": changes, "baseline_available": False, "baseline_count": 0, "current_count": current_count, "preexisting_count": 0, "baseline_conflicts": [], "repo_git": git_state}
+        return {"changes": changes, "baseline_available": False, "baseline_count": 0, "current_count": current_count, "preexisting_count": 0, "baseline_conflicts": [], "initial_dirty_paths": [], "ownership": {}, "repo_git": git_state}
     current, git_state = repo_changed_entries(root, target)
     baseline = _read_repo_baseline(root, task_id) if git_state.available else None
     if baseline is None:
-        return {"changes": current, "baseline_available": False, "baseline_count": 0, "current_count": len(current), "preexisting_count": 0, "baseline_conflicts": [], "repo_git": git_state}
+        return {"changes": current, "baseline_available": False, "baseline_count": 0, "current_count": len(current), "preexisting_count": 0, "baseline_conflicts": [], "initial_dirty_paths": [], "ownership": {}, "repo_git": git_state}
     baseline_entries = baseline["entries"]
-    baseline_fingerprints = baseline["fingerprints"]
-    current_fingerprints, _fingerprint_state = repo_change_fingerprints(root, current, target)
-    baseline_keys = {_entry_key(entry) for entry in baseline_entries}
+    baseline_fingerprints = baseline["path_fingerprints"]
+    current_fingerprints, _fingerprint_state = repo_path_fingerprints(root, _entry_paths(current), target)
+    baseline_paths = set(_entry_paths(baseline_entries))
+    ownership = baseline.get("ownership") if isinstance(baseline.get("ownership"), dict) else {}
     changes: list[ChangedEntry] = []
     baseline_conflicts: list[str] = []
     for entry in current:
-        if _entry_key(entry) not in baseline_keys:
+        paths = set(_entry_paths([entry]))
+        overlap = paths & baseline_paths
+        if not overlap:
             changes.append(entry)
             continue
-        key = _entry_fingerprint_key(entry)
-        baseline_fingerprint = baseline_fingerprints.get(key)
-        current_fingerprint = current_fingerprints.get(key)
-        if not baseline_fingerprint:
-            baseline_conflicts.append(entry[1])
-            changes.append(entry)
-        elif current_fingerprint != baseline_fingerprint:
-            baseline_conflicts.append(entry[1])
-            changes.append(entry)
+        unchanged = paths <= baseline_paths and all(
+            baseline_fingerprints.get(path) and current_fingerprints.get(path) == baseline_fingerprints.get(path)
+            for path in overlap
+        )
+        if unchanged:
+            continue
+        changes.append(entry)
+        for path in overlap:
+            decision = ownership.get(path) if isinstance(ownership.get(path), dict) else {}
+            if str(decision.get("ownership") or "") == "task":
+                continue
+            if str(decision.get("ownership") or "") == "preexisting" and current_fingerprints.get(path) == baseline_fingerprints.get(path):
+                continue
+            baseline_conflicts.append(path)
     return {
         "changes": changes,
         "baseline_available": True,
@@ -861,6 +1128,10 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
         "current_count": len(current),
         "preexisting_count": max(0, len(current) - len(changes)),
         "baseline_conflicts": sorted(set(baseline_conflicts)),
+        "initial_dirty_paths": sorted(baseline_paths),
+        "ownership": ownership,
+        "baseline_path_fingerprints": baseline_fingerprints,
+        "current_path_fingerprints": current_fingerprints,
         "repo_git": git_state,
     }
 
@@ -868,8 +1139,9 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
 def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
-    if task.status not in {"todo", "blocked"} and not (task.status == "doing" and force_dirty):
-        raise RepoctlError("task start requires status todo or blocked; use --force-dirty to refresh a doing task's repo evidence")
+    if task.status not in {"todo", "blocked"}:
+        raise RepoctlError("task start requires status todo or blocked; an active task baseline cannot be refreshed", code="task_already_started", path=task.rel_path)
+    existing_state = _read_task_state(root, task.id)
     target = _target_for_task(root, task)
     repo_scoped = _repo_scoped_task(task)
     if target is None:
@@ -885,7 +1157,9 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
         baseline_entries, _baseline_git_state = repo_changed_entries(root, target)
     if _repo_scoped_task(task) and not git_state.available:
         raise RepoctlError(f"repo-scoped task cannot start because {git_state.reason}; initialize repos/ as an independent git repository first", code="repo_git_unavailable", path=git_state.repo_path or "repos")
-    if dirty and repo_scoped and not force_dirty:
+    if task.status == "blocked" and repo_scoped and existing_state is None:
+        raise RepoctlError("blocked repo task has no initial baseline; create a new task instead of inferring the missing start state", code="repo_head_missing_at_start", path=task.rel_path)
+    if dirty and repo_scoped and task.status == "todo" and existing_state is None and not force_dirty:
         raise RepoctlError("repos/ is dirty; use --force-dirty to record dirty files and continue", code="repo_dirty", path=git_state.repo_path or "repos")
 
     text = task.path.read_text(encoding="utf-8")
@@ -897,7 +1171,7 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
         entry = _git_unavailable_entry(git_state.reason, copy=copy)
     else:
         entry = f"- {utc_stamp()}: {copy['task_started']}"
-    if git_state.available:
+    if git_state.available and existing_state is None:
         if target is None:
             _write_product_repo_baselines(root, task, _root_task_product_surfaces(root))
         else:
@@ -952,18 +1226,35 @@ def _verification_gate_summary(meta_gate: dict[str, Any] | None, git_state: Repo
     return "\n".join(lines) + "\n"
 
 
-def _verification_body(verification: str, diff_evidence: str, *, meta_gate: dict[str, Any] | None, git_state: RepoGitState, copy: dict[str, Any]) -> tuple[str, bool]:
+def _verification_body(verification: VerificationInput, diff_evidence: str, *, meta_gate: dict[str, Any] | None, git_state: RepoGitState, copy: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if verification.source == "external_file":
+        normalized_body = _normalize_verification_artifact(verification.text)
+        normalization = "strip_verification_heading_and_normalize_final_newline"
+    elif verification.source == "task_section":
+        normalized_body = verification.text.strip()
+        normalization = "normalize_final_newline"
+    else:
+        raise RepoctlError("verification source must be external_file or task_section", code="invalid_verification_source")
+    normalized = normalized_body.rstrip() + "\n"
+    stored = normalized
     truncated = False
-    verification = verification.strip()
-    verification = _normalize_verification_artifact(verification)
-    if len(verification) > 4000:
-        verification = verification[:4000].rstrip() + "\n... truncated"
+    if len(stored) > 4000:
+        stored = stored[:4000].rstrip() + "\n... truncated\n"
         truncated = True
-    body = verification or copy["verification_empty"]
+    body = stored.rstrip() or copy["verification_empty"]
     body += "\n\n" + _verification_gate_summary(meta_gate, git_state, copy=copy).rstrip("\n")
     if diff_evidence:
         body += f"\n\n{copy['repo_change_evidence']}\n\n```text\n" + diff_evidence + "\n```"
-    return body + "\n", truncated
+    metadata = {
+        "source": verification.source,
+        "source_path": verification.source_path,
+        "source_sha256": verification.source_sha256,
+        "normalization": normalization,
+        "normalized_sha256": _sha256_text(normalized),
+        "stored_sha256": _sha256_text(stored),
+        "truncated": truncated,
+    }
+    return body + "\n", metadata
 
 
 def _normalize_verification_artifact(verification: str) -> str:
@@ -995,6 +1286,29 @@ def _canceled_handoff(new_path: str, *, copy: dict[str, Any]) -> str:
     )
 
 
+def _finalize_handoff(text: str, *, status: str, new_path: str, receipt_path: str, evidence_mode: str, copy: dict[str, Any]) -> str:
+    if "## Last Active Handoff" in text or "## Closure" in text:
+        raise RepoctlError("task already contains completion-only sections", code="duplicate_closure_section")
+    section = find_section(text, "Handoff")
+    handoff_body = text[section.body_start : section.end].strip()
+    result = copy["closure_done"] if status == "done" else copy["closure_canceled"]
+    receipt_value = f"`{receipt_path}`" if receipt_path else "none"
+    closure = (
+        "## Last Active Handoff\n\n"
+        f"{handoff_body}\n\n"
+        "## Closure\n\n"
+        f"- Task result: {result}\n"
+        f"- Task record at completion: `{new_path}`\n"
+        f"- Repo evidence mode: `{evidence_mode}`\n"
+        f"- Completion receipt: {receipt_value}\n"
+        f"- Git delivery: {copy['git_delivery_outside']}\n"
+    )
+    suffix = text[section.end :]
+    if suffix and not closure.endswith("\n\n"):
+        closure += "\n"
+    return text[: section.start] + closure + suffix
+
+
 def _blocked_handoff(task_path: str, task_id: str, *, copy: dict[str, Any]) -> str:
     return (
         f"- Next exact step: {copy['blocked_handoff_next']}\n"
@@ -1002,30 +1316,6 @@ def _blocked_handoff(task_path: str, task_id: str, *, copy: dict[str, Any]) -> s
         f"- First command to run: `./scripts/repoctl task doctor {task_id} --json`\n"
         f"- Done when: {copy['blocked_handoff_done']}\n"
     )
-
-
-def _updated_child_receipt_write(root: Path, child: Task, child_new_path: str, child_archive_text: str) -> tuple[Path, str] | None:
-    child_receipt_path = _completion_receipt_path(root, child.id)
-    if not child_receipt_path.is_file():
-        return None
-    child_receipt_rel = child_receipt_path.relative_to(root).as_posix()
-    try:
-        child_receipt = json.loads(child_receipt_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RepoctlError(f"task completion receipt is unreadable: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel) from exc
-    if not isinstance(child_receipt, dict):
-        raise RepoctlError(f"task completion receipt has invalid schema: {child_receipt_rel}", code="invalid_completion_receipt", path=child_receipt_rel)
-    _validate_completion_receipt(child_receipt_path, root, child_receipt)
-    child_hash = _sha256_text(child_archive_text)
-    child_receipt["task_path"] = child_new_path
-    child_receipt["archive_path"] = child_new_path
-    child_receipt["content_sha256"] = child_hash
-    verification = child_receipt.get("verification")
-    if isinstance(verification, dict):
-        verification["task_path"] = child_new_path
-        verification["archive_path"] = child_new_path
-        verification["content_sha256"] = child_hash
-    return child_receipt_path, json.dumps(child_receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
 def validate_verification_file(root: Path, verification_file: Path) -> None:
@@ -1051,11 +1341,14 @@ def validate_verification_file(root: Path, verification_file: Path) -> None:
         raise RepoctlError(f"verification file cannot be read: {verification_file}", code="missing_verification_file", path=verification_file.as_posix())
 
 
-def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None, allow_head_changed: bool = False) -> dict[str, Any]:
+def finish_task(root: Path, task_id: str, *, verification: VerificationInput, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None, allow_head_changed: bool = False) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
         raise RepoctlError("task finish requires a live status")
+    receipt_path = _completion_receipt_path(root, task.id)
+    if receipt_path.exists():
+        raise RepoctlError("task completion receipt already exists and will not be overwritten", code="completion_receipt_exists", path=receipt_path.relative_to(root).as_posix())
     repo_scoped = _repo_scoped_task(task)
     area = str(task.frontmatter.get("area") or "")
     target = _target_for_task(root, task)
@@ -1075,7 +1368,7 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
             raise RepoctlError("task finish with changed repo HEAD requires committed diff evidence from the recorded task start head", code="committed_diff_required", path=task.rel_path)
     if repo_changed and area not in REPO_REQUIRED_AREAS and not str(task.frontmatter.get("repo_id") or ""):
         raise RepoctlError("task that changes repos/ must set area to one of: repo, backend, frontend, infra, mobile or set repo_id for the selected product repository", code="repository_selector_required", path=task.rel_path)
-    if repo_changed and not _discovery_recorded(task, target):
+    if repo_changed and not discovery_recorded(task, target):
         raise RepoctlError("repo task must record candidate discovery before finish", code="placeholder_discovery", path=task.rel_path)
     if repo_scoped and target is None:
         raise RepoctlError("repo-scoped task cannot finish because product repository is missing; initialize repos/ as the product repository or use area docs/ops for root-only work", code="repository_not_found", path=task.rel_path)
@@ -1083,13 +1376,8 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     timestamp_problem = _execution_log_timestamp_problem(task, now=finish_timestamp)
     if timestamp_problem:
         raise RepoctlError(f"task finish would create non-monotonic Execution Log timestamps; {timestamp_problem}", code="execution_log_timestamp_order", path=task.rel_path)
-    validate_verification_file(root, verification_file)
-    try:
-        verification = verification_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RepoctlError(f"verification file cannot be read: {verification_file}") from exc
-    if not verification.strip():
-        raise RepoctlError("verification file must contain the commands run and their results", code="empty_verification_file", path=verification_file.as_posix())
+    if not verification.text.strip():
+        raise RepoctlError("verification evidence must contain the commands run and their results", code="empty_verification_file", path=verification.source_path or task.rel_path)
     all_tasks = load_tasks(root)
     children = children_by_parent(all_tasks)
     live_children = [child for child in children.get(task.id, []) if child.status in LIVE]
@@ -1101,7 +1389,7 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         diff_evidence, git_state = "", _no_product_repo_state()
     else:
         diff_evidence, git_state = repo_diff_evidence(root, target)
-    verification_body, truncated = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
+    verification_body, verification_metadata = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_finished']}")
     text = replace_frontmatter_line(text, "status", "done")
@@ -1124,21 +1412,23 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
                     child_new_path = f"docs/archive/tasks/{child.path.name}"
                     child_archive_target = root / child_new_path
                     child_text = child.path.read_text(encoding="utf-8")
-                    child_text = append_section_entry(child_text, "Execution Log", f"- {utc_stamp()}: task archived with parent `{task.id}`.")
-                    child_archive_text = replace_section(child_text, "Handoff", _done_handoff(child_new_path, copy=copy))
-                    archive_texts[child_archive_target] = child_archive_text
+                    archive_texts[child_archive_target] = child_text
                     moves.append((child.path, child_archive_target))
-                    child_receipt_write = _updated_child_receipt_write(root, child, child_new_path, child_archive_text)
-                    if child_receipt_write is not None:
-                        receipt_writes.append(child_receipt_write)
-    text = replace_section(text, "Handoff", _done_handoff(new_path, copy=copy))
+    evidence_mode = str((repo_delta or {}).get("evidence_mode") or "none")
+    receipt_rel = receipt_path.relative_to(root).as_posix()
+    text = _finalize_handoff(text, status="done", new_path=new_path, receipt_path=receipt_rel, evidence_mode=evidence_mode, copy=copy)
     if moves:
         archive_texts[root / new_path] = text
     changed_entries = [_entry_to_dict(entry) for entry in (repo_delta or {}).get("changes", [])]
     repo_evidence = {
+        "mode": evidence_mode,
+        "attribution": "range_observed" if evidence_mode == "committed_range" else "task_working_tree" if evidence_mode == "working_tree_diff" else "none",
         "start_head": start_head,
-        "finish_head": current_head,
+        "observed_head": current_head,
         "git_available": bool(current_head_state.available),
+        "diff_fingerprint_sha256": str((repo_delta or {}).get("diff_fingerprint_sha256") or ""),
+        "fingerprint_manifest": (repo_delta or {}).get("evidence_manifest") or {},
+        "ownership": (repo_delta or {}).get("ownership") or {},
         "meta_gate": meta_gate or {},
         "delta": {
             "changed_count": len(changed_entries),
@@ -1147,27 +1437,23 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
             "baseline_count": int((repo_delta or {}).get("baseline_count") or 0),
             "preexisting_count": int((repo_delta or {}).get("preexisting_count") or 0),
             "baseline_conflicts": list((repo_delta or {}).get("baseline_conflicts") or []),
+            "scope": (repo_delta or {}).get("scope") or {},
         },
     }
     receipt = {
         "schema": "repoctl.task.completion",
-        "schema_version": 1,
+        "schema_version": COMPLETION_RECEIPT_SCHEMA_VERSION,
         "task_id": task.id,
         "repo_id": target.id if target is not None else "",
         "status": "done",
         "completed_at": finish_timestamp,
-        "task_path": new_path,
-        "archive_path": new_path if archived else "",
+        "task_path_at_completion": new_path,
         "content_sha256": _sha256_text(text),
         "changed_entries": changed_entries,
         "repo_evidence": repo_evidence,
-        "verification": {
-            "task_path": new_path,
-            "archive_path": new_path if archived else "",
-            "content_sha256": _sha256_text(text),
-        },
+        "verification": verification_metadata,
     }
-    receipt_writes.append((_completion_receipt_path(root, task.id), json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"))
+    receipt_writes.append((receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"))
     return {
         "task": task,
         "text": text,
@@ -1176,15 +1462,15 @@ def finish_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         "archived": archived,
         "moves": moves,
         "archive_texts": archive_texts,
-        "truncated": truncated,
-        "receipt_path": _completion_receipt_path(root, task.id),
+        "truncated": bool(verification_metadata["truncated"]),
+        "receipt_path": receipt_path,
         "receipt_text": json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         "receipt_writes": receipt_writes,
         "receipt": receipt,
     }
 
 
-def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate: dict[str, Any] | None = None) -> dict[str, Any]:
+def cancel_task(root: Path, task_id: str, *, verification: VerificationInput, meta_gate: dict[str, Any] | None = None) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -1193,12 +1479,7 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     timestamp_problem = _execution_log_timestamp_problem(task, now=finish_timestamp)
     if timestamp_problem:
         raise RepoctlError(f"task cancel would create non-monotonic Execution Log timestamps; {timestamp_problem}")
-    validate_verification_file(root, verification_file)
-    try:
-        verification = verification_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RepoctlError(f"verification file cannot be read: {verification_file}") from exc
-    if not verification.strip():
+    if not verification.text.strip():
         raise RepoctlError("verification file must contain the cancellation reason and any verification evidence")
     all_tasks = load_tasks(root)
     children = children_by_parent(all_tasks)
@@ -1213,7 +1494,7 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
     else:
         diff_evidence, git_state = repo_diff_evidence(root, target)
     meta_gate = meta_gate or {"status": "skipped", "reason": "task_canceled"}
-    verification_body, truncated = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
+    verification_body, verification_metadata = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_canceled']}")
     text = replace_frontmatter_line(text, "status", "canceled")
@@ -1236,14 +1517,9 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
                     child_new_path = f"docs/archive/tasks/{child.path.name}"
                     target = root / child_new_path
                     child_text = child.path.read_text(encoding="utf-8")
-                    child_text = append_section_entry(child_text, "Execution Log", f"- {utc_stamp()}: task archived with canceled parent `{task.id}`.")
-                    child_archive_text = replace_section(child_text, "Handoff", _canceled_handoff(child_new_path, copy=copy))
-                    archive_texts[target] = child_archive_text
+                    archive_texts[target] = child_text
                     moves.append((child.path, target))
-                    child_receipt_write = _updated_child_receipt_write(root, child, child_new_path, child_archive_text)
-                    if child_receipt_write is not None:
-                        receipt_writes.append(child_receipt_write)
-    text = replace_section(text, "Handoff", _canceled_handoff(new_path, copy=copy))
+    text = _finalize_handoff(text, status="canceled", new_path=new_path, receipt_path="", evidence_mode="none", copy=copy)
     if moves:
         archive_texts[root / new_path] = text
     return {
@@ -1254,12 +1530,12 @@ def cancel_task(root: Path, task_id: str, *, verification_file: Path, meta_gate:
         "archived": archived,
         "moves": moves,
         "archive_texts": archive_texts,
-        "truncated": truncated,
+        "truncated": bool(verification_metadata["truncated"]),
         "receipt_writes": receipt_writes,
     }
 
 
-def block_task(root: Path, task_id: str, *, verification_file: Path) -> dict[str, Any]:
+def block_task(root: Path, task_id: str, *, verification: VerificationInput) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -1268,12 +1544,7 @@ def block_task(root: Path, task_id: str, *, verification_file: Path) -> dict[str
     timestamp_problem = _execution_log_timestamp_problem(task, now=block_timestamp)
     if timestamp_problem:
         raise RepoctlError(f"task block would create non-monotonic Execution Log timestamps; {timestamp_problem}")
-    validate_verification_file(root, verification_file)
-    try:
-        verification = verification_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RepoctlError(f"verification file cannot be read: {verification_file}") from exc
-    if not verification.strip():
+    if not verification.text.strip():
         raise RepoctlError("verification file must contain the blocker and current evidence")
 
     text = task.path.read_text(encoding="utf-8")
@@ -1283,7 +1554,7 @@ def block_task(root: Path, task_id: str, *, verification_file: Path) -> dict[str
     else:
         diff_evidence, git_state = repo_diff_evidence(root, target)
     meta_gate = {"status": "skipped", "reason": "task_blocked"}
-    verification_body, truncated = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
+    verification_body, verification_metadata = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {block_timestamp}: {copy['task_blocked']}")
     text = replace_frontmatter_line(text, "status", "blocked")
@@ -1297,7 +1568,7 @@ def block_task(root: Path, task_id: str, *, verification_file: Path) -> dict[str
         "keep_board": True,
         "moves": [],
         "archive_texts": {},
-        "truncated": truncated,
+        "truncated": bool(verification_metadata["truncated"]),
     }
 
 
@@ -1384,7 +1655,7 @@ def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> li
     return invalid
 
 
-def _discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
+def discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
     try:
         section = find_section(task.body, "Discovery")
     except RepoctlError:
@@ -1407,7 +1678,7 @@ def _discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
     normalized = {key: fields[key].strip().strip("`").strip().lower() for key in fields}
     if any(normalized[key] in placeholders for key in normalized):
         return False
-    chosen_values = _read_discovery_values(task).get("Chosen files", [])
+    chosen_values = task_discovery_values(task).get("Chosen files", [])
     if target is not None and _discovery_paths_outside_target(chosen_values, target):
         return False
     chosen = fields["Chosen files"]
@@ -1419,6 +1690,32 @@ def _task_workspace_root(task: Task) -> Path:
     for _part in Path(task.rel_path).parts:
         root = root.parent
     return root
+
+
+def _live_handoff_problems(task: Task, root: Path) -> list[Problem]:
+    try:
+        section = find_section(task.body, "Handoff")
+    except RepoctlError:
+        return [Problem("error", "missing_handoff", "live task must contain a Handoff section", task.rel_path)]
+    body = task.body[section.body_start : section.end]
+    match = re.search(r"^\s*-\s*First file to open:\s*(.+?)\s*$", body, flags=re.MULTILINE)
+    if match is None:
+        return [Problem("error", "missing_handoff_first_file", "live Handoff must contain First file to open", task.rel_path)]
+    value = _strip_ticks(match.group(1))
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        return [Problem("error", "invalid_handoff_first_file", "Handoff First file must be a workspace-relative path", task.rel_path)]
+    candidate = root / path
+    try:
+        root_resolved = root.resolve()
+        candidate_resolved = candidate.resolve()
+    except OSError:
+        return [Problem("error", "invalid_handoff_first_file", "Handoff First file cannot be resolved", task.rel_path)]
+    if root_resolved not in (candidate_resolved, *candidate_resolved.parents):
+        return [Problem("error", "handoff_first_file_outside_workspace", "Handoff First file resolves outside the workspace", task.rel_path)]
+    if not candidate.is_file():
+        return [Problem("error", "handoff_first_file_missing", f"Handoff First file does not exist: {value}", task.rel_path)]
+    return []
 
 
 def _context_doc_paths(task: Task) -> list[str]:
@@ -1573,7 +1870,7 @@ def _apply_creation_defaults(
         text = replace_section(text, "Integration Done When", f"- {copy['integration_done']}\n")
     else:
         goal = copy["task_goal"].format(title=title) + "\n"
-        plan = _bullet_lines(copy["task_plan"])
+        scope = _bullet_lines(copy["task_scope"] if repo_scoped else copy["root_scope"])
         handoff = (
             f"- Next exact step: {copy['task_handoff_next'].format(repo_hint=repo_hint)}\n"
             f"- First file to open: `{rel_path.as_posix()}`\n"
@@ -1589,21 +1886,12 @@ def _apply_creation_defaults(
         text = replace_section(text, "Discovery", _bullet_lines(copy["discovery"]))
     text = replace_section(text, "Work Area", work_area)
     text = replace_section(text, "Goal", goal)
-    text = replace_section(
-        text,
-        "In Scope",
-        _bullet_lines(copy["in_scope"] if repo_scoped else copy["root_in_scope"]),
-    )
-    text = replace_section(
-        text,
-        "Out of Scope",
-        _bullet_lines(copy["out_of_scope"]),
-    )
-    text = replace_section(
-        text,
-        "Plan",
-        plan,
-    )
+    if task_type == "parent":
+        text = replace_section(text, "In Scope", _bullet_lines(copy["in_scope"] if repo_scoped else copy["root_in_scope"]))
+        text = replace_section(text, "Out of Scope", _bullet_lines(copy["out_of_scope"]))
+        text = replace_section(text, "Plan", plan)
+    else:
+        text = replace_section(text, "Scope", scope)
     text = replace_section(text, "Execution Log", f"- {created}: {copy['task_created']}\n")
     text = replace_section(text, "Verification", f"- {copy['verification_pending']}\n")
     text = replace_section(text, "Handoff", handoff)
@@ -1622,6 +1910,7 @@ def create_task_file(
     repo_ref: str = "",
     repo_id: str = "",
     backlog_id: str = "",
+    follow_up_of: str = "",
 ) -> Task:
     if not (root / LOCK_REL).is_dir():
         raise RepoctlError(f"task creation requires repoctl lock: {LOCK_REL}")
@@ -1648,12 +1937,19 @@ def create_task_file(
     if task_type == "parent" and parent:
         raise RepoctlError("parent tasks cannot have a parent id")
     _validate_parent_id(parent)
+    _validate_parent_id(follow_up_of)
     if parent:
         parent_matches = [task for task in load_tasks(root) if not task.archived and task.id == parent]
         if not parent_matches:
             raise RepoctlError(f"parent task not found: {parent}")
         if parent_matches[0].status not in LIVE or not is_parent_task(parent_matches[0]):
             raise RepoctlError(f"parent task is not a live coordinating parent: {parent}")
+    if follow_up_of:
+        previous = next((task for task in load_tasks(root) if task.id == follow_up_of), None)
+        if previous is None:
+            raise RepoctlError(f"follow-up task not found: {follow_up_of}", code="task_not_found")
+        if previous.status not in NON_LIVE:
+            raise RepoctlError("--follow-up-of requires a done or canceled task", code="follow_up_task_still_live", path=previous.rel_path)
     slug = slug or _slug_from_title(title)
     _validate_slug(slug)
 
@@ -1688,7 +1984,8 @@ def create_task_file(
         text = _replace_exact(text, 'area: ""', f'area: "{_escape_yaml_double(area)}"')
         text = _replace_exact(text, 'parent: ""', f'parent: "{_escape_yaml_double(parent)}"')
         language = document_language(root)
-        text = text.replace("depends_on: []\n", f'depends_on: []\ndocument_language: "{_escape_yaml_double(language)}"\n', 1)
+        follow_up_line = f'follow_up_of: "{_escape_yaml_double(follow_up_of)}"\n' if follow_up_of else ""
+        text = text.replace("depends_on: []\n", f'depends_on: []\n{follow_up_line}document_language: "{_escape_yaml_double(language)}"\n', 1)
         text = text.replace("# T-YYYYMMDDHHMMSSZ - Title", f"# {task_id} - {title}", 1)
         text = text.replace("# T-YYYYMMDDHHMMSSZ - Parent Title", f"# {task_id} - {title}", 1)
         text = _apply_creation_defaults(
@@ -1705,6 +2002,8 @@ def create_task_file(
             backlog_id=backlog_id,
             language=language,
         )
+        if follow_up_of:
+            text = append_section_entry(text, "Work Area", f"- Follow-up of: `{follow_up_of}`")
         atomic_write(path, text)
         return load_task(path, root)
     raise RepoctlError("failed to reserve unique task id after 20 retries")
@@ -1754,16 +2053,28 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
                     problems.append(Problem("error", "invalid_document_language", str(exc), task.rel_path))
         if task.parent and task.parent not in ids:
             problems.append(Problem("error", "missing_parent", f"parent task not found: {task.parent}", task.rel_path))
+        follow_up_of = str(task.frontmatter.get("follow_up_of") or "")
+        if follow_up_of:
+            if not ID_RE.match(follow_up_of):
+                problems.append(Problem("error", "invalid_follow_up", "follow_up_of must be a task id", task.rel_path))
+            elif follow_up_of not in ids:
+                problems.append(Problem("error", "missing_follow_up_task", f"follow_up_of task not found: {follow_up_of}", task.rel_path))
+            else:
+                previous = next((candidate for candidate in tasks if candidate.id == follow_up_of), None)
+                if previous is not None and previous.status in LIVE:
+                    problems.append(Problem("error", "follow_up_task_still_live", "follow_up_of must reference a done or canceled task", task.rel_path))
         repo_id = task.frontmatter.get("repo_id")
         if repo_id not in (None, "") and (not isinstance(repo_id, str) or not re.match(r"^[a-z][a-z0-9_-]*$", repo_id)):
             problems.append(Problem("error", "invalid_repo_id", "repo_id must be lowercase [a-z0-9_-] starting with a letter", task.rel_path))
-        if _repo_scoped_task(task) and task.status in LIVE and not _discovery_recorded(task):
+        if _repo_scoped_task(task) and task.status in LIVE and not discovery_recorded(task):
             append_warning(
                 task,
                 "missing_discovery_evidence",
                 "repo-scoped task needs structured Discovery fields: Candidate query, Candidate files reviewed, and Chosen files. Prefer `repoctl task discovery add`; free-form prose is not enough.",
             )
         root = _task_workspace_root(task)
+        if task.status in LIVE and not task.archived:
+            problems.extend(_live_handoff_problems(task, root))
         for context_path in _context_doc_paths(task):
             if not (root / context_path).exists():
                 append_warning(task, "missing_context_doc", f"Context Docs path does not exist: {context_path}", context_path)

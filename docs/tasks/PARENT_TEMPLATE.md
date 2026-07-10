@@ -87,7 +87,7 @@ Update on a best-effort basis; omissions are not rule violations.
 - Evidence captured
 - Result
 
-<!-- Finish with: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json` -->
+<!-- When this section is complete, `./scripts/repoctl task finish T-... --json` uses it directly. -->
 
 ## Handoff
 

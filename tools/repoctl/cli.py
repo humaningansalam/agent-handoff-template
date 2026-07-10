@@ -12,7 +12,7 @@ from .code_index import build_code_index
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
-from .git import repo_commit_range_entries, repo_git_head
+from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import build_graph, query_graph
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
@@ -21,8 +21,8 @@ from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
-from .tasks import Problem, REPO_REQUIRED_AREAS, append_task_log, block_task, cancel_task, create_task_file, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, start_task, task_repo_head_at_start, update_task_discovery, validate_tasks, validate_verification_file
-from .upgrade import apply_upgrade, plan_upgrade, write_plan
+from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownership, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_tasks, validate_verification_file
+from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
 class RepoctlArgparseError(RuntimeError):
@@ -149,19 +149,27 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         code = _problem_code(problem)
         path = _problem_path(problem)
         if code == "missing_verification_file":
-            add("Create verification evidence", command=f"cat > /tmp/{task_id}-verification.md")
-            add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --verification-file /tmp/{task_id}-verification.md --json")
-            add("Reuse completed task Verification", command=f"./scripts/repoctl task finish {task_id} --use-task-verification --json")
+            add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
+            add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --json")
+            add("Use an external verification artifact", command=f"./scripts/repoctl task finish {task_id} --verification-file /tmp/{task_id}-verification.md --json")
         elif code == "verification_file_inside_repo":
             add("Move verification evidence outside repos/", command=f"cp {path or 'repos/...'} /tmp/{task_id}-verification.md")
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
             add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
+        elif code == "actual_changes_outside_chosen":
+            add("Replace active Chosen files", command=f"./scripts/repoctl task discovery add {task_id} --replace-chosen repos/<path> --reason '<reason>' --json")
+            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --json")
         elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
             add("Initialize repos/ as an independent git repository", command="git -C repos init")
         elif code == "repo_head_changed_since_start":
-            add("Restart task baseline after reviewing repo HEAD change", command=f"./scripts/repoctl task start {task_id} --force-dirty --json")
-            add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --verification-file /tmp/{task_id}-verification.md --json")
+            add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --json")
+        elif code == "baseline_conflict":
+            add("Resolve baseline ownership", command=f"./scripts/repoctl task baseline resolve {task_id} --path {path or 'repos/<path>'} --ownership task --json")
+            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --json")
+        elif code == "repo_history_rewritten":
+            add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
+            add("Create a new task with a fresh baseline", command="./scripts/repoctl task create --slug <slug> --area repo --repo-id main <title> --start --json")
         elif code == "repo_changes_on_cancel":
             add("Revert or finish repos/ changes before canceling", command="git -C repos status --short")
             add("Explicitly cancel with dirty repo evidence", command=f"./scripts/repoctl task cancel {task_id} --verification-file /tmp/{task_id}-cancel.md --allow-dirty-cancel --json")
@@ -939,7 +947,8 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tu
     board_path = root / "docs/BOARD.md"
     board_text = board_path.read_text(encoding="utf-8")
     board_paths = parse_board(board_text)
-    problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + check_board(root, board_paths, tasks, board_text)
+    _receipts, receipt_problems = collect_completion_receipts(root)
+    problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + check_board(root, board_paths, tasks, board_text) + receipt_problems + _generated_adapter_problems(root)
     live_paths = [task.rel_path for task in live_tasks(tasks)]
     payload = {
         "ok": not _has_errors(problems),
@@ -957,6 +966,62 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tu
         },
     }
     return payload, problems, live_paths
+
+
+def _generated_adapter_problems(root: Path) -> list[Problem]:
+    manifest_path = root / "ai/generated-manifest.json"
+    rel_manifest = "ai/generated-manifest.json"
+    if not manifest_path.is_file():
+        contract_paths = (
+            root / "ai/roles",
+            root / ".agents/skills/maintenance-workflow/SKILL.md",
+            root / "tools/render_agent_adapters.py",
+        )
+        generated_outputs = (
+            *root.glob(".claude/agents/maintenance-*.md"),
+            *root.glob(".codex/agents/maintenance-*.toml"),
+        )
+        if not any(path.exists() for path in contract_paths) and not generated_outputs:
+            return []
+        return [Problem("error", "generated_adapter_manifest_invalid", "generated adapter manifest is missing", rel_manifest)]
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest is unreadable: {exc}", rel_manifest)]
+    if not isinstance(data, dict) or data.get("schema") != "repoctl.generated-adapters":
+        return [Problem("error", "generated_adapter_manifest_invalid", "generated adapter manifest has invalid schema", rel_manifest)]
+    problems: list[Problem] = []
+    expected_outputs: set[str] = set()
+    for group in ("sources", "outputs"):
+        entries = data.get(group)
+        if not isinstance(entries, list):
+            problems.append(Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest {group} must be a list", rel_manifest))
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                problems.append(Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest {group} entry is invalid", rel_manifest))
+                continue
+            rel = str(entry.get("path") or "")
+            expected = str(entry.get("sha256") or "")
+            normalized = Path(rel)
+            if not rel or normalized.is_absolute() or ".." in normalized.parts or not expected.startswith("sha256:"):
+                problems.append(Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest path or digest is invalid: {rel}", rel_manifest))
+                continue
+            path = root / rel
+            if group == "outputs":
+                expected_outputs.add(rel)
+            try:
+                actual = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                actual = ""
+            if actual != expected:
+                problems.append(Problem("error", "generated_adapter_drift", f"generated adapter {group[:-1]} digest does not match manifest", rel))
+    for pattern in (".claude/agents/maintenance-*.md", ".codex/agents/maintenance-*.toml"):
+        for path in root.glob(pattern):
+            rel = path.relative_to(root).as_posix()
+            if rel not in expected_outputs:
+                problems.append(Problem("error", "generated_adapter_orphan", "generated adapter is not declared by the manifest", rel))
+    return problems
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -1193,7 +1258,16 @@ def cmd_task_log_append(args: argparse.Namespace) -> int:
 def cmd_task_discovery_add(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     with repoctl_lock(root):
-        result = update_task_discovery(root, args.task_id, query=args.query or "", reviewed=args.reviewed or [], chosen=args.chosen or [], note=args.note or "")
+        result = update_task_discovery(
+            root,
+            args.task_id,
+            query=args.query or "",
+            reviewed=args.reviewed or [],
+            chosen=args.chosen or [],
+            replace_chosen=args.replace_chosen or [],
+            reason=args.reason or "",
+            note=args.note or "",
+        )
         atomic_write(result["task"].path, result["text"])
     payload = {
         "ok": True,
@@ -1219,6 +1293,25 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    with repoctl_lock(root):
+        result = resolve_task_baseline_ownership(root, args.task_id, path=args.path, ownership=args.ownership)
+    data = {
+        "task_id": result["task"].id,
+        "path": result["path"],
+        "ownership": result["ownership"],
+        "baseline_fingerprint": result["baseline_fingerprint"],
+        "final_fingerprint": result["final_fingerprint"],
+    }
+    payload = {"ok": True, "command": "task.baseline.resolve", "data": data, **data, "problems": [], "warnings": []}
+    if args.json:
+        _json(payload)
+    else:
+        print(f"Resolved baseline ownership: {result['path']} -> {result['ownership']}")
+    return 0
+
+
 def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     all_tasks = load_tasks(root)
@@ -1227,10 +1320,13 @@ def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
     delta = repo_changes_since_task_start(root, task_id)
     changed_files, meta_status_problems, meta = meta_status(root, changed=True, changes=delta["changes"], target=target)
     meta_problems = check_meta(root, changed=True, changes=delta["changes"], target=target) if changed_files and not _has_errors(meta_status_problems) else []
-    verification_path = Path(f"/tmp/{task_id}-verification.md")
     doctor_problems: list[Problem] = []
-    if not verification_path.is_file():
-        doctor_problems.append(Problem("warning", "missing_verification_file", f"expected verification file is not present: {verification_path}"))
+    verification_ready = True
+    try:
+        _task_verification_input(root, task_id)
+    except RepoctlError as exc:
+        verification_ready = False
+        doctor_problems.append(Problem("warning", exc.code or "missing_verification_file", str(exc), exc.path or task.rel_path))
     combined = [*task_problems, *meta_status_problems, *meta_problems, *doctor_problems]
     blockers = [problem.code for problem in combined if problem.severity == "error"]
     advisory = [problem.code for problem in combined if problem.severity == "warning"]
@@ -1246,7 +1342,10 @@ def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
             **_repo_change_summary(delta),
         },
         "repository": meta.get("repository", {}) if isinstance(meta, dict) else {},
-        "verification_file": verification_path.as_posix(),
+        "verification": {
+            "default_source": "task_section",
+            "task_section_complete": verification_ready,
+        },
     }
     payload = {
         "ok": not blockers,
@@ -1333,6 +1432,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
                 repo_ref=repo_ref,
                 repo_id=repo_id,
                 backlog_id=args.backlog_id or "",
+                follow_up_of=args.follow_up_of or "",
             )
             if args.backlog_id:
                 board_text, _removed = remove_backlog_item(board_text, args.backlog_id)
@@ -1497,31 +1597,51 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_verification_file(root: Path, task_id: str, *, suffix: str) -> Path:
+def _task_verification_input(root: Path, task_id: str) -> VerificationInput:
     task = resolve_task(root, task_id)
     text = task.path.read_text(encoding="utf-8")
     section = find_section(text, "Verification")
     body = text[section.body_start : section.end].strip()
-    if not body or body in {"- pending", "- 대기 중."}:
-        raise RepoctlError("task Verification section is empty; use --verification-file or fill ## Verification before --use-task-verification", code="missing_verification_file", path=task.rel_path)
-    path = Path("/tmp") / f"{task_id}-{suffix}.md"
-    path.write_text(body + "\n", encoding="utf-8")
-    return path
+    normalized = body.casefold().strip()
+    placeholders = {"- pending", "- pending.", "- 대기 중", "- 대기 중.", "pending", "pending.", "대기 중", "대기 중."}
+    if not body or normalized in placeholders:
+        raise RepoctlError("task Verification section is incomplete; record commands, evidence, and results or use --verification-file", code="missing_verification_file", path=task.rel_path)
+    source_text = body + "\n"
+    return VerificationInput(
+        source="task_section",
+        text=source_text,
+        source_sha256="sha256:" + hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        source_path=task.rel_path,
+    )
 
 
-def _verification_file_arg(root: Path, task_id: str, *, verification_file: str | None, use_task_verification: bool, suffix: str, command: str) -> Path:
+def _verification_input_arg(root: Path, task_id: str, *, verification_file: str | None, use_task_verification: bool, command: str) -> VerificationInput:
     if verification_file and use_task_verification:
         raise RepoctlError(f"{command} accepts either --verification-file or --use-task-verification, not both")
-    if use_task_verification:
-        return _task_verification_file(root, task_id, suffix=suffix)
-    if not verification_file:
-        raise RepoctlError(
-            f"task {command} requires external verification evidence outside repos/. "
-            f"Create /tmp/{task_id}-{suffix}.md and retry with --verification-file, "
-            "or use --use-task-verification only when ## Verification already contains final manager-run evidence.",
-            code="missing_verification_file",
+    if verification_file:
+        path = Path(verification_file)
+        validate_verification_file(root, path)
+        try:
+            source_bytes = path.read_bytes()
+            source_text = source_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise RepoctlError(f"verification file cannot be read as UTF-8: {path}", code="missing_verification_file", path=path.as_posix()) from exc
+        return VerificationInput(
+            source="external_file",
+            text=source_text,
+            source_sha256="sha256:" + hashlib.sha256(source_bytes).hexdigest(),
+            source_path=path.as_posix(),
         )
-    return Path(verification_file)
+    try:
+        return _task_verification_input(root, task_id)
+    except RepoctlError:
+        if use_task_verification:
+            raise
+        raise RepoctlError(
+            f"task {command} requires --verification-file or a completed ## Verification section",
+            code="missing_verification_file",
+            path=resolve_task(root, task_id).rel_path,
+        )
 
 
 def _repo_target_for_task_command(root: Path, task: Any) -> RepoTarget | None:
@@ -1569,6 +1689,15 @@ def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = Fa
             "preexisting_count": 0,
             "baseline_conflicts": [],
         }
+    if _repo_scoped_frontmatter(task) and not use_committed_diff:
+        start_head = task_repo_head_at_start(root, task_id)
+        current_head, head_state = repo_git_head(root, target)
+        if start_head and head_state.available and current_head != start_head:
+            raise RepoctlError(
+                "repo HEAD changed since task start; use --use-committed-diff only when the recorded start HEAD is an ancestor of the current HEAD",
+                code="repo_head_changed_since_start",
+                path=task.rel_path,
+            )
     delta = repo_changes_since_task_start(root, task_id)
     if use_committed_diff:
         pending_task_changes = delta.get("changes") or []
@@ -1586,20 +1715,55 @@ def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = Fa
         current_head, head_state = repo_git_head(root, target)
         if not head_state.available:
             raise RepoctlError(f"committed diff finish cannot read repository HEAD: {head_state.reason}", code="repo_git_unavailable", path=head_state.repo_path or target.display_path)
+        is_ancestor, ancestry_state = repo_is_ancestor(root, ancestor=start_head, descendant=current_head, target=target)
+        if not ancestry_state.available:
+            raise RepoctlError(f"committed diff finish cannot compare repository history: {ancestry_state.reason}", code="repo_commit_range_unavailable", path=ancestry_state.repo_path or target.display_path)
+        if not is_ancestor:
+            raise RepoctlError(
+                "committed diff finish requires the recorded start HEAD to be an ancestor of the observed HEAD",
+                code="repo_history_rewritten",
+                path=target.display_path,
+            )
         committed_changes, range_state = repo_commit_range_entries(root, base=start_head, target=target)
         if not range_state.available:
             raise RepoctlError(f"committed diff finish cannot read task commit range: {range_state.reason}", code="repo_commit_range_unavailable", path=range_state.repo_path or target.display_path)
+        committed_conflicts, ownership_evidence = committed_range_baseline_conflicts(root, task_id, committed_changes)
         delta = {
             "changes": committed_changes,
             "baseline_available": True,
             "baseline_count": int(delta.get("baseline_count") or 0),
             "current_count": int(delta.get("current_count") or 0),
             "preexisting_count": int(delta.get("preexisting_count") or 0),
-            "baseline_conflicts": list(delta.get("baseline_conflicts") or []),
+            "baseline_conflicts": sorted(set([*list(delta.get("baseline_conflicts") or []), *committed_conflicts])),
+            "initial_dirty_paths": list(delta.get("initial_dirty_paths") or []),
+            "ownership": ownership_evidence or task_baseline_ownership_evidence(root, task_id),
             "repo_git": range_state,
             "committed_range": {"base": start_head, "head": current_head},
         }
+    else:
+        delta["ownership"] = task_baseline_ownership_evidence(root, task_id)
+    if delta.get("baseline_conflicts"):
+        conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
+        suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
+        raise RepoctlError(
+            f"task changes overlap paths that were dirty at task start: {conflicts}{suffix}; resolve each path with repoctl task baseline resolve",
+            code="baseline_conflict",
+            path=str(delta["baseline_conflicts"][0]),
+        )
     task_changes = delta["changes"]
+    if task_changes and _repo_scoped_frontmatter(task):
+        if not discovery_recorded(task, target):
+            raise RepoctlError("repo task must record candidate discovery before finish", code="placeholder_discovery", path=task.rel_path)
+        scope_delta = discovery_scope_delta(task, target, task_changes)
+        delta["scope"] = scope_delta
+        if scope_delta["unchosen_actual_paths"]:
+            missing = ", ".join(scope_delta["unchosen_actual_paths"][:8])
+            suffix = "" if len(scope_delta["unchosen_actual_paths"]) <= 8 else f", ... +{len(scope_delta['unchosen_actual_paths']) - 8} more"
+            raise RepoctlError(
+                f"actual repository changes are outside the active Chosen files set: {missing}{suffix}",
+                code="actual_changes_outside_chosen",
+                path=scope_delta["unchosen_actual_paths"][0],
+            )
     changed_files, status_problems, meta_summary = meta_status(root, changed=True, changes=task_changes, target=target)
     repo_exists = bool(target and target.root_path.exists()) or (root / "repos").exists()
     meta_gate = {"status": "skipped", "reason": "no_repo_directory" if not repo_exists else "no_repo_changes"}
@@ -1632,6 +1796,26 @@ def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = Fa
             "preexisting_dirty_files": delta["preexisting_count"],
             "summary": meta_summary.get("summary", {}),
         }
+    start_head = task_repo_head_at_start(root, task_id)
+    observed_head, observed_state = repo_git_head(root, target)
+    should_record_repo_evidence = _repo_scoped_frontmatter(task) or bool(delta.get("changes"))
+    if observed_state.available and should_record_repo_evidence:
+        mode = "committed_range" if use_committed_diff else "working_tree_diff"
+        manifest, fingerprint, fingerprint_state = repo_evidence_fingerprint(
+            root,
+            mode=mode,
+            start_head=start_head,
+            observed_head=observed_head,
+            entries=list(delta.get("changes") or []),
+            ownership=delta.get("ownership") if isinstance(delta.get("ownership"), dict) else {},
+            conflict_paths=list(delta.get("baseline_conflicts") or []),
+            target=target,
+        )
+        if not fingerprint_state.available:
+            raise RepoctlError(f"cannot fingerprint repository evidence: {fingerprint_state.reason}", code="repo_git_unavailable", path=fingerprint_state.repo_path or target.display_path)
+        delta["evidence_mode"] = mode
+        delta["evidence_manifest"] = manifest
+        delta["diff_fingerprint_sha256"] = fingerprint
     return meta_gate, delta
 
 
@@ -1648,6 +1832,7 @@ def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[st
         "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
         "baseline_available": bool(delta.get("baseline_available")),
         "baseline_conflicts": list(delta.get("baseline_conflicts") or []),
+        "unused_chosen_paths": list((delta.get("scope") or {}).get("unused_chosen_paths") or []),
         "repo_git_available": bool(repo_git and repo_git.available),
         "repo_git_reason": str(repo_git.reason) if repo_git and not repo_git.available else "",
         "attention_required": bool(delta.get("baseline_conflicts")) or str(meta_gate.get("status") or "") not in {"passed", "skipped"},
@@ -1768,11 +1953,10 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
 
 def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification_file = _verification_file_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, suffix="verification", command="finish")
-    validate_verification_file(root, verification_file)
+    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="finish")
     with repoctl_lock(root):
         meta_gate, delta = _finish_meta_gate(root, args.task_id, use_committed_diff=args.use_committed_diff)
-        result = finish_task(root, args.task_id, verification_file=verification_file, meta_gate=meta_gate, repo_delta=delta, allow_head_changed=args.use_committed_diff)
+        result = finish_task(root, args.task_id, verification=verification, meta_gate=meta_gate, repo_delta=delta, allow_head_changed=args.use_committed_diff)
         _write_task_result(root, result)
     finish_summary = _finish_summary(meta_gate, delta)
     data = {
@@ -1812,11 +1996,10 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
 
 def cmd_task_cancel(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification_file = _verification_file_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, suffix="cancel", command="cancel")
-    validate_verification_file(root, verification_file)
+    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="cancel")
     with repoctl_lock(root):
         cancel_gate = _cancel_dirty_gate(root, args.task_id, allow_dirty_cancel=args.allow_dirty_cancel)
-        result = cancel_task(root, args.task_id, verification_file=verification_file, meta_gate=cancel_gate)
+        result = cancel_task(root, args.task_id, verification=verification, meta_gate=cancel_gate)
         _write_task_result(root, result)
     data = {
         "task_id": args.task_id,
@@ -1846,10 +2029,9 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
 
 def cmd_task_block(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification_file = _verification_file_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, suffix="blocker", command="block")
-    validate_verification_file(root, verification_file)
+    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="block")
     with repoctl_lock(root):
-        result = block_task(root, args.task_id, verification_file=verification_file)
+        result = block_task(root, args.task_id, verification=verification)
         _write_task_result(root, result)
     payload = {
         "ok": True,
@@ -2081,8 +2263,9 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
         "ok": snapshot is not None and not _has_errors(problems),
         "command": "graph build",
         "data": data,
-        "problems": [problem.to_dict() for problem in problems],
+        "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [
+            *[problem.to_dict() for problem in problems if problem.severity == "warning"],
             {
                 "code": "graph_not_authoritative",
                 "message": "graph build is a read-only derived snapshot; source authorities remain repo registry, code index, and .repometa",
@@ -2155,12 +2338,21 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         in_file=args.in_file or "",
         depth=args.depth,
     )
+    query_status = str((result or {}).get("query_status") or "unavailable")
+    outcome_ok = query_status in {"found", "not_found"}
     payload = {
-        "ok": result is not None and not _has_errors(query_problems),
+        "ok": result is not None and outcome_ok and not _has_errors(query_problems),
         "command": "graph query",
-        "data": {"result": result, "repository": target.to_dict(), "snapshot_digest": snapshot.snapshot_digest},
+        "data": {
+            "result": result,
+            "query_status": query_status,
+            "completeness": result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness,
+            "repository": target.to_dict(),
+            "snapshot_digest": snapshot.snapshot_digest,
+        },
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
+            *[problem.to_dict() for problem in build_problems if problem.severity == "warning"],
             {
                 "code": "graph_not_authoritative",
                 "message": "graph query uses a read-only derived snapshot; inspect source files before changing task scope",
@@ -2184,7 +2376,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
                 print(f"path {source_label} --{path.get('edge')}--> {target_label} ({path.get('reason')})")
         for problem in query_problems:
             print(problem.message)
-    return 1 if _has_errors(query_problems) else 0
+    return 1 if _has_errors(query_problems) or query_status in {"unsupported", "unavailable"} else 0
 
 
 def cmd_context_query(args: argparse.Namespace) -> int:
@@ -2382,8 +2574,8 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         "ok": not _has_errors(problems),
         "command": "context pack",
         "data": payload_data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": data.get("warnings", []),
+        "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
+        "warnings": [*data.get("warnings", []), *[problem.to_dict() for problem in problems if problem.severity == "warning"]],
     }
     output_format = "json" if args.json else args.format
     if args.output and not _has_errors(problems):
@@ -2391,7 +2583,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         if output_problem is not None:
             problems.append(output_problem)
             payload["ok"] = False
-            payload["problems"] = [problem.to_dict() for problem in problems]
+            payload["problems"] = [problem.to_dict() for problem in problems if problem.severity == "error"]
         else:
             if data and output_format == "json":
                 payload["data"]["artifact"] = {
@@ -2470,8 +2662,9 @@ def cmd_context_pack_benchmark(args: argparse.Namespace) -> int:
         "ok": not _has_errors(problems),
         "command": "context pack-benchmark",
         "data": data,
-        "problems": [problem.to_dict() for problem in problems],
+        "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [
+            *[problem.to_dict() for problem in problems if problem.severity == "warning"],
             {
                 "code": "context_pack_benchmark_retrieval_only",
                 "message": "context pack benchmark measures source pack recall only; it does not validate generated answers or task scope",
@@ -3093,6 +3286,31 @@ def _default_knowledge_render_output(repo_id: str) -> Path:
     return Path("docs/knowledge/generated") / repo_id
 
 
+def cmd_upgrade_status(args: argparse.Namespace) -> int:
+    root = _workspace_root_or_cwd()
+    status_data, problems = upgrade_status(root)
+    data = {
+        **_version_data(root),
+        **status_data,
+        "next_command": "./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --json",
+    }
+    payload = {
+        "ok": not problems,
+        "command": "upgrade status",
+        "data": data,
+        "problems": problems,
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"repoctl upgrade status version={data['version']} status={data['status']} receipts={data['receipt_count']}")
+        if data.get("latest"):
+            print(f"latest backup: {data['latest']['backup']['availability']}")
+        print(data["next_command"])
+    return 1 if problems else 0
+
+
 def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else find_workspace_root()
     data = plan_upgrade(root, source=args.source)
@@ -3158,6 +3376,7 @@ def cmd_meta_set(args: argparse.Namespace) -> int:
             topics=args.topic,
             declared_effects=args.declared_effect or [],
             caution=caution,
+            reviewed_by=args.reviewed_by,
             target=target,
         )
     payload = {"ok": True, "command": "meta set", "data": data, "problems": [], "warnings": []}
@@ -3268,6 +3487,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("--repo-ref", default="", help="advisory repos/ branch or worktree hint; never selects a repository")
     task_create.add_argument("--repo-id", default="", help="stable product repository id for repo-scoped work; defaults to main in single-repo workspaces")
     task_create.add_argument("--backlog-id")
+    task_create.add_argument("--follow-up-of", default="", help="create a new task linked to a completed task; completed tasks are immutable")
     task_create.add_argument("--start", action="store_true")
     task_create.add_argument("--force-dirty", action="store_true", help="with --start, record an existing dirty repos/ baseline instead of blocking repo-scoped work")
     task_create.add_argument("--print-id", action="store_true", help="print only the created task id in non-JSON mode")
@@ -3299,9 +3519,19 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add.add_argument("--query", help="candidate search/query command or phrase")
     task_discovery_add.add_argument("--reviewed", action="append", default=[], help="repos/path inspected during discovery; repeat for multiple files")
     task_discovery_add.add_argument("--chosen", action="append", default=[], help="repos/path selected for task scope; repeat for multiple files")
+    task_discovery_add.add_argument("--replace-chosen", action="append", default=[], help="replace the active chosen-file set; repeat for multiple files")
+    task_discovery_add.add_argument("--reason", help="required rationale when replacing the active chosen-file set")
     task_discovery_add.add_argument("--note", help="short rationale for the chosen scope")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)
+    task_baseline = task_sub.add_parser("baseline")
+    task_baseline_sub = task_baseline.add_subparsers(dest="task_baseline_command", required=True, parser_class=RepoctlArgumentParser)
+    task_baseline_resolve = task_baseline_sub.add_parser("resolve")
+    task_baseline_resolve.add_argument("task_id")
+    task_baseline_resolve.add_argument("--path", required=True)
+    task_baseline_resolve.add_argument("--ownership", choices=["task", "preexisting"], required=True)
+    task_baseline_resolve.add_argument("--json", action="store_true")
+    task_baseline_resolve.set_defaults(func=cmd_task_baseline_resolve)
     task_start = task_sub.add_parser("start")
     task_start.add_argument("task_id")
     task_start.add_argument("--force-dirty", action="store_true")
@@ -3400,6 +3630,7 @@ def build_parser() -> argparse.ArgumentParser:
     meta_set.add_argument("--declared-effect", action="append")
     meta_set.add_argument("--caution", action="append")
     meta_set.add_argument("--caution-file")
+    meta_set.add_argument("--reviewed-by", default="agent")
     meta_set.add_argument("--json", action="store_true")
     meta_set.set_defaults(func=cmd_meta_set)
     meta_remove = meta_sub.add_parser("remove")
@@ -3652,6 +3883,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)
+    upgrade_status_parser = upgrade_sub.add_parser("status")
+    upgrade_status_parser.add_argument("--json", action="store_true")
+    upgrade_status_parser.set_defaults(func=cmd_upgrade_status)
     upgrade_plan = upgrade_sub.add_parser("plan")
     upgrade_plan.add_argument("--workspace-root", help="workspace to upgrade; defaults to the current workspace")
     upgrade_plan.add_argument("--from", dest="source", required=True, help="repoctl release checkout or extracted artifact directory")
@@ -3681,18 +3915,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if raw_argv and raw_argv[0] == "llmwiki":
         raw_argv = ["knowledge", "render", *raw_argv[1:]]
-    if len(raw_argv) >= 2 and raw_argv[:2] == ["upgrade", "status"]:
-        data = {
-            **_version_data(_workspace_root_or_cwd()),
-            "status": "source_required_for_upgrade_diff",
-            "next_command": "./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --json",
-        }
-        if "--json" in raw_argv:
-            _json({"ok": True, "command": "upgrade status", "data": data, "problems": [], "warnings": []})
-        else:
-            print(f"repoctl upgrade status version={data['version']} status={data['status']}")
-            print(data["next_command"])
-        return 0
     try:
         args = parser.parse_args(raw_argv)
     except RepoctlArgparseError as error:

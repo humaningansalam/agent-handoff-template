@@ -1,14 +1,14 @@
 {
   "Q-001": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
         "section": "repoctl module boundaries"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "docs/contracts/repoctl-graph-contract.md",
         "section": "repoctl Graph contract"
@@ -16,20 +16,20 @@
     ]
   },
   "Q-002": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "docs/PRD.md",
         "section": "Evidence And Context"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
         "section": "repoctl Context contract"
       }
     ],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
         "section": "repoctl Context contract"
@@ -37,10 +37,10 @@
     ]
   },
   "Q-003": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:utils%2Ftokens.py>"
       },
@@ -50,10 +50,10 @@
     ]
   },
   "Q-004": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
       },
@@ -63,10 +63,10 @@
     ]
   },
   "Q-005": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
       },
@@ -76,12 +76,12 @@
     ]
   },
   "Q-006": {
-    "acceptable_optional_refs": [
+    "supporting": [
       {
         "path": "<graph:repo:main:file:auth%2Fflow.py>"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -92,7 +92,7 @@
       }
     ],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
       },
@@ -102,12 +102,12 @@
     ]
   },
   "Q-007": {
-    "acceptable_optional_refs": [
+    "supporting": [
       {
         "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -118,7 +118,7 @@
       }
     ],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
       },
@@ -128,7 +128,7 @@
     ]
   },
   "Q-008": {
-    "acceptable_optional_refs": [
+    "supporting": [
       {
         "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
       },
@@ -136,7 +136,7 @@
         "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -147,7 +147,7 @@
       }
     ],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
       },
@@ -157,15 +157,15 @@
     ]
   },
   "Q-009": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
         "section": "repoctl Context contract"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "docs/contracts/repoctl-graph-contract.md",
         "section": "repoctl Graph contract"
@@ -173,15 +173,15 @@
     ]
   },
   "Q-010": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
         "section": "repoctl Context contract"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "docs/PRD.md",
         "section": "Evidence And Context"
@@ -189,15 +189,15 @@
     ]
   },
   "Q-011": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "docs/README.md",
         "section": "Boundaries"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
         "section": "Derived layer rules"
@@ -205,10 +205,10 @@
     ]
   },
   "Q-012": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
         "section": "Derived layer rules"
@@ -216,10 +216,10 @@
     ]
   },
   "Q-013": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
       },
@@ -229,10 +229,10 @@
     ]
   },
   "Q-014": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:utils%2Ftokens.py>"
       },
@@ -242,10 +242,10 @@
     ]
   },
   "Q-015": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
       },
@@ -255,10 +255,10 @@
     ]
   },
   "Q-016": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
       },
@@ -268,10 +268,10 @@
     ]
   },
   "Q-017": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
       },
@@ -281,10 +281,10 @@
     ]
   },
   "Q-018": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:auth%2Fflow.py>"
       },
@@ -294,14 +294,14 @@
     ]
   },
   "Q-019": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:auth%2Fflow.py>"
       },
@@ -311,10 +311,10 @@
     ]
   },
   "Q-020": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:import-ref:python:services.token_service.issue_token>"
       },
@@ -324,10 +324,10 @@
     ]
   },
   "Q-021": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:import-ref:python:utils.tokens.issue_token>"
       },
@@ -337,10 +337,10 @@
     ]
   },
   "Q-022": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
       },
@@ -350,7 +350,7 @@
     ]
   },
   "Q-023": {
-    "acceptable_optional_refs": [
+    "acceptable": [
       {
         "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
       },
@@ -358,9 +358,9 @@
         "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
       }
     ],
-    "forbidden_refs": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:auth%2Fflow.py>"
       },
@@ -370,10 +370,10 @@
     ]
   },
   "Q-024": {
-    "acceptable_optional_refs": [],
-    "forbidden_refs": [],
+    "acceptable": [],
+    "noise": [],
     "required_knowledge_source_refs": [],
-    "required_source_refs": [
+    "must_find": [
       {
         "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
       },

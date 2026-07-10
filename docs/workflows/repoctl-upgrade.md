@@ -21,7 +21,7 @@ It must preserve project state:
 1. Obtain a repoctl release checkout or extracted release artifact.
 2. Generate a dry-run plan:
    `./scripts/repoctl upgrade plan --from /path/to/release --output /tmp/repoctl-upgrade-plan.json --json`
-3. Inspect `operations`, `preserve_paths`, and `conflicts`.
+3. Inspect `operations`, `state_migrations`, `preserve_paths`, and `conflicts`.
 4. Apply only the inspected plan:
    `./scripts/repoctl upgrade apply --plan-file /tmp/repoctl-upgrade-plan.json --json`
 5. Run verification:
@@ -35,11 +35,15 @@ It must preserve project state:
 - `create_paths` are canonical docs/examples that are copied only when missing.
 - `preserve_paths` are adopter-owned state and must not be overwritten.
 
+Task state is the only preserved state that upgrade may transform. A readable known schema is migrated atomically in place only when its original HEAD and required baseline fingerprints are already present. Upgrade does not infer missing history from the current HEAD or working tree. An unverifiable state is reported as a plan conflict and remains untouched; there is no separate legacy store or compatibility runtime.
+
+Each apply receipt records the managed source digest and backup tree digest. `./scripts/repoctl upgrade status --json` calculates backup `availability` as `available`, `missing`, `digest_mismatch`, or `not_required` without modifying the receipt. Backups use manual retention in this version; there is no prune command.
+
 Workflow docs are distributed as `create_paths` by default. This lets new workspaces receive the canonical workflows while preserving modified workflows in existing workspaces.
 
 ## Forbidden Shortcuts
 
 - Do not parse Backlog, PRD, task, or workflow prose to infer upgrade scope.
-- Do not repair Board, task, archive, or metadata state inside upgrade apply.
+- Do not repair Board, task Markdown, archive, or metadata state inside upgrade apply.
 - Do not use broad mirror sync or delete files absent from the release artifact.
 - Do not update `repos/**` through this command.

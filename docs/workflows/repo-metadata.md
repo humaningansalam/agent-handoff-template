@@ -36,7 +36,7 @@ repoctl inventory / repoctl index code
 = indexing excludes + vocab + area/topic defaults + coverage rules
 
 repos/.repometa/annotations/<hex>.json
-= sparse role/purpose/topics/declared_effects/caution + exclusion overrides
+= sparse role/purpose/topics/declared_effects/caution + review provenance + exclusion overrides
 ```
 
 The store is not an inventory. General files can exist without annotations unless coverage policy requires one.
@@ -133,7 +133,10 @@ Example `repos/.repometa/annotations/a.json`:
       "purpose": "call backend authentication endpoints",
       "topics": ["auth", "api"],
       "declared_effects": ["net"],
-      "caution": ["keep login response compatibility"]
+      "caution": ["keep login response compatibility"],
+      "source_content_digest": "sha256:...",
+      "reviewed_at": "20260710T010000Z",
+      "reviewed_by": "codex"
     }
   },
   "exclusions": {
@@ -158,6 +161,14 @@ Recommended:
 Optional:
 
 - `caution`: human/agent warning not derivable from code
+
+repoctl-managed provenance:
+
+- `source_content_digest`: SHA-256 of the file bytes reviewed by `meta set`
+- `reviewed_at`: UTC time when repoctl wrote the annotation
+- `reviewed_by`: reviewer label, default `agent`, or the explicit `--reviewed-by` value
+
+Do not store `possibly_stale`. `meta status`, `meta inventory`, and `meta show` calculate it by comparing the current file digest with `source_content_digest`. An older annotation without a source digest remains readable but cannot be proven current, so it is counted as possibly stale until `meta set` refreshes it.
 
 Forbidden fields:
 
@@ -218,7 +229,7 @@ Use `repoctl meta init` to create the default `.repometa` policy and shard skele
 Mutation commands update `.repometa` through repoctl:
 
 ```bash
-repoctl meta set <path> --role ... --purpose "..." --topic ... --declared-effect ...
+repoctl meta set <path> --role ... --purpose "..." --topic ... --declared-effect ... --reviewed-by agent
 repoctl meta set <path> --role ... --purpose-file /tmp/purpose.txt --topic ...
 repoctl meta remove <path>
 repoctl meta move <old-path> <new-path>
@@ -226,6 +237,8 @@ repoctl meta exclude <path> --reason ...
 ```
 
 Do not add migration or inline compatibility commands in v0.
+
+Status output keeps separate views for store presence, index coverage, semantic coverage, and annotation-gate activation. `semantic_coverage` reports `annotated`, `current`, and computed `possibly_stale`; these values are not written back to `.repometa` by read-only commands.
 
 ## Check Semantics
 

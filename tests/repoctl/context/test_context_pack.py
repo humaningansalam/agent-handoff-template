@@ -39,7 +39,11 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
         "path": ".repoctl-state/context-pack/T-20260622010101Z.json",
         "pack_digest": data["pack_digest"],
     }
-    assert data["seed"]["source"] == "task_fields_for_retrieval_only"
+    assert data["stage"] == "scoped"
+    assert data["seed"]["source"] == "discovery_query_history_only"
+    assert data["input_digest"].startswith("sha256:")
+    assert data["stop_reason"] in {"required_evidence_satisfied", "budget_reached"}
+    assert data["budget"]["final_render_estimated_tokens"] <= 1200
     assert any(item["source_ref"]["path"] == "docs/contracts/repoctl-context-contract.md" for item in data["groups"]["must_read"])
     assert data["groups"]["reviewed_knowledge"] == []
     assert data["metrics"]["group_counts"]["must_read"] == len(data["groups"]["must_read"])
@@ -126,7 +130,8 @@ Use project context without structured discovery yet.
     warning_codes = {warning["code"] for warning in payload["warnings"]}
     assert "repos/README.md" in must_read_paths
     assert "repos/pyproject.toml" in must_read_paths
-    assert "docs/PRD.md" in must_read_paths
+    assert "docs/PRD.md" not in must_read_paths
+    assert payload["data"]["stage"] == "bootstrap"
     assert "context_pack_no_structured_discovery" in warning_codes
 
 
@@ -490,7 +495,7 @@ def test_context_pack_benchmark_scores_required_must_read_refs(tmp_path: Path, m
         "docs/contracts/repoctl-module-boundaries.md",
     }
     assert payload["data"]["gates"]["min_must_read_recall"] == 1.0
-    assert payload["warnings"][0]["code"] == "context_pack_benchmark_retrieval_only"
+    assert any(warning["code"] == "context_pack_benchmark_retrieval_only" for warning in payload["warnings"])
 
 
 def test_context_pack_benchmark_materialize_makes_shipped_fixture_runnable(tmp_path: Path, monkeypatch, capsys) -> None:

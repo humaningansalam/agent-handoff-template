@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .io import RepoctlError, atomic_write, repoctl_lock
+from .tasks import TASK_STATE_SCHEMA_VERSION
 
 MANIFEST_REL = Path("repoctl-upgrade-manifest.json")
 UPGRADE_STATE_REL = Path("docs/tasks/.repoctl-state/upgrades")
@@ -44,6 +45,50 @@ def _hash_bytes(data: bytes) -> str:
 
 def _hash_file(path: Path) -> str:
     return _hash_bytes(path.read_bytes())
+
+
+def _sha256(value: str) -> str:
+    return f"sha256:{value}"
+
+
+def _canonical_entry_records(path: Path, *, relative_to: Path) -> list[dict[str, Any]]:
+    paths = [path]
+    if path.is_dir() and not path.is_symlink():
+        paths.extend(sorted(path.rglob("*"), key=lambda item: item.relative_to(relative_to).as_posix()))
+    records: list[dict[str, Any]] = []
+    for item in paths:
+        rel = item.relative_to(relative_to).as_posix()
+        try:
+            mode = item.lstat().st_mode & 0o7777
+        except OSError as exc:
+            raise RepoctlError(f"upgrade digest path cannot be inspected: {rel}", code="upgrade_digest_failed", path=rel) from exc
+        if item.is_symlink():
+            records.append({"path": rel, "kind": "symlink", "mode": mode, "target": os.readlink(item)})
+        elif item.is_dir():
+            records.append({"path": rel, "kind": "directory", "mode": mode})
+        elif item.is_file():
+            records.append({"path": rel, "kind": "file", "mode": mode, "content_sha256": _sha256(_hash_file(item))})
+        else:
+            records.append({"path": rel, "kind": "other", "mode": mode})
+    return records
+
+
+def _canonical_paths_digest(root: Path, paths: list[str]) -> str:
+    records: list[dict[str, Any]] = []
+    for rel in sorted(set(paths)):
+        path = root / rel
+        if path.exists() or path.is_symlink():
+            records.extend(_canonical_entry_records(path, relative_to=root))
+    encoded = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256(_hash_bytes(encoded))
+
+
+def _canonical_tree_digest(path: Path) -> str:
+    if not path.exists() and not path.is_symlink():
+        return ""
+    records = _canonical_entry_records(path, relative_to=path.parent)
+    encoded = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256(_hash_bytes(encoded))
 
 
 def _safe_rel(value: str) -> str:
@@ -137,12 +182,104 @@ def _source_root(source: str | Path) -> Path:
     return root
 
 
-def _plan_payload(root: Path, source_root: Path, manifest: dict[str, Any], operations: list[UpgradeOperation], conflicts: list[dict[str, str]]) -> dict[str, Any]:
+def _task_state_text(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _migrate_task_state_payload(data: dict[str, Any], *, task_id: str, rel: str) -> dict[str, Any] | None:
+    if data.get("schema") == "repoctl.task.state" and data.get("schema_version") == TASK_STATE_SCHEMA_VERSION:
+        return None
+    if data.get("schema_version") != 2 or str(data.get("task_id") or "") != task_id:
+        raise RepoctlError("task state schema cannot be migrated without inference", code="task_state_migration_failed", path=rel)
+
+    def convert_record(record: dict[str, Any]) -> dict[str, Any]:
+        raw_entries = record.get("dirty_entries", record.get("repo_changes", []))
+        raw_fingerprints = record.get("dirty_path_fingerprints")
+        if not isinstance(raw_entries, list):
+            raise RepoctlError("task state dirty entries are invalid", code="task_state_migration_failed", path=rel)
+        if raw_entries and not isinstance(raw_fingerprints, dict):
+            raise RepoctlError("task state dirty baseline cannot be migrated without path fingerprints", code="task_state_migration_failed", path=rel)
+        path_fingerprints = dict(raw_fingerprints or {})
+        if any(not isinstance(path, str) or not isinstance(value, str) or not value.startswith("sha256:") for path, value in path_fingerprints.items()):
+            raise RepoctlError("task state path fingerprints are invalid", code="task_state_migration_failed", path=rel)
+        start_head = str(record.get("start_head") or record.get("head") or "")
+        if not start_head:
+            raise RepoctlError("task state has no recorded initial HEAD", code="task_state_migration_failed", path=rel)
+        return {
+            "repo_id": str(record.get("repo_id") or ""),
+            "repo_path": str(record.get("repo_path") or ""),
+            "git_toplevel": str(record.get("git_toplevel") or ""),
+            "start_head": start_head,
+            "dirty_entries": raw_entries,
+            "dirty_path_fingerprints": path_fingerprints,
+        }
+
+    raw_repositories = data.get("repositories", [])
+    if raw_repositories:
+        if not isinstance(raw_repositories, list) or not all(isinstance(item, dict) for item in raw_repositories):
+            raise RepoctlError("task state repository baselines are invalid", code="task_state_migration_failed", path=rel)
+        initial = {"created": str(data.get("created") or ""), "repositories": [convert_record(item) for item in raw_repositories]}
+    else:
+        initial = {"created": str(data.get("created") or ""), **convert_record(data)}
+    ownership = data.get("ownership", {})
+    if not isinstance(ownership, dict):
+        raise RepoctlError("task state ownership is invalid", code="task_state_migration_failed", path=rel)
+    return {
+        "schema": "repoctl.task.state",
+        "schema_version": TASK_STATE_SCHEMA_VERSION,
+        "task_id": task_id,
+        "initial": initial,
+        "ownership": dict(ownership),
+    }
+
+
+def _plan_task_state_migrations(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    migrations: list[dict[str, Any]] = []
+    conflicts: list[dict[str, str]] = []
+    state_dir = root / "docs/tasks/.repoctl-state"
+    if not state_dir.is_dir():
+        return migrations, conflicts
+    for path in sorted(state_dir.glob("T-*.json")):
+        rel = path.relative_to(root).as_posix()
+        try:
+            source_bytes = path.read_bytes()
+            data = json.loads(source_bytes.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise RepoctlError("task state is not an object", code="task_state_migration_failed", path=rel)
+            migrated = _migrate_task_state_payload(data, task_id=path.stem, rel=rel)
+            if migrated is None:
+                continue
+            target_bytes = _task_state_text(migrated).encode("utf-8")
+            migrations.append(
+                {
+                    "path": rel,
+                    "action": "migrate_task_state",
+                    "source_hash": _hash_bytes(source_bytes),
+                    "target_hash": _hash_bytes(target_bytes),
+                    "schema_from": int(data.get("schema_version") or 0),
+                    "schema_to": TASK_STATE_SCHEMA_VERSION,
+                }
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RepoctlError) as exc:
+            conflicts.append({"code": "task_state_migration_failed", "path": rel, "message": str(exc)})
+    return migrations, conflicts
+
+
+def _plan_payload(
+    root: Path,
+    source_root: Path,
+    manifest: dict[str, Any],
+    operations: list[UpgradeOperation],
+    state_migrations: list[dict[str, Any]],
+    conflicts: list[dict[str, str]],
+) -> dict[str, Any]:
+    source_paths = [*manifest["replace_paths"], *manifest["create_paths"], *_preserve_seed_paths(source_root, manifest)]
     data = {
         "schema_version": 1,
         "package": manifest.get("package", "agent-workspace-control-plane"),
         "source_version": str(manifest.get("version", "")),
         "source_root": source_root.as_posix(),
+        "source_content_digest": _canonical_paths_digest(source_root, source_paths),
         "workspace_root": root.as_posix(),
         "manifest_path": MANIFEST_REL.as_posix(),
         "replace_paths": manifest["replace_paths"],
@@ -150,6 +287,7 @@ def _plan_payload(root: Path, source_root: Path, manifest: dict[str, Any], opera
         "remove_paths": manifest["remove_paths"],
         "preserve_paths": manifest["preserve_paths"],
         "operations": [operation.to_dict() for operation in operations],
+        "state_migrations": state_migrations,
         "conflicts": conflicts,
     }
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -245,7 +383,9 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
                 size=len(source_bytes),
             )
         )
-    return _plan_payload(root, source_root, manifest, operations, conflicts)
+    state_migrations, migration_conflicts = _plan_task_state_migrations(root)
+    conflicts.extend(migration_conflicts)
+    return _plan_payload(root, source_root, manifest, operations, state_migrations, conflicts)
 
 
 def write_plan(path: Path, payload: dict[str, Any]) -> None:
@@ -283,7 +423,7 @@ def _prune_empty_parents(root: Path, start: Path) -> None:
         current = current.parent
 
 
-def _rollback_applied(root: Path, applied: list[dict[str, str]], backups: list[dict[str, str]]) -> list[dict[str, str]]:
+def _rollback_applied(root: Path, applied: list[dict[str, str]], backups: list[dict[str, Any]]) -> list[dict[str, str]]:
     backup_by_path = {backup["path"]: backup["backup_path"] for backup in backups}
     rolled_back: list[dict[str, str]] = []
     for operation in reversed(applied):
@@ -313,7 +453,7 @@ def _load_plan(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise RepoctlError(f"invalid upgrade plan JSON: {error}", code="invalid_upgrade_plan", path=str(path)) from error
-    if not isinstance(payload, dict) or not isinstance(payload.get("operations"), list):
+    if not isinstance(payload, dict) or not isinstance(payload.get("operations"), list) or not isinstance(payload.get("state_migrations", []), list):
         raise RepoctlError("invalid upgrade plan shape", code="invalid_upgrade_plan", path=str(path))
     expected_digest = _canonical_plan_hash(payload)
     if str(payload.get("plan_sha256") or "") != expected_digest:
@@ -363,6 +503,10 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
         raise RepoctlError("upgrade source has conflicts; recreate the plan", code="upgrade_plan_stale")
     if _operation_dicts(plan) != _operation_dicts(expected):
         raise RepoctlError("upgrade plan operations do not match current source manifest and workspace state", code="upgrade_plan_stale")
+    if str(plan.get("source_content_digest") or "") != str(expected.get("source_content_digest") or ""):
+        raise RepoctlError("upgrade plan source digest does not match current source", code="upgrade_plan_stale")
+    if plan.get("state_migrations", []) != expected.get("state_migrations", []):
+        raise RepoctlError("upgrade plan task state migrations do not match current workspace state", code="upgrade_plan_stale")
 
 
 def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
@@ -374,6 +518,12 @@ def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
         expected = str(operation.get("target_hash") or "")
         current = _hash_file(target) if target.is_file() else ""
         if current != expected:
+            raise RepoctlError(f"upgrade plan is stale for {rel}", code="upgrade_plan_stale", path=rel)
+    for migration in plan.get("state_migrations", []):
+        rel = _safe_rel(str(migration.get("path", "")))
+        target = _assert_contained_path(root, rel, code="invalid_upgrade_target", require_file=True)
+        current = _hash_file(target)
+        if current != str(migration.get("source_hash") or ""):
             raise RepoctlError(f"upgrade plan is stale for {rel}", code="upgrade_plan_stale", path=rel)
 
 
@@ -387,8 +537,24 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
     if not source_root.is_dir():
         raise RepoctlError("upgrade source from plan is unavailable", code="invalid_upgrade_source", path=str(source_root))
     applied: list[dict[str, str]] = []
-    backups: list[dict[str, str]] = []
+    backups: list[dict[str, Any]] = []
     backup_root = root / UPGRADE_STATE_REL / run_id / "backup"
+
+    def backup_target(rel: str, target_path: Path) -> None:
+        if not target_path.is_file():
+            return
+        backup_path = backup_root / rel
+        _assert_contained_path(root, backup_path.relative_to(root).as_posix(), code="invalid_upgrade_target")
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target_path, backup_path)
+        backups.append(
+            {
+                "path": rel,
+                "backup_path": backup_path.relative_to(root).as_posix(),
+                "backup_digest": _sha256(_hash_file(backup_path)),
+            }
+        )
+
     with repoctl_lock(root):
         _verify_plan_fresh(root, plan)
         _verify_plan_bound_to_source(root, source_root, plan)
@@ -397,12 +563,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                 rel = _safe_rel(str(operation["path"]))
                 action = str(operation.get("action") or "replace")
                 target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
-                if target_path.is_file():
-                    backup_path = backup_root / rel
-                    _assert_contained_path(root, backup_path.relative_to(root).as_posix(), code="invalid_upgrade_target")
-                    backup_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(target_path, backup_path)
-                    backups.append({"path": rel, "backup_path": backup_path.relative_to(root).as_posix()})
+                backup_target(rel, target_path)
                 if action == "remove":
                     if target_path.exists():
                         if not target_path.is_file():
@@ -418,6 +579,24 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                         raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
                     _atomic_copy_file(source_path, target_path)
                 applied.append({"path": rel, "action": action})
+            for migration in plan.get("state_migrations", []):
+                rel = _safe_rel(str(migration.get("path", "")))
+                target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target", require_file=True)
+                try:
+                    data = json.loads(target_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise RepoctlError("task state changed after upgrade plan", code="upgrade_plan_stale", path=rel) from exc
+                if not isinstance(data, dict):
+                    raise RepoctlError("task state changed after upgrade plan", code="upgrade_plan_stale", path=rel)
+                migrated = _migrate_task_state_payload(data, task_id=target_path.stem, rel=rel)
+                if migrated is None:
+                    raise RepoctlError("task state no longer requires the planned migration", code="upgrade_plan_stale", path=rel)
+                migrated_text = _task_state_text(migrated)
+                if _hash_bytes(migrated_text.encode("utf-8")) != str(migration.get("target_hash") or ""):
+                    raise RepoctlError("task state migration output changed after upgrade plan", code="upgrade_plan_stale", path=rel)
+                backup_target(rel, target_path)
+                atomic_write(target_path, migrated_text)
+                applied.append({"path": rel, "action": "migrate_task_state"})
         except Exception as error:
             rolled_back = _rollback_applied(root, applied, backups)
             rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
@@ -441,12 +620,19 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
             if isinstance(error, RepoctlError):
                 raise
             raise
+        backup = {
+            "path": backup_root.relative_to(root).as_posix(),
+            "recorded_digest": _canonical_tree_digest(backup_root) if backups else "",
+            "retention_status_at_creation": "manual_retention" if backups else "not_required",
+        }
         receipt = {
             "run_id": run_id,
             "plan_file": plan_path.as_posix(),
             "plan_sha256": plan.get("plan_sha256", ""),
+            "source_content_digest": str(plan.get("source_content_digest") or ""),
             "applied": applied,
             "backups": backups,
+            "backup": backup,
         }
         receipt_path = root / UPGRADE_STATE_REL / run_id / "receipt.json"
         atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
@@ -454,9 +640,66 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         "run_id": run_id,
         "applied": applied,
         "backups": backups,
+        "backup": backup,
         "receipt_path": (UPGRADE_STATE_REL / run_id / "receipt.json").as_posix(),
         "verification_commands": [
             "./scripts/repoctl check --json",
             "./scripts/repoctl meta check --json",
         ],
     }
+
+
+def upgrade_status(root: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    receipts: list[dict[str, Any]] = []
+    problems: list[dict[str, str]] = []
+    state_root = root / UPGRADE_STATE_REL
+    if state_root.is_dir():
+        for path in sorted(state_root.glob("*/receipt.json")):
+            rel = path.relative_to(root).as_posix()
+            try:
+                receipt = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                problems.append({"severity": "error", "code": "upgrade_receipt_invalid", "message": str(exc), "path": rel})
+                continue
+            if not isinstance(receipt, dict):
+                problems.append({"severity": "error", "code": "upgrade_receipt_invalid", "message": "upgrade receipt is not an object", "path": rel})
+                continue
+            backup = receipt.get("backup") if isinstance(receipt.get("backup"), dict) else {}
+            backups = receipt.get("backups") if isinstance(receipt.get("backups"), list) else []
+            backup_rel = str(backup.get("path") or "")
+            recorded_digest = str(backup.get("recorded_digest") or "")
+            retention_status = str(backup.get("retention_status_at_creation") or "")
+            availability = "not_required"
+            current_digest = ""
+            if backups:
+                try:
+                    backup_path = _assert_contained_path(root, backup_rel, code="upgrade_receipt_invalid")
+                    if not backup_path.exists():
+                        availability = "missing"
+                    else:
+                        current_digest = _canonical_tree_digest(backup_path)
+                        availability = "available" if recorded_digest and current_digest == recorded_digest else "digest_mismatch"
+                except RepoctlError as exc:
+                    problems.append({"severity": "error", "code": exc.code, "message": str(exc), "path": exc.path or rel})
+                    availability = "invalid"
+            receipts.append(
+                {
+                    "run_id": str(receipt.get("run_id") or path.parent.name),
+                    "receipt_path": rel,
+                    "source_content_digest": str(receipt.get("source_content_digest") or ""),
+                    "backup": {
+                        "path": backup_rel,
+                        "recorded_digest": recorded_digest,
+                        "current_digest": current_digest,
+                        "retention_status_at_creation": retention_status,
+                        "availability": availability,
+                    },
+                }
+            )
+    latest = receipts[-1] if receipts else None
+    return {
+        "status": "receipts_available" if receipts else "no_upgrade_receipts",
+        "receipt_count": len(receipts),
+        "latest": latest,
+        "receipts": receipts,
+    }, problems

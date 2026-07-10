@@ -5,11 +5,13 @@
 Follow these steps when a role or agent definition needs to change:
 
 1. **Update Canonical Source**: Edit the human-authored YAML files in `ai/roles/*.yaml`. This is the source of truth.
-2. **Re-render Adapters**: Use the synchronization script (if available) or manually update the following files to match the canonical YAML:
+2. **Re-render Adapters**: Run `python3 tools/render_agent_adapters.py` to regenerate:
    - `.claude/agents/*.md`
    - `.codex/agents/*.toml`
+   - `tools/registries/agent_registry.py`
+   - `ai/generated-manifest.json`
 
-3. **Verify Consistency**: Ensure no tool-specific logic has drifted from the canonical role definition.
+3. **Verify Consistency**: Run `python3 tools/render_agent_adapters.py --check` and `./scripts/repoctl check --json`.
 
 > [!WARNING]
 > Never edit generated adapter files directly. Any ad-hoc changes will be overwritten during the next re-sync.
@@ -24,10 +26,8 @@ Render tool-specific adapters into:
 
 ## Current Status
 
-No automated renderer exists yet.
-Update generated adapters manually and keep their structure aligned with `ai/roles/README.md`.
+`ai/roles/*.yaml` is the only role source. `.agents/skills/maintenance-workflow/SKILL.md` is the canonical maintenance skill source. Generated files must not be edited directly.
 
-## Future
+`repoctl check` uses only the standard library and compares raw source/output digests with `ai/generated-manifest.json`; it does not parse YAML or invoke uv. The renderer performs the semantic byte-for-byte regeneration check in development and CI.
 
-When an automated renderer is needed, add it here as `render_roles.py` or equivalent.
-Trigger: when role definitions change frequently enough that manual sync becomes error-prone.
+Use `scripts/claude-maintenance` to activate `.claude/settings.maintenance.json`. Default Claude execution does not load maintenance-only agents, hooks, or the `repos/**` deny rules.

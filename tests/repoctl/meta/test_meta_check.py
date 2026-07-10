@@ -165,11 +165,23 @@ def test_meta_set_writes_hash_shard_and_satisfies_coverage(tmp_path: Path, monke
     (repo / rel).write_text("export {}\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "set", rel, "--role", "adapter", "--purpose", "call backend billing endpoints", "--topic", "api", "--topic", "billing", "--declared-effect", "net", "--json"]) == 0
+    assert main(["meta", "set", rel, "--role", "adapter", "--purpose", "call backend billing endpoints", "--topic", "api", "--topic", "billing", "--declared-effect", "net", "--reviewed-by", "codex", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["shard"] == shard_for_path(rel)
-    assert (repo / ".repometa/annotations" / f"{shard_for_path(rel)}.json").read_text(encoding="utf-8").find(rel) != -1
+    annotation = payload["data"]["annotation"]
+    assert annotation["reviewed_by"] == "codex"
+    assert annotation["source_content_digest"].startswith("sha256:")
     assert main(["meta", "check", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["meta", "status", "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["data"]["semantic_coverage"] == {"annotated": 1, "current": 1, "possibly_stale": 0}
+
+    (repo / rel).write_text("export const changed = true;\n", encoding="utf-8")
+    assert main(["meta", "status", "--json"]) == 0
+    stale_status = json.loads(capsys.readouterr().out)
+    assert stale_status["data"]["semantic_coverage"] == {"annotated": 1, "current": 0, "possibly_stale": 1}
 
 def test_meta_set_invalid_path_leaves_no_repometa_skeleton(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

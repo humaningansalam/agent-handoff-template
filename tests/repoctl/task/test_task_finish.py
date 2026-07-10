@@ -59,7 +59,14 @@ def test_task_finish_changed_meta_gate_uses_explicit_task_changes(tmp_path: Path
     capsys.readouterr()
     write_repometa(repo, coverage=["*.py"], annotations={"task_new.py": {"role": "service", "purpose": "new task file", "topics": ["task"]}})
     (repo / "task_new.py").write_text("y = 1\n", encoding="utf-8")
-    record_discovery(tmp_path, "T-20260609184046Z", query="task new", reviewed="repos/task_new.py", chosen="repos/task_new.py")
+    metadata_path = f"repos/.repometa/annotations/{shard_for_path('task_new.py')}.json"
+    record_discovery(
+        tmp_path,
+        "T-20260609184046Z",
+        query="task new",
+        reviewed=f"repos/task_new.py, {metadata_path}",
+        chosen=f"repos/task_new.py, {metadata_path}",
+    )
 
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
 
@@ -127,7 +134,7 @@ def test_task_finish_treats_modified_dirty_baseline_file_as_task_change(tmp_path
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repository_selector_required"
+    assert payload["problems"][0]["code"] == "baseline_conflict"
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
 
 
@@ -150,20 +157,25 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     assert "Result: pass" in archived
     assert "- meta gate: skipped (no_repo_directory)" in archived
     assert "task finished and verified.\n\n## Verification" in archived
-    assert "First command to run: `./scripts/repoctl check --json`" in archived
-    assert f"First file to open: `{payload['new_path']}`" in archived
+    assert "## Last Active Handoff" in archived
+    assert "## Closure" in archived
+    assert "Git delivery: Not managed by repoctl." in archived
     assert "docs/tasks/T-20260609184046Z--alpha.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     receipt = json.loads((tmp_path / payload["completion_receipt"]).read_text(encoding="utf-8"))
     assert receipt["schema"] == "repoctl.task.completion"
     assert receipt["task_id"] == "T-20260609184046Z"
     assert receipt["status"] == "done"
-    assert receipt["task_path"] == payload["new_path"]
-    assert receipt["archive_path"] == payload["new_path"]
+    assert receipt["task_path_at_completion"] == payload["new_path"]
     assert receipt["changed_entries"] == []
+    assert receipt["schema_version"] == 2
+    assert receipt["repo_evidence"]["mode"] == "none"
+    assert receipt["repo_evidence"]["attribution"] == "none"
     assert receipt["repo_evidence"]["git_available"] is False
     assert receipt["repo_evidence"]["meta_gate"]["reason"] == "no_repo_directory"
     assert receipt["repo_evidence"]["delta"]["changed_count"] == 0
-    assert receipt["verification"]["content_sha256"] == receipt["content_sha256"]
+    assert receipt["verification"]["source"] == "external_file"
+    assert receipt["verification"]["source_sha256"].startswith("sha256:")
+    assert receipt["verification"]["stored_sha256"].startswith("sha256:")
 
 
 def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -171,6 +183,14 @@ def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypat
     text = task_text("T-20260609184046Z", status="doing").replace("- pending", "- Command: pytest\n- Result: pass")
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    real_write_text = Path.write_text
+
+    def reject_temp_verification(path: Path, *args: object, **kwargs: object) -> int:
+        if path == Path("/tmp/T-20260609184046Z-verification.md"):
+            raise AssertionError("task verification must not be copied through /tmp")
+        return real_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", reject_temp_verification)
 
     assert main(["task", "finish", "T-20260609184046Z", "--use-task-verification", "--json"]) == 0
 
@@ -178,6 +198,8 @@ def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypat
     archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
     assert "Result: pass" in archived
     assert "status: done" in archived
+    receipt = json.loads((tmp_path / payload["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["verification"]["source"] == "task_section"
 
 
 def test_task_finish_strips_verification_artifact_title(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -440,7 +462,13 @@ def test_task_finish_summarizes_repo_status_for_humans(tmp_path: Path, monkeypat
     verification.write_text("ok\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     start_task_for_finish(monkeypatch, capsys, tmp_path)
-    record_discovery(tmp_path, "T-20260609184046Z", query="repo status summary", reviewed="repos/tracked.py, repos/longer_name.py", chosen="repos/tracked.py, repos/longer_name.py")
+    record_discovery(
+        tmp_path,
+        "T-20260609184046Z",
+        query="repo status summary",
+        reviewed="repos/tracked.py, repos/longer_name.py, repos/__pycache__/cache.pyc",
+        chosen="repos/tracked.py, repos/longer_name.py, repos/__pycache__/cache.pyc",
+    )
     (repo / "tracked.py").write_text("new\n", encoding="utf-8")
     (repo / "longer_name.py").write_text("new\n", encoding="utf-8")
     (repo / "__pycache__").mkdir()
@@ -496,7 +524,8 @@ def test_task_finish_ignores_unrelated_full_repo_metadata_errors(tmp_path: Path,
 
 def test_task_finish_missing_verification_file_returns_json_error(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    text = task_text("T-20260609184046Z", status="doing").replace("- pending", "- Pending.")
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
@@ -508,7 +537,7 @@ def test_task_finish_missing_verification_file_returns_json_error(tmp_path: Path
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "missing_verification_file"
-    assert any(action["label"] == "Create verification evidence" for action in payload["next_actions"])
+    assert any(action["label"] == "Complete task Verification" for action in payload["next_actions"])
 
 
 def test_task_finish_rejects_empty_verification_file(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -538,6 +567,22 @@ def test_task_finish_rejects_verification_file_inside_repo(tmp_path: Path, monke
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "verification_file_inside_repo"
+
+
+def test_task_finish_never_overwrites_existing_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    verification = write_verification(tmp_path)
+    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text("existing receipt\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "completion_receipt_exists"
+    assert receipt_path.read_text(encoding="utf-8") == "existing receipt\n"
 
 
 def test_task_finish_blocks_when_repo_head_changed_after_start_with_clean_worktree(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -592,6 +637,60 @@ def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_pa
     assert receipt["repo_evidence"]["delta"]["changed_count"] == 1
 
 
+def test_task_finish_committed_diff_blocks_initial_dirty_path_until_owned(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
+    (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")
+    task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task)
+    verification = tmp_path / "verification.md"
+    verification.write_text("verified after product commit\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, "T-20260609184046Z", query="app change", reviewed="repos/app.py", chosen="repos/app.py")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 2
+    blocked = json.loads(capsys.readouterr().out)
+    assert blocked["problems"][0]["code"] == "baseline_conflict"
+
+    assert main(["task", "baseline", "resolve", "T-20260609184046Z", "--path", "repos/app.py", "--ownership", "task", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    receipt = json.loads((tmp_path / payload["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["repo_evidence"]["attribution"] == "range_observed"
+    assert receipt["repo_evidence"]["ownership"]["app.py"]["ownership"] == "task"
+
+
+def test_task_finish_committed_diff_blocks_non_ancestor_observed_head(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
+    task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task)
+    verification = tmp_path / "verification.md"
+    verification.write_text("verified\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+    rewritten = subprocess.run(["git", "commit-tree", tree, "-m", "rewritten root"], cwd=repo, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+    subprocess.run(["git", "reset", "--hard", rewritten], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repo_history_rewritten"
+    assert not (tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json").exists()
+
+
 def test_task_finish_committed_diff_blocks_invalid_start_head(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -606,7 +705,7 @@ def test_task_finish_committed_diff_blocks_invalid_start_head(tmp_path: Path, mo
     capsys.readouterr()
     baseline = tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json"
     payload = json.loads(baseline.read_text(encoding="utf-8"))
-    payload["head"] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    payload["initial"]["start_head"] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     baseline.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     record_discovery(tmp_path, "T-20260609184046Z", query="app change", reviewed="repos/app.py", chosen="repos/app.py")
     (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")

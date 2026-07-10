@@ -45,7 +45,8 @@ def test_upgrade_status_guides_to_plan(tmp_path: Path, monkeypatch, capsys) -> N
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "upgrade status"
-    assert payload["data"]["status"] == "source_required_for_upgrade_diff"
+    assert payload["data"]["status"] == "no_upgrade_receipts"
+    assert payload["data"]["receipt_count"] == 0
     assert "upgrade plan --from" in payload["data"]["next_command"]
 
 

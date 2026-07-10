@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import subprocess
 import hashlib
+import json
+import os
+import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from .repositories import RepoTarget, default_repo_target
 
@@ -68,6 +71,31 @@ def repo_git_head(root: Path, target: RepoTarget | None = None) -> tuple[str, Re
     if result.returncode != 0:
         return "<unborn>", state
     return result.stdout.strip(), state
+
+
+def repo_is_ancestor(root: Path, *, ancestor: str, descendant: str = "HEAD", target: RepoTarget | None = None) -> tuple[bool, RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    if not state.available:
+        return False, state
+    assert selected is not None
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=selected.root_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True, state
+    if result.returncode == 1:
+        return False, state
+    return False, RepoGitState(
+        False,
+        f"{selected.display_path}/ cannot compare repository history: {ancestor}..{descendant}",
+        selected.id,
+        selected.display_path,
+    )
 
 
 def normalize_repo_path(path: str | Path) -> str:
@@ -212,6 +240,130 @@ def repo_change_fingerprints(root: Path, entries: list[ChangedEntry], target: Re
                 digest.update(b"<missing>")
         fingerprints[_changed_entry_key(entry)] = digest.hexdigest()
     return fingerprints, state
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _git_bytes(repo: Path, args: list[str]) -> bytes:
+    result = subprocess.run(
+        ["git", "-c", "core.quotePath=false", *args],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.stdout if result.returncode == 0 else b""
+
+
+def _path_state_manifest(repo: Path, path: str) -> dict[str, Any]:
+    normalized = normalize_repo_path(path)
+    file_path = repo / normalized
+    status_bytes = _git_bytes(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", normalized])
+    index_bytes = _git_bytes(repo, ["ls-files", "--stage", "-z", "--", normalized])
+    manifest: dict[str, Any] = {
+        "path": normalized,
+        "git_status_sha256": _sha256_bytes(status_bytes),
+        "index_sha256": _sha256_bytes(index_bytes),
+    }
+    try:
+        file_stat = os.lstat(file_path)
+    except OSError:
+        manifest.update({"kind": "missing", "mode": ""})
+        return manifest
+    manifest["mode"] = f"{stat.S_IMODE(file_stat.st_mode):04o}"
+    if stat.S_ISLNK(file_stat.st_mode):
+        manifest.update({"kind": "symlink", "symlink_target": os.readlink(file_path)})
+    elif stat.S_ISREG(file_stat.st_mode):
+        try:
+            content = file_path.read_bytes()
+        except OSError:
+            content = b"<unreadable>"
+        manifest.update({"kind": "file", "content_sha256": _sha256_bytes(content)})
+    elif stat.S_ISDIR(file_stat.st_mode):
+        manifest["kind"] = "directory"
+    else:
+        manifest["kind"] = "other"
+    return manifest
+
+
+def repo_path_fingerprints(root: Path, paths: list[str], target: RepoTarget | None = None) -> tuple[dict[str, str], RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    if not state.available:
+        return {}, state
+    assert selected is not None
+    fingerprints: dict[str, str] = {}
+    for path in sorted({normalized for value in paths if (normalized := normalize_repo_path(value))}):
+        manifest = _path_state_manifest(selected.root_path, path)
+        encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        fingerprints[path] = _sha256_bytes(encoded)
+    return fingerprints, state
+
+
+def _sorted_changed_entries(entries: list[ChangedEntry]) -> list[dict[str, str]]:
+    values: list[dict[str, str]] = []
+    for change, path, old_path in sorted(set(entries), key=lambda item: (item[1], item[2], item[0])):
+        item = {"change": change, "path": path}
+        if old_path:
+            item["old_path"] = old_path
+        values.append(item)
+    return values
+
+
+def repo_evidence_fingerprint(
+    root: Path,
+    *,
+    mode: str,
+    start_head: str,
+    observed_head: str,
+    entries: list[ChangedEntry],
+    ownership: dict[str, dict[str, Any]] | None = None,
+    conflict_paths: list[str] | None = None,
+    target: RepoTarget | None = None,
+) -> tuple[dict[str, Any], str, RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    if not state.available:
+        return {}, "", state
+    assert selected is not None
+    repo = selected.root_path
+    untracked_paths = [
+        normalize_repo_path(token.decode("utf-8", errors="surrogateescape"))
+        for token in _git_bytes(repo, ["ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
+        if token
+    ]
+    untracked = [_path_state_manifest(repo, path) for path in sorted(path for path in untracked_paths if path)]
+    ownership_items: list[dict[str, str]] = []
+    for path, decision in sorted((ownership or {}).items()):
+        ownership_items.append(
+            {
+                "path": path,
+                "ownership": str(decision.get("ownership") or ""),
+                "baseline_fingerprint": str(decision.get("baseline_fingerprint") or ""),
+                "final_fingerprint": str(decision.get("final_fingerprint") or ""),
+            }
+        )
+    manifest: dict[str, Any] = {
+        "repo_id": selected.id,
+        "repo_path": selected.display_path,
+        "mode": mode,
+        "start_head": start_head,
+        "observed_head": observed_head,
+        "changed_entries": _sorted_changed_entries(entries),
+        "staged_binary_diff_sha256": _sha256_bytes(_git_bytes(repo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])),
+        "unstaged_binary_diff_sha256": _sha256_bytes(_git_bytes(repo, ["diff", "--binary", "--full-index", "--no-ext-diff"])),
+        "untracked": untracked,
+        "ownership": ownership_items,
+        "conflict_paths": sorted(set(conflict_paths or [])),
+    }
+    if mode == "committed_range":
+        manifest["committed_binary_diff_sha256"] = _sha256_bytes(
+            _git_bytes(repo, ["diff", "--binary", "--full-index", "--no-ext-diff", f"{start_head}..{observed_head}"])
+        )
+    encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return manifest, _sha256_bytes(encoded), state
 
 
 def _changed_entry_key(entry: ChangedEntry) -> str:

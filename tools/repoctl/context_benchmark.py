@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import fnmatch
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -11,8 +12,11 @@ from .context_model import ContextBundle
 from .graph import build_graph
 from .graph_model import GraphSnapshot
 from .graph_model import digest_data
+from .language_profiles import default_indexing_excludes
 from .repositories import require_repo_target
 from .tasks import Problem
+
+IGNORED_SOURCE_PATTERNS = tuple(default_indexing_excludes())
 
 
 def run_context_benchmark(
@@ -467,11 +471,13 @@ def _append_drop_regression(problems: list[Problem], metric_deltas: dict[str, di
 
 
 def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem], snapshot: GraphSnapshot | None = None) -> dict[str, Any]:
-    required = _refs(spec.get("required_source_refs"))
+    labels = _source_labels(spec)
+    required = labels["must_find"]
     required_knowledge = _refs(spec.get("required_knowledge_source_refs"))
     required_edges = _refs(spec.get("required_graph_edges"))
-    optional = _refs(spec.get("acceptable_optional_refs"))
-    forbidden = _refs(spec.get("forbidden_refs"))
+    optional = labels["acceptable"]
+    supporting = labels["supporting"]
+    forbidden = labels["noise"]
     candidate_refs = _bundle_refs(bundle, field="candidates")
     packed_refs = _bundle_refs(bundle, field="packed_context")
     knowledge_refs = _knowledge_refs(bundle)
@@ -493,9 +499,15 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     required_edges_found = [edge for edge in required_edges if _contains_edge(graph_edges, edge)]
     selected_forbidden = [ref for ref in forbidden if _contains_ref(candidate_refs, ref) or _contains_ref(packed_refs, ref)]
     cross_repo_refs = _cross_repo_refs([*candidate_refs, *packed_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
-    relevant_top5 = sum(1 for ref in top5 if _matches_any_expected(ref, [*required, *optional]))
+    precision_top5 = [ref for ref in top5 if not _matches_any_expected(ref, supporting)]
+    relevant_top5 = sum(1 for ref in precision_top5 if _matches_any_expected(ref, [*required, *optional]))
+    supporting_top5 = [ref for ref in top5 if _matches_any_expected(ref, supporting)]
+    first_correct_rank = next((index for index, ref in enumerate(candidate_refs, start=1) if _matches_any_expected(ref, required)), 0)
+    generated_noise = [ref for ref in _dedupe_refs(packed_refs) if _is_generated_or_ignored_ref(ref) and not _matches_any_expected(ref, supporting)]
+    verification = _verification_hint_metrics(spec, packed_refs)
     integrity_failures = [ref for ref in candidate_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
     knowledge_integrity_failures = [ref for ref in knowledge_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
+    budget = bundle.budget if bundle is not None else {}
 
     return {
         "id": str(question.get("id") or ""),
@@ -505,7 +517,18 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "metrics": {
             "recall_at_5": _ratio(len(required_top5), len(required)),
             "recall_at_10": _ratio(len(required_top10), len(required)),
-            "precision_at_5": _ratio(relevant_top5, len(top5)),
+            "precision_at_5": _ratio(relevant_top5, len(precision_top5)),
+            "first_correct_rank": first_correct_rank,
+            "must_find_count": len(required),
+            "supporting_hit_at_5": _ratio(len(supporting_top5), len(supporting)) if supporting else 0.0,
+            "supporting_expected_count": len(supporting),
+            "noise_selected": len(selected_forbidden),
+            "generated_or_ignored_noise": len(generated_noise),
+            "verification_hint_accuracy": verification["accuracy"],
+            "verification_hint_expected_count": verification["expected_count"],
+            "output_estimated_tokens": int(budget.get("estimated_tokens") or 0),
+            "output_candidate_count": len(candidate_refs),
+            "output_packed_count": len(packed_refs),
             "packed_recall": _ratio(len(packed_required), len(required)),
             "source_ref_integrity": len(integrity_failures) == 0,
             "knowledge_source_ref_integrity": len(knowledge_integrity_failures) == 0,
@@ -533,6 +556,10 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "required_graph_edges_found": required_edges_found,
         "missing_required_graph_edges": [edge for edge in required_edges if not _contains_edge(graph_edges, edge)],
         "selected_forbidden": selected_forbidden,
+        "selected_noise": selected_forbidden,
+        "generated_or_ignored_noise": generated_noise,
+        "supporting_found_at_5": supporting_top5,
+        "verification_hints": verification,
         "cross_repo_refs": cross_repo_refs,
         "top_refs": top5,
         "top_knowledge_refs": knowledge_top5,
@@ -544,10 +571,24 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
 
 def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics = [result["metrics"] for result in results]
+    ranked = [metric for metric in metrics if metric["must_find_count"]]
+    found_ranks = [metric["first_correct_rank"] for metric in ranked if metric["first_correct_rank"]]
+    verification_metrics = [metric for metric in metrics if metric["verification_hint_expected_count"]]
     return {
         "mean_recall_at_5": _mean(metric["recall_at_5"] for metric in metrics),
         "mean_recall_at_10": _mean(metric["recall_at_10"] for metric in metrics),
         "mean_precision_at_5": _mean(metric["precision_at_5"] for metric in metrics),
+        "first_correct_found_rate": _ratio(len(found_ranks), len(ranked)),
+        "mean_first_correct_rank": _mean(found_ranks),
+        "mean_supporting_hit_at_5": _mean(metric["supporting_hit_at_5"] for metric in metrics if metric["supporting_expected_count"]),
+        "noise_selected": sum(int(metric["noise_selected"]) for metric in metrics),
+        "generated_or_ignored_noise": sum(int(metric["generated_or_ignored_noise"]) for metric in metrics),
+        "mean_verification_hint_accuracy": _mean(metric["verification_hint_accuracy"] for metric in verification_metrics),
+        "verification_hint_expected_questions": len(verification_metrics),
+        "mean_output_estimated_tokens": _mean(metric["output_estimated_tokens"] for metric in metrics),
+        "max_output_estimated_tokens": max((int(metric["output_estimated_tokens"]) for metric in metrics), default=0),
+        "mean_output_candidate_count": _mean(metric["output_candidate_count"] for metric in metrics),
+        "mean_output_packed_count": _mean(metric["output_packed_count"] for metric in metrics),
         "mean_packed_recall": _mean(metric["packed_recall"] for metric in metrics),
         "source_ref_integrity": all(metric["source_ref_integrity"] for metric in metrics),
         "knowledge_source_ref_integrity": all(metric["knowledge_source_ref_integrity"] for metric in metrics),
@@ -575,11 +616,22 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
         grouped.setdefault(category, []).append(metrics)
     summary: dict[str, dict[str, Any]] = {}
     for category, items in sorted(grouped.items()):
+        ranked = [metric for metric in items if metric.get("must_find_count", 0)]
+        found_ranks = [int(metric.get("first_correct_rank") or 0) for metric in ranked if metric.get("first_correct_rank")]
+        verification_metrics = [metric for metric in items if metric.get("verification_hint_expected_count", 0)]
         summary[category] = {
             "question_count": len(items),
             "mean_recall_at_5": _mean(metric.get("recall_at_5", 0.0) for metric in items),
             "mean_recall_at_10": _mean(metric.get("recall_at_10", 0.0) for metric in items),
             "mean_precision_at_5": _mean(metric.get("precision_at_5", 0.0) for metric in items),
+            "first_correct_found_rate": _ratio(len(found_ranks), len(ranked)),
+            "mean_first_correct_rank": _mean(found_ranks),
+            "mean_supporting_hit_at_5": _mean(metric.get("supporting_hit_at_5", 0.0) for metric in items if metric.get("supporting_expected_count", 0)),
+            "noise_selected": sum(int(metric.get("noise_selected") or 0) for metric in items),
+            "generated_or_ignored_noise": sum(int(metric.get("generated_or_ignored_noise") or 0) for metric in items),
+            "mean_verification_hint_accuracy": _mean(metric.get("verification_hint_accuracy", 0.0) for metric in verification_metrics),
+            "mean_output_estimated_tokens": _mean(metric.get("output_estimated_tokens", 0) for metric in items),
+            "max_output_estimated_tokens": max((int(metric.get("output_estimated_tokens") or 0) for metric in items), default=0),
             "mean_packed_recall": _mean(metric.get("packed_recall", 0.0) for metric in items),
             "mean_knowledge_recall_at_5": _mean(metric.get("knowledge_recall_at_5", 0.0) for metric in items if metric.get("required_knowledge_count", 0)),
             "knowledge_expected_questions": sum(1 for metric in items if metric.get("required_knowledge_count", 0)),
@@ -647,6 +699,90 @@ def _knowledge_source_statuses(bundle: ContextBundle | None) -> list[dict[str, A
 
 def _refs(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _source_labels(spec: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    labels = {name: _refs(spec.get(name)) for name in ("must_find", "acceptable", "supporting", "noise")}
+    if any(name in spec for name in labels):
+        return labels
+    raw_labels = spec.get("source_labels")
+    if isinstance(raw_labels, list):
+        parsed = {name: [] for name in labels}
+        for item in raw_labels:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "")
+            if label not in parsed:
+                continue
+            parsed[label].append({key: value for key, value in item.items() if key != "label"})
+        return parsed
+    return {
+        "must_find": _refs(spec.get("required_source_refs")),
+        "acceptable": _refs(spec.get("acceptable_optional_refs")),
+        "supporting": _refs(spec.get("supporting_source_refs")),
+        "noise": _refs(spec.get("forbidden_refs")),
+    }
+
+
+def _dedupe_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in refs:
+        key = (str(ref.get("path") or ""), str(ref.get("section") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(ref)
+    return result
+
+
+def _repo_path_from_ref(ref: dict[str, Any]) -> str:
+    path = str(ref.get("path") or "")
+    if path.startswith("<graph:repo:") and path.endswith(">"):
+        body = path[len("<graph:repo:") : -1]
+        if ":file:" in body:
+            return unquote(body.split(":file:", 1)[1])
+        if ":symbol:" in body:
+            symbol_id = unquote(body.split(":symbol:", 1)[1])
+            parts = symbol_id.split(":", 2)
+            return parts[1] if len(parts) > 1 else ""
+        return ""
+    if path.startswith("<"):
+        return ""
+    return path.removeprefix("repos/")
+
+
+def _is_generated_or_ignored_ref(ref: dict[str, Any]) -> bool:
+    path = _repo_path_from_ref(ref)
+    return bool(path and any(fnmatch.fnmatch(path, pattern) for pattern in IGNORED_SOURCE_PATTERNS))
+
+
+def _verification_hint_metrics(spec: dict[str, Any], packed_refs: list[dict[str, Any]]) -> dict[str, Any]:
+    raw_expected = spec.get("expected_verification_hints")
+    if not isinstance(raw_expected, list):
+        return {"accuracy": 0.0, "expected_count": 0, "selected_count": 0, "found": [], "missing": [], "unexpected": []}
+    expected = [item for item in raw_expected if isinstance(item, dict) and str(item.get("command_or_capability") or "").strip()]
+    positive = [item for item in expected if str(item.get("status") or "acceptable") in {"must_find", "acceptable"}]
+    selected = [ref for ref in packed_refs if str(ref.get("kind") or "") == "verification_hint"]
+
+    def matches(ref: dict[str, Any], item: dict[str, Any]) -> bool:
+        needle = str(item.get("command_or_capability") or "").casefold()
+        haystack = f"{ref.get('path', '')} {ref.get('section', '')}".casefold()
+        return bool(needle and needle in haystack)
+
+    found = [item for item in positive if any(matches(ref, item) for ref in selected)]
+    unexpected = [ref for ref in selected if not any(matches(ref, item) for item in positive)]
+    missing = [item for item in positive if item not in found]
+    denominator = len(found) + len(unexpected) + len(missing)
+    accuracy = _ratio(len(found), denominator) if denominator else 1.0
+    return {
+        "accuracy": accuracy,
+        "expected_count": len(positive),
+        "selected_count": len(selected),
+        "found": found,
+        "missing": missing,
+        "unexpected": unexpected,
+    }
 
 
 def _contains_ref(haystack: list[dict[str, Any]], needle: dict[str, Any]) -> bool:

@@ -2,7 +2,7 @@
 
 `repoctl graph build --json` emits a read-only derived snapshot for one explicit product repository.
 
-Graph is not authoritative. Source authorities remain repo registry, code index, `.repometa`, and future structured task receipts.
+Graph is not authoritative. Source authorities remain repo registry, code index, `.repometa`, and structured task completion receipts.
 
 ## Command
 
@@ -58,6 +58,15 @@ Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--sy
   ],
   "sources": [],
   "completeness": {
+    "status": "partial",
+    "capabilities": {
+      "source_inventory": "complete",
+      "file_inventory": "complete",
+      "imports": "complete",
+      "symbols": "partial",
+      "calls": "partial",
+      "task_history": "complete"
+    },
     "inventory_complete": true,
     "identity_collisions": 0,
     "metadata_store_valid": true,
@@ -131,17 +140,20 @@ Impact and caller/callee queries consume `CALLS` and `IMPORTS_FILE` evidence tha
 
 Task edges are produced only from structured task completion receipts under `docs/tasks/.repoctl-state/completions/`. Graph must not parse task Markdown, verification prose, or diff summaries to infer task/file relations.
 
+`working_tree_diff` evidence has `attribution: task_working_tree`. `committed_range` evidence has `attribution: range_observed`; Graph and Context must describe those paths as files observed in the completion range, not as task-owned commits or task-owned changes. One invalid receipt makes only `task_history` partial and does not remove current file/import evidence or other valid receipts.
+
+repoctl accepts `committed_range` only when `start_head` is an ancestor of `observed_head`. Branch switches, resets, or rebases that break this ancestry block finish with `repo_history_rewritten`. Committed-range evidence is not combined implicitly with task-new working-tree changes.
+
 Completion receipt shape:
 
 ```json
 {
   "schema": "repoctl.task.completion",
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "T-...",
   "repo_id": "web",
   "status": "done",
-  "task_path": "docs/archive/tasks/T-...md",
-  "archive_path": "docs/archive/tasks/T-...md",
+  "task_path_at_completion": "docs/archive/tasks/T-...md",
   "content_sha256": "sha256:...",
   "changed_entries": [
     {
@@ -150,10 +162,19 @@ Completion receipt shape:
       "old_path": ""
     }
   ],
+  "repo_evidence": {
+    "mode": "committed_range",
+    "attribution": "range_observed",
+    "start_head": "...",
+    "observed_head": "...",
+    "diff_fingerprint_sha256": "sha256:..."
+  },
   "verification": {
-    "task_path": "docs/archive/tasks/T-...md",
-    "archive_path": "docs/archive/tasks/T-...md",
-    "content_sha256": "sha256:..."
+    "source": "task_section",
+    "source_sha256": "sha256:...",
+    "normalized_sha256": "sha256:...",
+    "stored_sha256": "sha256:...",
+    "truncated": false
   }
 }
 ```
@@ -232,6 +253,7 @@ Rules:
     "type": "file",
     "path": "src/app.py"
   },
+  "query_status": "not_found",
   "matches": [],
   "nodes": [],
   "edges": [],
@@ -248,3 +270,14 @@ Query selectors are exact typed selectors. Clients must not pass an `id` string 
 Simple symbol names are fail-closed. If a symbol selector matches multiple precise symbols, `graph query` exits nonzero with `graph_query_ambiguous_symbol` and returns candidate matches with path, qualified name, symbol kind, provider, and source range so the caller can retry with `--in-file` or a qualified name.
 
 Unsupported or incomplete provider coverage is reported through `completeness` and `warnings`; query must not claim a complete call graph when only file-level import impact is available.
+
+Query outcome and evidence completeness are separate axes:
+
+| `query_status` | JSON `ok` | Exit | Meaning |
+|---|---:|---:|---|
+| `found` | `true` | 0 | A supported query found direct matches. |
+| `not_found` | `true` | 0 | No direct match was found in the available evidence. |
+| `unsupported` | `false` | 1 | No provider/capability exists for this query. |
+| `unavailable` | `false` | 1 | A defined provider could not produce evidence for this run. |
+
+Invalid selectors, invalid paths, and ambiguous symbols are ordinary problems, not `query_status` values. `not_found` with `completeness.status: partial` means only "not found in currently available evidence"; it does not prove absence.

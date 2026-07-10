@@ -27,9 +27,8 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     assert any(edge["kind"] == "CONTAINS" and edge["to"] == file_id("main", "src/app.py") for edge in result["edges"])
 
     assert main(["graph", "query", "--file", "./src\\app.py", "--json"]) == 1
-    not_found = json.loads(capsys.readouterr().out)
-    assert not_found["problems"][0]["code"] == "graph_query_not_found"
-    assert not_found["problems"][0]["path"] == "src\\app.py"
+    invalid = json.loads(capsys.readouterr().out)
+    assert invalid["problems"][0]["code"] == "graph_query_invalid_path"
 
 
 def test_graph_query_topic_returns_matching_files(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -84,7 +83,25 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     ambiguous = json.loads(capsys.readouterr().out)
     assert ambiguous["problems"][0]["code"] == "graph_query_selector_ambiguous"
 
-    assert main(["graph", "query", "--file", "missing.py", "--json"]) == 1
+    assert main(["graph", "query", "--file", "missing.py", "--json"]) == 0
     missing = json.loads(capsys.readouterr().out)
-    assert missing["problems"][0]["code"] == "graph_query_not_found"
+    assert missing["ok"] is True
+    assert missing["data"]["query_status"] == "not_found"
+    assert missing["data"]["result"]["completeness"]["status"] == "complete"
 
+
+def test_graph_call_query_reports_unsupported_language_instead_of_not_found(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.ts").write_text("export function run() { return 1; }\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--callers-of", "run", "--in-file", "app.ts", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["data"]["query_status"] == "unsupported"
+    assert payload["data"]["result"]["query_status"] == "unsupported"
+    assert payload["data"]["completeness"]["capabilities"]["calls"] == "partial"

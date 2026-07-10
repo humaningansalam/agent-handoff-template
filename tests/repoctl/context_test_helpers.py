@@ -67,20 +67,37 @@ Keep token validation centralized.
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(archive_text, encoding="utf-8")
     archive_hash = _sha256_text(archive_text)
+    verification_text = "`uv run pytest tests/test_auth.py` passed."
+    verification_hash = _sha256_text(verification_text)
     receipt = {
         "schema": "repoctl.task.completion",
-        "schema_version": 1,
+        "schema_version": 2,
         "repo_id": repo_id,
         "task_id": task_id,
         "status": "done",
-        "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
-        "archive_path": archive_rel,
+        "completed_at": "20260625T010101Z",
+        "task_path_at_completion": archive_rel,
         "content_sha256": archive_hash,
         "changed_entries": [{"change": "modified", "path": "auth.py"}],
+        "repo_evidence": {
+            "mode": "working_tree_diff",
+            "attribution": "task_working_tree",
+            "start_head": "",
+            "observed_head": "",
+            "git_available": True,
+            "diff_fingerprint_sha256": "sha256:" + ("0" * 64),
+            "fingerprint_manifest": {},
+            "ownership": {},
+            "meta_gate": {},
+            "delta": {"changed_count": 1},
+        },
         "verification": {
-            "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
-            "archive_path": archive_rel,
-            "content_sha256": archive_hash,
+            "source": "task_section",
+            "source_sha256": verification_hash,
+            "normalization": "none",
+            "normalized_sha256": verification_hash,
+            "stored_sha256": verification_hash,
+            "truncated": False,
         },
     }
     receipt_path = root / "docs/tasks/.repoctl-state/completions" / f"{task_id}.json"

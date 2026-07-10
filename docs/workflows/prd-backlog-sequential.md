@@ -117,10 +117,10 @@ cd <selected-product-repo> && <focused test or smoke command>
 ./scripts/repoctl meta check --changed --json
 ```
 
-Write verification evidence outside `repos/`, then finish:
+Record the commands and results in the task `## Verification`, then finish:
 
 ```bash
-./scripts/repoctl task finish T-... --verification-file /tmp/verification.md --json
+./scripts/repoctl task finish T-... --json
 ./scripts/repoctl check --json
 ./scripts/repoctl backlog list --json
 ./scripts/repoctl task list --json

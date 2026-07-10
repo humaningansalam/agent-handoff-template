@@ -5,7 +5,7 @@ Root `docs/**` contains the workspace task/control ledger, repoctl contracts/wor
 ## What Lives Here
 
 - `BOARD.md` - live task registry only; task frontmatter remains authoritative.
-- `tasks/` - active or reopenable task files plus creation templates.
+- `tasks/` - live task files plus creation templates; completed tasks are immutable.
 - `archive/tasks/` - non-live task originals after completion or cancellation.
 - `contracts/` - machine-facing repoctl JSON, Graph, Context, and module-boundary contracts.
 - `adr/` - empty adopter ADR slot; the template ships only `.gitkeep`.
@@ -25,8 +25,10 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - List tasks: `./scripts/repoctl task list --json`
 - Show task: `./scripts/repoctl task show T-... --json`
 - Append log: `./scripts/repoctl task log append T-... "message" --json`
-- Finish task: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
-- Finish after an accidental product commit: `./scripts/repoctl task finish T-... --use-committed-diff --verification-file /tmp/T-...-verification.md --json`
+- Finish task from completed `## Verification`: `./scripts/repoctl task finish T-... --json`
+- Finish with an external verification artifact: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
+- Finish after an accidental product commit: `./scripts/repoctl task finish T-... --use-committed-diff --json`
+- Create follow-up work: `./scripts/repoctl task create --follow-up-of T-old --slug follow-up "Follow-up title" --json`
 - Show version: `./scripts/repoctl --version` or `./scripts/repoctl version --json`
 - Check workspace: `./scripts/repoctl check --json`
 - Check metadata: `./scripts/repoctl meta check --json`

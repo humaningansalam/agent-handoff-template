@@ -99,7 +99,13 @@ Markdown output is a view. It must not be ingested as a future Context, Knowledg
 The pack is non-authoritative and must be read before editing repo files for repo-scoped tasks when available. Default `--json` output is compact and contains:
 
 ```text
+stage
+input_digest
+stop_reason
+budget
 must_read
+edit_candidates
+supporting_evidence
 likely_change
 impact
 verification
@@ -109,6 +115,27 @@ warnings
 
 Use `--full --json` to include the raw nested Context bundle and debug candidate details.
 
-Legacy JSON groups such as `maybe_relevant` and `verification_hints` remain for compatibility. The agent-facing groups are aliases over the same source references plus direct task Graph evidence.
+`stage: bootstrap` is used before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, and capability warnings; it must not add raw task history or Graph noise. `stage: scoped` is used after Discovery has an active Chosen set. Chosen/current source and directly connected tests appear before historical receipt evidence.
 
-The pack may use task title, Goal, Discovery, Handoff, chosen files, and explicit Context Docs as retrieval seeds only. It must not convert task prose into source authority or automatic edit scope.
+`edit_candidates` contains only the active Chosen set. Reviewed but unchosen files are `supporting_evidence`. Context does not infer edit scope from task prose, receipt history, basenames, or generated/ignored files.
+
+Retrieval query text comes from Candidate query history. Goal and Handoff prose are not parsed as symbols. A test is directly connected only through explicit Discovery evidence, a provider-confirmed relation, or manifest mapping.
+
+`input_digest` covers task content, Discovery query history, Reviewed and Chosen sets, explicit Context Docs and their content digests, repository identity, observed HEAD/snapshot, and capability matrix. A saved pack is stale when recomputing those inputs produces a different digest; read-only commands do not rewrite it.
+
+Budget values are estimates and use the name `estimated_tokens`. Early stop is deterministic and reports one of:
+
+```text
+required_evidence_satisfied
+budget_reached
+no_more_eligible_evidence
+required_evidence_exceeds_budget
+```
+
+`final_render_estimated_tokens` must not exceed `maximum_estimated_tokens` unless the required evidence alone exceeds the budget, in which case the stop reason is `required_evidence_exceeds_budget`.
+
+## Benchmark Labels
+
+Benchmark fixtures may label source refs as `must_find`, `acceptable`, `supporting`, or `noise`. `must_find` drives recall and first-correct rank; precision treats `must_find + acceptable` as relevant; `supporting` is reported separately and does not count against precision; visible `noise` is contamination. Verification hints use explicit `expected_verification_hints` labels rather than keyword inference.
+
+The first release records first-correct rank, labeled precision/recall, supporting hits, generated/ignored noise, verification-hint accuracy, and output size as baseline measurements. Existing source-integrity, explicit-source recall, forbidden-source, and cross-repo contamination gates remain. New precision/recall thresholds are not release gates until real benchmark history justifies them.

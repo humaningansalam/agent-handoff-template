@@ -15,7 +15,7 @@ class TestMaintenanceScopeGuardContract:
         return set(str(matcher).split("|")) if matcher else set()
 
     def test_maintenance_scope_guard_is_wired_before_general_capture(self):
-        settings = json.loads((ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        settings = json.loads((ROOT / ".claude" / "settings.maintenance.json").read_text(encoding="utf-8"))
         pretool_commands = [entry["hooks"][0]["command"] for entry in settings["hooks"]["PreToolUse"]]
         permission_allow = settings["permissions"]["allow"]
         expansion_commands = [

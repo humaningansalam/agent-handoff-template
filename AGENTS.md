@@ -61,6 +61,7 @@ Scope matrix:
 - Parent-child authority: child `parent` frontmatter is source of truth; parent child lists are convenience summaries.
 - `owner` and `depends_on` are informational metadata, not locks/enforcement.
 - Worker agents must not set lifecycle-managed fields such as `status: done`; use `repoctl task finish`.
+- Humans and agents write task meaning: Goal, Discovery, Execution Log, Verification, and Handoff. Do not hand-edit `.repoctl-state` baselines, fingerprints, ownership decisions, completion receipts, or archive metadata; repoctl owns those machine records.
 
 ## repoctl Boundary
 
@@ -68,10 +69,10 @@ Scope matrix:
 - Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
 - Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
 - Use `./scripts/repoctl task show T-... --json` to inspect a task and `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
-- Finish tasks with a verification artifact outside every product repo: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`.
-- If `## Verification` is already complete, `./scripts/repoctl task finish T-... --use-task-verification --json` may reuse it.
-- Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `./scripts/repoctl task finish T-... --use-committed-diff --verification-file /tmp/T-...-verification.md --json`; it validates the recorded start HEAD through current HEAD and still runs changed-file metadata gates.
-- Use `./scripts/repoctl task block T-... --verification-file /tmp/T-...-blocker.md --json` when acceptance fails but work should remain live.
+- When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`; `--use-task-verification` remains an explicit compatibility form. Use `--verification-file` only for an external artifact.
+- Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `--use-committed-diff`. This mode is allowed only when the recorded start HEAD is an ancestor of the current HEAD and no task-new working-tree changes remain.
+- A committed range is observed Git evidence, not proof that its commits belong to the task. repoctl does not manage commit, push, PR, deploy, or delivery ownership.
+- Use `./scripts/repoctl task block T-... --json` after recording the blocker in `## Verification`, or pass `--verification-file` for an external blocker artifact.
 
 ## Working Commands
 
@@ -88,16 +89,18 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 
 - Every task must include `## Handoff`; it should let the next agent restart in about 30 seconds.
 - Handoff fields: **Next exact step**, **First file to open**, **First command to run**, **Done when**.
+- For a live task, **First file to open** must resolve to an existing file inside the workspace. Historical `## Last Active Handoff` entries are not revalidated after completion. **First command to run** is stored as text and must not be parsed, classified, or executed by repoctl.
 - `## Execution Log` is append-only, short, and uses real UTC timestamps. Prefer `repoctl task log append` over hand-written timestamps.
 - `## Verification` records commands, evidence, and results. Worker inability to run a gate is evidence, not final verification; final gates are the manager/Codex responsibility.
 - Keep `## Handoff` aligned with the latest meaningful execution log before stopping.
 
-## Archive/Reopen
+## Archive/Follow-Up
 
 - Standalone done/canceled tasks are archived immediately and removed from Board.
 - Done/canceled child tasks leave Board but may remain in `docs/tasks/` until the parent archives.
 - Parent tasks archive only after live children are done, canceled, or re-parented.
-- Reopen by restoring/moving the task to `docs/tasks/`, setting `status` to `todo` or `doing`, re-adding Board row, and updating Handoff/Execution Log.
+- Done/canceled tasks and their completion receipts are immutable.
+- Additional work uses a new task: `./scripts/repoctl task create --follow-up-of T-old --slug ... "Follow-up title" --json`. The new task gets a new baseline; the old task is not moved or rewritten.
 
 ## Documentation Language
 

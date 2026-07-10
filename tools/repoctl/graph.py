@@ -8,7 +8,7 @@ from .git import normalize_repo_path
 from .graph_code_provider import build_precise_calls, build_precise_symbols
 from .graph_import_resolver import resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
-from .language_profiles import graph_language_capabilities, limited_semantic_languages
+from .language_profiles import graph_language_capabilities, language_for_path, limited_semantic_languages
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipts
@@ -164,7 +164,7 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             add_edge(GraphEdge("HAS_TOPIC", file_node.id, topic_node_id, "declared", "repometa_annotation"))
 
     task_receipts, receipt_problems = collect_completion_receipts(root, repo_id=repo_id)
-    problems.extend(receipt_problems)
+    problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
     for receipt in task_receipts:
         receipt_task_id = str(receipt.get("task_id") or "")
         if not receipt_task_id:
@@ -177,24 +177,26 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             facts={
                 "receipt": {
                     "status": str(receipt.get("status") or ""),
-                    "task_path": str(receipt.get("task_path") or ""),
-                    "archive_path": str(receipt.get("archive_path") or ""),
+                    "task_path_at_completion": str(receipt.get("task_path_at_completion") or ""),
                     "completed_at": str(receipt.get("completed_at") or ""),
                     "content_sha256": str(receipt.get("content_sha256") or ""),
+                    "repo_evidence": receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {},
                 }
             },
         )
         verification = receipt.get("verification") if isinstance(receipt.get("verification"), dict) else {}
-        artifact_path = str(verification.get("archive_path") or verification.get("task_path") or receipt.get("task_path") or "")
+        artifact_path = str(receipt.get("task_path_at_completion") or "")
         if artifact_path:
             artifact_node_id = artifact_id(receipt_task_id, artifact_path)
             nodes[artifact_node_id] = GraphNode(
                 id=artifact_node_id,
                 kind="artifact",
                 identity={"task_id": receipt_task_id, "path": artifact_path},
-                facts={"receipt": {"content_sha256": str(verification.get("content_sha256") or receipt.get("content_sha256") or "")}},
+                facts={"receipt": {"content_sha256": str(receipt.get("content_sha256") or ""), "verification": verification}},
             )
             add_edge(GraphEdge("TASK_VERIFIED_BY", task_node_id, artifact_node_id, "recorded", "task_completion"))
+        repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
+        attribution = str(repo_evidence.get("attribution") or "none")
         raw_changes = receipt.get("changed_entries") if isinstance(receipt.get("changed_entries"), list) else []
         for index, raw_change in enumerate(raw_changes):
             if not isinstance(raw_change, dict):
@@ -209,9 +211,9 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
                 id=change_node_id,
                 kind="change_event",
                 identity={"task_id": receipt_task_id, "index": index},
-                facts={"receipt": {"change": change, "path": path, "old_path": old_path}},
+                facts={"receipt": {"change": change, "path": path, "old_path": old_path, "attribution": attribution}},
             )
-            add_edge(GraphEdge("TASK_RECORDED_CHANGE", task_node_id, change_node_id, "recorded", "task_completion"))
+            add_edge(GraphEdge("TASK_RECORDED_CHANGE", task_node_id, change_node_id, "recorded", "task_completion", {"attribution": attribution}))
             affected_file_id = ensure_receipt_file_node(path)
             add_edge(GraphEdge("CHANGE_AFFECTED_FILE", change_node_id, affected_file_id, "recorded", "task_completion", {"role": "path"}))
             if old_path:
@@ -329,6 +331,16 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         "dart_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "dart_import_resolver"],
     }
     language_capabilities = graph_language_capabilities({entry.language for entry in entries})
+    limited_languages = limited_semantic_languages(language_capabilities)
+    capability_completeness = {
+        "source_inventory": "complete",
+        "file_inventory": "complete",
+        "imports": "complete" if parse_error_count == 0 else "partial",
+        "symbols": "partial" if limited_languages or parse_error_count else "complete",
+        "calls": "partial" if limited_languages or parse_error_count else "complete",
+        "task_history": "partial" if receipt_problems else "complete",
+    }
+    overall_completeness = "complete" if all(value == "complete" for value in capability_completeness.values()) else "partial"
     snapshot = GraphSnapshot(
         repository=target.to_dict(),
         sources=[
@@ -343,6 +355,8 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             {"kind": "dart_import_resolver", "assertion": "resolved", "digest": digest_data(source_payloads["dart_import_resolver"])},
         ],
         completeness={
+            "status": overall_completeness,
+            "capabilities": capability_completeness,
             "inventory_complete": True,
             "identity_collisions": 0,
             "metadata_store_valid": True,
@@ -506,6 +520,7 @@ def _query_payload(
     matches: list[dict[str, Any]] | None = None,
     paths: list[dict[str, Any]] | None = None,
     warnings: list[dict[str, str]] | None = None,
+    query_status: str = "found",
 ) -> dict[str, Any]:
     nodes = _node_by_id(snapshot)
     for edge in edges:
@@ -516,6 +531,7 @@ def _query_payload(
         "repository": snapshot.repository,
         "snapshot_digest": snapshot.snapshot_digest,
         "query": query,
+        "query_status": query_status,
         "matches": matches or [],
         "nodes": [nodes[node_id].to_dict() for node_id in sorted(node_ids) if node_id in nodes],
         "edges": [edge.to_dict() for edge in sorted_edges],
@@ -523,6 +539,42 @@ def _query_payload(
         "completeness": snapshot.completeness,
         "warnings": warnings or _query_warnings(snapshot),
     }
+
+
+def _empty_query_payload(snapshot: GraphSnapshot, *, query: dict[str, Any], query_status: str, warning: dict[str, str] | None = None) -> dict[str, Any]:
+    warnings = _query_warnings(snapshot)
+    if warning is not None:
+        warnings.append(warning)
+    return _query_payload(snapshot, query=query, node_ids=set(), edges=[], warnings=warnings, query_status=query_status)
+
+
+def _semantic_query_status(snapshot: GraphSnapshot, *, in_file: str) -> tuple[str, dict[str, str] | None]:
+    capabilities = snapshot.completeness.get("language_capabilities")
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    normalized_file = normalize_repo_path(in_file) if in_file else ""
+    if normalized_file:
+        language = language_for_path(normalized_file)
+        capability = capabilities.get(language) if isinstance(capabilities.get(language), dict) else {}
+        if not capability.get("precise_semantics"):
+            return "unsupported", {
+                "code": "graph_query_unsupported",
+                "message": f"provider-confirmed symbol/call queries are unsupported for {language}",
+            }
+        file_node = _node_by_id(snapshot).get(file_id(str(snapshot.repository.get("id") or ""), normalized_file))
+        index = file_node.facts.get("index") if file_node is not None and isinstance(file_node.facts.get("index"), dict) else {}
+        if index and index.get("parse_status") != "ok":
+            return "unavailable", {
+                "code": "graph_query_unavailable",
+                "message": f"the semantic provider could not parse {normalized_file}",
+            }
+        return "found", None
+    precise_languages = [language for language, value in capabilities.items() if isinstance(value, dict) and value.get("precise_semantics")]
+    if not precise_languages and capabilities:
+        return "unsupported", {
+            "code": "graph_query_unsupported",
+            "message": "no provider-confirmed symbol/call capability is available for the indexed languages",
+        }
+    return "found", None
 
 
 def query_graph(
@@ -571,18 +623,18 @@ def query_graph(
     nodes = _node_by_id(snapshot)
     if selector == "file":
         normalized = normalize_repo_path(value)
-        if not normalized:
+        if not normalized or "\\" in value:
             return None, [Problem("error", "graph_query_invalid_path", "graph file query must be a normalized repo-relative path")]
         wanted = file_id(repo_id, normalized)
         if wanted not in nodes:
-            return None, [Problem("error", "graph_query_not_found", f"graph file query matched no node: {normalized}", normalized)]
+            return _empty_query_payload(snapshot, query={"type": "file", "path": normalized}, query_status="not_found"), []
         matched_edges = [edge for edge in snapshot.edges if edge.from_id == wanted or edge.to_id == wanted]
         return _query_payload(snapshot, query={"type": "file", "path": normalized}, node_ids={wanted}, edges=matched_edges, matches=[_node_summary(nodes[wanted])]), []
 
     if selector == "topic":
         wanted = topic_id(repo_id, value)
         if wanted not in nodes:
-            return None, [Problem("error", "graph_query_not_found", f"graph topic query matched no node: {value}")]
+            return _empty_query_payload(snapshot, query={"type": "topic", "topic": value}, query_status="not_found"), []
         matched_edges = [edge for edge in snapshot.edges if edge.kind == "HAS_TOPIC" and edge.to_id == wanted]
         return _query_payload(snapshot, query={"type": "topic", "topic": value}, node_ids={wanted}, edges=matched_edges, matches=[_node_summary(nodes[wanted])]), []
 
@@ -594,7 +646,7 @@ def query_graph(
         ]
         matched_ids = {node.id for node in matched_import_nodes}
         if not matched_ids:
-            return None, [Problem("error", "graph_query_not_found", f"graph import query matched no node: {value}")]
+            return _empty_query_payload(snapshot, query={"type": "import", "raw_import": value}, query_status="not_found"), []
         matched_edges = [edge for edge in snapshot.edges if edge.kind in {"DECLARES_IMPORT", "RESOLVES_TO"} and (edge.to_id in matched_ids or edge.from_id in matched_ids)]
         return _query_payload(snapshot, query={"type": "import", "raw_import": value}, node_ids=set(matched_ids), edges=matched_edges, matches=[_node_summary(node) for node in matched_import_nodes]), []
 
@@ -604,12 +656,20 @@ def query_graph(
         if in_file:
             query["in_file"] = normalize_repo_path(in_file)
         if not matches:
-            return None, None, [Problem("error", "graph_query_not_found", f"graph symbol query matched no node: {raw_symbol}", normalize_repo_path(in_file) if in_file else None)]
+            return None, _empty_query_payload(snapshot, query=query, query_status="not_found"), []
         match_payloads = [_symbol_match_dict(snapshot, node) for node in matches]
         if len(matches) > 1:
             result = _query_payload(snapshot, query=query, node_ids={node.id for node in matches}, edges=_definition_edges(snapshot, {node.id for node in matches}), matches=match_payloads)
             return None, result, [Problem("error", "graph_query_ambiguous_symbol", f"graph symbol query matched {len(matches)} symbols; pass --in-file or a qualified name")]
         return matches[0], _query_payload(snapshot, query=query, node_ids={matches[0].id}, edges=_definition_edges(snapshot, {matches[0].id}), matches=match_payloads), []
+
+    if selector in {"symbol", "callers_of", "callees_of", "impact_symbol"}:
+        semantic_status, semantic_warning = _semantic_query_status(snapshot, in_file=in_file)
+        if semantic_status in {"unsupported", "unavailable"}:
+            query = {"type": selector, "symbol": value}
+            if in_file:
+                query["in_file"] = normalize_repo_path(in_file)
+            return _empty_query_payload(snapshot, query=query, query_status=semantic_status, warning=semantic_warning), []
 
     if selector == "symbol":
         _symbol_node, result, problems = resolve_one_symbol("symbol", value)
@@ -635,6 +695,7 @@ def query_graph(
             edges=edges,
             matches=base_result["matches"] if base_result else [],
             paths=paths,
+            query_status="found" if call_edges else "not_found",
         ), []
 
     def impact_walk(start_ids: set[str], *, max_depth: int) -> tuple[set[str], list[GraphEdge], list[dict[str, Any]]]:
@@ -672,11 +733,11 @@ def query_graph(
 
     if selector == "impact_file":
         normalized = normalize_repo_path(value)
-        if not normalized:
+        if not normalized or "\\" in value:
             return None, [Problem("error", "graph_query_invalid_path", "graph impact-file query must be a normalized repo-relative path")]
         wanted = file_id(repo_id, normalized)
         if wanted not in nodes:
-            return None, [Problem("error", "graph_query_not_found", f"graph impact-file query matched no node: {normalized}", normalized)]
+            return _empty_query_payload(snapshot, query={"type": "impact_file", "path": normalized, "depth": depth}, query_status="not_found"), []
         node_ids, edges, paths = impact_walk({wanted}, max_depth=depth)
         return _query_payload(
             snapshot,

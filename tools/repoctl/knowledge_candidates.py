@@ -127,10 +127,14 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
             return {}, receipt_problems
         return {}, [Problem("error", "knowledge_candidate_receipt_missing", f"completion receipt not found for task: {normalized_task_id}")]
     receipt_rel = f"docs/tasks/.repoctl-state/completions/{normalized_task_id}.json"
-    artifact_rel = str(receipt.get("archive_path") or receipt.get("task_path") or "")
-    artifact_path = root / artifact_rel
-    if not artifact_path.is_file():
-        return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_rel)]
+    artifact_at_completion = str(receipt.get("task_path_at_completion") or "")
+    artifact_candidates = [root / artifact_at_completion]
+    artifact_candidates.extend(sorted((root / "docs/tasks").glob(f"{normalized_task_id}--*.md")))
+    artifact_candidates.extend(sorted((root / "docs/archive/tasks").glob(f"{normalized_task_id}--*.md")))
+    artifact_path = next((path for path in artifact_candidates if path.is_file()), None)
+    if artifact_path is None:
+        return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_at_completion)]
+    artifact_rel = artifact_path.relative_to(root).as_posix()
     artifact_text = artifact_path.read_text(encoding="utf-8")
     title = _receipt_title(receipt, artifact_text)
     summary = _receipt_summary(receipt, artifact_text)

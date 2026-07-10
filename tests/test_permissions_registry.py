@@ -70,6 +70,7 @@ def _tool_names_from_frontmatter(value: object) -> tuple[str, ...]:
 def test_project_settings_do_not_allow_stale_or_broad_commands() -> None:
     settings = json.loads((REPO_ROOT / ".claude/settings.json").read_text(encoding="utf-8"))
     permissions = settings.get("permissions", {}).get("allow", [])
+    denied = settings.get("permissions", {}).get("deny", [])
 
     forbidden_fragments = [
         "/tmp/test/agent-trading-lab_3",
@@ -82,6 +83,13 @@ def test_project_settings_do_not_allow_stale_or_broad_commands() -> None:
     for permission in permissions:
         for fragment in forbidden_fragments:
             assert fragment not in permission
+    assert not any("repos/**" in permission for permission in denied)
+    assert not any("maintenance/" in str(hook) for entries in settings.get("hooks", {}).values() for entry in entries for hook in entry.get("hooks", []))
+
+    maintenance = json.loads((REPO_ROOT / ".claude/settings.maintenance.json").read_text(encoding="utf-8"))
+    assert any("repos/**" in permission for permission in maintenance["permissions"]["deny"])
+    launcher = (REPO_ROOT / "scripts/claude-maintenance").read_text(encoding="utf-8")
+    assert '--settings "$ROOT/.claude/settings.maintenance.json"' in launcher
 
 
 def test_local_claude_settings_are_excluded_from_project_artifacts() -> None:
@@ -90,7 +98,7 @@ def test_local_claude_settings_are_excluded_from_project_artifacts() -> None:
 
 
 def test_settings_allow_safe_writer_but_not_direct_agent_harness_artifact_writes() -> None:
-    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    settings = json.loads((REPO_ROOT / ".claude" / "settings.maintenance.json").read_text(encoding="utf-8"))
     allowed = settings["permissions"]["allow"]
 
     assert "Bash(uv run pytest *)" in allowed

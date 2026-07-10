@@ -162,27 +162,7 @@ def test_context_query_isolates_invalid_completion_receipts(tmp_path: Path, monk
     receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
     receipt_dir.mkdir(parents=True, exist_ok=True)
     (receipt_dir / "T-20260625010101Z.json").write_text(
-        json.dumps(
-            {
-                "schema": "repoctl.task.completion",
-                "schema_version": 1,
-                "repo_id": "main",
-                "task_id": "T-20260625010101Z",
-                "status": "done",
-                "task_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
-                "archive_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
-                "content_sha256": "sha256:" + "a" * 64,
-                "changed_entries": [{"change": "modified", "path": "app.py"}],
-                "verification": {
-                    "task_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
-                    "archive_path": "docs/archive/tasks/T-20260625010101Z--missing.md",
-                    "content_sha256": "sha256:" + "a" * 64,
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
+        json.dumps({"broken": True}) + "\n",
         encoding="utf-8",
     )
 

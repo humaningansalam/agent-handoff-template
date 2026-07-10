@@ -2,58 +2,53 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-"""Canonical agent tool and permission boundaries."""
+"""Generated from ai/roles/*.yaml. Do not edit directly."""
 
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """Canonical maintenance worker tool and permission contract."""
     name: str
     kind: str
     tools: tuple[str, ...]
     permission_mode: str = "default"
 
 
-READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
-READ_ONLY_EVALUATION_TOOLS = ("Read", "Grep", "Glob", "Bash")
-IMPLEMENTER_TOOLS = ("Read", "Grep", "Glob", "Edit", "MultiEdit", "Write")
-
 AGENTS: tuple[AgentSpec, ...] = (
     AgentSpec(
-        name="maintenance-cartographer",
-        kind="maintenance-worker",
-        tools=READ_ONLY_TOOLS,
-        permission_mode="plan",
+        name='maintenance-cartographer',
+        kind='maintenance-worker',
+        tools=('Read', 'Grep', 'Glob'),
+        permission_mode='plan',
     ),
     AgentSpec(
-        name="maintenance-planner",
-        kind="maintenance-worker",
-        tools=READ_ONLY_TOOLS,
-        permission_mode="plan",
+        name='maintenance-evaluator',
+        kind='maintenance-worker',
+        tools=('Read', 'Grep', 'Glob', 'Bash'),
+        permission_mode='plan',
     ),
     AgentSpec(
-        name="maintenance-plan-critic",
-        kind="maintenance-worker",
-        tools=READ_ONLY_TOOLS,
-        permission_mode="plan",
+        name='maintenance-implementer',
+        kind='maintenance-worker',
+        tools=('Read', 'Grep', 'Glob', 'Edit', 'MultiEdit', 'Write'),
+        permission_mode='default',
     ),
     AgentSpec(
-        name="maintenance-implementer",
-        kind="maintenance-worker",
-        tools=IMPLEMENTER_TOOLS,
-        permission_mode="default",
+        name='maintenance-plan-critic',
+        kind='maintenance-worker',
+        tools=('Read', 'Grep', 'Glob'),
+        permission_mode='plan',
     ),
     AgentSpec(
-        name="maintenance-evaluator",
-        kind="maintenance-worker",
-        tools=READ_ONLY_EVALUATION_TOOLS,
-        permission_mode="plan",
+        name='maintenance-planner',
+        kind='maintenance-worker',
+        tools=('Read', 'Grep', 'Glob'),
+        permission_mode='plan',
     ),
     AgentSpec(
-        name="maintenance-skeptic",
-        kind="maintenance-worker",
-        tools=READ_ONLY_EVALUATION_TOOLS,
-        permission_mode="plan",
+        name='maintenance-skeptic',
+        kind='maintenance-worker',
+        tools=('Read', 'Grep', 'Glob', 'Bash'),
+        permission_mode='plan',
     ),
 )
 

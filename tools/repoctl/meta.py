@@ -13,7 +13,7 @@ from .io import RepoctlError, atomic_write
 from .language_profiles import default_indexing_excludes
 from .markdown import parse_frontmatter
 from .repositories import RepoTarget, default_repo_target, require_repo_target
-from .tasks import Problem
+from .tasks import Problem, utc_stamp
 
 REPOMETA_DIR = ".repometa"
 POLICY_FILE = "policy.json"
@@ -91,6 +91,9 @@ class FileClassification:
     change: str = ""
     old_path: str = ""
     workspace_path: str = ""
+    annotation_current: bool | None = None
+    source_content_digest: str = ""
+    current_content_digest: str = ""
 
     @property
     def area(self) -> str:
@@ -117,6 +120,11 @@ class FileClassification:
             data["old_path"] = self.old_path
         if self.workspace_path:
             data["workspace_path"] = self.workspace_path
+        if self.annotation_current is not None:
+            data["annotation_current"] = self.annotation_current
+            data["possibly_stale"] = not self.annotation_current
+            data["source_content_digest"] = self.source_content_digest
+            data["current_content_digest"] = self.current_content_digest
         return data
 
 
@@ -542,7 +550,17 @@ def _classify(path: str, policy: dict[str, Any], annotations: dict[str, dict[str
     return FileClassification(rel, "indexed_only", _areas_for(rel, policy), _topics_for(rel, policy), False, "not covered by annotation policy", change, old_path)
 
 
-def _with_workspace_path(root: Path, repo: Path, file: FileClassification) -> FileClassification:
+def _content_digest(path: Path) -> str:
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _with_workspace_path(root: Path, repo: Path, file: FileClassification, annotation: dict[str, Any] | None = None) -> FileClassification:
+    source_digest = str((annotation or {}).get("source_content_digest") or "")
+    current_digest = _content_digest(repo / file.path) if annotation is not None and (repo / file.path).is_file() else ""
+    annotation_current = bool(source_digest and current_digest == source_digest) if current_digest else None
     return FileClassification(
         file.path,
         file.classification,
@@ -553,7 +571,35 @@ def _with_workspace_path(root: Path, repo: Path, file: FileClassification) -> Fi
         file.change,
         file.old_path,
         _workspace_path(root, repo, file.path),
+        annotation_current,
+        source_digest,
+        current_digest,
     )
+
+
+def _coverage_views(repo: Path, policy: dict[str, Any], files: list[FileClassification], annotations: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    current_annotations = {path: data for path, data in annotations.items() if (repo / path).is_file()}
+    current_count = 0
+    for path, annotation in current_annotations.items():
+        source_digest = str(annotation.get("source_content_digest") or "")
+        if source_digest and _content_digest(repo / path) == source_digest:
+            current_count += 1
+    annotated_count = len(current_annotations)
+    eligible_count = sum(file.classification not in {"excluded", "excluded_override", "orphan_annotation", "orphan_exclusion"} for file in files)
+    coverage_patterns = _coverage_patterns(policy)
+    return {
+        "store": {"present": (repo / REPOMETA_DIR).is_dir()},
+        "index_coverage": {"eligible": eligible_count, "excluded": sum(file.classification in {"excluded", "excluded_override"} for file in files)},
+        "semantic_coverage": {
+            "annotated": annotated_count,
+            "current": current_count,
+            "possibly_stale": annotated_count - current_count,
+        },
+        "annotation_gate": {
+            "active": bool(coverage_patterns),
+            "pattern_count": len(coverage_patterns),
+        },
+    }
 
 
 def _changed_files(root: Path, target: RepoTarget | None = None) -> list[ChangedEntry]:
@@ -673,7 +719,7 @@ def _validate_annotation(path: str, data: dict[str, Any], policy: dict[str, Any]
     forbidden = sorted(set(data) & FORBIDDEN_ANNOTATION_FIELDS)
     if forbidden:
         problems.append(Problem("error", "forbidden_annotation_field", f"forbidden annotation fields: {', '.join(forbidden)}", location))
-    allowed = REQUIRED_ANNOTATION | {"declared_effects", "caution"}
+    allowed = REQUIRED_ANNOTATION | {"declared_effects", "caution", "source_content_digest", "reviewed_at", "reviewed_by"}
     unknown = sorted(set(data) - allowed - FORBIDDEN_ANNOTATION_FIELDS)
     if unknown:
         problems.append(Problem("error", "unknown_annotation_field", f"unknown annotation fields: {', '.join(unknown)}", location))
@@ -701,6 +747,15 @@ def _validate_annotation(path: str, data: dict[str, Any], policy: dict[str, Any]
     purpose = data.get("purpose")
     if purpose is not None and (not isinstance(purpose, str) or not purpose.strip()):
         problems.append(Problem("error", "invalid_purpose", "purpose must be a non-empty string", location))
+    source_content_digest = data.get("source_content_digest")
+    if source_content_digest is not None and (not isinstance(source_content_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_content_digest)):
+        problems.append(Problem("error", "invalid_source_content_digest", "source_content_digest must be a SHA-256 digest", location))
+    reviewed_at = data.get("reviewed_at")
+    if reviewed_at is not None and (not isinstance(reviewed_at, str) or not re.fullmatch(r"\d{8}T\d{6}Z", reviewed_at)):
+        problems.append(Problem("error", "invalid_reviewed_at", "reviewed_at must be a UTC timestamp", location))
+    reviewed_by = data.get("reviewed_by")
+    if reviewed_by is not None and (not isinstance(reviewed_by, str) or not reviewed_by.strip()):
+        problems.append(Problem("error", "invalid_reviewed_by", "reviewed_by must be a non-empty string", location))
     return problems
 
 
@@ -756,20 +811,25 @@ def meta_inventory(root: Path, *, changed: bool = False, changes: list[ChangedEn
                 classification = base
             else:
                 classification = _classify(path, policy, annotations, exclusions, change=change, old_path=old_path)
-            files.append(_with_workspace_path(root, repo, classification))
+            files.append(_with_workspace_path(root, repo, classification, annotations.get(path)))
     else:
         for path in existing:
-            files.append(_with_workspace_path(root, repo, _classify(path, policy, annotations, exclusions)))
+            files.append(_with_workspace_path(root, repo, _classify(path, policy, annotations, exclusions), annotations.get(path)))
     if not changed:
         for path in sorted(set(annotations) - existing):
-            files.append(_with_workspace_path(root, repo, FileClassification(path, "orphan_annotation", [], [], True, "annotation exists for missing file")))
+            files.append(_with_workspace_path(root, repo, FileClassification(path, "orphan_annotation", [], [], True, "annotation exists for missing file"), annotations.get(path)))
         for path in sorted(set(exclusions) - existing):
             files.append(_with_workspace_path(root, repo, FileClassification(path, "orphan_exclusion", [], [], False, "exclusion exists for missing file")))
     summary: dict[str, int] = {key: 0 for key in ["total", "excluded", "annotated", "annotation_required", "indexed_only", "excluded_override", "orphan_annotation", "orphan_exclusion", "move_candidate"]}
     summary["total"] = len(files)
     for file in files:
         summary[file.classification] = summary.get(file.classification, 0) + 1
-    meta = {"scope": "changed" if changed else "all", "summary": summary, "repository": repository}
+    meta = {
+        "scope": "changed" if changed else "all",
+        "summary": summary,
+        "repository": repository,
+        **_coverage_views(repo, policy, files, annotations),
+    }
     return files, problems, meta
 
 
@@ -899,7 +959,21 @@ def show_annotation(root: Path, path: str, *, target: RepoTarget | None = None) 
     data = _load_shard(repo, shard)
     annotation = (data.get("annotations") or {}).get(rel)
     exclusion = (data.get("exclusions") or {}).get(rel)
-    return {"path": rel, "workspace_path": _workspace_path(root, repo, rel), "repository": _repository_meta(root, repo, target), "shard": shard, "annotation": annotation, "exclusion": exclusion}
+    source_digest = str((annotation or {}).get("source_content_digest") or "")
+    current_digest = _content_digest(repo / rel) if (repo / rel).is_file() else ""
+    return {
+        "path": rel,
+        "workspace_path": _workspace_path(root, repo, rel),
+        "repository": _repository_meta(root, repo, target),
+        "shard": shard,
+        "annotation": annotation,
+        "exclusion": exclusion,
+        "provenance": {
+            "source_content_digest": source_digest,
+            "current_content_digest": current_digest,
+            "possibly_stale": bool(annotation is not None and source_digest != current_digest),
+        },
+    }
 
 
 def _annotation_topics(annotation: dict[str, Any] | None) -> list[str]:
@@ -1065,13 +1139,27 @@ def meta_suggest(root: Path, *, text: str, limit: int = 20, target: RepoTarget |
     return candidates[: max(0, limit)], problems, {**meta, "suggestion": {"text": query, "tokens": tokens, "limit": limit, "authoritative": False}}
 
 
-def set_annotation(root: Path, path: str, *, role: str, purpose: str, topics: list[str], declared_effects: list[str] | None = None, caution: list[str] | None = None, target: RepoTarget | None = None) -> dict[str, Any]:
+def set_annotation(root: Path, path: str, *, role: str, purpose: str, topics: list[str], declared_effects: list[str] | None = None, caution: list[str] | None = None, reviewed_by: str = "agent", target: RepoTarget | None = None) -> dict[str, Any]:
     repo = _repo(root, target)
     rel = normalize_repo_path(path, target=target)
-    if not (repo / rel).is_file():
+    source_path = repo / rel
+    if not source_path.is_file():
         raise RepoctlError(f"repo path does not exist: {rel}")
     shard = shard_for_path(rel)
-    annotation: dict[str, Any] = {"role": role, "purpose": purpose.strip(), "topics": [topic for topic in topics if topic]}
+    reviewer = reviewed_by.strip()
+    if not reviewer:
+        raise RepoctlError("--reviewed-by must be non-empty")
+    source_content_digest = _content_digest(source_path)
+    if not source_content_digest:
+        raise RepoctlError(f"repo path cannot be read: {rel}")
+    annotation: dict[str, Any] = {
+        "role": role,
+        "purpose": purpose.strip(),
+        "topics": [topic for topic in topics if topic],
+        "source_content_digest": source_content_digest,
+        "reviewed_at": utc_stamp(),
+        "reviewed_by": reviewer,
+    }
     if declared_effects:
         annotation["declared_effects"] = [effect for effect in declared_effects if effect]
     if caution:

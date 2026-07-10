@@ -210,12 +210,25 @@ def _python_hints(repo: Path) -> list[VerificationHint]:
     hints: list[VerificationHint] = []
     pyproject = repo / "pyproject.toml"
     if pyproject.is_file():
-        hints.append(VerificationHint("uv run pytest", "pyproject.toml", "python_project_manifest", "Python project manifest present"))
         try:
             data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             data = {}
         tool = data.get("tool") if isinstance(data, dict) else {}
+        project = data.get("project") if isinstance(data, dict) else {}
+        dependency_groups = data.get("dependency-groups") if isinstance(data, dict) else {}
+        dependency_values: list[str] = []
+        if isinstance(project, dict):
+            dependency_values.extend(str(value) for value in project.get("dependencies", []) if isinstance(value, str))
+            optional = project.get("optional-dependencies")
+            if isinstance(optional, dict):
+                dependency_values.extend(str(value) for values in optional.values() if isinstance(values, list) for value in values if isinstance(value, str))
+        if isinstance(dependency_groups, dict):
+            dependency_values.extend(str(value) for values in dependency_groups.values() if isinstance(values, list) for value in values if isinstance(value, str))
+        pytest_configured = isinstance(tool, dict) and isinstance(tool.get("pytest"), dict)
+        pytest_declared = any(re.match(r"^pytest(?:\W|$)", value.strip(), re.IGNORECASE) for value in dependency_values)
+        if pytest_configured or pytest_declared:
+            hints.append(VerificationHint("uv run pytest", "pyproject.toml", "python_project_manifest", "pytest is explicitly configured or declared"))
         if isinstance(tool, dict) and "ruff" in tool:
             hints.append(VerificationHint("uv run ruff check .", "pyproject.toml", "python_project_manifest", "tool.ruff configured"))
         if isinstance(tool, dict) and "mypy" in tool:

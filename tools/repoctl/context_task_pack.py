@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -11,10 +12,11 @@ from .context_model import ContextBundle, ContextCandidate
 from .context_pack import estimate_tokens
 from .graph_model import digest_data
 from .graph import build_graph, query_graph
+from .git import normalize_repo_path, repo_git_head
 from .language_profiles import collect_verification_hints, limited_semantic_languages
 from .markdown import find_section
 from .repositories import RepoTarget
-from .tasks import Problem, Task, resolve_task
+from .tasks import Problem, Task, resolve_task, task_discovery_values
 
 
 def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, force: bool = False) -> tuple[dict[str, Any], list[Problem]]:
@@ -86,26 +88,66 @@ def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, 
 
 def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 5000, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
     task = resolve_task(root, task_id)
+    discovery = task_discovery_values(task)
+    chosen = _without_discovery_placeholders(discovery.get("Chosen files", []))
+    reviewed = _without_discovery_placeholders(discovery.get("Candidate files reviewed", []))
+    stage = "scoped" if chosen else "bootstrap"
     query = _task_seed_query(task)
-    bundle, problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens, explain=explain)
-    task_graph_evidence, task_graph_problems = _direct_task_graph_evidence(root, target=target, task=task)
-    problems.extend(task_graph_problems)
+    bundle: ContextBundle | None = None
+    problems: list[Problem] = []
+    meta: dict[str, Any] = {"repository": target.to_dict()}
+    if stage == "scoped" and query:
+        bundle, bundle_problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens, explain=explain)
+        problems.extend(bundle_problems)
+    snapshot, graph_problems, graph_meta = build_graph(root, target=target)
+    problems.extend(graph_problems)
+    task_graph_evidence = _direct_task_graph_evidence(snapshot, target=target, chosen=chosen) if stage == "scoped" and snapshot is not None else []
     mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
     problems.extend(mandatory_problems)
+    required_candidates, required_problems = _required_task_candidates(root, target=target, task=task)
+    problems.extend(required_problems)
+    discovery_candidates, discovery_problems = _discovery_file_candidates(root, target=target, chosen=chosen, reviewed=reviewed)
+    problems.extend(discovery_problems)
     fallback_candidates, fallback_problems = _startup_fallback_candidates(root, target=target, task=task)
     problems.extend(fallback_problems)
     verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
     problems.extend(verification_problems)
-    packed_context = _dedupe_candidates([*mandatory_candidates, *fallback_candidates, *verification_candidates, *(bundle.packed_context if bundle is not None else [])])
+    bundle_candidates = [
+        candidate
+        for candidate in (bundle.packed_context if bundle is not None else [])
+        if candidate.source_ref.kind not in {"completion_receipt", "task_artifact"}
+    ]
+    packed_context = _dedupe_candidates(
+        [*required_candidates, *mandatory_candidates, *discovery_candidates, *fallback_candidates, *verification_candidates, *bundle_candidates]
+    )
     groups = _group_candidates(packed_context)
-    groups["reviewed_knowledge"] = bundle.knowledge_results if bundle is not None else []
+    groups["reviewed_knowledge"] = bundle.knowledge_results if stage == "scoped" and bundle is not None else []
     groups["task_graph_evidence"] = task_graph_evidence
     groups.update(_agent_pack_groups(groups, bundle))
-    warnings = [*_pack_warnings(bundle, task), *_pack_quality_warnings(groups, task)]
+    groups["edit_candidates"] = _candidate_items(discovery_candidates, reason="Chosen files are the active edit scope", chosen=chosen)
+    groups["supporting_evidence"] = _candidate_items(discovery_candidates, reason="Reviewed files are supporting evidence", chosen=[])
+    graph_completeness = snapshot.completeness if snapshot is not None else {}
+    warnings = [*_pack_warnings(bundle, task), *_graph_capability_warnings(graph_completeness, graph_meta), *_pack_quality_warnings(groups, task)]
+    observed_head, _head_state = repo_git_head(root, target)
+    input_digest = digest_data(
+        {
+            "task_content_digest": _task_content_digest(task),
+            "candidate_query_history": _without_discovery_placeholders(discovery.get("Candidate query", [])),
+            "reviewed_files": reviewed,
+            "chosen_files": chosen,
+            "context_docs": _context_doc_digest_inputs(root, task),
+            "repository": target.to_dict(),
+            "observed_head": observed_head,
+            "graph_snapshot_digest": snapshot.snapshot_digest if snapshot is not None else "",
+            "capability_matrix": graph_completeness.get("capabilities", {}),
+        }
+    )
     data = {
         "schema": "repoctl.context.task_pack",
-        "schema_version": 1,
+        "schema_version": 2,
         "authoritative": False,
+        "stage": stage,
+        "input_digest": input_digest,
         "task": {
             "id": task.id,
             "path": task.rel_path,
@@ -115,7 +157,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             "content_digest": _task_content_digest(task),
         },
         "seed": {
-            "source": "task_fields_for_retrieval_only",
+            "source": "discovery_query_history_only",
             "query": query,
             "used_sections": _used_sections(task),
         },
@@ -124,6 +166,18 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         "bundle": bundle.to_dict() if bundle is not None else None,
         "warnings": warnings,
     }
+    data["budget"] = {
+        "maximum_estimated_tokens": budget_tokens,
+        "final_render_estimated_tokens": 0,
+    }
+    data["pack_digest"] = "sha256:" + "0" * 64
+    stop_reason = _apply_render_budget(data, budget_tokens=budget_tokens)
+    data["stop_reason"] = stop_reason
+    data["metrics"] = _pack_metrics(data["groups"], bundle)
+    data["budget"]["final_render_estimated_tokens"] = estimate_tokens(render_task_context_pack_markdown(data))
+    data["metrics"]["requested_tokens"] = budget_tokens
+    data["metrics"]["estimated_tokens"] = data["budget"]["final_render_estimated_tokens"]
+    data.pop("pack_digest", None)
     data["pack_digest"] = digest_data(data)
     return data, problems, meta
 
@@ -139,7 +193,10 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
         f"- Task: `{task.get('id', '')}`",
         f"- Repository: `{task.get('repo_id', '')}`",
         f"- Status: `{task.get('status', '')}`",
+        f"- Stage: `{data.get('stage', '')}`",
+        f"- Input digest: `{data.get('input_digest', '')}`",
         f"- Pack digest: `{data.get('pack_digest', '')}`",
+        f"- Stop reason: `{data.get('stop_reason', '')}`",
         f"- Source: {seed.get('source', '')}",
         "",
         "## Task Startup Order",
@@ -158,6 +215,8 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
     ]
     sections = [
         ("must_read", "Read First"),
+        ("edit_candidates", "Active Edit Candidates"),
+        ("supporting_evidence", "Reviewed Supporting Evidence"),
         ("likely_change", "Likely Change Surface"),
         ("impact", "Definitions, Callers, Imports, Dependents"),
         ("verification", "Tests And Verification Hints"),
@@ -179,7 +238,7 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
             "",
             f"- Unique must-read sources: {metrics.get('unique_must_read_source_count', 0)}",
             f"- Unique verification sources: {metrics.get('unique_verification_source_count', 0)}",
-            f"- Estimated tokens: {metrics.get('estimated_tokens', 0)} / {metrics.get('requested_tokens', 0)}",
+            f"- Estimated tokens: {metrics.get('estimated_tokens', 0)} / {metrics.get('requested_tokens', 0)} maximum",
             "",
         ]
     )
@@ -188,6 +247,8 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
 
 COMPACT_GROUP_LIMITS = {
     "must_read": 7,
+    "edit_candidates": 8,
+    "supporting_evidence": 8,
     "likely_change": 5,
     "impact": 5,
     "verification": 5,
@@ -198,7 +259,7 @@ COMPACT_GROUP_LIMITS = {
 
 def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180) -> dict[str, Any]:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-    canonical_groups = ("must_read", "likely_change", "impact", "verification", "reviewed_knowledge", "warnings")
+    canonical_groups = ("must_read", "edit_candidates", "supporting_evidence", "likely_change", "impact", "verification", "reviewed_knowledge", "warnings")
     compact_groups = {
         group: [_compact_pack_item(item, excerpt_chars=excerpt_chars) for item in _compact_group_items(groups.get(group) or [], group)]
         for group in canonical_groups
@@ -209,6 +270,10 @@ def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180)
         "schema_version": data.get("schema_version", 1),
         "view": "compact",
         "authoritative": data.get("authoritative", False),
+        "stage": data.get("stage", ""),
+        "input_digest": data.get("input_digest", ""),
+        "stop_reason": data.get("stop_reason", ""),
+        "budget": data.get("budget", {}),
         "task": data.get("task", {}),
         "seed": _compact_seed(data.get("seed") if isinstance(data.get("seed"), dict) else {}),
         "groups": compact_groups,
@@ -251,7 +316,7 @@ def _compact_seed(seed: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_pack_summary(groups: dict[str, list[dict[str, Any]]], metrics: dict[str, Any]) -> dict[str, Any]:
     top_refs: list[dict[str, str]] = []
-    for group in ("must_read", "likely_change", "impact", "verification"):
+    for group in ("must_read", "edit_candidates", "supporting_evidence", "likely_change", "impact", "verification"):
         for item in groups.get(group, [])[:3]:
             ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
             path = str(ref.get("path") or "")
@@ -469,15 +534,105 @@ def compare_task_context_pack_benchmarks(
 
 
 def _task_seed_query(task: Task) -> str:
-    parts = [
-        str(task.frontmatter.get("title") or ""),
-        str(task.frontmatter.get("area") or ""),
-        _section(task, "Context Docs"),
-        _section(task, "Goal"),
-        _section(task, "Discovery"),
-        _section(task, "Handoff"),
-    ]
-    return "\n".join(part.strip() for part in parts if part.strip())
+    discovery = task_discovery_values(task)
+    return "\n".join(_without_discovery_placeholders(discovery.get("Candidate query", [])))
+
+
+def _without_discovery_placeholders(values: list[str]) -> list[str]:
+    placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
+    return [value for value in values if value.strip().strip("`").lower() not in placeholders]
+
+
+def _required_task_candidates(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
+    candidates: list[ContextCandidate] = []
+    problems: list[Problem] = []
+    for rel_path in ("AGENTS.md", task.rel_path):
+        path = root / rel_path
+        if not path.is_file():
+            problems.append(Problem("warning", "context_pack_required_source_missing", "required context source is missing", rel_path))
+            continue
+        try:
+            chunks = chunk_markdown_file(root, path)
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(Problem("warning", "context_pack_required_source_unreadable", str(exc), rel_path))
+            continue
+        for chunk in chunks[:4]:
+            candidates.append(
+                ContextCandidate(
+                    source_ref=chunk.source_ref,
+                    text=chunk.text,
+                    score=120.0,
+                    score_breakdown={"required_task_context": 1.0},
+                    selection_reasons=["Required bootstrap evidence"],
+                    graph_path=[],
+                )
+            )
+    return candidates, problems
+
+
+def _discovery_file_candidates(root: Path, *, target: RepoTarget, chosen: list[str], reviewed: list[str]) -> tuple[list[ContextCandidate], list[Problem]]:
+    candidates: list[ContextCandidate] = []
+    problems: list[Problem] = []
+    prefix = f"{target.display_path.rstrip('/')}/"
+    ordered = [(value, "active Chosen file", 118.0) for value in chosen]
+    ordered.extend((value, "reviewed supporting file", 108.0) for value in reviewed if value not in chosen)
+    for value, reason, score in ordered:
+        workspace_path = normalize_repo_path(value)
+        if not workspace_path.startswith(prefix):
+            problems.append(Problem("warning", "context_pack_discovery_path_outside_repo", "Discovery path is outside the selected repository", value))
+            continue
+        path = root / workspace_path
+        if not path.is_file():
+            problems.append(Problem("warning", "context_pack_discovery_path_missing", "Discovery path is not a current file", workspace_path))
+            continue
+        try:
+            if path.suffix.lower() in {".md", ".markdown"}:
+                chunks = chunk_markdown_file(root, path)
+            else:
+                chunks = [chunk_text_source(root, workspace_path, path.read_text(encoding="utf-8"), kind="current_source", section=path.name)]
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(Problem("warning", "context_pack_discovery_path_unreadable", str(exc), workspace_path))
+            continue
+        for chunk in chunks[:4]:
+            candidates.append(
+                ContextCandidate(
+                    source_ref=chunk.source_ref,
+                    text=chunk.text,
+                    score=score,
+                    score_breakdown={"structured_discovery": 1.0},
+                    selection_reasons=[reason],
+                    graph_path=[],
+                )
+            )
+    return candidates, problems
+
+
+def _candidate_items(candidates: list[ContextCandidate], *, reason: str, chosen: list[str]) -> list[dict[str, Any]]:
+    chosen_set = {normalize_repo_path(path) for path in chosen}
+    items: list[dict[str, Any]] = []
+    for candidate in candidates:
+        path = normalize_repo_path(candidate.source_ref.path)
+        is_chosen = path in chosen_set
+        if chosen and not is_chosen:
+            continue
+        if not chosen and is_chosen:
+            continue
+        item = candidate.to_dict()
+        item["selection_reason"] = reason
+        items.append(item)
+    return _dedupe_dict_items(items)
+
+
+def _context_doc_digest_inputs(root: Path, task: Task) -> list[dict[str, str]]:
+    inputs: list[dict[str, str]] = []
+    for rel_path in _context_doc_paths(task):
+        path = root / rel_path
+        try:
+            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+        inputs.append({"path": rel_path, "content_sha256": digest})
+    return inputs
 
 
 def _task_content_digest(task: Task) -> str:
@@ -533,8 +688,6 @@ def _context_doc_paths(task: Task) -> list[str]:
 def _startup_fallback_candidates(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
     candidates: list[ContextCandidate] = []
     problems: list[Problem] = []
-    if _context_doc_paths(task):
-        return candidates, problems
     for rel_path, score in _startup_fallback_docs(task, target=target):
         path = root / rel_path
         if not path.is_file():
@@ -582,12 +735,6 @@ def _startup_fallback_docs(task: Task, *, target: RepoTarget) -> list[tuple[str,
             (f"{repo_prefix}/go.mod", 92.0),
             (f"{repo_prefix}/Packages/manifest.json", 90.0),
             (f"{repo_prefix}/ProjectSettings/ProjectVersion.txt", 90.0),
-            (f"{repo_prefix}/docs/README.md", 88.0),
-            (f"{repo_prefix}/docs/PRD.md", 85.0),
-            ("docs/PRD.md", 78.0),
-            ("AGENTS.md", 70.0),
-            ("README.md", 55.0),
-            ("docs/README.md", 50.0),
         ]
     else:
         docs = [
@@ -641,53 +788,20 @@ def _verification_hint_candidates(root: Path, *, target: RepoTarget) -> tuple[li
     return candidates, problems
 
 
-IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
-REPO_PATH_RE = re.compile(r"`?repos/([^`\s]+)`?")
-
-
-def _direct_task_graph_evidence(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[dict[str, Any]], list[Problem]]:
-    snapshot, problems, _meta = build_graph(root, target=target)
-    if snapshot is None:
-        return [], problems
+def _direct_task_graph_evidence(snapshot: Any, *, target: RepoTarget, chosen: list[str]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
-    query = _task_seed_query(task)
-    for symbol in _task_identifier_seeds(query):
-        for selector, kwargs in (
-            ("callers_of", {"callers_of": symbol}),
-            ("impact_symbol", {"impact_symbol": symbol, "depth": 2}),
-        ):
-            result, query_problems = query_graph(snapshot, **kwargs)
-            problems.extend(problem for problem in query_problems if problem.severity != "error" or problem.code == "graph_query_ambiguous_symbol")
-            if result is not None and (result.get("paths") or result.get("matches")):
-                evidence.append(_graph_result_item(result, reason=f"task {selector} evidence for `{symbol}`"))
-    for path in _task_path_seeds(query):
-        result, query_problems = query_graph(snapshot, impact_file=path, depth=2)
-        problems.extend(problem for problem in query_problems if problem.severity != "error")
-        if result is not None and (result.get("paths") or result.get("matches")):
-            evidence.append(_graph_result_item(result, reason=f"task file impact evidence for `{path}`"))
-    return _dedupe_dict_items(evidence), problems
-
-
-def _task_identifier_seeds(query: str) -> list[str]:
-    stop = {"Candidate", "query", "files", "reviewed", "Chosen", "First", "command", "repoctl", "context", "pack", "task", "repo", "main", "json"}
-    seeds: list[str] = []
-    for token in IDENTIFIER_RE.findall(query):
-        if token in stop or token.lower() in {item.lower() for item in stop}:
+    prefix = f"{target.display_path.rstrip('/')}/"
+    for workspace_path in chosen:
+        normalized = normalize_repo_path(workspace_path)
+        if not normalized.startswith(prefix):
             continue
-        if "_" not in token and not any(char.isupper() for char in token):
+        repo_path = normalize_repo_path(normalized[len(prefix) :])
+        result, query_problems = query_graph(snapshot, impact_file=repo_path, depth=2)
+        if query_problems or result is None or result.get("query_status") != "found":
             continue
-        if token not in seeds:
-            seeds.append(token)
-    return seeds[:12]
-
-
-def _task_path_seeds(query: str) -> list[str]:
-    seeds: list[str] = []
-    for match in REPO_PATH_RE.finditer(query):
-        path = match.group(1).strip().strip("`.,")
-        if path and path not in seeds:
-            seeds.append(path)
-    return seeds[:12]
+        if result.get("paths") or result.get("matches"):
+            evidence.append(_graph_result_item(result, reason=f"provider-confirmed impact evidence for `{workspace_path}`"))
+    return _dedupe_dict_items(evidence)
 
 
 def _graph_result_item(result: dict[str, Any], *, reason: str) -> dict[str, Any]:
@@ -1102,7 +1216,7 @@ def _pack_regressions(
 
 
 def _used_sections(task: Task) -> list[str]:
-    return [name for name in ("Context Docs", "Goal", "Discovery", "Handoff") if _section(task, name).strip()]
+    return [name for name in ("Context Docs", "Discovery") if _section(task, name).strip()]
 
 
 def _section(task: Task, heading: str) -> str:
@@ -1287,6 +1401,56 @@ def _pack_metrics(groups: dict[str, list[dict[str, Any]]], bundle: Any) -> dict[
     }
 
 
+def _graph_capability_warnings(completeness: dict[str, Any], graph_meta: dict[str, Any]) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+    capabilities = completeness.get("capabilities") if isinstance(completeness.get("capabilities"), dict) else {}
+    if completeness.get("status") == "partial":
+        warnings.append(
+            {
+                "code": "context_pack_graph_partial",
+                "message": f"Graph evidence is partial by capability: {capabilities}",
+            }
+        )
+    language_capabilities = graph_meta.get("language_capabilities") if isinstance(graph_meta.get("language_capabilities"), dict) else {}
+    limited = limited_semantic_languages(language_capabilities)
+    if limited:
+        warnings.append(
+            {
+                "code": "context_pack_graph_language_capability",
+                "message": f"Provider-confirmed call relations are unsupported for {limited}.",
+            }
+        )
+    return warnings
+
+
+def _apply_render_budget(data: dict[str, Any], *, budget_tokens: int) -> str:
+    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    for items in groups.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get("excerpt"):
+                item["excerpt"] = _truncate_text(str(item["excerpt"]), 320)
+    estimate = estimate_tokens(render_task_context_pack_markdown(data))
+    if estimate <= budget_tokens:
+        return "required_evidence_satisfied"
+    removed = False
+    for group in ("reviewed_knowledge", "supporting_evidence", "impact", "verification", "likely_change"):
+        items = groups.get(group)
+        while isinstance(items, list) and items and estimate > budget_tokens:
+            items.pop()
+            removed = True
+            estimate = estimate_tokens(render_task_context_pack_markdown(data))
+    if estimate <= budget_tokens:
+        return "budget_reached" if removed else "required_evidence_satisfied"
+    must_read = groups.get("must_read")
+    while isinstance(must_read, list) and len(must_read) > 2 and estimate > budget_tokens:
+        must_read.pop()
+        removed = True
+        estimate = estimate_tokens(render_task_context_pack_markdown(data))
+    return "budget_reached" if estimate <= budget_tokens and removed else "required_evidence_exceeds_budget"
+
+
 def _source_ref_keys(items: list[dict[str, Any]]) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     for item in items:
@@ -1310,7 +1474,7 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
     warnings = [
         {
             "code": "context_pack_not_authoritative",
-            "message": "task context pack uses task text only as retrieval seed; it does not set task scope or create knowledge",
+            "message": "task context pack uses structured Discovery as retrieval input; it does not set task scope or create knowledge",
         }
     ]
     task_repo_id = str(task.frontmatter.get("repo_id") or "")

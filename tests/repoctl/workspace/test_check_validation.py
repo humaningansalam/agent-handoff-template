@@ -105,6 +105,19 @@ def test_check_warns_when_context_doc_is_missing(tmp_path: Path, monkeypatch, ca
     assert not any(problem["code"] == "missing_context_doc" and problem.get("path") == "AGENTS.md" for problem in payload["problems"])
 
 
+def test_check_rejects_live_handoff_first_file_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = task_text("T-20260609184046Z").replace("First file to open: `docs/BOARD.md`", "First file to open: `../outside.md`")
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["check", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "invalid_handoff_first_file" for problem in payload["problems"])
+
+
 def test_check_warns_on_execution_log_timestamp_order(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     text = task_text("T-20260609184046Z").replace("- created", "- 20260611T020000Z: later\n- 20260611T010000Z: earlier")

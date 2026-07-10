@@ -248,6 +248,24 @@ def test_task_create_rejects_missing_parent(tmp_path: Path, monkeypatch, capsys)
     assert "parent task not found" in capsys.readouterr().out
 
 
+def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    previous_id = "T-20260609184046Z"
+    previous_path = tmp_path / f"docs/archive/tasks/{previous_id}--completed.md"
+    previous_text = task_text(previous_id, status="done")
+    previous_path.write_text(previous_text, encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--follow-up-of", previous_id, "--slug", "completed-follow-up", "Completed follow-up", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    created = (tmp_path / payload["path"]).read_text(encoding="utf-8")
+    assert payload["task_id"] != previous_id
+    assert f'follow_up_of: "{previous_id}"' in created
+    assert f"- Follow-up of: `{previous_id}`" in created
+    assert previous_path.read_text(encoding="utf-8") == previous_text
+
+
 def test_task_create_rejects_non_ascii_title_without_slug(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)

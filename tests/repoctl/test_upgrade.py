@@ -90,6 +90,26 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     plan_file = tmp_path / "plan.json"
     write_workspace(workspace)
     write_source(source)
+    state_path = workspace / "docs/tasks/.repoctl-state/T-20260609120000Z.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "task_id": "T-20260609120000Z",
+                "created": "20260609T120000Z",
+                "repo_id": "main",
+                "repo_path": "repos",
+                "git_toplevel": (workspace / "repos").as_posix(),
+                "head": "a" * 40,
+                "repo_changes": [],
+                "repo_change_fingerprints": {},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     board_before = (workspace / "docs/BOARD.md").read_text(encoding="utf-8")
     task_before = (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
@@ -100,9 +120,16 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert {item["path"] for item in payload["data"]["applied"]} == {"docs/tasks/TEMPLATE.md", "scripts/repoctl"}
+    assert {item["path"] for item in payload["data"]["applied"]} == {"docs/tasks/TEMPLATE.md", "scripts/repoctl", "docs/tasks/.repoctl-state/T-20260609120000Z.json"}
     assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "new repoctl\n"
     assert (workspace / "docs/tasks/TEMPLATE.md").read_text(encoding="utf-8") == "new template\n"
+    migrated = json.loads(state_path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 3
+    assert migrated["initial"]["start_head"] == "a" * 40
+
+    assert main(["upgrade", "status", "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["data"]["latest"]["backup"]["availability"] == "available"
 
 
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:

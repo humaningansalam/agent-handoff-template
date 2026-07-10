@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / ".claude/skills/maintenance-workflow/SKILL.md"
 CONTRACT = ROOT / "docs" / "MAINTENANCE_HARNESS_CONTRACT.md"
 AGENT_DIR = ROOT / ".claude" / "agents"
-SETTINGS = ROOT / ".claude" / "settings.json"
+SETTINGS = ROOT / ".claude" / "settings.maintenance.json"
 
 
 def text(path: Path) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -152,8 +153,24 @@ def test_render_board_replaces_only_board_section() -> None:
     assert "- docs/tasks/T-20260609184046Z--old.md" not in rendered
     assert "## Backlog\n\n- keep" in rendered
 
-def test_repoctl_script_falls_back_to_python3_without_uv(tmp_path: Path) -> None:
+def test_repoctl_script_uses_system_python_without_workspace_residue(tmp_path: Path) -> None:
     root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+
+    def tree_snapshot() -> list[tuple[str, str, int, str]]:
+        entries: list[tuple[str, str, int, str]] = []
+        for path in sorted(root.rglob("*")):
+            rel = path.relative_to(root)
+            if ".git" in rel.parts:
+                continue
+            mode = path.lstat().st_mode & 0o7777
+            if path.is_symlink():
+                entries.append((rel.as_posix(), "symlink", mode, os.readlink(path)))
+            elif path.is_dir():
+                entries.append((rel.as_posix(), "directory", mode, ""))
+            elif path.is_file():
+                entries.append((rel.as_posix(), "file", mode, hashlib.sha256(path.read_bytes()).hexdigest()))
+        return entries
+
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     for name in ["bash", "dirname", "python3"]:
@@ -161,23 +178,26 @@ def test_repoctl_script_falls_back_to_python3_without_uv(tmp_path: Path) -> None
         if not target.exists():
             target = Path("/bin") / name
         (fake_bin / name).symlink_to(target)
-    env = os.environ.copy()
-    env["PATH"] = str(fake_bin)
-    env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
-    env.pop("VIRTUAL_ENV", None)
+    before = tree_snapshot()
+    for path_value in (os.environ.get("PATH", ""), str(fake_bin)):
+        env = os.environ.copy()
+        env["PATH"] = path_value
+        env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+        env.pop("VIRTUAL_ENV", None)
+        result = subprocess.run(
+            [str(root / "scripts/repoctl"), "check", "--json"],
+            cwd=root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["ok"] is True
 
-    result = subprocess.run(
-        [str(root / "scripts/repoctl"), "check", "--json"],
-        cwd=root,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["ok"] is True
+    assert tree_snapshot() == before
+    assert not (tmp_path / "uv-cache").exists()
 
 def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -192,8 +212,8 @@ def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_
     assert payload["command"] == "task.finish"
     assert payload["data"]["task_id"] == "T-20260609184046Z"
     assert payload["problems"][0]["code"] == "missing_verification_file"
-    assert any(action["label"] == "Create verification evidence" for action in payload["next_actions"])
-    assert any(action["command"].endswith("--use-task-verification --json") for action in payload["next_actions"])
+    assert any(action["label"] == "Complete task Verification" for action in payload["next_actions"])
+    assert any(action.get("command", "").endswith(f"task finish T-20260609184046Z --json") for action in payload["next_actions"])
 
 def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -209,6 +229,7 @@ def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Pa
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "task.doctor"
     assert payload["data"]["finish_ready"] is False
+    assert payload["data"]["verification"] == {"default_source": "task_section", "task_section_complete": False}
     assert "missing_discovery_evidence" in payload["data"]["advisory"]
     assert "missing_verification_file" in payload["data"]["advisory"]
     assert any(action["label"] == "Record task discovery evidence" for action in payload["next_actions"])

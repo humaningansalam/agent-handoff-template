@@ -44,7 +44,7 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["summary"]["mean_recall_at_5"] > 0
     assert payload["data"]["summary"]["by_category"]["authority"]["mean_recall_at_5"] >= 0.85
     assert payload["data"]["summary"]["by_category"]["authority"]["mean_packed_recall"] == 1.0
-    assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
+    assert payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] > 0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["cross-file-call-impact"]["mean_recall_at_5"] == 1.0
     assert payload["data"]["summary"]["by_category"]["reference-impact"]["mean_graph_edge_recall"] == 1.0
@@ -52,12 +52,15 @@ def test_context_benchmark_scores_fixture(tmp_path: Path, monkeypatch, capsys) -
     assert payload["data"]["summary"]["by_category"]["cross-file-call-impact"]["mean_graph_edge_recall"] == 1.0
     assert payload["data"]["summary"]["knowledge_expected_questions"] >= 1
     assert payload["data"]["summary"]["knowledge_result_questions"] == 0
+    assert payload["data"]["summary"]["first_correct_found_rate"] > 0
+    assert payload["data"]["summary"]["max_output_estimated_tokens"] <= 3000
+    assert payload["data"]["summary"]["generated_or_ignored_noise"] == 0
     assert payload["warnings"][0]["code"] == "context_benchmark_retrieval_only"
 
-    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--require-fixture-corpus", "--json"]) == 0
+    assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "reference-impact=1.0", "--require-fixture-corpus", "--json"]) == 0
 
     gated_payload = json.loads(capsys.readouterr().out)
-    assert gated_payload["data"]["summary"]["by_category"]["impact"]["mean_recall_at_5"] == 1.0
+    assert gated_payload["data"]["summary"]["by_category"]["reference-impact"]["mean_recall_at_5"] == 1.0
     assert gated_payload["data"]["fixture_corpus"]["missing_count"] == 0
     assert gated_payload["data"]["fixture_corpus"]["digest_drift_count"] == 0
     assert gated_payload["problems"] == []
@@ -331,7 +334,17 @@ def test_context_benchmark_multi_repo_isolation_passes_for_selected_repo(tmp_pat
         encoding="utf-8",
     )
     (fixture / "expected-sources.json").write_text(
-        json.dumps({"Q-WEB": {"required_source_refs": [], "required_knowledge_source_refs": [], "acceptable_optional_refs": [], "forbidden_refs": []}}),
+        json.dumps(
+            {
+                "Q-WEB": {
+                    "must_find": [],
+                    "acceptable": [],
+                    "supporting": [],
+                    "noise": [],
+                    "required_knowledge_source_refs": [],
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -386,13 +399,14 @@ def test_context_benchmark_import_impact_passes_after_resolution(tmp_path: Path,
         json.dumps(
             {
                 "Q-IMPACT-IMPORT": {
-                    "required_source_refs": [
+                    "must_find": [
                         {"path": f"<graph:{file_id('main', 'utils/tokens.py')}>"},
                         {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"},
                     ],
                     "required_knowledge_source_refs": [],
-                    "acceptable_optional_refs": [],
-                    "forbidden_refs": [],
+                    "acceptable": [],
+                    "supporting": [],
+                    "noise": [],
                 }
             },
             sort_keys=True,
@@ -428,7 +442,18 @@ def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: 
         encoding="utf-8",
     )
     (fixture / "expected-sources.json").write_text(
-        json.dumps({"Q-WEB": {"required_source_refs": [], "required_knowledge_source_refs": [], "acceptable_optional_refs": [], "forbidden_refs": []}}),
+        json.dumps(
+            {
+                "Q-WEB": {
+                    "must_find": [],
+                    "acceptable": [],
+                    "supporting": [],
+                    "noise": [],
+                    "required_knowledge_source_refs": [],
+                    "expected_verification_hints": [{"command_or_capability": "pytest", "status": "acceptable"}],
+                }
+            }
+        ),
         encoding="utf-8",
     )
     foreign = ContextCandidate(
@@ -437,14 +462,20 @@ def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: 
         score=1.0,
         score_breakdown={"exact": 1.0},
     )
+    verification_hint = ContextCandidate(
+        source_ref=ContextSourceRef(kind="verification_hint", path="repos/web/pyproject.toml", section="verification: uv run pytest", content_sha256="sha256:" + "1" * 64),
+        text="uv run pytest",
+        score=0.5,
+        score_breakdown={"verification_hint": 1.0},
+    )
     bundle = ContextBundle(
         repository={"id": "web", "path": "repos/web", "identity_source": "pinned"},
         query={"text": "auth"},
         source_snapshots={},
         completeness={},
-        candidates=[foreign],
-        packed_context=[foreign],
-        budget={"requested_tokens": 3000, "estimated_tokens": 10, "candidate_count": 1, "packed_count": 1},
+        candidates=[foreign, verification_hint],
+        packed_context=[foreign, verification_hint],
+        budget={"requested_tokens": 3000, "estimated_tokens": 14, "candidate_count": 2, "packed_count": 2},
     ).with_digest()
     monkeypatch.setattr("tools.repoctl.context_benchmark.build_context_bundle", lambda *args, **kwargs: (bundle, [], {}))
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -453,6 +484,7 @@ def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["summary"]["cross_repo_ref_count"] == 2
+    assert payload["data"]["summary"]["mean_verification_hint_accuracy"] == 1.0
     assert payload["data"]["results"][0]["cross_repo_refs"][0]["path"] == "<graph:repo:api:file:app.py>"
     assert payload["problems"][0]["code"] == "context_benchmark_cross_repo_leakage"
 

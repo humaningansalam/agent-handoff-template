@@ -72,10 +72,11 @@ def test_task_finish_parent_blocks_when_live_child_exists(tmp_path: Path, monkey
     assert payload["problems"][0]["code"] == "live_children_block_finish"
 
 
-def test_task_finish_parent_archives_non_live_child_with_archive_handoff(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_finish_parent_archives_non_live_child_byte_identically(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
-    add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
+    child_path = add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
+    original_child = child_path.read_bytes()
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--parent.md\n\n## Backlog\n", encoding="utf-8")
     verification = tmp_path / "verification.md"
     verification.write_text("parent verified\n", encoding="utf-8")
@@ -88,8 +89,7 @@ def test_task_finish_parent_archives_non_live_child_with_archive_handoff(tmp_pat
     assert payload["archived"] is True
     assert child_archive.exists()
     assert not (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
-    child_text = child_archive.read_text(encoding="utf-8")
-    assert "First file to open: `docs/archive/tasks/T-20260609184047Z--child.md`" in child_text
+    assert child_archive.read_bytes() == original_child
 
 
 def test_task_finish_parent_restores_child_receipt_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -142,7 +142,7 @@ def test_task_finish_parent_restores_child_receipt_when_board_write_fails(tmp_pa
     assert receipt_path.read_text(encoding="utf-8") == original_receipt
 
 
-def test_task_cancel_parent_updates_non_live_child_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_cancel_parent_does_not_rewrite_non_live_child_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
     child_path = add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
@@ -169,6 +169,7 @@ def test_task_cancel_parent_updates_non_live_child_receipt(tmp_path: Path, monke
             },
         },
     )
+    original_receipt = receipt_path.read_bytes()
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--parent.md\n\n## Backlog\n", encoding="utf-8")
     verification = tmp_path / "verification.md"
     verification.write_text("cancel parent\n", encoding="utf-8")
@@ -179,15 +180,11 @@ def test_task_cancel_parent_updates_non_live_child_receipt(tmp_path: Path, monke
     capsys.readouterr()
     child_archive_rel = "docs/archive/tasks/T-20260609184047Z--child.md"
     child_archive = tmp_path / child_archive_rel
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert child_archive.exists()
-    assert receipt["task_path"] == child_archive_rel
-    assert receipt["archive_path"] == child_archive_rel
-    assert receipt["verification"]["task_path"] == child_archive_rel
-    assert receipt["verification"]["archive_path"] == child_archive_rel
+    assert receipt_path.read_bytes() == original_receipt
 
 
-def test_task_finish_parent_reports_corrupt_child_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_finish_parent_ignores_corrupt_child_receipt_while_archiving_child(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
     add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
@@ -199,9 +196,9 @@ def test_task_finish_parent_reports_corrupt_child_receipt(tmp_path: Path, monkey
     verification.write_text("parent verified\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "invalid_completion_receipt"
-    assert (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
-    assert not (tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md").exists()
+    capsys.readouterr()
+    assert not (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
+    assert (tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md").exists()
+    assert receipt_path.read_text(encoding="utf-8") == "{not json\n"

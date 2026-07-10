@@ -51,21 +51,9 @@ This section may be empty for root-only or already-obvious work. -->
 
 State the outcome in one clear sentence.
 
-## In Scope
+## Scope
 
-- List concrete deliverables
-- Keep items testable
-
-## Out of Scope
-
-- List explicit non-goals
-- Prevent scope drift
-
-## Plan
-
-- Step 1
-- Step 2
-- Step 3
+- Name only task-specific boundaries that are not already clear from Goal and Discovery.
 
 ## Execution Log
 
@@ -77,7 +65,7 @@ State the outcome in one clear sentence.
 - Evidence captured
 - Result
 
-<!-- Finish with: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json` -->
+<!-- When this section is complete, `./scripts/repoctl task finish T-... --json` uses it directly. Use --verification-file only for an external artifact. -->
 
 ## Handoff
 
@@ -86,24 +74,4 @@ State the outcome in one clear sentence.
 - First command to run: `<command>`
 - Done when: <objective completion condition>
 
-<!--
-This section should let the next agent start in ~30 seconds.
-
-Bad example:
-- Next: continue from here
-- File: check docs
-- Command: run tests
-- Done when: looks good
-
-Good example:
-- Next exact step: Update the task status and verification notes after running the targeted test.
-- First file to open: `docs/tasks/T-20260326084215Z--auth.md`
-- First command to run: `rg "^status:" docs/tasks/T-*.md`
-- Done when: The task frontmatter reflects the latest verified state and the next agent can continue without guessing.
-
-Parent-task note:
-- If this task becomes a parent/coordinating task, add sections such as
-  `## Live Child Tasks`, `## Non-Live Child Tasks`,
-  `## Shared Interfaces / Decisions`, and `## Integration Done When`
-  only when needed.
--->
+<!-- Keep these four fields concrete enough for another agent to resume in about 30 seconds. -->

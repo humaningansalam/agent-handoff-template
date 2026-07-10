@@ -120,22 +120,30 @@ Keep token validation centralized.
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(archive_text, encoding="utf-8")
     digest = "sha256:" + hashlib.sha256(archive_text.encode("utf-8")).hexdigest()
+    verification_text = "`uv run pytest tests/test_auth.py` passed.\n"
+    verification_digest = "sha256:" + hashlib.sha256(verification_text.encode("utf-8")).hexdigest()
     receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
     receipt_dir.mkdir(parents=True, exist_ok=True)
     valid_receipt = {
         "schema": "repoctl.task.completion",
-        "schema_version": 1,
+        "schema_version": 2,
         "repo_id": "main",
         "task_id": task_id,
         "status": "done",
-        "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
-        "archive_path": archive_rel,
+        "task_path_at_completion": archive_rel,
         "content_sha256": digest,
         "changed_entries": [{"change": "modified", "path": "auth.py"}],
+        "repo_evidence": {
+            "mode": "working_tree_diff",
+            "attribution": "task_working_tree",
+            "diff_fingerprint_sha256": "sha256:" + "0" * 64,
+        },
         "verification": {
-            "task_path": f"docs/tasks/{task_id}--knowledge-receipt.md",
-            "archive_path": archive_rel,
-            "content_sha256": digest,
+            "source": "task_section",
+            "source_sha256": verification_digest,
+            "normalized_sha256": verification_digest,
+            "stored_sha256": verification_digest,
+            "truncated": False,
         },
     }
     receipt_dir.joinpath(f"{task_id}.json").write_text(json.dumps(valid_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
