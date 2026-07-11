@@ -11,7 +11,7 @@ from typing import Any
 
 from .io import LOCK_REL, RepoctlError, atomic_write
 from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status, repo_path_fingerprints
-from .markdown import append_section_entry, find_section, parse_frontmatter, replace_frontmatter_line, replace_section
+from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import RepoTarget, default_repo_target, repo_layout
 from .settings import document_language, validate_document_language
 
@@ -351,6 +351,15 @@ def _strip_ticks(value: str) -> str:
     return stripped
 
 
+def _normalize_discovery_path(value: str) -> str:
+    raw = _strip_ticks(value)
+    path = Path(raw)
+    if not raw or path.is_absolute() or ".." in path.parts or "\\" in raw:
+        return ""
+    normalized = normalize_repo_path(raw)
+    return normalized if normalized.startswith("repos/") else ""
+
+
 def _dedupe_preserve(values: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -368,23 +377,13 @@ def _dedupe_preserve(values: list[str]) -> list[str]:
 
 def task_discovery_values(task: Task) -> dict[str, list[str]]:
     try:
-        section = find_section(task.body, "Discovery")
+        fields = parse_labeled_list_section(
+            task.body,
+            "Discovery",
+            ("Candidate query", "Candidate files reviewed", "Chosen files", "Notes"),
+        )
     except RepoctlError:
         return {}
-    body = task.body[section.body_start : section.end]
-    fields: dict[str, list[str]] = {}
-    current_key = ""
-    for line in body.splitlines():
-        match = re.match(r"^\s*-\s+(Candidate query|Candidate files reviewed|Chosen files|Notes):\s*(.*)$", line)
-        if match:
-            current_key = match.group(1)
-            value = match.group(2).strip()
-            fields.setdefault(current_key, [])
-            if value:
-                fields[current_key].append(value)
-            continue
-        if current_key and re.match(r"^\s{2,}-\s+", line):
-            fields.setdefault(current_key, []).append(re.sub(r"^\s*-\s*", "", line).strip())
     return {key: _dedupe_preserve(values) for key, values in fields.items()}
 
 
@@ -441,9 +440,40 @@ def update_task_discovery(
     note_values = _dedupe_preserve([*without_placeholders(fields.get("Notes", [])), *([note] if note.strip() else [])])
     target = _target_for_task(root, task)
     if target is not None:
-        invalid = _discovery_paths_outside_target(chosen_values, target)
-        if invalid:
-            raise RepoctlError(f"chosen discovery files must stay under selected repository {target.id} ({target.display_path}): {', '.join(invalid)}", code="discovery_outside_selected_repository", path=task.rel_path)
+        for label, values in (("reviewed", reviewed_values), ("chosen", chosen_values)):
+            normalized_paths = [_normalize_discovery_path(value) for value in values]
+            invalid_paths = [value for value, normalized in zip(values, normalized_paths, strict=True) if not normalized]
+            if invalid_paths:
+                escaping_paths = [value for value in invalid_paths if ".." in Path(_strip_ticks(value)).parts]
+                if escaping_paths:
+                    raise RepoctlError(
+                        f"{label} discovery files must stay under selected repository {target.id} ({target.display_path}): {', '.join(escaping_paths)}",
+                        code="discovery_outside_selected_repository",
+                        path=escaping_paths[0],
+                    )
+                raise RepoctlError(
+                    f"{label} discovery files must be workspace-relative product paths: {', '.join(invalid_paths)}",
+                    code="invalid_discovery_path",
+                    path=invalid_paths[0],
+                )
+            outside = _discovery_paths_outside_target(normalized_paths, target)
+            if outside:
+                raise RepoctlError(
+                    f"{label} discovery files must stay under selected repository {target.id} ({target.display_path}): {', '.join(outside)}",
+                    code="discovery_outside_selected_repository",
+                    path=outside[0],
+                )
+        directory_paths = [
+            path
+            for path in _dedupe_preserve([*reviewed_values, *chosen_values])
+            if (normalized := _normalize_discovery_path(path)) and (root / normalized).is_dir()
+        ]
+        if directory_paths:
+            raise RepoctlError(
+                f"discovery entries must be files, not directories: {', '.join(directory_paths)}",
+                code="discovery_path_is_directory",
+                path=directory_paths[0],
+            )
 
     lines: list[str] = []
     lines.extend(_format_discovery_list("Candidate query", query_values))
@@ -455,10 +485,11 @@ def update_task_discovery(
     discovery_body = "\n".join(lines) + "\n"
     try:
         text = replace_section(current_text, "Discovery", discovery_body)
-    except RepoctlError:
-        if "## Execution Log" not in current_text:
+    except RepoctlError as exc:
+        if exc.code != "missing_section":
             raise
-        text = current_text.replace("## Execution Log", f"## Discovery\n\n{discovery_body}\n## Execution Log", 1)
+        execution_log = find_section(current_text, "Execution Log")
+        text = current_text[: execution_log.start] + f"## Discovery\n\n{discovery_body}\n" + current_text[execution_log.start :]
     if replace_chosen:
         removed = sorted(set(previous_chosen) - set(chosen_values))
         added = sorted(set(chosen_values) - set(previous_chosen))
@@ -1287,7 +1318,7 @@ def _canceled_handoff(new_path: str, *, copy: dict[str, Any]) -> str:
 
 
 def _finalize_handoff(text: str, *, status: str, new_path: str, receipt_path: str, evidence_mode: str, copy: dict[str, Any]) -> str:
-    if "## Last Active Handoff" in text or "## Closure" in text:
+    if has_section(text, "Last Active Handoff") or has_section(text, "Closure"):
         raise RepoctlError("task already contains completion-only sections", code="duplicate_closure_section")
     section = find_section(text, "Handoff")
     handoff_body = text[section.body_start : section.end].strip()
@@ -1307,15 +1338,6 @@ def _finalize_handoff(text: str, *, status: str, new_path: str, receipt_path: st
     if suffix and not closure.endswith("\n\n"):
         closure += "\n"
     return text[: section.start] + closure + suffix
-
-
-def _blocked_handoff(task_path: str, task_id: str, *, copy: dict[str, Any]) -> str:
-    return (
-        f"- Next exact step: {copy['blocked_handoff_next']}\n"
-        f"- First file to open: `{task_path}`\n"
-        f"- First command to run: `./scripts/repoctl task doctor {task_id} --json`\n"
-        f"- Done when: {copy['blocked_handoff_done']}\n"
-    )
 
 
 def validate_verification_file(root: Path, verification_file: Path) -> None:
@@ -1342,6 +1364,7 @@ def validate_verification_file(root: Path, verification_file: Path) -> None:
 
 
 def finish_task(root: Path, task_id: str, *, verification: VerificationInput, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None, allow_head_changed: bool = False) -> dict[str, Any]:
+    """Validate finish and build its write set without mutating the workspace."""
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -1354,7 +1377,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     target = _target_for_task(root, task)
     _assert_repo_baseline_matches(root, task, target)
     repo_changed = bool(meta_gate and meta_gate.get("status") == "passed" and meta_gate.get("scope") == "changed")
-    start_head = _repo_head_from_state(root, task) or _repo_head_at_start(task)
+    start_head = _repo_head_from_state(root, task)
     if target is None:
         current_head, current_head_state = "", _no_product_repo_state()
     else:
@@ -1558,7 +1581,6 @@ def block_task(root: Path, task_id: str, *, verification: VerificationInput) -> 
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {block_timestamp}: {copy['task_blocked']}")
     text = replace_frontmatter_line(text, "status", "blocked")
-    text = replace_section(text, "Handoff", _blocked_handoff(task.rel_path, task.id, copy=copy))
     return {
         "task": task,
         "text": text,
@@ -1634,12 +1656,8 @@ def _repo_scoped_task(task: Task) -> bool:
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in {"repo", "backend", "frontend", "infra", "mobile"}
 
 
-def _has_backlog_origin(task: Task) -> bool:
-    return "Backlog origin:" in task.body
-
-
 def _repo_discovery_paths(values: list[str]) -> list[str]:
-    return [stripped for value in values if re.match(r"^repos/[^`]+$", stripped := _strip_ticks(value))]
+    return [normalized for value in values if (normalized := _normalize_discovery_path(value))]
 
 
 def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> list[str]:
@@ -1656,33 +1674,23 @@ def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> li
 
 
 def discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
-    try:
-        section = find_section(task.body, "Discovery")
-    except RepoctlError:
-        return False
-    body = task.body[section.body_start : section.end]
-    fields: dict[str, str] = {}
-    current_key = ""
-    for line in body.splitlines():
-        match = re.match(r"^\s*-\s+(Candidate query|Candidate files reviewed|Chosen files):\s*(.*)$", line)
-        if match:
-            current_key = match.group(1)
-            fields[current_key] = match.group(2).strip()
-            continue
-        if current_key and re.match(r"^\s{2,}-\s+", line):
-            fields[current_key] = (fields[current_key] + " " + line.strip()).strip()
-    missing = [key for key in ("Candidate query", "Candidate files reviewed", "Chosen files") if not fields.get(key)]
-    if missing:
-        return False
+    fields = task_discovery_values(task)
     placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
-    normalized = {key: fields[key].strip().strip("`").strip().lower() for key in fields}
-    if any(normalized[key] in placeholders for key in normalized):
+    required: dict[str, list[str]] = {}
+    for key in ("Candidate query", "Candidate files reviewed", "Chosen files"):
+        values = [value for value in fields.get(key, []) if _strip_ticks(value).lower() not in placeholders]
+        if not values:
+            return False
+        required[key] = values
+    reviewed_paths = _repo_discovery_paths(required["Candidate files reviewed"])
+    chosen_paths = _repo_discovery_paths(required["Chosen files"])
+    if len(reviewed_paths) != len(required["Candidate files reviewed"]) or len(chosen_paths) != len(required["Chosen files"]):
         return False
-    chosen_values = task_discovery_values(task).get("Chosen files", [])
-    if target is not None and _discovery_paths_outside_target(chosen_values, target):
+    if target is not None and (
+        _discovery_paths_outside_target(reviewed_paths, target) or _discovery_paths_outside_target(chosen_paths, target)
+    ):
         return False
-    chosen = fields["Chosen files"]
-    return bool(re.search(r"`repos/[^`]+`", chosen))
+    return True
 
 
 def _task_workspace_root(task: Task) -> Path:
@@ -1694,14 +1702,17 @@ def _task_workspace_root(task: Task) -> Path:
 
 def _live_handoff_problems(task: Task, root: Path) -> list[Problem]:
     try:
-        section = find_section(task.body, "Handoff")
+        fields = parse_labeled_list_section(
+            task.body,
+            "Handoff",
+            ("Next exact step", "First file to open", "First command to run", "Done when"),
+        )
     except RepoctlError:
         return [Problem("error", "missing_handoff", "live task must contain a Handoff section", task.rel_path)]
-    body = task.body[section.body_start : section.end]
-    match = re.search(r"^\s*-\s*First file to open:\s*(.+?)\s*$", body, flags=re.MULTILINE)
-    if match is None:
+    first_file_values = fields.get("First file to open", [])
+    if len(first_file_values) != 1:
         return [Problem("error", "missing_handoff_first_file", "live Handoff must contain First file to open", task.rel_path)]
-    value = _strip_ticks(match.group(1))
+    value = _strip_ticks(first_file_values[0])
     path = Path(value)
     if not value or path.is_absolute() or ".." in path.parts:
         return [Problem("error", "invalid_handoff_first_file", "Handoff First file must be a workspace-relative path", task.rel_path)]
@@ -1739,16 +1750,6 @@ def _context_doc_paths(task: Task) -> list[str]:
     return paths
 
 
-def _repo_head_at_start(task: Task) -> str:
-    try:
-        section = find_section(task.body, "Execution Log")
-    except RepoctlError:
-        return ""
-    body = task.body[section.body_start : section.end]
-    match = re.search(r"^- repo head at start: `([^`]+)`", body, flags=re.MULTILINE)
-    return match.group(1) if match else ""
-
-
 def _repo_head_from_state(root: Path, task: Task) -> str:
     baseline = _read_repo_baseline(root, task.id)
     if baseline is None:
@@ -1758,7 +1759,7 @@ def _repo_head_from_state(root: Path, task: Task) -> str:
 
 def task_repo_head_at_start(root: Path, task_id: str) -> str:
     task = resolve_task(root, task_id)
-    return _repo_head_from_state(root, task) or _repo_head_at_start(task)
+    return _repo_head_from_state(root, task)
 
 
 def _assert_repo_baseline_matches(root: Path, task: Task, target: RepoTarget | None) -> None:

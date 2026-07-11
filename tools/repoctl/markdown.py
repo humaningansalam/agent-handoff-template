@@ -99,6 +99,58 @@ def find_section(text: str, heading: str) -> SectionRange:
     raise RepoctlError(f"section missing: {wanted}", code="missing_section")
 
 
+def has_section(text: str, heading: str) -> bool:
+    try:
+        find_section(text, heading)
+    except RepoctlError as exc:
+        if exc.code == "missing_section":
+            return False
+        raise
+    return True
+
+
+def parse_labeled_list_section(text: str, heading: str, labels: tuple[str, ...]) -> dict[str, list[str]]:
+    section = find_section(text, heading)
+    body = text[section.body_start : section.end]
+    allowed = set(labels)
+    parsed: dict[str, list[str]] = {}
+    current = ""
+    in_fence = False
+    fence_marker = ""
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            current = ""
+            continue
+        if in_fence:
+            continue
+        if not stripped or stripped.startswith("<!--"):
+            continue
+        indentation = len(raw_line) - len(raw_line.lstrip(" "))
+        if indentation == 0 and stripped.startswith("- "):
+            label, separator, value = stripped[2:].partition(":")
+            current = label if separator and label in allowed else ""
+            if current:
+                parsed.setdefault(current, [])
+                if value.strip():
+                    parsed[current].append(value.strip())
+            continue
+        if current and indentation >= 2 and stripped.startswith("- "):
+            value = stripped[2:].strip()
+            if value:
+                parsed[current].append(value)
+            continue
+        current = ""
+    return parsed
+
+
 def replace_section(text: str, heading: str, body: str) -> str:
     section = find_section(text, heading)
     normalized = body if body.endswith("\n") else body + "\n"

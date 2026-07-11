@@ -21,13 +21,18 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 6. `docs/PRD.md` when shared project context is needed
 7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
-For repo-scoped implementation tasks, after the task is live and before editing product files, generate and read a Context Pack when available:
+For repo-scoped implementation tasks, use this order before editing product files:
+
+1. Start the task.
+2. Search and inspect candidate product files read-only.
+3. Record Candidate query history, Reviewed files, and the active Chosen files in `## Discovery`.
+4. Generate and read the scoped Context Pack when available.
 
 ```bash
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
-Context Pack is read-only evidence. It does not define task scope; open and inspect candidate files directly before choosing files to edit.
+An optional bootstrap pack may be generated before Discovery for repository orientation, but it is not a required gate and must be refreshed after Chosen files exist. Context Pack is read-only evidence and never defines task scope.
 
 If no active task is assigned:
 
@@ -68,9 +73,10 @@ Scope matrix:
 - `repoctl` is the canonical mutation boundary for Board, Backlog, task creation, task lifecycle, archive transitions, and `.repometa` validation.
 - Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
 - Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
-- Use `./scripts/repoctl task show T-... --json` to inspect a task and `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
+- Use `./scripts/repoctl task show T-... --summary --json` for compact task inspection, omit `--summary` when the full task body is needed, and use `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
 - When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`; `--use-task-verification` remains an explicit compatibility form. Use `--verification-file` only for an external artifact.
 - Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `--use-committed-diff`. This mode is allowed only when the recorded start HEAD is an ancestor of the current HEAD and no task-new working-tree changes remain.
+- Use `./scripts/repoctl task doctor T-... --use-committed-diff --json` to preflight that same committed-range path before finish.
 - A committed range is observed Git evidence, not proof that its commits belong to the task. repoctl does not manage commit, push, PR, deploy, or delivery ownership.
 - Use `./scripts/repoctl task block T-... --json` after recording the blocker in `## Verification`, or pass `--verification-file` for an external blocker artifact.
 

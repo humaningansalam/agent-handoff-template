@@ -40,6 +40,7 @@ Example:
 <!-- For repo work, record candidate-file discovery evidence before editing.
 Use `repoctl meta query` / `repoctl meta suggest` as read-only hints only; inspect files directly before choosing scope.
 Prefer `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` over hand-editing.
+After Chosen files exist, generate and read the scoped Context Pack command returned by `task discovery add` before editing.
 Each required field may be one line or an indented sub-list; include at least one `repos/...` path under Chosen files.
 This section may be empty for root-only or already-obvious work. -->
 

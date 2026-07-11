@@ -235,7 +235,7 @@ def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, 
 
     stdout = capsys.readouterr().out
     artifact = output.read_text(encoding="utf-8")
-    assert stdout == artifact
+    assert stdout == "context pack written: .repoctl-state/context-pack/T-20260622010103Z.md\n"
     assert "# Agent Context Pack" in artifact
     assert "## Task Startup Order" in artifact
     assert "## Definitions, Callers, Imports, Dependents" in artifact

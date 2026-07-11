@@ -119,6 +119,16 @@ def test_clean_check_reports_release_candidate_field_gates(tmp_path: Path, monke
 
     assert main(["check", "--json"]) == 0
 
+    compact = json.loads(capsys.readouterr().out)["data"]["field_gates"]["release_candidate"]
+    assert compact == {
+        "details_included": False,
+        "gate_count": 4,
+        "mutating_gate_count": 2,
+        "run_command": "./scripts/repoctl field-gate run release-candidate --repo-id main --json",
+    }
+
+    assert main(["check", "--full", "--json"]) == 0
+
     payload = json.loads(capsys.readouterr().out)
     gates = payload["data"]["field_gates"]["release_candidate"]
     commands = [gate["command"] for gate in gates]
@@ -235,6 +245,33 @@ def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Pa
     assert any(action["label"] == "Record task discovery evidence" for action in payload["next_actions"])
     after = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert after == before
+
+
+def test_task_doctor_with_complete_verification_does_not_materialize_finish_writes(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = task_text("T-20260609184046Z", status="doing").replace("- pending", "- Command: pytest\n- Result: pass")
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["finish_ready"] is True
+    after = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not (tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json").exists()
+    assert not (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").exists()
+
 
 def test_repoctl_lock_recovers_dead_owner_on_same_host(tmp_path: Path) -> None:
     write_workspace(tmp_path)

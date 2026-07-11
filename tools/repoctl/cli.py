@@ -159,14 +159,15 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
         elif code == "actual_changes_outside_chosen":
             add("Replace active Chosen files", command=f"./scripts/repoctl task discovery add {task_id} --replace-chosen repos/<path> --reason '<reason>' --json")
-            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --json")
+            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
             add("Initialize repos/ as an independent git repository", command="git -C repos init")
         elif code == "repo_head_changed_since_start":
+            add("Preflight committed range", command=f"./scripts/repoctl task doctor {task_id} --use-committed-diff --json")
             add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --json")
         elif code == "baseline_conflict":
             add("Resolve baseline ownership", command=f"./scripts/repoctl task baseline resolve {task_id} --path {path or 'repos/<path>'} --ownership task --json")
-            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --json")
+            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code == "repo_history_rewritten":
             add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
             add("Create a new task with a fresh baseline", command="./scripts/repoctl task create --slug <slug> --area repo --repo-id main <title> --start --json")
@@ -942,7 +943,7 @@ def _error_data(args: argparse.Namespace) -> dict[str, Any]:
     return data
 
 
-def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tuple[dict[str, Any], list[Problem], list[str]]:
+def _check_payload(root: Path, *, include_archived_warnings: bool = False, full: bool = False) -> tuple[dict[str, Any], list[Problem], list[str]]:
     tasks = load_tasks(root)
     board_path = root / "docs/BOARD.md"
     board_text = board_path.read_text(encoding="utf-8")
@@ -950,11 +951,18 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False) -> tu
     _receipts, receipt_problems = collect_completion_receipts(root)
     problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + validate_live_task_states(root, tasks) + check_board(root, board_paths, tasks, board_text) + receipt_problems + _generated_adapter_problems(root)
     live_paths = [task.rel_path for task in live_tasks(tasks)]
+    release_gates = _release_candidate_field_gates(root)
+    release_gate_data: Any = release_gates if full else {
+        "details_included": False,
+        "gate_count": len(release_gates),
+        "mutating_gate_count": sum(1 for gate in release_gates if gate.get("mutates_workspace")),
+        "run_command": "./scripts/repoctl field-gate run release-candidate --repo-id main --json",
+    }
     payload = {
         "ok": not _has_errors(problems),
         "data": {
             "field_gates": {
-                "release_candidate": _release_candidate_field_gates(root),
+                "release_candidate": release_gate_data,
             },
         },
         "problems": [problem.to_dict() for problem in problems],
@@ -1026,16 +1034,16 @@ def _generated_adapter_problems(root: Path) -> list[Problem]:
 
 def cmd_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    payload, problems, live_paths = _check_payload(root, include_archived_warnings=args.include_archived_warnings)
+    payload, problems, live_paths = _check_payload(root, include_archived_warnings=args.include_archived_warnings, full=args.full)
     if args.fix_board:
         with repoctl_lock(root):
-            _locked_payload, _locked_problems, live_paths = _check_payload(root, include_archived_warnings=args.include_archived_warnings)
+            _locked_payload, _locked_problems, live_paths = _check_payload(root, include_archived_warnings=args.include_archived_warnings, full=args.full)
             board_path = root / "docs/BOARD.md"
             board_text = board_path.read_text(encoding="utf-8")
             fixed = render_board(board_text, live_paths)
             if fixed != board_text:
                 atomic_write(board_path, fixed)
-        payload, problems, _ = _check_payload(root, include_archived_warnings=args.include_archived_warnings)
+        payload, problems, _ = _check_payload(root, include_archived_warnings=args.include_archived_warnings, full=args.full)
     if args.json:
         _json(payload)
     else:
@@ -1234,9 +1242,26 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     task = resolve_task(root, args.task_id)
     delta = repo_changes_since_task_start(root, args.task_id) if task.status in {"todo", "doing", "blocked"} else None
     repo_changes = _repo_change_summary(delta) if delta else None
-    payload = {"ok": True, "command": "task.show", "data": {"task": task.to_list_dict(), "path": task.rel_path, "frontmatter": task.frontmatter, "body": task.body, "repo_changes": repo_changes}, "task": task.to_list_dict(), "path": task.rel_path, "frontmatter": task.frontmatter, "body": task.body, "repo_changes": repo_changes, "problems": [], "warnings": []}
+    summary = {"task": task.to_list_dict(), "path": task.rel_path, "repo_changes": repo_changes}
+    if args.summary:
+        payload = {"ok": True, "command": "task.show", "data": summary, "problems": [], "warnings": []}
+    else:
+        payload = {
+            "ok": True,
+            "command": "task.show",
+            "data": {**summary, "frontmatter": task.frontmatter, "body": task.body},
+            "task": task.to_list_dict(),
+            "path": task.rel_path,
+            "frontmatter": task.frontmatter,
+            "body": task.body,
+            "repo_changes": repo_changes,
+            "problems": [],
+            "warnings": [],
+        }
     if args.json:
         _json(payload)
+    elif args.summary:
+        print(f"{task.id} {task.status} {task.rel_path}")
     else:
         print(task.path.read_text(encoding="utf-8"))
     return 0
@@ -1269,6 +1294,29 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
             note=args.note or "",
         )
         atomic_write(result["task"].path, result["text"])
+    next_actions: list[dict[str, str]] = []
+    chosen_files = result["discovery"]["chosen_files"]
+    if chosen_files:
+        try:
+            target = _repo_target_for_task_command(root, result["task"])
+        except RepoctlError:
+            target = None
+        if target is not None:
+            next_actions.append(
+                {
+                    "label": "Refresh scoped Context Pack",
+                    "command": (
+                        f"./scripts/repoctl context pack --task {args.task_id} --repo-id {target.id} "
+                        f"--format markdown --output .repoctl-state/context-pack/{args.task_id}.md"
+                    ),
+                }
+            )
+    next_actions.append(
+        {
+            "label": "Check finish readiness",
+            "command": f"./scripts/repoctl task doctor {args.task_id} --json",
+        }
+    )
     payload = {
         "ok": True,
         "command": "task.discovery.add",
@@ -1279,12 +1327,7 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         },
         "problems": [],
         "warnings": [],
-        "next_actions": [
-            {
-                "label": "Check finish readiness",
-                "command": f"./scripts/repoctl task doctor {args.task_id} --json",
-            }
-        ],
+        "next_actions": next_actions,
     }
     if args.json:
         _json(payload)
@@ -1312,25 +1355,52 @@ def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
+def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool = False) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     all_tasks = load_tasks(root)
     task_problems = [problem for problem in validate_tasks(all_tasks, include_archived_warnings=True) if problem.path == task.rel_path]
-    target = _repo_target_for_task_command(root, task)
-    delta = repo_changes_since_task_start(root, task_id)
-    changed_files, meta_status_problems, meta = meta_status(root, changed=True, changes=delta["changes"], target=target)
-    meta_problems = check_meta(root, changed=True, changes=delta["changes"], target=target) if changed_files and not _has_errors(meta_status_problems) else []
     doctor_problems: list[Problem] = []
+    verification: VerificationInput | None = None
     verification_ready = True
     try:
-        _task_verification_input(root, task_id)
+        verification = _task_verification_input(root, task_id)
     except RepoctlError as exc:
         verification_ready = False
         doctor_problems.append(Problem("warning", exc.code or "missing_verification_file", str(exc), exc.path or task.rel_path))
-    combined = [*task_problems, *meta_status_problems, *meta_problems, *doctor_problems]
+    try:
+        delta = repo_changes_since_task_start(root, task_id)
+    except RepoctlError:
+        delta = {
+            "changes": [],
+            "baseline_available": False,
+            "preexisting_count": 0,
+            "baseline_conflicts": [],
+        }
+    try:
+        if verification is None:
+            _meta_gate, delta = _finish_meta_gate(root, task_id, use_committed_diff=use_committed_diff)
+        else:
+            _meta_gate, delta, _result = _prepare_task_finish(
+                root,
+                task_id,
+                verification=verification,
+                use_committed_diff=use_committed_diff,
+            )
+    except RepoctlError as exc:
+        discovery_is_already_advisory = verification is None and exc.code == "placeholder_discovery" and any(
+            problem.code == "missing_discovery_evidence" for problem in task_problems
+        )
+        if not discovery_is_already_advisory:
+            doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
+    combined = [*task_problems, *doctor_problems]
     blockers = [problem.code for problem in combined if problem.severity == "error"]
     advisory = [problem.code for problem in combined if problem.severity == "warning"]
-    finish_ready = task.status in {"doing", "todo", "blocked"} and not blockers and not advisory
+    finish_ready = task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers
+    try:
+        target = _repo_target_for_task_command(root, task)
+        repository = target.to_dict() if target is not None else {}
+    except RepoctlError:
+        repository = {}
     data = {
         "task_id": task.id,
         "status": task.status,
@@ -1341,7 +1411,8 @@ def _task_doctor_payload(root: Path, task_id: str) -> dict[str, Any]:
         "repo_changes": {
             **_repo_change_summary(delta),
         },
-        "repository": meta.get("repository", {}) if isinstance(meta, dict) else {},
+        "repository": repository,
+        "evidence_mode": "committed_range" if use_committed_diff else "working_tree_diff",
         "verification": {
             "default_source": "task_section",
             "task_section_complete": verification_ready,
@@ -1388,7 +1459,7 @@ def _metadata_coverage_warnings(meta: dict[str, Any]) -> list[dict[str, str]]:
 
 def cmd_task_doctor(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    payload = _task_doctor_payload(root, args.task_id)
+    payload = _task_doctor_payload(root, args.task_id, use_committed_diff=args.use_committed_diff)
     if args.json:
         _json(payload)
     else:
@@ -1396,7 +1467,7 @@ def cmd_task_doctor(args: argparse.Namespace) -> int:
         print(f"repoctl task doctor: {data['task_id']} status={data['status']} finish_ready={data['finish_ready']}")
         for problem in payload["problems"] + payload["warnings"]:
             print(f"- {problem['code']}: {problem['message']}")
-    return 1 if _has_errors([Problem(problem["severity"], problem["code"], problem["message"], problem.get("path")) for problem in payload["problems"]]) else 0
+    return 1 if payload["problems"] else 0
 
 
 def cmd_task_create(args: argparse.Namespace) -> int:
@@ -1819,6 +1890,25 @@ def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = Fa
     return meta_gate, delta
 
 
+def _prepare_task_finish(
+    root: Path,
+    task_id: str,
+    *,
+    verification: VerificationInput,
+    use_committed_diff: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    meta_gate, delta = _finish_meta_gate(root, task_id, use_committed_diff=use_committed_diff)
+    result = finish_task(
+        root,
+        task_id,
+        verification=verification,
+        meta_gate=meta_gate,
+        repo_delta=delta,
+        allow_head_changed=use_committed_diff,
+    )
+    return meta_gate, delta, result
+
+
 def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     repo_git = delta.get("repo_git")
     task_new_files = [str(entry[1]) for entry in delta.get("changes", [])]
@@ -1955,8 +2045,12 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="finish")
     with repoctl_lock(root):
-        meta_gate, delta = _finish_meta_gate(root, args.task_id, use_committed_diff=args.use_committed_diff)
-        result = finish_task(root, args.task_id, verification=verification, meta_gate=meta_gate, repo_delta=delta, allow_head_changed=args.use_committed_diff)
+        meta_gate, delta, result = _prepare_task_finish(
+            root,
+            args.task_id,
+            verification=verification,
+            use_committed_diff=args.use_committed_diff,
+        )
         _write_task_result(root, result)
     finish_summary = _finish_summary(meta_gate, delta)
     data = {
@@ -2035,12 +2129,25 @@ def cmd_task_block(args: argparse.Namespace) -> int:
         _write_task_result(root, result)
     payload = {
         "ok": True,
+        "command": "task.block",
+        "data": {
+            "task_id": args.task_id,
+            "status": "blocked",
+            "path": result["new_path"],
+            "truncated": result["truncated"],
+        },
         "task_id": args.task_id,
         "status": "blocked",
         "path": result["new_path"],
         "truncated": result["truncated"],
         "problems": [],
         "warnings": [],
+        "next_actions": [
+            {
+                "label": "Check task readiness after resolving the blocker",
+                "command": f"./scripts/repoctl task doctor {args.task_id} --json",
+            }
+        ],
     }
     if args.json:
         _json(payload)
@@ -2578,6 +2685,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
         "warnings": [*data.get("warnings", []), *[problem.to_dict() for problem in problems if problem.severity == "warning"]],
     }
     output_format = "json" if args.json else args.format
+    written_output = ""
     if args.output and not _has_errors(problems):
         output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
         if output_problem is not None:
@@ -2585,6 +2693,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
             payload["ok"] = False
             payload["problems"] = [problem.to_dict() for problem in problems if problem.severity == "error"]
         else:
+            written_output = output.relative_to(root).as_posix()
             if data and output_format == "json":
                 payload["data"]["artifact"] = {
                     "path": output.relative_to(root).as_posix(),
@@ -2598,7 +2707,9 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     if output_format == "json":
         _json(payload)
     elif output_format == "markdown":
-        if data:
+        if written_output:
+            print(f"context pack written: {written_output}")
+        elif data and not args.output:
             print(render_task_context_pack_markdown(data), end="")
         for problem in problems:
             print(problem.message)
@@ -3433,6 +3544,7 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check")
     check.add_argument("--fix-board", action="store_true")
     check.add_argument("--include-archived-warnings", action="store_true")
+    check.add_argument("--full", action="store_true", help="include detailed release field-gate commands")
     check.add_argument("--json", action="store_true")
     check.set_defaults(func=cmd_check)
 
@@ -3499,10 +3611,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.set_defaults(func=cmd_task_list)
     task_show = task_sub.add_parser("show")
     task_show.add_argument("task_id")
+    task_show.add_argument("--summary", action="store_true", help="omit task body and frontmatter from output")
     task_show.add_argument("--json", action="store_true")
     task_show.set_defaults(func=cmd_task_show)
     task_doctor = task_sub.add_parser("doctor")
     task_doctor.add_argument("task_id")
+    task_doctor.add_argument("--use-committed-diff", action="store_true", help="preflight the recorded task-start HEAD through current HEAD")
     task_doctor.add_argument("--json", action="store_true")
     task_doctor.set_defaults(func=cmd_task_doctor)
     task_log = task_sub.add_parser("log")

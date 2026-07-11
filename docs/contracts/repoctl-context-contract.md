@@ -96,7 +96,7 @@ Markdown output is a view. It must not be ingested as a future Context, Knowledg
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
-The pack is non-authoritative and must be read before editing repo files for repo-scoped tasks when available. Default `--json` output is compact and contains:
+The normal repo-scoped flow is read-only candidate inspection, structured Discovery, then a scoped Context Pack before editing. The pack is non-authoritative. A bootstrap pack before Discovery is optional orientation rather than a lifecycle gate. Default `--json` output is compact and contains:
 
 ```text
 stage
@@ -115,7 +115,9 @@ warnings
 
 Use `--full --json` to include the raw nested Context bundle and debug candidate details.
 
-`stage: bootstrap` is used before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, and capability warnings; it must not add raw task history or Graph noise. `stage: scoped` is used after Discovery has an active Chosen set. Chosen/current source and directly connected tests appear before historical receipt evidence.
+When `--output` is supplied, the full requested artifact is written to that path. Markdown stdout reports only the artifact path instead of duplicating the complete pack; omit `--output` when the rendered Markdown itself is required on stdout.
+
+`stage: bootstrap` is available before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, and capability warnings; it must not add raw task history or Graph noise and is not required before initial file inspection. `stage: scoped` is used after Discovery has an active Chosen set and is the implementation pack. Chosen/current source and directly connected tests appear before historical receipt evidence.
 
 `edit_candidates` contains only the active Chosen set. Reviewed but unchosen files are `supporting_evidence`. Context does not infer edit scope from task prose, receipt history, basenames, or generated/ignored files.
 

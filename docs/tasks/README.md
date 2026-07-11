@@ -12,7 +12,8 @@ Repo-scoped live tasks should fill in structured `## Discovery` with the inspect
 Use `repoctl meta query` and `repoctl meta suggest` only as discovery aids; inspect the files yourself and keep the final task scope explicit.
 Use `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` to record structured Discovery without hand-editing the task file. Free-form Discovery prose is not enough unless it preserves the exact `Candidate query`, `Candidate files reviewed`, and `Chosen files` fields.
 Candidate queries append to history. Reviewed files accumulate. Chosen files are the current active edit set; replace that set with `--replace-chosen ... --reason "..."` when scope changes.
-Use `./scripts/repoctl task show T-... --json` for task inspection and `./scripts/repoctl task log append T-... "message" --json` for timestamped execution log entries.
+Inspect candidate files read-only before choosing them. After Chosen files are recorded, run the scoped Context Pack command returned by `task discovery add`, read the artifact, and then edit product files. A pre-Discovery bootstrap pack is optional orientation only.
+Use `./scripts/repoctl task show T-... --summary --json` for compact task inspection; omit `--summary` only when the full task body is needed. Use `./scripts/repoctl task log append T-... "message" --json` for timestamped execution log entries.
 When `## Verification` is complete, finish with `./scripts/repoctl task finish T-... --json`. Pass `--verification-file` only when the evidence already exists as an external file.
 
 Agents and humans write task meaning in Markdown. repoctl alone writes `.repoctl-state` baseline data, fingerprints, ownership decisions, completion receipts, Closure, Board changes, and archive transitions.

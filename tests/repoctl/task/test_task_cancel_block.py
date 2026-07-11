@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.markdown import replace_section
 from tests.repoctl.task_lifecycle_helpers import (
     add_task,
     task_text,
@@ -86,7 +87,15 @@ def test_task_cancel_allows_explicit_dirty_cancel_with_evidence(tmp_path: Path, 
 
 def test_task_block_records_evidence_and_keeps_board_entry(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    add_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    original_handoff = (
+        "- Next exact step: inspect the failed mobile screenshot.\n"
+        "- First file to open: `docs/BOARD.md`\n"
+        "- First command to run: `pytest tests/mobile -q`\n"
+        "- Done when: the blank viewport cause is understood.\n"
+    )
+    text = task_text("T-20260609184046Z", status="doing")
+    text = replace_section(text, "Handoff", original_handoff)
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
     verification = tmp_path / "blocker.md"
     verification.write_text("- Blocker: screenshot acceptance failed\n- Evidence: mobile viewport still blank\n", encoding="utf-8")
@@ -100,8 +109,7 @@ def test_task_block_records_evidence_and_keeps_board_entry(tmp_path: Path, monke
     assert "status: blocked" in task_body
     assert "screenshot acceptance failed" in task_body
     assert "task blocked with evidence" in task_body
-    assert "./scripts/repoctl task doctor T-20260609184046Z --json" in task_body
+    assert original_handoff in task_body
+    assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     assert "docs/tasks/T-20260609184046Z--alpha.md" in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
-
-
 

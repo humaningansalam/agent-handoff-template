@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.markdown import find_section
 from tools.repoctl.meta import shard_for_path
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
@@ -138,6 +139,61 @@ def test_task_finish_treats_modified_dirty_baseline_file_as_task_change(tmp_path
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
 
 
+def test_task_doctor_and_finish_share_baseline_conflict_preflight(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("- pending", "- Command: pytest\n- Result: pass")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, "T-20260609184046Z", query="app value", reviewed="repos/app.py", chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 3\n", encoding="utf-8")
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert doctor_payload["problems"][0]["code"] == "baseline_conflict"
+
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
+    finish_payload = json.loads(capsys.readouterr().out)
+    assert finish_payload["problems"][0]["code"] == "baseline_conflict"
+
+
+def test_task_doctor_and_finish_share_actual_scope_preflight(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n", "extra.py": "value = 1\n"})
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("- pending", "- Command: pytest\n- Result: pass")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, "T-20260609184046Z", query="app value", reviewed="repos/app.py", chosen="repos/app.py")
+    (repo / "extra.py").write_text("value = 2\n", encoding="utf-8")
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert doctor_payload["problems"][0]["code"] == "actual_changes_outside_chosen"
+
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
+    finish_payload = json.loads(capsys.readouterr().out)
+    assert finish_payload["problems"][0]["code"] == "actual_changes_outside_chosen"
+
+
 def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
@@ -176,6 +232,23 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     assert receipt["verification"]["source"] == "external_file"
     assert receipt["verification"]["source_sha256"].startswith("sha256:")
     assert receipt["verification"]["stored_sha256"].startswith("sha256:")
+
+
+def test_task_finish_treats_closure_challenge_as_an_unrelated_section(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = task_text("T-20260609184046Z", status="doing")
+    handoff = find_section(text, "Handoff")
+    text = text[: handoff.start] + "## Closure Challenge\n\n- Confirm the implementation survives adversarial review.\n\n" + text[handoff.start :]
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    verification = write_verification(tmp_path, "- Command: pytest\n- Result: pass\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
+    assert "## Closure Challenge" in archived
+    assert "## Closure\n" in archived
 
 
 def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -684,6 +757,10 @@ def test_task_finish_committed_diff_blocks_non_ancestor_observed_head(tmp_path: 
     rewritten = subprocess.run(["git", "commit-tree", tree, "-m", "rewritten root"], cwd=repo, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
     subprocess.run(["git", "reset", "--hard", rewritten], cwd=repo, check=True, stdout=subprocess.DEVNULL)
 
+    assert main(["task", "doctor", "T-20260609184046Z", "--use-committed-diff", "--json"]) == 1
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert doctor_payload["problems"][0]["code"] == "repo_history_rewritten"
+
     assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
@@ -766,6 +843,26 @@ def test_task_finish_ignores_fake_start_head_outside_execution_log(tmp_path: Pat
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     verification = tmp_path / "verification.md"
     verification.write_text("verified\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repo_head_missing_at_start"
+
+
+def test_task_finish_does_not_infer_start_head_from_execution_log_prose(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
+    text = (
+        task_text("T-20260609184046Z", status="doing")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("- created", f"- created\n- repo head at start: `{'a' * 40}`")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    verification = write_verification(tmp_path, "verified\n")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2

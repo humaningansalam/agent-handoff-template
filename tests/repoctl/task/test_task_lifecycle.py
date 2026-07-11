@@ -45,6 +45,12 @@ def test_task_show_and_log_append_use_repoctl_lifecycle_boundary(tmp_path: Path,
     assert show_payload["task"]["id"] == "T-20260609184046Z"
     assert "checked worker output" in show_payload["body"]
 
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    summary_payload = json.loads(capsys.readouterr().out)
+    assert summary_payload["data"]["task"]["id"] == "T-20260609184046Z"
+    assert "body" not in summary_payload["data"]
+    assert "frontmatter" not in summary_payload["data"]
+
 
 def test_task_commands_accept_slugged_task_file_id(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -120,8 +126,32 @@ def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reas
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["discovery"]["candidate_query_history"] == ["q1", "q2"]
     assert payload["data"]["discovery"]["chosen_files"] == ["repos/b.py"]
+    assert any(
+        action["command"]
+        == "./scripts/repoctl context pack --task T-20260609184046Z --repo-id main --format markdown --output .repoctl-state/context-pack/T-20260609184046Z.md"
+        for action in payload["next_actions"]
+    )
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "scope changed: removed repos/a.py; added repos/b.py; reason=implementation moved" in task_body
+
+
+def test_task_discovery_rejects_existing_directories_but_allows_future_files(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "existing.py").write_text("value = 1\n", encoding="utf-8")
+    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "future file", "--reviewed", "repos/src", "--chosen", "repos/new.py", "--json"]) == 2
+    reviewed_error = json.loads(capsys.readouterr().out)
+    assert reviewed_error["problems"][0]["code"] == "discovery_path_is_directory"
+
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "future file", "--reviewed", "repos/existing.py", "--chosen", "repos/new.py", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["discovery"]["chosen_files"] == ["repos/new.py"]
 
 
 def test_task_create_print_id_and_root_work_area(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -290,6 +320,7 @@ def test_task_show_and_doctor_report_task_new_changed_files(tmp_path: Path, monk
     assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
     doctor_payload = json.loads(capsys.readouterr().out)
     assert doctor_payload["data"]["repo_changes"]["task_new_files"] == ["changed.py"]
+    assert doctor_payload["problems"] == []
 
 
 def test_task_lifecycle_keeps_created_document_language_when_workspace_setting_changes(tmp_path: Path, monkeypatch, capsys) -> None:
