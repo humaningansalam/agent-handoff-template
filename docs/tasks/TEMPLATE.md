@@ -38,9 +38,9 @@ Example:
 ## Discovery
 
 <!-- For repo work, record candidate-file discovery evidence before editing.
-Use `repoctl meta query` / `repoctl meta suggest` as read-only hints only; inspect files directly before choosing scope.
-Prefer `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` over hand-editing.
-After Chosen files exist, generate and read the scoped Context Pack command returned by `task discovery add` before editing.
+Record the Candidate query, run compact `repoctl context query`, and inspect suggested files directly. Refine and repeat the query before choosing scope when evidence is insufficient.
+Prefer `./scripts/repoctl task discovery add T-... --query "..." --json`, then add `--reviewed` and `--chosen` after inspection.
+A scoped Context Pack is optional when a durable handoff or relationship summary is useful.
 Each required field may be one line or an indented sub-list; include at least one `repos/...` path under Chosen files.
 This section may be empty for root-only or already-obvious work. -->
 

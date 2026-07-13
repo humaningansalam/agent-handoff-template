@@ -124,7 +124,6 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
         (["./scripts/repoctl", "context", "--help"], "pack-benchmark-materialize"),
         (["./scripts/repoctl", "field-gate", "run", "--help"], "release-candidate"),
         (["./scripts/repoctl", "field-gate", "compare", "--help"], "--require-no-gate-regressions"),
-        (["./scripts/repoctl", "field-gate", "cleanup", "--help"], "--artifact"),
         (["./scripts/repoctl", "knowledge", "--help"], "render"),
         (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
     ]
@@ -261,8 +260,12 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     assert field_gate_payload["data"]["failed_count"] == 0
     assert field_gate_payload["data"]["artifact"]["path"] == field_gate_output
     assert (package_root / field_gate_output).is_file()
-    cleanup_entry_count = sum(len(gate.get("cleanup", [])) for gate in field_gate_payload["data"]["gates"])
-    assert cleanup_entry_count >= 17
+    removed_count = sum(
+        int(gate.get("summary", {}).get("auto_cleanup", {}).get("removed_count") or 0)
+        for gate in field_gate_payload["data"]["gates"]
+    )
+    assert removed_count >= 17
+    assert not (package_root / "repos/auth").exists()
 
     field_gate_compare = subprocess.run(
         [
@@ -290,19 +293,6 @@ def test_release_archive_runs_context_benchmark_field_gate(tmp_path: Path) -> No
     field_gate_compare_payload = json.loads(field_gate_compare.stdout)
     assert field_gate_compare_payload["data"]["failed_count_delta"]["delta"] == 0
 
-    field_gate_cleanup = subprocess.run(
-        ["./scripts/repoctl", "field-gate", "cleanup", "--artifact", field_gate_output, "--json"],
-        cwd=package_root,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    assert field_gate_cleanup.returncode == 0, field_gate_cleanup.stderr
-    field_gate_cleanup_payload = json.loads(field_gate_cleanup.stdout)
-    assert field_gate_cleanup_payload["data"]["removed_count"] == cleanup_entry_count
-    assert not (package_root / "repos/auth").exists()
     assert (package_root / "docs/archive/tasks").is_dir()
 
     shutil.rmtree(package_root / "repos")

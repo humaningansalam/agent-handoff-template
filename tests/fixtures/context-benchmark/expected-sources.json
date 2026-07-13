@@ -42,10 +42,10 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
+        "path": "repos/utils/tokens.py"
       },
       {
-        "path": "<graph:repo:main:file:handlers%2Flogin.py>"
+        "path": "repos/handlers/login.py"
       }
     ]
   },
@@ -55,10 +55,10 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
+        "path": "repos/handlers/session_tokens.py"
       },
       {
-        "path": "<graph:repo:main:file:handlers%2Fsession_login.py>"
+        "path": "repos/handlers/session_login.py"
       }
     ]
   },
@@ -68,17 +68,17 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
+        "path": "repos/frontend/src/api/tokens.ts"
       },
       {
-        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
+        "path": "repos/frontend/src/client.ts"
       }
     ]
   },
   "Q-006": {
     "supporting": [
       {
-        "path": "<graph:repo:main:file:auth%2Fflow.py>"
+        "path": "repos/auth/flow.py"
       }
     ],
     "noise": [],
@@ -94,17 +94,14 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
+        "path": "repos/auth/flow.py"
       }
     ]
   },
   "Q-007": {
     "supporting": [
       {
-        "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
+        "path": "repos/auth/method_flow.py"
       }
     ],
     "noise": [],
@@ -120,20 +117,17 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.login%3Amethod%3A5%3A4%3A8%3A23>"
+        "path": "repos/auth/method_flow.py"
       }
     ]
   },
   "Q-008": {
     "supporting": [
       {
-        "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
+        "path": "repos/services/token_service.py"
       },
       {
-        "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
+        "path": "repos/handlers/cross_login.py"
       }
     ],
     "noise": [],
@@ -149,10 +143,10 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+        "path": "repos/services/token_service.py"
       },
       {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31>"
+        "path": "repos/handlers/cross_login.py"
       }
     ]
   },
@@ -221,10 +215,7 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+        "path": "repos/services/token_service.py"
       }
     ]
   },
@@ -234,10 +225,7 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Autils%2Ftokens.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29>"
+        "path": "repos/utils/tokens.py"
       }
     ]
   },
@@ -247,10 +235,7 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fmethod_flow.py%3ATokenFlow.validate%3Amethod%3A2%3A4%3A3%3A28>"
+        "path": "repos/auth/method_flow.py"
       }
     ]
   },
@@ -260,10 +245,10 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fapi%2Ftokens.ts>"
+        "path": "repos/frontend/src/api/tokens.ts"
       },
       {
-        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
+        "path": "repos/frontend/src/client.ts"
       }
     ]
   },
@@ -273,10 +258,10 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
+        "path": "repos/handlers/session_tokens.py"
       },
       {
-        "path": "<graph:repo:main:file:handlers%2Fsession_login.py>"
+        "path": "repos/handlers/session_login.py"
       }
     ]
   },
@@ -286,27 +271,21 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:auth%2Fflow.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
+        "path": "repos/auth/flow.py"
       }
     ]
   },
   "Q-019": {
     "acceptable": [
       {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Avalidate_token%3Afunction%3A1%3A0%3A2%3A24>"
+        "path": "repos/auth/flow.py"
       }
     ],
     "noise": [],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:auth%2Fflow.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
+        "path": "repos/auth/flow.py"
       }
     ]
   },
@@ -316,10 +295,10 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:import-ref:python:services.token_service.issue_token>"
+        "path": "repos/services/token_service.py"
       },
       {
-        "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
+        "path": "repos/handlers/cross_login.py"
       }
     ]
   },
@@ -329,10 +308,7 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:import-ref:python:utils.tokens.issue_token>"
-      },
-      {
-        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
+        "path": "repos/utils/tokens.py"
       }
     ]
   },
@@ -342,30 +318,24 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:handlers%2Fsession_tokens.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fsession_tokens.py%3Aissue_session%3Afunction%3A1%3A0%3A2%3A31>"
+        "path": "repos/handlers/session_tokens.py"
       }
     ]
   },
   "Q-023": {
     "acceptable": [
       {
-        "path": "<graph:repo:main:file:frontend%2Fsrc%2Fclient.ts>"
+        "path": "repos/frontend/src/client.ts"
       },
       {
-        "path": "<graph:repo:main:file:auth%2Fmethod_flow.py>"
+        "path": "repos/auth/method_flow.py"
       }
     ],
     "noise": [],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:auth%2Fflow.py>"
-      },
-      {
-        "path": "<graph:repo:main:symbol:python_ast:python_ast%3Aauth%2Fflow.py%3Alogin%3Afunction%3A8%3A0%3A11%3A19>"
+        "path": "repos/auth/flow.py"
       }
     ]
   },
@@ -375,13 +345,13 @@
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:main:file:services%2Ftoken_service.py>"
+        "path": "repos/services/token_service.py"
       },
       {
-        "path": "<graph:repo:main:file:handlers%2Fcross_login.py>"
+        "path": "repos/handlers/cross_login.py"
       },
       {
-        "path": "<graph:repo:main:file:utils%2Ftokens.py>"
+        "path": "repos/utils/tokens.py"
       }
     ]
   }

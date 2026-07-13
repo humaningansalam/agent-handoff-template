@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .code_index import CodeIndexEntry, build_code_index
+from .code_index import CodeIndexEntry, build_code_index, semantic_provider_entries
 from .git import normalize_repo_path
-from .graph_code_provider import build_precise_calls, build_precise_symbols
-from .graph_import_resolver import resolve_code_imports
-from .graph_model import GraphEdge, GraphNode, GraphSnapshot, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
-from .language_profiles import graph_language_capabilities, language_for_path, limited_semantic_languages
+from .graph_code_provider import PYTHON_PROVIDER_LANGUAGES, build_python_semantics
+from .graph_import_resolver import IMPORT_RESOLVER_LANGUAGES, resolve_code_imports
+from .graph_model import GraphEdge, GraphNode, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
+from .language_profiles import graph_language_capabilities, is_semantic_source_language, language_for_path
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipts
@@ -39,6 +39,31 @@ def _annotation_payload(annotation: dict[str, Any] | None) -> dict[str, Any]:
             else:
                 payload[key] = value
     return payload
+
+
+def _provider_coverage(
+    capability: str,
+    entries: list[CodeIndexEntry],
+    *,
+    provider_languages: set[str] | frozenset[str],
+    analyzed_paths: list[str],
+    evidence_level: str,
+) -> ProviderCoverage:
+    eligible_entries = [
+        entry
+        for entry in entries
+        if entry.classification != "excluded" and is_semantic_source_language(entry.language)
+    ]
+    analyzed = set(analyzed_paths)
+    supported_entries = [entry for entry in eligible_entries if entry.language in provider_languages]
+    return ProviderCoverage(
+        capability=capability,
+        eligible_paths=tuple(sorted(entry.path for entry in eligible_entries)),
+        analyzed_paths=tuple(sorted(entry.path for entry in supported_entries if entry.path in analyzed)),
+        unsupported_paths=tuple(sorted(entry.path for entry in eligible_entries if entry.language not in provider_languages)),
+        failed_paths=tuple(sorted(entry.path for entry in supported_entries if entry.path not in analyzed)),
+        evidence_level=evidence_level,
+    )
 
 
 def _index_facts(entry: CodeIndexEntry) -> dict[str, Any]:
@@ -220,7 +245,14 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
                 old_file_id = ensure_receipt_file_node(old_path)
                 add_edge(GraphEdge("CHANGE_AFFECTED_FILE", change_node_id, old_file_id, "recorded", "task_completion", {"role": "old_path"}))
 
-    precise_symbols, precise_meta = build_precise_symbols(root, target=target, paths=[entry.path for entry in entries])
+    provider_entries = semantic_provider_entries(entries)
+    import_resolutions, import_meta = resolve_code_imports(provider_entries, repo=target.root_path)
+    precise_symbols, precise_calls, precise_meta = build_python_semantics(
+        root,
+        target=target,
+        entries=provider_entries,
+        import_resolutions=import_resolutions,
+    )
     precise_symbol_node_ids: dict[str, str] = {}
     for precise_symbol in precise_symbols:
         file_node_id = file_id(repo_id, precise_symbol.path)
@@ -259,15 +291,6 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
         precise_symbol_node_ids[precise_symbol.provider_symbol_id] = symbol_node_id
 
-    import_resolutions = resolve_code_imports(entries, repo=target.root_path)
-
-    precise_calls, precise_call_meta = build_precise_calls(
-        root,
-        target=target,
-        paths=[entry.path for entry in entries],
-        symbols=precise_symbols,
-        import_resolutions=import_resolutions,
-    )
     for precise_call in precise_calls:
         caller_node_id = precise_symbol_node_ids.get(precise_call.caller_provider_symbol_id)
         callee_node_id = precise_symbol_node_ids.get(precise_call.callee_provider_symbol_id)
@@ -312,6 +335,30 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         )
 
     parse_error_count = int(summary.get("parse_error") or 0)
+    analyzed_python_paths = [str(path) for path in precise_meta.get("analyzed_paths", [])]
+    provider_coverage = {
+        "imports": _provider_coverage(
+            "imports",
+            entries,
+            provider_languages=IMPORT_RESOLVER_LANGUAGES,
+            analyzed_paths=[str(path) for path in import_meta.get("analyzed_paths", [])],
+            evidence_level="conservative",
+        ),
+        "symbols": _provider_coverage(
+            "symbols",
+            entries,
+            provider_languages=PYTHON_PROVIDER_LANGUAGES,
+            analyzed_paths=analyzed_python_paths,
+            evidence_level="precise",
+        ),
+        "calls": _provider_coverage(
+            "calls",
+            entries,
+            provider_languages=PYTHON_PROVIDER_LANGUAGES,
+            analyzed_paths=analyzed_python_paths,
+            evidence_level="conservative",
+        ),
+    }
     source_payloads = {
         "code_index": [entry.to_dict() for entry in entries],
         "repometa_annotation": [
@@ -331,13 +378,12 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
         "dart_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "dart_import_resolver"],
     }
     language_capabilities = graph_language_capabilities({entry.language for entry in entries})
-    limited_languages = limited_semantic_languages(language_capabilities)
     capability_completeness = {
         "source_inventory": "complete",
         "file_inventory": "complete",
-        "imports": "complete" if parse_error_count == 0 else "partial",
-        "symbols": "partial" if limited_languages or parse_error_count else "complete",
-        "calls": "partial" if limited_languages or parse_error_count else "complete",
+        "imports": provider_coverage["imports"].status,
+        "symbols": provider_coverage["symbols"].status,
+        "calls": provider_coverage["calls"].status,
         "task_history": "partial" if receipt_problems else "complete",
     }
     overall_completeness = "complete" if all(value == "complete" for value in capability_completeness.values()) else "partial"
@@ -366,13 +412,22 @@ def build_graph(root: Path, *, target: RepoTarget) -> tuple[GraphSnapshot | None
             "code_facts_complete": parse_error_count == 0,
             "parse_error_count": parse_error_count,
             "provider_failures": [problem.to_dict() for problem in receipt_problems],
+            "provider_coverage": {name: coverage.to_dict() for name, coverage in sorted(provider_coverage.items())},
             "language_capabilities": language_capabilities,
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
         capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls", "cross_file_import_calls", "language_capabilities"],
     ).with_digest()
-    return snapshot, problems, {"repository": target.to_dict(), "index": summary, "metadata": metadata_meta.get("summary", {}), "precise_provider": precise_meta, "precise_calls": precise_call_meta, "language_capabilities": language_capabilities}
+    return snapshot, problems, {
+        "repository": target.to_dict(),
+        "index": summary,
+        "metadata": metadata_meta.get("summary", {}),
+        "precise_provider": precise_meta,
+        "import_resolvers": import_meta,
+        "provider_coverage": {name: coverage.to_dict() for name, coverage in sorted(provider_coverage.items())},
+        "language_capabilities": language_capabilities,
+    }
 
 
 def _node_by_id(snapshot: GraphSnapshot) -> dict[str, GraphNode]:
@@ -470,14 +525,18 @@ def _query_warnings(snapshot: GraphSnapshot) -> list[dict[str, str]]:
         )
     for failure in snapshot.completeness.get("provider_failures", []):
         warnings.append({"code": "graph_provider_failure", "message": str(failure)})
-    capabilities = snapshot.completeness.get("language_capabilities")
-    if isinstance(capabilities, dict):
-        limited = limited_semantic_languages(capabilities)
-        if limited:
+    coverage = snapshot.completeness.get("provider_coverage")
+    if isinstance(coverage, dict):
+        incomplete = {
+            name: value.get("status")
+            for name, value in sorted(coverage.items())
+            if isinstance(value, dict) and value.get("status") != "complete"
+        }
+        if incomplete:
             warnings.append(
                 {
-                    "code": "graph_language_capability",
-                    "message": f"language providers for {limited} are inventory/evidence only; CALLS/REFERENCES require provider-confirmed edges",
+                    "code": "graph_provider_coverage",
+                    "message": f"semantic provider coverage is incomplete: {incomplete}",
                 }
             )
     return warnings
@@ -548,7 +607,7 @@ def _empty_query_payload(snapshot: GraphSnapshot, *, query: dict[str, Any], quer
     return _query_payload(snapshot, query=query, node_ids=set(), edges=[], warnings=warnings, query_status=query_status)
 
 
-def _semantic_query_status(snapshot: GraphSnapshot, *, in_file: str) -> tuple[str, dict[str, str] | None]:
+def _semantic_query_status(snapshot: GraphSnapshot, *, capability_name: str, in_file: str) -> tuple[str, dict[str, str] | None]:
     capabilities = snapshot.completeness.get("language_capabilities")
     capabilities = capabilities if isinstance(capabilities, dict) else {}
     normalized_file = normalize_repo_path(in_file) if in_file else ""
@@ -562,17 +621,29 @@ def _semantic_query_status(snapshot: GraphSnapshot, *, in_file: str) -> tuple[st
             }
         file_node = _node_by_id(snapshot).get(file_id(str(snapshot.repository.get("id") or ""), normalized_file))
         index = file_node.facts.get("index") if file_node is not None and isinstance(file_node.facts.get("index"), dict) else {}
+        if index.get("classification") == "excluded":
+            return "unsupported", {
+                "code": "graph_query_unsupported",
+                "message": f"semantic analysis is excluded by policy for {normalized_file}",
+            }
         if index and index.get("parse_status") != "ok":
             return "unavailable", {
                 "code": "graph_query_unavailable",
                 "message": f"the semantic provider could not parse {normalized_file}",
             }
         return "found", None
-    precise_languages = [language for language, value in capabilities.items() if isinstance(value, dict) and value.get("precise_semantics")]
-    if not precise_languages and capabilities:
+    capability_statuses = snapshot.completeness.get("capabilities")
+    capability_statuses = capability_statuses if isinstance(capability_statuses, dict) else {}
+    coverage_status = str(capability_statuses.get(capability_name) or "")
+    if coverage_status == "unsupported":
         return "unsupported", {
             "code": "graph_query_unsupported",
-            "message": "no provider-confirmed symbol/call capability is available for the indexed languages",
+            "message": f"no provider-confirmed {capability_name} capability is available for the indexed source files",
+        }
+    if coverage_status == "unavailable":
+        return "unavailable", {
+            "code": "graph_query_unavailable",
+            "message": f"the {capability_name} provider could not analyze the indexed source files",
         }
     return "found", None
 
@@ -664,7 +735,8 @@ def query_graph(
         return matches[0], _query_payload(snapshot, query=query, node_ids={matches[0].id}, edges=_definition_edges(snapshot, {matches[0].id}), matches=match_payloads), []
 
     if selector in {"symbol", "callers_of", "callees_of", "impact_symbol"}:
-        semantic_status, semantic_warning = _semantic_query_status(snapshot, in_file=in_file)
+        capability_name = "symbols" if selector == "symbol" else "calls"
+        semantic_status, semantic_warning = _semantic_query_status(snapshot, capability_name=capability_name, in_file=in_file)
         if semantic_status in {"unsupported", "unavailable"}:
             query = {"type": selector, "symbol": value}
             if in_file:

@@ -684,26 +684,6 @@ def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -
             raise RepoctlError(f"task completion receipt has invalid changed entry old_path: {rel}", code="invalid_completion_receipt", path=rel)
 
 
-def load_completion_receipts(root: Path, *, repo_id: str | None = None) -> list[dict[str, Any]]:
-    directory = _state_dir(root) / "completions"
-    if not directory.is_dir():
-        return []
-    receipts: list[dict[str, Any]] = []
-    for path in sorted(directory.glob("T-*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RepoctlError(f"task completion receipt is unreadable: {path.relative_to(root).as_posix()}") from exc
-        if not isinstance(data, dict):
-            raise RepoctlError(f"task completion receipt has invalid schema: {path.relative_to(root).as_posix()}", code="invalid_completion_receipt", path=path.relative_to(root).as_posix())
-        receipt_repo_id = _completion_receipt_repo_id(path, root, data)
-        if repo_id is not None and receipt_repo_id != repo_id:
-            continue
-        _validate_completion_receipt(path, root, data)
-        receipts.append(data)
-    return receipts
-
-
 def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tuple[list[dict[str, Any]], list[Problem]]:
     directory = _state_dir(root) / "completions"
     if not directory.is_dir():
@@ -1209,13 +1189,14 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
             entry = f"{entry}\n{_repo_head_entry(head, copy=copy)}"
             _write_repo_baseline(root, task, baseline_entries, git_state, target)
     text = append_section_entry(text, "Execution Log", entry)
-    handoff = (
-        f"- Next exact step: {copy['start_handoff_next'].format(task_path=task.rel_path)}\n"
-        f"- First file to open: `{task.rel_path}`\n"
-        "- First command to run: `./scripts/repoctl task list --json`\n"
-        f"- Done when: {copy['start_handoff_done']}\n"
-    )
-    text = replace_section(text, "Handoff", handoff)
+    if task.status == "todo":
+        handoff = (
+            f"- Next exact step: {copy['start_handoff_next'].format(task_path=task.rel_path)}\n"
+            f"- First file to open: `{task.rel_path}`\n"
+            "- First command to run: `./scripts/repoctl task list --json`\n"
+            f"- Done when: {copy['start_handoff_done']}\n"
+        )
+        text = replace_section(text, "Handoff", handoff)
     warnings: list[Problem] = []
     if dirty and not repo_scoped and not force_dirty:
         warnings.append(Problem("warning", "root_task_repo_dirty_recorded", "task started with existing repos/ dirty state recorded for baseline only", task.rel_path))
@@ -1262,7 +1243,7 @@ def _verification_body(verification: VerificationInput, diff_evidence: str, *, m
         normalized_body = _normalize_verification_artifact(verification.text)
         normalization = "strip_verification_heading_and_normalize_final_newline"
     elif verification.source == "task_section":
-        normalized_body = verification.text.strip()
+        normalized_body = _strip_generated_verification_suffix(verification.text, copy=copy).strip()
         normalization = "normalize_final_newline"
     else:
         raise RepoctlError("verification source must be external_file or task_section", code="invalid_verification_source")
@@ -1286,6 +1267,15 @@ def _verification_body(verification: VerificationInput, diff_evidence: str, *, m
         "truncated": truncated,
     }
     return body + "\n", metadata
+
+
+def _strip_generated_verification_suffix(text: str, *, copy: dict[str, Any]) -> str:
+    marker = copy["gate_summary_title"]
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == marker:
+            return "\n".join(lines[:index]).rstrip()
+    return text.rstrip()
 
 
 def _normalize_verification_artifact(verification: str) -> str:
@@ -1918,6 +1908,13 @@ def create_task_file(
     _validate_title(title)
     _validate_area(area)
     _validate_repo_ref(repo_ref)
+    if task_type not in {"task", "parent"}:
+        raise RepoctlError("--type must be 'task' or 'parent'")
+    if task_type == "parent" and (repo_id or repo_ref or area in REPO_REQUIRED_AREAS):
+        raise RepoctlError(
+            "parent tasks are root coordination only; create repo-scoped child tasks for product work",
+            code="parent_repo_scope_forbidden",
+        )
     validate_repo_ref_area(area, repo_ref)
     if repo_id and not re.match(r"^[a-z][a-z0-9_-]*$", repo_id):
         raise RepoctlError("invalid repo_id; use lowercase [a-z0-9_-] starting with a letter", code="invalid_repo_id")
@@ -1927,8 +1924,6 @@ def create_task_file(
             repo_id = target.id
         else:
             raise RepoctlError("product task requires a selected product repository; initialize repos/ or pass --repo-id for configured repositories", code="repository_selector_required")
-    if task_type not in {"task", "parent"}:
-        raise RepoctlError("--type must be 'task' or 'parent'")
     if repo_id:
         layout = repo_layout(root)
         if not layout.registry_ready:

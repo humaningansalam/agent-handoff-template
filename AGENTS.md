@@ -24,22 +24,27 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 For repo-scoped implementation tasks, use this order before editing product files:
 
 1. Start the task.
-2. Search and inspect candidate product files read-only.
-3. Record Candidate query history, Reviewed files, and the active Chosen files in `## Discovery`.
-4. Generate and read the scoped Context Pack when available.
+2. Record the explicit Candidate query in `## Discovery`.
+3. Run compact `repoctl context query` to find likely product files and tests.
+4. Inspect those files read-only; refine the query and repeat when evidence is insufficient.
+5. Record Reviewed files and the active Chosen files.
+6. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
 
 ```bash
+./scripts/repoctl task discovery add T-... --query "<query>" --json
+./scripts/repoctl context query "<query>" --repo-id main --json
+./scripts/repoctl task discovery add T-... --reviewed repos/path --chosen repos/path --json
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
-An optional bootstrap pack may be generated before Discovery for repository orientation, but it is not a required gate and must be refreshed after Chosen files exist. Context Pack is read-only evidence and never defines task scope.
+Context Pack is optional read-only evidence and never defines task scope. If generated before Chosen files exist, refresh it after Discovery before relying on its scoped view.
 
 If no active task is assigned:
 
 - Resume a live task from `docs/BOARD.md` if one exists.
 - For product work under `repos/`, create a live task with `./scripts/repoctl task create ...`.
 - For read-only questions/status checks, do not create a task.
-- Use a parent task only for coordination across multiple independently verifiable child tasks.
+- Use a root-only parent task only for coordination across multiple independently verifiable repo-scoped child tasks.
 
 Scope matrix:
 
@@ -74,7 +79,7 @@ Scope matrix:
 - Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
 - Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
 - Use `./scripts/repoctl task show T-... --summary --json` for compact task inspection, omit `--summary` when the full task body is needed, and use `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
-- When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`; `--use-task-verification` remains an explicit compatibility form. Use `--verification-file` only for an external artifact.
+- When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`. Use `--verification-file` only for an external artifact.
 - Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `--use-committed-diff`. This mode is allowed only when the recorded start HEAD is an ancestor of the current HEAD and no task-new working-tree changes remain.
 - Use `./scripts/repoctl task doctor T-... --use-committed-diff --json` to preflight that same committed-range path before finish.
 - A committed range is observed Git evidence, not proof that its commits belong to the task. repoctl does not manage commit, push, PR, deploy, or delivery ownership.

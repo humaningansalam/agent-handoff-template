@@ -126,13 +126,28 @@ def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reas
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["discovery"]["candidate_query_history"] == ["q1", "q2"]
     assert payload["data"]["discovery"]["chosen_files"] == ["repos/b.py"]
-    assert any(
-        action["command"]
-        == "./scripts/repoctl context pack --task T-20260609184046Z --repo-id main --format markdown --output .repoctl-state/context-pack/T-20260609184046Z.md"
-        for action in payload["next_actions"]
-    )
+    assert all("context pack" not in action["command"] for action in payload["next_actions"])
+    assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "scope changed: removed repos/a.py; added repos/b.py; reason=implementation moved" in task_body
+
+
+def test_task_discovery_query_returns_compact_context_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "TokenFlow.validate callers", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["next_actions"] == [
+        {
+            "label": "Find likely product files",
+            "command": "./scripts/repoctl context query 'TokenFlow.validate callers' --repo-id main --json",
+        }
+    ]
 
 
 def test_task_discovery_rejects_existing_directories_but_allows_future_files(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -194,7 +209,7 @@ def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     commands = [action.get("command", "") for action in payload["next_actions"]]
     assert any("task discovery add T-20260609184046Z" in command for command in commands)
-    assert any("task doctor T-20260609184046Z" in command for command in commands)
+    assert any("context query '<query>' --repo-id main" in command for command in commands)
 
 
 def test_task_create_blocks_when_repo_ref_uses_non_repo_area(tmp_path: Path, monkeypatch, capsys) -> None:

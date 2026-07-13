@@ -44,6 +44,14 @@ class CodeIndexEntry:
         return data
 
 
+def semantic_provider_entries(entries: list[CodeIndexEntry]) -> list[CodeIndexEntry]:
+    return [
+        entry
+        for entry in entries
+        if entry.classification != "excluded" and entry.parse_status == "ok"
+    ]
+
+
 JS_IMPORT_RE = re.compile(r"(?:import\s+(?:[^'\"]+\s+from\s+)?|require\()\s*['\"]([^'\"]+)['\"]")
 JS_SYMBOL_RE = re.compile(r"\b(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)|\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=")
 JS_CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")

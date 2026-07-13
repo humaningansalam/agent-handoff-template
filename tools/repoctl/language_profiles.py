@@ -18,6 +18,7 @@ class LanguageProfile:
     exclude_patterns: tuple[str, ...] = ()
     capability: str = "inventory evidence"
     precise_semantics: bool = False
+    semantic_source: bool = False
     notes: tuple[str, ...] = ()
 
 
@@ -46,6 +47,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         exclude_patterns=(".venv/**", "venv/**", "env/**", ".pytest_cache/**", ".mypy_cache/**", ".ruff_cache/**", ".tox/**", ".nox/**", "*.egg-info/**", "__pycache__/**", "**/__pycache__/**", "*.pyc", "*.pyo", "**/*.pyc", "**/*.pyo"),
         capability="Python AST symbols and conservative call/import evidence",
         precise_semantics=True,
+        semantic_source=True,
     ),
     LanguageProfile(
         id="javascript",
@@ -54,6 +56,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         manifest_patterns=("package.json", "jsconfig.json", "vite.config.*", "next.config.*", "playwright.config.*"),
         exclude_patterns=("node_modules/**", ".next/**", ".nuxt/**", ".svelte-kit/**", ".turbo/**", ".parcel-cache/**", ".firebase/**", ".playwright-browsers/**", "dist/**", "build/**", "coverage/**", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"),
         capability="inventory evidence and conservative relative import resolution",
+        semantic_source=True,
         notes=("No provider-confirmed CALLS/REFERENCES edges.",),
     ),
     LanguageProfile(
@@ -63,6 +66,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         manifest_patterns=("package.json", "tsconfig.json", "jsconfig.json", "vite.config.*", "next.config.*", "playwright.config.*"),
         exclude_patterns=("node_modules/**", ".next/**", ".nuxt/**", ".svelte-kit/**", ".turbo/**", ".parcel-cache/**", ".firebase/**", ".playwright-browsers/**", "dist/**", "build/**", "coverage/**", "*.tsbuildinfo", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"),
         capability="inventory evidence and conservative relative import resolution",
+        semantic_source=True,
         notes=("No provider-confirmed CALLS/REFERENCES edges.",),
     ),
     LanguageProfile(
@@ -72,6 +76,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         manifest_patterns=("pubspec.yaml", "analysis_options.yaml"),
         exclude_patterns=(".dart_tool/**", "build/**", ".flutter-plugins", ".flutter-plugins-dependencies"),
         capability="inventory evidence and conservative Dart import resolution",
+        semantic_source=True,
         notes=("No provider-confirmed widget/call/reference graph.",),
     ),
     LanguageProfile(
@@ -81,13 +86,14 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         manifest_patterns=("*.csproj", "*.sln", "Packages/manifest.json", "ProjectSettings/ProjectVersion.txt", "Assets/**/*.asmdef"),
         exclude_patterns=("Library/**", "Temp/**", "Obj/**", "obj/**", "bin/**", "Build/**", "Builds/**", "Logs/**", "UserSettings/**", "MemoryCaptures/**"),
         capability="inventory/declaration evidence",
+        semantic_source=True,
         notes=("No provider-confirmed Unity scene/prefab/reference graph.",),
     ),
-    LanguageProfile(id="go", display_name="Go", suffixes=(".go",), manifest_patterns=("go.mod",), exclude_patterns=("vendor/**", "bin/**", "coverage/**"), capability="inventory evidence"),
-    LanguageProfile(id="rust", display_name="Rust", suffixes=(".rs",), manifest_patterns=("Cargo.toml",), exclude_patterns=("target/**", "coverage/**"), capability="inventory evidence"),
-    LanguageProfile(id="java", display_name="Java/Kotlin", suffixes=(".java", ".kt", ".kts"), manifest_patterns=("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"), exclude_patterns=(".gradle/**", "build/**", "target/**", "out/**"), capability="inventory evidence"),
-    LanguageProfile(id="swift", display_name="Swift", suffixes=(".swift",), manifest_patterns=("Package.swift", "*.xcodeproj/project.pbxproj", "*.xcworkspace/contents.xcworkspacedata"), exclude_patterns=(".build/**", "DerivedData/**"), capability="inventory evidence"),
-    LanguageProfile(id="shell", display_name="Shell", suffixes=(".sh", ".bash", ".zsh"), capability="inventory evidence"),
+    LanguageProfile(id="go", display_name="Go", suffixes=(".go",), manifest_patterns=("go.mod",), exclude_patterns=("vendor/**", "bin/**", "coverage/**"), capability="inventory evidence", semantic_source=True),
+    LanguageProfile(id="rust", display_name="Rust", suffixes=(".rs",), manifest_patterns=("Cargo.toml",), exclude_patterns=("target/**", "coverage/**"), capability="inventory evidence", semantic_source=True),
+    LanguageProfile(id="java", display_name="Java/Kotlin", suffixes=(".java", ".kt", ".kts"), manifest_patterns=("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"), exclude_patterns=(".gradle/**", "build/**", "target/**", "out/**"), capability="inventory evidence", semantic_source=True),
+    LanguageProfile(id="swift", display_name="Swift", suffixes=(".swift",), manifest_patterns=("Package.swift", "*.xcodeproj/project.pbxproj", "*.xcworkspace/contents.xcworkspacedata"), exclude_patterns=(".build/**", "DerivedData/**"), capability="inventory evidence", semantic_source=True),
+    LanguageProfile(id="shell", display_name="Shell", suffixes=(".sh", ".bash", ".zsh"), capability="inventory evidence", semantic_source=True),
     LanguageProfile(id="markdown", display_name="Markdown", suffixes=(".md", ".markdown"), capability="document evidence"),
     LanguageProfile(id="json", display_name="JSON", suffixes=(".json",), capability="manifest/config evidence"),
     LanguageProfile(id="toml", display_name="TOML", suffixes=(".toml",), capability="manifest/config evidence"),
@@ -115,7 +121,7 @@ COMMON_EXCLUDE_PATTERNS: tuple[str, ...] = (
 
 LANGUAGE_BY_SUFFIX = {suffix: profile.id for profile in LANGUAGE_PROFILES for suffix in profile.suffixes}
 LANGUAGE_BY_FILENAME = {filename: profile.id for profile in LANGUAGE_PROFILES for filename in profile.filenames}
-SEMANTIC_CAPABILITY_WARNING_LANGUAGES = {"javascript", "typescript", "dart", "csharp", "go", "rust", "java", "swift"}
+PROFILE_BY_ID = {profile.id: profile for profile in LANGUAGE_PROFILES}
 
 DART_IMPORT_RE = re.compile(r"\bimport\s+['\"]([^'\"]+)['\"]")
 CS_DECL_RE = re.compile(r"\b(?:class|struct|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)")
@@ -145,10 +151,9 @@ def language_for_path(path: str) -> str:
 
 
 def graph_language_capabilities(languages: set[str]) -> dict[str, Any]:
-    profiles = {profile.id: profile for profile in LANGUAGE_PROFILES}
     result: dict[str, Any] = {}
     for language in sorted(language for language in languages if language):
-        profile = profiles.get(language)
+        profile = PROFILE_BY_ID.get(language)
         if profile is None:
             result[language] = {"capability": "inventory evidence", "precise_semantics": False, "notes": ["No registered language profile."]}
             continue
@@ -156,19 +161,15 @@ def graph_language_capabilities(languages: set[str]) -> dict[str, Any]:
             "display_name": profile.display_name,
             "capability": profile.capability,
             "precise_semantics": profile.precise_semantics,
+            "semantic_source": profile.semantic_source,
             "notes": list(profile.notes),
         }
     return result
 
 
-def limited_semantic_languages(capabilities: dict[str, Any]) -> list[str]:
-    return [
-        language
-        for language, capability in sorted(capabilities.items())
-        if language in SEMANTIC_CAPABILITY_WARNING_LANGUAGES
-        and isinstance(capability, dict)
-        and not capability.get("precise_semantics")
-    ]
+def is_semantic_source_language(language: str) -> bool:
+    profile = PROFILE_BY_ID.get(language)
+    return bool(profile and profile.semantic_source)
 
 
 def index_dart(text: str) -> tuple[list[str], list[str], list[str], str, str]:

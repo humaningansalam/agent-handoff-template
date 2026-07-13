@@ -28,6 +28,7 @@ PRODUCT_DOCUMENT_PATTERNS = (
     "docs/*.md",
 )
 EXCLUDED_PARTS = {".repoctl-state", "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".firebase", ".dart_tool", "Library", "Temp", "Obj", "obj", "Build", "Builds", "Logs", "UserSettings", "node_modules", "dist", "build", "target"}
+MAX_CURRENT_SOURCE_BYTES = 128 * 1024
 
 
 def collect_context_sources(
@@ -37,6 +38,7 @@ def collect_context_sources(
     snapshot: GraphSnapshot | None,
     graph_problems: list[Problem],
     graph_meta: dict[str, Any],
+    include_history: bool = False,
 ) -> tuple[list[DocumentChunk], dict[str, str], dict[str, Any], list[Problem]]:
     chunks: list[DocumentChunk] = []
     problems: list[Problem] = []
@@ -64,25 +66,31 @@ def collect_context_sources(
         text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
         chunks.append(chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}"))
 
-    receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
-    receipt_warnings = [
-        Problem(
-            "warning",
-            "context_completion_receipt_invalid",
-            f"{problem.message}; receipt excluded from this Context bundle",
-            problem.path,
-        )
-        for problem in receipt_problems
-    ]
-    problems.extend(receipt_warnings)
-    for receipt in receipts:
-        rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
-        text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
-        chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=str(receipt.get("task_id") or "completion receipt")))
-        for artifact in _receipt_artifacts(receipt):
-            artifact_path = root / artifact
-            if artifact_path.is_file():
-                chunks.extend(chunk_markdown_file(root, artifact_path, kind="task_artifact"))
+    receipts: list[dict[str, Any]] = []
+    receipt_warnings: list[Problem] = []
+    if include_history:
+        receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
+        receipt_warnings = [
+            Problem(
+                "warning",
+                "context_completion_receipt_invalid",
+                f"{problem.message}; receipt excluded from this Context bundle",
+                problem.path,
+            )
+            for problem in receipt_problems
+        ]
+        for receipt in receipts:
+            rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
+            text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
+            chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=str(receipt.get("task_id") or "completion receipt")))
+            for artifact in _receipt_artifacts(receipt):
+                artifact_path = root / artifact
+                if artifact_path.is_file():
+                    chunks.extend(chunk_markdown_file(root, artifact_path, kind="task_artifact"))
+
+    invalid_receipt_problems = [problem for problem in graph_problems if problem.code == "invalid_completion_receipt"]
+    reported_receipt_problems = invalid_receipt_problems or receipt_warnings
+    receipt_problem_paths = sorted(problem.path or "" for problem in reported_receipt_problems if problem.path)
 
     graph_context_problems = _context_graph_problems(graph_problems)
     problems.extend(graph_context_problems)
@@ -91,8 +99,9 @@ def collect_context_sources(
             "documents_checked": len(document_paths),
             "manifests_checked": len(manifest_paths),
             "receipts_checked": len(receipts),
-            "receipt_problem_count": len(receipt_warnings),
-            "receipt_problem_paths": sorted(problem.path or "" for problem in receipt_warnings if problem.path),
+            "history_loaded": include_history,
+            "receipt_problem_count": len(reported_receipt_problems),
+            "receipt_problem_paths": receipt_problem_paths,
             "graph_available": False,
             "graph_meta": graph_meta,
         }
@@ -101,14 +110,17 @@ def collect_context_sources(
             "receipt_manifest_digest": digest_data(receipts),
         }, completeness, problems
 
-    graph_chunks = _graph_chunks(root, snapshot.to_dict())
-    chunks.extend(graph_chunks)
+    current_source_chunks, current_source_problems = _current_source_chunks(root, target=target, snapshot=snapshot, existing_paths={chunk.source_ref.path for chunk in chunks})
+    chunks.extend(current_source_chunks)
+    problems.extend(current_source_problems)
     completeness = {
         "documents_checked": len(document_paths),
         "manifests_checked": len(manifest_paths),
         "receipts_checked": len(receipts),
-        "receipt_problem_count": len(receipt_warnings),
-        "receipt_problem_paths": sorted(problem.path or "" for problem in receipt_warnings if problem.path),
+        "current_sources_checked": len(current_source_chunks),
+        "history_loaded": include_history,
+        "receipt_problem_count": len(reported_receipt_problems),
+        "receipt_problem_paths": receipt_problem_paths,
         "graph_available": True,
         "graph_meta": graph_meta,
         "graph_completeness": snapshot.completeness,
@@ -116,9 +128,47 @@ def collect_context_sources(
     source_snapshots = {
         "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest", "verification_hint"}]),
         "receipt_manifest_digest": digest_data(receipts),
+        "current_source_manifest_digest": _manifest_digest(current_source_chunks),
         "graph_digest": snapshot.snapshot_digest,
     }
     return chunks, source_snapshots, completeness, problems
+
+
+def _current_source_chunks(
+    root: Path,
+    *,
+    target: RepoTarget,
+    snapshot: GraphSnapshot,
+    existing_paths: set[str],
+) -> tuple[list[DocumentChunk], list[Problem]]:
+    chunks: list[DocumentChunk] = []
+    problems: list[Problem] = []
+    for node in snapshot.nodes:
+        if node.kind != "file":
+            continue
+        identity = node.identity if isinstance(node.identity, dict) else {}
+        facts = node.facts if isinstance(node.facts, dict) else {}
+        index = facts.get("index") if isinstance(facts.get("index"), dict) else {}
+        if str(index.get("classification") or "") == "excluded":
+            continue
+        workspace_path = str(identity.get("workspace_path") or "")
+        repo_path = str(identity.get("path") or "")
+        if not workspace_path or workspace_path in existing_paths:
+            continue
+        path = root / workspace_path
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_CURRENT_SOURCE_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        except OSError as exc:
+            problems.append(Problem("warning", "context_current_source_unreadable", str(exc), workspace_path))
+            continue
+        if not text.strip():
+            continue
+        chunks.append(chunk_text_source(root, workspace_path, text, kind="current_source", section=repo_path or path.name))
+    return chunks, problems
 
 
 def _document_paths(root: Path, *, target: RepoTarget) -> list[Path]:
@@ -150,18 +200,6 @@ def _receipt_artifacts(receipt: dict[str, Any]) -> list[str]:
             if value:
                 values.append(value)
     return sorted(set(values))
-
-
-def _graph_chunks(root: Path, snapshot: dict[str, Any]) -> list[DocumentChunk]:
-    chunks: list[DocumentChunk] = []
-    for node in snapshot.get("nodes", []):
-        if not isinstance(node, dict):
-            continue
-        identity = node.get("identity") if isinstance(node.get("identity"), dict) else {}
-        label = str(identity.get("path") or identity.get("topic") or identity.get("task_id") or identity.get("provider_symbol_id") or node.get("id") or "")
-        text = json.dumps(node, ensure_ascii=False, sort_keys=True)
-        chunks.append(chunk_text_source(root, f"<graph:{node.get('id', '')}>", text, kind="graph_node", section=f"{node.get('kind', 'node')} {label}"))
-    return chunks
 
 
 def _context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:

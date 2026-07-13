@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
-from tools.repoctl.graph_model import digest_data, file_id
+from tools.repoctl.graph_model import digest_data
 from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
 from tests.repoctl.context_test_helpers import (
     _approve_deprecated_context_knowledge,
@@ -398,11 +398,11 @@ def test_context_benchmark_import_impact_passes_after_resolution(tmp_path: Path,
     (fixture / "expected-sources.json").write_text(
         json.dumps(
             {
-                "Q-IMPACT-IMPORT": {
-                    "must_find": [
-                        {"path": f"<graph:{file_id('main', 'utils/tokens.py')}>"},
-                        {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"},
-                    ],
+                    "Q-IMPACT-IMPORT": {
+                        "must_find": [
+                            {"path": "repos/utils/tokens.py"},
+                            {"path": "repos/handlers/login.py"},
+                        ],
                     "required_knowledge_source_refs": [],
                     "acceptable": [],
                     "supporting": [],
@@ -422,7 +422,7 @@ def test_context_benchmark_import_impact_passes_after_resolution(tmp_path: Path,
     assert result["metrics"]["recall_at_5"] == 1.0
     assert impact_summary["question_count"] == 1
     assert impact_summary["mean_recall_at_5"] == result["metrics"]["recall_at_5"]
-    assert {"path": f"<graph:{file_id('main', 'handlers/login.py')}>"} in result["required_found_at_5"]
+    assert {"path": "repos/handlers/login.py"} in result["required_found_at_5"]
     assert payload["data"]["gates"]["min_category_recall_at_5"] == {}
 
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--repo-id", "main", "--min-category-recall-at-5", "impact=1.0", "--json"]) == 0
@@ -457,8 +457,8 @@ def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: 
         encoding="utf-8",
     )
     foreign = ContextCandidate(
-        source_ref=ContextSourceRef(kind="graph_node", path="<graph:repo:api:file:app.py>", section="file app.py", content_sha256="sha256:" + "0" * 64),
-        text='{"identity":{"repo_id":"api","path":"app.py"}}',
+        source_ref=ContextSourceRef(kind="current_source", path="repos/api/app.py", section="app.py", content_sha256="sha256:" + "0" * 64),
+        text="def api_only(): pass",
         score=1.0,
         score_breakdown={"exact": 1.0},
     )
@@ -485,7 +485,7 @@ def test_context_benchmark_cross_repo_gate_fails_on_foreign_graph_ref(tmp_path: 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["summary"]["cross_repo_ref_count"] == 2
     assert payload["data"]["summary"]["mean_verification_hint_accuracy"] == 1.0
-    assert payload["data"]["results"][0]["cross_repo_refs"][0]["path"] == "<graph:repo:api:file:app.py>"
+    assert payload["data"]["results"][0]["cross_repo_refs"][0]["path"] == "repos/api/app.py"
     assert payload["problems"][0]["code"] == "context_benchmark_cross_repo_leakage"
 
 

@@ -7,6 +7,9 @@ from posixpath import normpath
 from .code_index import CodeIndexEntry
 
 
+IMPORT_RESOLVER_LANGUAGES = frozenset({"python", "javascript", "typescript", "dart"})
+
+
 @dataclass(frozen=True)
 class ImportResolution:
     importer_path: str
@@ -25,7 +28,7 @@ class ImportResolution:
         }
 
 
-def resolve_code_imports(entries: list[CodeIndexEntry], *, repo: Path | None = None) -> list[ImportResolution]:
+def resolve_code_imports(entries: list[CodeIndexEntry], *, repo: Path | None = None) -> tuple[list[ImportResolution], dict[str, object]]:
     file_paths = {entry.path for entry in entries}
     dart_package_name = _dart_package_name(repo) if repo is not None else ""
     resolutions: list[ImportResolution] = []
@@ -54,7 +57,12 @@ def resolve_code_imports(entries: list[CodeIndexEntry], *, repo: Path | None = N
                         provider=provider,
                     )
                 )
-    return sorted(resolutions, key=lambda item: (item.importer_path, item.raw_import, item.target_path))
+    return sorted(resolutions, key=lambda item: (item.importer_path, item.raw_import, item.target_path)), {
+        "providers": ["python_import_resolver", "js_ts_relative_import_resolver", "dart_import_resolver"],
+        "languages": sorted(IMPORT_RESOLVER_LANGUAGES),
+        "analyzed_paths": sorted(entry.path for entry in entries if entry.language in IMPORT_RESOLVER_LANGUAGES),
+        "resolution_count": len(resolutions),
+    }
 
 
 def _resolve_repo_local_python_import(raw_import: str, file_paths: set[str], *, importer_path: str) -> str:

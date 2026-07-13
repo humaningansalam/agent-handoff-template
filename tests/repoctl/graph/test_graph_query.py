@@ -104,4 +104,22 @@ def test_graph_call_query_reports_unsupported_language_instead_of_not_found(tmp_
     assert payload["ok"] is False
     assert payload["data"]["query_status"] == "unsupported"
     assert payload["data"]["result"]["query_status"] == "unsupported"
-    assert payload["data"]["completeness"]["capabilities"]["calls"] == "partial"
+    assert payload["data"]["completeness"]["capabilities"]["calls"] == "unsupported"
+
+
+def test_graph_shell_only_repo_reports_provider_coverage_as_unsupported(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "run.sh").write_text("#!/bin/sh\nrun_task() { echo ok; }\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--symbol", "run_task", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    completeness = payload["data"]["completeness"]
+    assert payload["data"]["query_status"] == "unsupported"
+    assert completeness["capabilities"]["symbols"] == "unsupported"
+    assert completeness["capabilities"]["calls"] == "unsupported"
+    assert completeness["provider_coverage"]["symbols"]["unsupported_paths"] == ["run.sh"]

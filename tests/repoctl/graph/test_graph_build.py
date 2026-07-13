@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 from pathlib import Path
@@ -11,7 +12,7 @@ from tools.repoctl.graph_model import canonical_json, file_id, import_ref_id, to
 from tools.repoctl.repositories import require_repo_target
 from tools.repoctl.tasks import Problem
 from tests.repoctl.workspace.test_check import write_workspace
-from tests.repoctl.meta.test_meta_check import write_repometa
+from tests.repoctl.meta.test_meta_check import BASE_POLICY, write_repometa
 from tests.repoctl.repository.test_repositories import init_repo, write_settings
 
 
@@ -265,6 +266,28 @@ def test_graph_python_ast_provider_adds_symbol_and_anchor_nodes(tmp_path: Path, 
     assert any(node["kind"] == "anchor" and node["identity"]["path"] == "service.py" for node in snapshot["nodes"])
     assert any(edge["kind"] == "DEFINES" and edge["from"] == file_id("main", "service.py") for edge in snapshot["edges"])
     assert any(edge["kind"] == "ANCHORS" and edge["assertion"] == "resolved" and edge["source"] == "python_ast" for edge in snapshot["edges"])
+
+
+def test_graph_semantic_providers_respect_hard_excludes(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    policy = copy.deepcopy(BASE_POLICY)
+    policy["indexing"]["exclude"].append("secret.py")
+    write_repometa(repo, policy=policy, exclusions={"visible.py": {"reason": "annotation exemption"}})
+    (repo / "secret.py").write_text("def hidden_symbol():\n    return 1\n", encoding="utf-8")
+    (repo / "visible.py").write_text("def visible_symbol():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--full", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    symbols = [node for node in snapshot["nodes"] if node["kind"] == "symbol"]
+    assert {node["facts"]["provider"]["qualified_name"] for node in symbols} == {"visible_symbol"}
+    secret = next(node for node in snapshot["nodes"] if node["id"] == file_id("main", "secret.py"))
+    assert secret["facts"]["index"]["classification"] == "excluded"
+    assert secret["facts"]["index"]["parse_status"] == "skipped"
+    assert not any(edge["kind"] in {"DEFINES", "ANCHORS", "CALLS", "IMPORTS_FILE"} and edge["from"] == secret["id"] for edge in snapshot["edges"])
 
 def test_graph_python_ast_provider_distinguishes_nested_function_from_method(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

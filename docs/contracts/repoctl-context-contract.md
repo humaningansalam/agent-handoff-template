@@ -11,9 +11,13 @@ Context is not authoritative. Source authorities remain the repo registry, sourc
 ./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --mode authority --format markdown
 ```
 
-`--mode` is optional. When omitted, repoctl classifies the query deterministically. Supported modes are:
+`--mode` is optional. When omitted, `auto` performs lexical retrieval over current sources and documents, then expands bounded Graph relationships from the top current-source results. It does not infer intent from query wording. Knowledge and historical task evidence require an explicit mode.
+
+Supported modes are:
 
 ```text
+auto
+startup_reading
 code_location
 call_impact
 file_impact
@@ -23,7 +27,7 @@ invariant
 failure_mode
 ```
 
-Hyphenated aliases such as `call-impact` are accepted.
+Hyphenated aliases such as `call-impact` are accepted. `authority` and `contract` map to `authority_or_contract`.
 
 ## Bundle
 
@@ -64,6 +68,8 @@ supporting_evidence
 warnings_and_completeness
 ```
 
+`reviewed_knowledge` is populated only for explicit `authority_or_contract`, `invariant`, `past_decision`, or `failure_mode` queries. Completion receipts and archived task artifacts are loaded only for explicit `past_decision` or `failure_mode` queries.
+
 Every grouped evidence item keeps `repo_id`, `status`, `source_ref`, `content_sha256`, `selection_reason`, and deterministic scoring or relation evidence when available.
 
 ## Graph Evidence
@@ -96,7 +102,7 @@ Markdown output is a view. It must not be ingested as a future Context, Knowledg
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
-The normal repo-scoped flow is read-only candidate inspection, structured Discovery, then a scoped Context Pack before editing. The pack is non-authoritative. A bootstrap pack before Discovery is optional orientation rather than a lifecycle gate. Default `--json` output is compact and contains:
+The normal repo-scoped flow is: record a Candidate query, run compact `context query`, inspect the suggested product files, refine and repeat the query when needed, then record Reviewed and Chosen files before editing. Default retrieval does not infer intent from Goal or Handoff prose: it ranks current source lexically, then expands only the bounded Graph relations of the top source results. A scoped Context Pack is optional durable handoff evidence, not an edit gate. The pack is non-authoritative. Default `--json` output is compact and contains:
 
 ```text
 stage
@@ -109,7 +115,6 @@ supporting_evidence
 likely_change
 impact
 verification
-reviewed_knowledge
 warnings
 ```
 
@@ -117,11 +122,13 @@ Use `--full --json` to include the raw nested Context bundle and debug candidate
 
 When `--output` is supplied, the full requested artifact is written to that path. Markdown stdout reports only the artifact path instead of duplicating the complete pack; omit `--output` when the rendered Markdown itself is required on stdout.
 
-`stage: bootstrap` is available before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, and capability warnings; it must not add raw task history or Graph noise and is not required before initial file inspection. `stage: scoped` is used after Discovery has an active Chosen set and is the implementation pack. Chosen/current source and directly connected tests appear before historical receipt evidence.
+`stage: bootstrap` is available before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, and capability warnings; it must not add task history or raw Graph data and is not required before initial file inspection. `stage: scoped` is used after Discovery has an active Chosen set. Chosen/current source and directly connected tests remain the focus.
 
-`edit_candidates` contains only the active Chosen set. Reviewed but unchosen files are `supporting_evidence`. Context does not infer edit scope from task prose, receipt history, basenames, or generated/ignored files.
+`edit_candidates` contains exactly the active Chosen set. `supporting_evidence` contains Reviewed minus Chosen, so the two sets are disjoint. Context does not infer edit scope from task prose, receipt history, basenames, or generated/ignored files.
 
 Retrieval query text comes from Candidate query history. Goal and Handoff prose are not parsed as symbols. A test is directly connected only through explicit Discovery evidence, a provider-confirmed relation, or manifest mapping.
+
+Task packs do not query reviewed knowledge or completion history. Use an explicit `context query --mode ...`, `knowledge query`, or an explicit Context Doc when historical evidence is needed.
 
 `input_digest` covers task content, Discovery query history, Reviewed and Chosen sets, explicit Context Docs and their content digests, repository identity, observed HEAD/snapshot, and capability matrix. A saved pack is stale when recomputing those inputs produces a different digest; read-only commands do not rewrite it.
 
@@ -135,6 +142,8 @@ required_evidence_exceeds_budget
 ```
 
 `final_render_estimated_tokens` must not exceed `maximum_estimated_tokens` unless the required evidence alone exceeds the budget, in which case the stop reason is `required_evidence_exceeds_budget`.
+
+Each Task Pack group item records `requirement: required | optional`. Required evidence is AGENTS, the task source ref, explicit Context Docs, and scoped Chosen refs. Budget trimming may shorten excerpts and remove optional evidence, but it must never remove required source refs. Compact output also preserves every required item even when a normal display limit would be exceeded.
 
 ## Benchmark Labels
 

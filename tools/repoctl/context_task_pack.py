@@ -8,12 +8,12 @@ from typing import Any
 
 from .context import build_context_bundle
 from .context_chunks import chunk_markdown_file, chunk_text_source
-from .context_model import ContextBundle, ContextCandidate
+from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
 from .context_pack import estimate_tokens
 from .graph_model import digest_data
 from .graph import build_graph, query_graph
 from .git import normalize_repo_path, repo_git_head
-from .language_profiles import collect_verification_hints, limited_semantic_languages
+from .language_profiles import collect_verification_hints
 from .markdown import find_section
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task, task_discovery_values
@@ -86,21 +86,31 @@ def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, 
     return data, problems
 
 
-def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 5000, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
+def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 1500, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
     task = resolve_task(root, task_id)
     discovery = task_discovery_values(task)
     chosen = _without_discovery_placeholders(discovery.get("Chosen files", []))
     reviewed = _without_discovery_placeholders(discovery.get("Candidate files reviewed", []))
+    chosen_paths = {normalize_repo_path(path) for path in chosen}
+    reviewed_paths = {normalize_repo_path(path) for path in reviewed} - chosen_paths
     stage = "scoped" if chosen else "bootstrap"
     query = _task_seed_query(task)
     bundle: ContextBundle | None = None
     problems: list[Problem] = []
     meta: dict[str, Any] = {"repository": target.to_dict()}
-    if stage == "scoped" and query:
-        bundle, bundle_problems, meta = build_context_bundle(root, target=target, query=query, budget_tokens=budget_tokens, explain=explain)
-        problems.extend(bundle_problems)
     snapshot, graph_problems, graph_meta = build_graph(root, target=target)
-    problems.extend(graph_problems)
+    if query:
+        bundle, bundle_problems, meta = build_context_bundle(
+            root,
+            target=target,
+            query=query,
+            budget_tokens=budget_tokens,
+            explain=explain,
+            graph_result=(snapshot, graph_problems, graph_meta),
+        )
+        problems.extend(bundle_problems)
+    else:
+        problems.extend(graph_problems)
     task_graph_evidence = _direct_task_graph_evidence(snapshot, target=target, chosen=chosen) if stage == "scoped" and snapshot is not None else []
     mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
     problems.extend(mandatory_problems)
@@ -112,20 +122,39 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     problems.extend(fallback_problems)
     verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
     problems.extend(verification_problems)
+    allowed_bundle_kinds = {"current_source", "product_manifest", "verification_hint", "graph_query"}
     bundle_candidates = [
         candidate
         for candidate in (bundle.packed_context if bundle is not None else [])
-        if candidate.source_ref.kind not in {"completion_receipt", "task_artifact"}
-    ]
+        if candidate.source_ref.kind in allowed_bundle_kinds
+    ][:8]
+    if stage == "scoped":
+        fallback_candidates = [candidate for candidate in fallback_candidates if candidate.source_ref.kind == "product_manifest"]
     packed_context = _dedupe_candidates(
         [*required_candidates, *mandatory_candidates, *discovery_candidates, *fallback_candidates, *verification_candidates, *bundle_candidates]
     )
     groups = _group_candidates(packed_context)
-    groups["reviewed_knowledge"] = bundle.knowledge_results if stage == "scoped" and bundle is not None else []
     groups["task_graph_evidence"] = task_graph_evidence
     groups.update(_agent_pack_groups(groups, bundle))
-    groups["edit_candidates"] = _candidate_items(discovery_candidates, reason="Chosen files are the active edit scope", chosen=chosen)
-    groups["supporting_evidence"] = _candidate_items(discovery_candidates, reason="Reviewed files are supporting evidence", chosen=[])
+    groups["edit_candidates"] = _candidate_items(
+        discovery_candidates,
+        reason="Chosen files are the active edit scope",
+        allowed_paths=chosen_paths,
+    )
+    groups["supporting_evidence"] = _candidate_items(
+        discovery_candidates,
+        reason="Reviewed files are supporting evidence",
+        allowed_paths=reviewed_paths,
+    )
+    _mark_group_requirements(
+        groups,
+        required_paths={
+            "AGENTS.md",
+            task.rel_path,
+            *(_context_doc_paths(task)),
+            *chosen_paths,
+        },
+    )
     graph_completeness = snapshot.completeness if snapshot is not None else {}
     warnings = [*_pack_warnings(bundle, task), *_graph_capability_warnings(graph_completeness, graph_meta), *_pack_quality_warnings(groups, task)]
     observed_head, _head_state = repo_git_head(root, target)
@@ -220,7 +249,6 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
         ("likely_change", "Likely Change Surface"),
         ("impact", "Definitions, Callers, Imports, Dependents"),
         ("verification", "Tests And Verification Hints"),
-        ("reviewed_knowledge", "Current Decisions, Invariants, Failure Modes"),
         ("warnings", "Ambiguity And Completeness Warnings"),
     ]
     for group, title in sections:
@@ -229,7 +257,7 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
         if not isinstance(items, list) or not items:
             lines.extend(["- No evidence selected.", ""])
             continue
-        for item in items[:12]:
+        for item in _limited_group_items(items, limit=12):
             lines.extend(_markdown_item(item))
         lines.append("")
     lines.extend(
@@ -252,14 +280,13 @@ COMPACT_GROUP_LIMITS = {
     "likely_change": 5,
     "impact": 5,
     "verification": 5,
-    "reviewed_knowledge": 5,
     "warnings": 8,
 }
 
 
 def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180) -> dict[str, Any]:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-    canonical_groups = ("must_read", "edit_candidates", "supporting_evidence", "likely_change", "impact", "verification", "reviewed_knowledge", "warnings")
+    canonical_groups = ("must_read", "edit_candidates", "supporting_evidence", "likely_change", "impact", "verification", "warnings")
     compact_groups = {
         group: [_compact_pack_item(item, excerpt_chars=excerpt_chars) for item in _compact_group_items(groups.get(group) or [], group)]
         for group in canonical_groups
@@ -294,13 +321,23 @@ def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180)
 
 
 def _compact_group_items(items: list[Any], group: str) -> list[dict[str, Any]]:
-    limit = COMPACT_GROUP_LIMITS[group]
-    filtered = [item for item in items if isinstance(item, dict) and not _is_noisy_pack_item(item)]
-    if group in {"must_read", "warnings"}:
-        selected = filtered
-    else:
-        selected = filtered[:limit]
-    return selected[:limit]
+    return _limited_group_items(items, limit=COMPACT_GROUP_LIMITS[group], filter_noisy=True)
+
+
+def _limited_group_items(items: list[Any], *, limit: int, filter_noisy: bool = False) -> list[dict[str, Any]]:
+    filtered = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and (
+            not filter_noisy
+            or item.get("requirement") == "required"
+            or not _is_noisy_pack_item(item)
+        )
+    ]
+    required = [item for item in filtered if item.get("requirement") == "required"]
+    optional = [item for item in filtered if item.get("requirement") != "required"]
+    return [*required, *optional[: max(0, limit - len(required))]]
 
 
 def _compact_seed(seed: dict[str, Any]) -> dict[str, Any]:
@@ -332,7 +369,7 @@ def _compact_pack_summary(groups: dict[str, list[dict[str, Any]]], metrics: dict
 
 def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    for key in ("status", "record_id", "code", "selection_reason"):
+    for key in ("status", "record_id", "code", "selection_reason", "requirement"):
         if item.get(key):
             compact[key] = item[key]
     ref = item.get("source_ref")
@@ -398,7 +435,6 @@ def compare_task_context_packs(
     baseline_path: Path,
     candidate_path: Path,
     max_must_read_drop: int | None = None,
-    max_reviewed_knowledge_drop: int | None = None,
     require_warning_stability: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     problems: list[Problem] = []
@@ -410,19 +446,15 @@ def compare_task_context_packs(
         "must_read": _group_count_delta(baseline, candidate, "must_read"),
         "maybe_relevant": _group_count_delta(baseline, candidate, "maybe_relevant"),
         "verification_hints": _group_count_delta(baseline, candidate, "verification_hints"),
-        "reviewed_knowledge": _group_count_delta(baseline, candidate, "reviewed_knowledge"),
     }
     metric_deltas = _metric_deltas(baseline, candidate)
     missing_refs = _missing_group_refs(baseline, candidate, "must_read")
-    missing_reviewed_ids = _missing_reviewed_knowledge_ids(baseline, candidate)
     warning_deltas = _warning_deltas(baseline, candidate)
     regressions = _pack_regressions(
         count_deltas,
         missing_refs,
-        missing_reviewed_ids,
         warning_deltas,
         max_must_read_drop=max_must_read_drop,
-        max_reviewed_knowledge_drop=max_reviewed_knowledge_drop,
         require_warning_stability=require_warning_stability,
     )
     problems.extend(regressions)
@@ -435,11 +467,9 @@ def compare_task_context_packs(
         "metric_deltas": metric_deltas,
         "warning_deltas": warning_deltas,
         "missing_must_read_refs": missing_refs,
-        "missing_reviewed_knowledge_ids": missing_reviewed_ids,
         "regressions": [problem.to_dict() for problem in regressions],
         "gates": {
             "max_must_read_drop": max_must_read_drop,
-            "max_reviewed_knowledge_drop": max_reviewed_knowledge_drop,
             "require_warning_stability": require_warning_stability,
         },
     }, problems
@@ -450,7 +480,7 @@ def run_task_context_pack_benchmark(
     *,
     target: RepoTarget,
     fixture: Path,
-    budget_tokens: int = 5000,
+    budget_tokens: int = 1500,
     explain: bool = False,
     min_must_read_recall: float | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
@@ -556,17 +586,17 @@ def _required_task_candidates(root: Path, *, target: RepoTarget, task: Task) -> 
         except (OSError, UnicodeDecodeError) as exc:
             problems.append(Problem("warning", "context_pack_required_source_unreadable", str(exc), rel_path))
             continue
-        for chunk in chunks[:4]:
-            candidates.append(
-                ContextCandidate(
-                    source_ref=chunk.source_ref,
-                    text=chunk.text,
-                    score=120.0,
-                    score_breakdown={"required_task_context": 1.0},
-                    selection_reasons=["Required bootstrap evidence"],
-                    graph_path=[],
-                )
+        chunk = chunks[0]
+        candidates.append(
+            ContextCandidate(
+                source_ref=chunk.source_ref,
+                text=f"Open {rel_path} directly for the canonical task context.",
+                score=120.0,
+                score_breakdown={"required_task_context": 1.0},
+                selection_reasons=["Required task context"],
+                graph_path=[],
             )
+        )
     return candidates, problems
 
 
@@ -583,7 +613,22 @@ def _discovery_file_candidates(root: Path, *, target: RepoTarget, chosen: list[s
             continue
         path = root / workspace_path
         if not path.is_file():
-            problems.append(Problem("warning", "context_pack_discovery_path_missing", "Discovery path is not a current file", workspace_path))
+            candidates.append(
+                ContextCandidate(
+                    source_ref=ContextSourceRef(
+                        kind="planned_new",
+                        path=workspace_path,
+                        section="planned new file",
+                        content_sha256=digest_data({"planned_new": workspace_path}),
+                    ),
+                    text="Chosen path has no current file content; create it before editing or keep it as an intentional deletion.",
+                    score=score,
+                    score_breakdown={"structured_discovery": 1.0},
+                    selection_reasons=[f"{reason}; current content unavailable"],
+                    graph_path=[],
+                )
+            )
+            problems.append(Problem("warning", "context_pack_planned_new_file", "Chosen path has no current file content", workspace_path))
             continue
         try:
             if path.suffix.lower() in {".md", ".markdown"}:
@@ -607,20 +652,29 @@ def _discovery_file_candidates(root: Path, *, target: RepoTarget, chosen: list[s
     return candidates, problems
 
 
-def _candidate_items(candidates: list[ContextCandidate], *, reason: str, chosen: list[str]) -> list[dict[str, Any]]:
-    chosen_set = {normalize_repo_path(path) for path in chosen}
-    items: list[dict[str, Any]] = []
+def _candidate_items(candidates: list[ContextCandidate], *, reason: str, allowed_paths: set[str]) -> list[dict[str, Any]]:
+    items_by_path: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
         path = normalize_repo_path(candidate.source_ref.path)
-        is_chosen = path in chosen_set
-        if chosen and not is_chosen:
-            continue
-        if not chosen and is_chosen:
+        if path not in allowed_paths:
             continue
         item = candidate.to_dict()
         item["selection_reason"] = reason
-        items.append(item)
-    return _dedupe_dict_items(items)
+        items_by_path.setdefault(path, item)
+    return list(items_by_path.values())
+
+
+def _mark_group_requirements(groups: dict[str, list[dict[str, Any]]], *, required_paths: set[str]) -> None:
+    normalized_required = {normalize_repo_path(path) for path in required_paths}
+    for items in groups.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+            path = normalize_repo_path(str(ref.get("path") or ""))
+            item["requirement"] = "required" if path in normalized_required else "optional"
 
 
 def _context_doc_digest_inputs(root: Path, task: Task) -> list[dict[str, str]]:
@@ -658,17 +712,21 @@ def _explicit_context_doc_candidates(root: Path, task: Task) -> tuple[list[Conte
         if not path.is_file():
             problems.append(Problem("warning", "context_pack_context_doc_missing", "task Context Docs path is missing", rel_path))
             continue
-        for chunk in chunk_markdown_file(root, path):
-            candidates.append(
-                ContextCandidate(
-                    source_ref=chunk.source_ref,
-                    text=chunk.text,
-                    score=100.0,
-                    score_breakdown={"explicit_context_doc": 1.0},
-                    selection_reasons=["Task Context Docs explicit source"],
-                    graph_path=[],
-                )
+        try:
+            chunk = chunk_text_source(root, rel_path, path.read_text(encoding="utf-8"), kind="document", section=path.name)
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(Problem("warning", "context_pack_context_doc_unreadable", str(exc), rel_path))
+            continue
+        candidates.append(
+            ContextCandidate(
+                source_ref=chunk.source_ref,
+                text=chunk.text,
+                score=100.0,
+                score_breakdown={"explicit_context_doc": 1.0},
+                selection_reasons=["Task Context Docs explicit source"],
+                graph_path=[],
             )
+        )
     return candidates, problems
 
 
@@ -814,7 +872,9 @@ def _graph_result_item(result: dict[str, Any], *, reason: str) -> dict[str, Any]
         label = match.get("qualified_name") or match.get("path") or match.get("id")
         location = match.get("path") or ""
         lines.append(f"match {label} {location}".rstrip())
-    for path in paths[:8]:
+    relationship_paths = [path for path in paths if str(path.get("edge") or "") not in {"DEFINES", "ANCHORS"}]
+    display_paths = relationship_paths or paths
+    for path in display_paths[:8]:
         source = path.get("from") if isinstance(path.get("from"), dict) else {}
         target = path.get("to") if isinstance(path.get("to"), dict) else {}
         source_label = source.get("qualified_name") or source.get("path") or source.get("id")
@@ -1133,11 +1193,6 @@ def _ref_key(ref: dict[str, str]) -> tuple[str, str, str]:
     return (str(ref.get("kind") or ""), str(ref.get("path") or ""), str(ref.get("section") or ""))
 
 
-def _missing_reviewed_knowledge_ids(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
-    candidate_ids = set(_reviewed_knowledge_ids(candidate))
-    return sorted(record_id for record_id in _reviewed_knowledge_ids(baseline) if record_id not in candidate_ids)
-
-
 def _warning_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     baseline_codes = _warning_codes(baseline)
     candidate_codes = _warning_codes(candidate)
@@ -1172,41 +1227,19 @@ def _warning_codes(data: dict[str, Any]) -> list[str]:
     return codes
 
 
-def _reviewed_knowledge_ids(data: dict[str, Any]) -> list[str]:
-    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-    values = groups.get("reviewed_knowledge")
-    ids: list[str] = []
-    if not isinstance(values, list):
-        return ids
-    for item in values:
-        if not isinstance(item, dict):
-            continue
-        record = item.get("record") if isinstance(item.get("record"), dict) else {}
-        record_id = str(record.get("id") or "")
-        if record_id:
-            ids.append(record_id)
-    return ids
-
-
 def _pack_regressions(
     count_deltas: dict[str, dict[str, int]],
     missing_must_read_refs: list[dict[str, str]],
-    missing_reviewed_knowledge_ids: list[str],
     warning_deltas: dict[str, Any],
     *,
     max_must_read_drop: int | None,
-    max_reviewed_knowledge_drop: int | None,
     require_warning_stability: bool,
 ) -> list[Problem]:
     problems: list[Problem] = []
     if max_must_read_drop is not None and int(count_deltas["must_read"]["delta"]) < -abs(max_must_read_drop):
         problems.append(Problem("error", "context_pack_must_read_regressed", "context pack must_read count dropped more than allowed"))
-    if max_reviewed_knowledge_drop is not None and int(count_deltas["reviewed_knowledge"]["delta"]) < -abs(max_reviewed_knowledge_drop):
-        problems.append(Problem("error", "context_pack_reviewed_knowledge_regressed", "context pack reviewed_knowledge count dropped more than allowed"))
     for ref in missing_must_read_refs:
         problems.append(Problem("error", "context_pack_must_read_ref_missing", "candidate context pack is missing a baseline must_read source ref", f"{ref.get('path', '')}#{ref.get('section', '')}"))
-    for record_id in missing_reviewed_knowledge_ids:
-        problems.append(Problem("error", "context_pack_reviewed_knowledge_missing", "candidate context pack is missing a baseline reviewed knowledge record", record_id))
     if require_warning_stability:
         for code in warning_deltas.get("missing_codes", []):
             problems.append(Problem("error", "context_pack_warning_missing", "candidate context pack is missing a baseline warning code", str(code)))
@@ -1232,7 +1265,11 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
     for candidate in candidates:
         ref = candidate.source_ref
         item = candidate.to_dict()
-        if ref.kind in {"completion_receipt", "task_artifact", "verification_hint"} or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
+        if candidate.score_breakdown.get("required_task_context") or candidate.score_breakdown.get("explicit_context_doc"):
+            groups["must_read"].append(item)
+        elif candidate.score_breakdown.get("structured_discovery"):
+            continue
+        elif ref.kind == "verification_hint" or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
             groups["verification_hints"].append(item)
         elif _must_read_ref_path(ref.path):
             groups["must_read"].append(item)
@@ -1268,25 +1305,14 @@ def _looks_like_test_or_workflow_ref(path: str) -> bool:
 
 
 def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextBundle | None) -> dict[str, list[dict[str, Any]]]:
-    context_groups = bundle.groups if bundle is not None else {}
-    likely_change = [
-        *_copy_items(context_groups.get("likely_change_surface")),
-        *_copy_items(groups.get("maybe_relevant")),
-    ]
+    likely_change = _copy_items(groups.get("maybe_relevant"))
     impact = [
         *_copy_items(groups.get("task_graph_evidence")),
         *_bundle_graph_query_items(bundle),
-        *_copy_items(context_groups.get("callers_and_dependents")),
         *_copy_items(_graph_items(groups.get("maybe_relevant", []))),
     ]
-    verification = [
-        *_copy_items(context_groups.get("tests_and_verification")),
-        *_copy_items(groups.get("verification_hints")),
-    ]
-    warnings = [
-        *_copy_items(context_groups.get("warnings_and_completeness")),
-        *_warning_items(bundle),
-    ]
+    verification = _copy_items(groups.get("verification_hints"))
+    warnings = _warning_items(bundle)
     return {
         "likely_change": _dedupe_dict_items(likely_change),
         "impact": _dedupe_dict_items(impact),
@@ -1327,16 +1353,6 @@ def _warning_items(bundle: ContextBundle | None) -> list[dict[str, Any]]:
                 "status": "warning",
                 "code": "context_pack_graph_code_facts_incomplete",
                 "selection_reason": f"Graph parse errors: {graph_completeness.get('parse_error_count', 0)}",
-            }
-        )
-    lifecycle = bundle.completeness.get("knowledge_lifecycle") if isinstance(bundle.completeness.get("knowledge_lifecycle"), dict) else {}
-    excluded = lifecycle.get("excluded_statuses") if isinstance(lifecycle.get("excluded_statuses"), dict) else {}
-    for status, count in sorted(excluded.items()):
-        warnings.append(
-            {
-                "status": "warning",
-                "code": f"context_pack_knowledge_{status}_excluded",
-                "selection_reason": f"Reviewed knowledge with status {status} excluded from default pack: {count}",
             }
         )
     return warnings
@@ -1411,13 +1427,17 @@ def _graph_capability_warnings(completeness: dict[str, Any], graph_meta: dict[st
                 "message": f"Graph evidence is partial by capability: {capabilities}",
             }
         )
-    language_capabilities = graph_meta.get("language_capabilities") if isinstance(graph_meta.get("language_capabilities"), dict) else {}
-    limited = limited_semantic_languages(language_capabilities)
-    if limited:
+    provider_coverage = graph_meta.get("provider_coverage") if isinstance(graph_meta.get("provider_coverage"), dict) else {}
+    incomplete_coverage = {
+        name: value.get("status")
+        for name, value in sorted(provider_coverage.items())
+        if isinstance(value, dict) and value.get("status") != "complete"
+    }
+    if incomplete_coverage:
         warnings.append(
             {
-                "code": "context_pack_graph_language_capability",
-                "message": f"Provider-confirmed call relations are unsupported for {limited}.",
+                "code": "context_pack_graph_provider_coverage",
+                "message": f"Graph semantic provider coverage is incomplete: {incomplete_coverage}.",
             }
         )
     return warnings
@@ -1430,25 +1450,26 @@ def _apply_render_budget(data: dict[str, Any], *, budget_tokens: int) -> str:
             continue
         for item in items:
             if isinstance(item, dict) and item.get("excerpt"):
-                item["excerpt"] = _truncate_text(str(item["excerpt"]), 320)
+                item["excerpt"] = _truncate_text(str(item["excerpt"]), 220)
     estimate = estimate_tokens(render_task_context_pack_markdown(data))
     if estimate <= budget_tokens:
         return "required_evidence_satisfied"
     removed = False
-    for group in ("reviewed_knowledge", "supporting_evidence", "impact", "verification", "likely_change"):
+    for group in ("supporting_evidence", "likely_change", "impact", "verification", "must_read", "warnings"):
         items = groups.get(group)
-        while isinstance(items, list) and items and estimate > budget_tokens:
-            items.pop()
+        while isinstance(items, list) and estimate > budget_tokens:
+            optional_index = next(
+                (index for index in range(len(items) - 1, -1, -1) if items[index].get("requirement") != "required"),
+                None,
+            )
+            if optional_index is None:
+                break
+            items.pop(optional_index)
             removed = True
             estimate = estimate_tokens(render_task_context_pack_markdown(data))
     if estimate <= budget_tokens:
         return "budget_reached" if removed else "required_evidence_satisfied"
-    must_read = groups.get("must_read")
-    while isinstance(must_read, list) and len(must_read) > 2 and estimate > budget_tokens:
-        must_read.pop()
-        removed = True
-        estimate = estimate_tokens(render_task_context_pack_markdown(data))
-    return "budget_reached" if estimate <= budget_tokens and removed else "required_evidence_exceeds_budget"
+    return "required_evidence_exceeds_budget"
 
 
 def _source_ref_keys(items: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1507,15 +1528,6 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
                 "message": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
             }
         )
-    language_capabilities = graph_meta.get("language_capabilities") if isinstance(graph_meta.get("language_capabilities"), dict) else {}
-    limited_languages = limited_semantic_languages(language_capabilities)
-    if limited_languages:
-        warnings.append(
-            {
-                "code": "context_pack_graph_language_capability",
-                "message": f"Graph language providers for {limited_languages} are inventory/evidence only; do not treat them as precise CALLS/REFERENCES.",
-            }
-        )
     parse_error_count = int(graph_completeness.get("parse_error_count") or 0)
     if parse_error_count > 0 or graph_completeness.get("code_facts_complete") is False:
         warnings.append(
@@ -1532,17 +1544,6 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
                 "message": f"Graph provider failures are present; count={len(provider_failures)}",
             }
         )
-    knowledge_lifecycle = completeness.get("knowledge_lifecycle") if isinstance(completeness.get("knowledge_lifecycle"), dict) else {}
-    excluded_statuses = knowledge_lifecycle.get("excluded_statuses") if isinstance(knowledge_lifecycle.get("excluded_statuses"), dict) else {}
-    for status in ("stale", "superseded", "deprecated"):
-        count = int(excluded_statuses.get(status) or 0)
-        if count > 0:
-            warnings.append(
-                {
-                    "code": f"context_pack_knowledge_{status}_excluded",
-                    "message": f"context pack excluded {count} {status} knowledge record(s) from default reviewed knowledge",
-                }
-            )
     return warnings
 
 

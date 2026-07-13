@@ -67,6 +67,16 @@ Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--sy
       "calls": "partial",
       "task_history": "complete"
     },
+    "provider_coverage": {
+      "symbols": {
+        "status": "partial",
+        "eligible_paths": ["src/app.py", "scripts/run.sh"],
+        "analyzed_paths": ["src/app.py"],
+        "unsupported_paths": ["scripts/run.sh"],
+        "failed_paths": [],
+        "evidence_level": "precise"
+      }
+    },
     "inventory_complete": true,
     "identity_collisions": 0,
     "metadata_store_valid": true,
@@ -133,6 +143,10 @@ CALLS
 `IMPORTS_FILE` points from the importing file node to the resolved imported file node. It is added only when resolution is unambiguous.
 
 `CALLS` points from a precise provider symbol node to another precise provider symbol node. Current support covers Python provider-confirmed same-file calls, same-class method calls, and selected cross-file calls through imported Python functions. String matching alone must not create `CALLS`.
+
+All semantic providers consume the same policy-eligible Code Index entry set. `classification: excluded` files may remain inventory nodes, but they do not produce source parsing, `DEFINES`, `ANCHORS`, `CALLS`, `RESOLVES_TO`, or `IMPORTS_FILE` evidence. `excluded_override` is an annotation-policy exemption and remains eligible for semantic analysis.
+
+Python `CALLS` resolution follows lexical scopes. Nested function, class, lambda, and comprehension bindings are not attributed to the wrong scope. Parameters and local assignments/imports shadow outer symbols; module imports and simple module aliases may resolve calls; `global` and `nonlocal` declarations are honored; ambiguous or order-unsafe bindings fail closed.
 
 Impact and caller/callee queries consume `CALLS` and `IMPORTS_FILE` evidence that already exists in the snapshot. They must not create new call edges by name matching query strings.
 
@@ -270,6 +284,8 @@ Query selectors are exact typed selectors. Clients must not pass an `id` string 
 Simple symbol names are fail-closed. If a symbol selector matches multiple precise symbols, `graph query` exits nonzero with `graph_query_ambiguous_symbol` and returns candidate matches with path, qualified name, symbol kind, provider, and source range so the caller can retry with `--in-file` or a qualified name.
 
 Unsupported or incomplete provider coverage is reported through `completeness` and `warnings`; query must not claim a complete call graph when only file-level import impact is available.
+
+Capability coverage values are `complete`, `partial`, `unsupported`, or `unavailable`. They are computed from provider execution over eligible, analyzed, unsupported, and failed paths rather than a language warning allowlist. `evidence_level` separately describes whether emitted evidence is precise or conservative; it does not claim whole-language exhaustiveness.
 
 Query outcome and evidence completeness are separate axes:
 

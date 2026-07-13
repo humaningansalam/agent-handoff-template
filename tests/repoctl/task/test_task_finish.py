@@ -251,7 +251,7 @@ def test_task_finish_treats_closure_challenge_as_an_unrelated_section(tmp_path: 
     assert "## Closure\n" in archived
 
 
-def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_finish_uses_task_verification_section(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     text = task_text("T-20260609184046Z", status="doing").replace("- pending", "- Command: pytest\n- Result: pass")
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
@@ -265,7 +265,7 @@ def test_task_finish_can_use_task_verification_section(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(Path, "write_text", reject_temp_verification)
 
-    assert main(["task", "finish", "T-20260609184046Z", "--use-task-verification", "--json"]) == 0
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")

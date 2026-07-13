@@ -4,6 +4,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
 from tests.repoctl.context_test_helpers import (
@@ -20,7 +22,6 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     _write_context_docs(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
-    write_repometa(repo)
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
     shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", tmp_path / "tests/fixtures/context-pack-benchmark")
@@ -50,6 +51,10 @@ def test_release_candidate_field_gate_runner_writes_summary_artifact(tmp_path: P
     pack_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_pack_benchmark")
     assert context_summary["mean_recall_at_5"] >= 0.85
     assert pack_summary["mean_must_read_recall"] == 1.0
+    materialize_summary = next(gate["summary"] for gate in payload["data"]["gates"] if gate["name"] == "context_benchmark_materialize")
+    assert materialize_summary["temporary_repometa"]["created_count"] == 17
+    assert materialize_summary["temporary_repometa"]["auto_cleanup"]["removed_count"] == 17
+    assert not (repo / ".repometa").exists()
 
 
 def test_release_candidate_field_gate_rejects_invalid_output_before_mutation(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -188,8 +193,6 @@ def test_field_gate_compare_accepts_failed_run_artifact(tmp_path: Path, monkeypa
 
     assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", baseline.as_posix(), "--json"]) == 0
     capsys.readouterr()
-    assert main(["field-gate", "cleanup", "--artifact", baseline.as_posix(), "--json"]) == 0
-    capsys.readouterr()
     assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
@@ -215,7 +218,7 @@ def test_field_gate_compare_accepts_failed_run_artifact(tmp_path: Path, monkeypa
     assert knowledge_delta["problem_count"]["candidate"] == 1
 
 
-def test_field_gate_cleanup_removes_only_recorded_created_files(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_field_gate_run_removes_materialized_files(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
     repo = tmp_path / "repos"
@@ -229,42 +232,32 @@ def test_field_gate_cleanup_removes_only_recorded_created_files(tmp_path: Path, 
 
     assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", artifact.as_posix(), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    cleanup_count = sum(len(gate.get("cleanup", [])) for gate in payload["data"]["gates"])
-    assert cleanup_count == 17
-    assert (tmp_path / "repos/auth/flow.py").is_file()
-    assert (tmp_path / "docs/archive/tasks/T-20260624020202Z--pack-benchmark.md").is_file()
-
-    assert main(["field-gate", "cleanup", "--artifact", artifact.as_posix(), "--json"]) == 0
-    cleanup_payload = json.loads(capsys.readouterr().out)
-    assert cleanup_payload["data"]["removed_count"] == 17
+    removed_count = sum(
+        int(gate.get("summary", {}).get("auto_cleanup", {}).get("removed_count") or 0)
+        for gate in payload["data"]["gates"]
+    )
+    assert removed_count == 17
     assert not (tmp_path / "repos/auth/flow.py").exists()
     assert not (tmp_path / "repos/auth").exists()
     assert not (tmp_path / "docs/archive/tasks/T-20260624020202Z--pack-benchmark.md").exists()
     assert (tmp_path / "docs/archive/tasks").is_dir()
 
-    assert main(["field-gate", "cleanup", "--artifact", artifact.as_posix(), "--json"]) == 0
-    second_payload = json.loads(capsys.readouterr().out)
-    assert second_payload["data"]["removed_count"] == 0
-    assert second_payload["data"]["skipped_count"] == 17
 
-
-def test_field_gate_cleanup_refuses_changed_created_file(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_field_gate_run_cleans_materialized_files_when_benchmark_raises(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     _write_context_docs(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
-    write_repometa(repo)
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     shutil.copytree(source_root / "tests/fixtures/context-benchmark", tmp_path / "tests/fixtures/context-benchmark")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    artifact = tmp_path / ".repoctl-state/field-gates/release-candidate.json"
 
-    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", artifact.as_posix(), "--json"]) == 0
-    capsys.readouterr()
-    (tmp_path / "repos/auth/flow.py").write_text("user changed file\n", encoding="utf-8")
+    def fail_benchmark(*args, **kwargs):
+        raise RuntimeError("benchmark failed")
 
-    assert main(["field-gate", "cleanup", "--artifact", artifact.as_posix(), "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert any(problem["code"] == "field_gate_cleanup_digest_mismatch" and problem["path"] == "repos/auth/flow.py" for problem in payload["problems"])
-    assert (tmp_path / "repos/auth/flow.py").read_text(encoding="utf-8") == "user changed file\n"
-
+    monkeypatch.setattr("tools.repoctl.cli.run_context_benchmark", fail_benchmark)
+    with pytest.raises(RuntimeError, match="benchmark failed"):
+        main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--json"])
+    assert not (tmp_path / "repos/auth/flow.py").exists()
+    assert not (tmp_path / "repos/auth").exists()
+    assert not (repo / ".repometa").exists()

@@ -240,6 +240,16 @@ def test_task_create_parent_uses_parent_template(tmp_path: Path, monkeypatch, ca
     assert "Child tasks are discovered from child frontmatter" in text
 
 
+def test_task_create_rejects_repo_scoped_parent(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--type", "parent", "--area", "backend", "--slug", "repo-parent", "Repo Parent", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "parent_repo_scope_forbidden"
+
+
 def test_task_create_rejects_missing_parent(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)

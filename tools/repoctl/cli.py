@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -409,6 +410,52 @@ def _pack_materialize_cleanup_entries(root: Path, data: dict[str, Any]) -> list[
     return entries
 
 
+def _temporary_benchmark_metadata(root: Path, *, repo_id: str, enabled: bool) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    if not enabled:
+        return {}, []
+    target = require_repo_target(root, repo_id=repo_id)
+    metadata_root = target.root_path / ".repometa"
+    if metadata_root.exists() or any(path.name != ".git" for path in target.root_path.iterdir()):
+        return {}, []
+
+    data = init_store(root, target=target)
+    entries: list[dict[str, str]] = []
+    for rel in data.get("created", []):
+        if not isinstance(rel, str) or not rel:
+            continue
+        entry = _cleanup_entry(root, root / rel, stop_at=target.root_path)
+        if entry is not None:
+            entries.append(entry)
+    return data, entries
+
+
+def _cleanup_materialized_entries(root: Path, entries: list[dict[str, str]]) -> tuple[dict[str, Any], list[Problem]]:
+    removed: list[str] = []
+    problems: list[Problem] = []
+    for entry in entries:
+        rel = str(entry.get("path") or "")
+        expected_digest = str(entry.get("content_sha256") or "")
+        stop_rel = str(entry.get("stop_at") or "")
+        path = root / rel
+        stop_at = root / stop_rel
+        if not rel or not expected_digest or not stop_rel:
+            problems.append(Problem("error", "field_gate_materialized_entry_invalid", "field gate materialized entry is invalid", rel))
+            continue
+        if not path.is_file():
+            continue
+        if _file_digest(path) != expected_digest:
+            problems.append(Problem("error", "field_gate_materialized_file_changed", "field gate materialized file changed before automatic removal", rel))
+            continue
+        path.unlink()
+        removed.append(rel)
+        _remove_empty_parents(path.parent, stop_at=stop_at, root=root)
+    return {
+        "materialized_count": len(entries),
+        "removed_count": len(removed),
+        "removed": removed,
+    }, problems
+
+
 def _release_candidate_gate_result(
     *,
     name: str,
@@ -418,7 +465,6 @@ def _release_candidate_gate_result(
     problems: list[Problem],
     warnings: list[dict[str, str]] | None = None,
     summary: dict[str, Any] | None = None,
-    cleanup: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -426,7 +472,6 @@ def _release_candidate_gate_result(
         "ok": not _has_errors(problems),
         "mutates_workspace": mutates_workspace,
         "summary": summary or {},
-        "cleanup": cleanup or [],
         "data_digest": digest_data(data) if data else "",
         "problems": _problem_dicts(problems),
         "warnings": warnings or [],
@@ -506,84 +551,161 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
     )
 
     context_fixture = root / "tests/fixtures/context-benchmark"
-    if _repo_target_available(root, repo_id) and _fixture_has_repository(context_fixture, repo_id):
-        context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(root, fixture=context_fixture, repo_id=repo_id, force=False)
-        gates.append(
-            _release_candidate_gate_result(
-                name="context_benchmark_materialize",
-                command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
-                mutates_workspace=True,
-                data=context_materialize,
-                problems=context_materialize_problems,
-                warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
-                summary=context_materialize.get("totals", {}) if context_materialize else {},
-                cleanup=_context_materialize_cleanup_entries(root, context_materialize),
-            )
-        )
-        if not _has_errors(context_materialize_problems):
-            context_benchmark, context_benchmark_problems = run_context_benchmark(
-                root,
-                fixture=context_fixture,
-                repo_id=repo_id,
-                min_recall_at_5=0.85,
-                require_source_integrity=True,
-                require_fixture_corpus=True,
-                require_no_forbidden=True,
-            )
-            gates.append(
-                _release_candidate_gate_result(
-                    name="context_benchmark",
-                    command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
-                    mutates_workspace=False,
-                    data=context_benchmark,
-                    problems=context_benchmark_problems,
-                    warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
-                    summary={
-                        "question_count": context_benchmark.get("question_count", 0),
-                        **(context_benchmark.get("summary", {}) if isinstance(context_benchmark.get("summary"), dict) else {}),
-                    },
-                )
-            )
-
+    context_enabled = _repo_target_available(root, repo_id) and _fixture_has_repository(context_fixture, repo_id)
     pack_fixture = root / "tests/fixtures/context-pack-benchmark"
-    if _repo_target_available(root, repo_id) and (pack_fixture / "cases.json").exists():
-        if (pack_fixture / "tasks.json").exists():
-            pack_materialize, pack_materialize_problems = materialize_task_context_pack_benchmark_tasks(root, fixture=pack_fixture, force=False)
+    pack_enabled = _repo_target_available(root, repo_id) and (pack_fixture / "cases.json").exists()
+    benchmark_metadata, benchmark_metadata_entries = _temporary_benchmark_metadata(
+        root,
+        repo_id=repo_id,
+        enabled=context_enabled or pack_enabled,
+    )
+    benchmark_metadata_cleanup: dict[str, Any] = {}
+    benchmark_metadata_cleanup_problems: list[Problem] = []
+
+    def cleanup_benchmark_metadata() -> None:
+        nonlocal benchmark_metadata_cleanup, benchmark_metadata_cleanup_problems, benchmark_metadata_entries
+        if not benchmark_metadata_entries:
+            return
+        benchmark_metadata_cleanup, benchmark_metadata_cleanup_problems = _cleanup_materialized_entries(root, benchmark_metadata_entries)
+        benchmark_metadata_entries = []
+
+    if context_enabled:
+        try:
+            context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(root, fixture=context_fixture, repo_id=repo_id, force=False)
+            context_cleanup_entries = _context_materialize_cleanup_entries(root, context_materialize)
+            context_cleanup: dict[str, Any] = {}
+            context_benchmark: dict[str, Any] = {}
+            context_benchmark_problems: list[Problem] = []
+            try:
+                if not _has_errors(context_materialize_problems):
+                    context_benchmark, context_benchmark_problems = run_context_benchmark(
+                        root,
+                        fixture=context_fixture,
+                        repo_id=repo_id,
+                        min_recall_at_5=0.85,
+                        require_source_integrity=True,
+                        require_fixture_corpus=True,
+                        require_no_forbidden=True,
+                    )
+            finally:
+                context_cleanup, context_cleanup_problems = _cleanup_materialized_entries(root, context_cleanup_entries)
+                context_materialize_problems.extend(context_cleanup_problems)
             gates.append(
                 _release_candidate_gate_result(
-                    name="context_pack_benchmark_materialize",
-                    command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
+                    name="context_benchmark_materialize",
+                    command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
                     mutates_workspace=True,
-                    data=pack_materialize,
-                    problems=pack_materialize_problems,
-                    warnings=[{"code": "context_pack_benchmark_materialize_mutates_workspace", "message": "context pack benchmark materialize writes archived fixture tasks for controlled startup-pack tests"}],
-                    summary=pack_materialize.get("totals", {}) if pack_materialize else {},
-                    cleanup=_pack_materialize_cleanup_entries(root, pack_materialize),
+                    data=context_materialize,
+                    problems=context_materialize_problems,
+                    warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
+                    summary={**(context_materialize.get("totals", {}) if context_materialize else {}), "auto_cleanup": context_cleanup},
                 )
             )
-        else:
-            pack_materialize_problems = []
-        if not _has_errors(pack_materialize_problems):
-            target = require_repo_target(root, repo_id=repo_id)
-            pack_benchmark, pack_benchmark_problems = run_task_context_pack_benchmark(root, target=target, fixture=pack_fixture, min_must_read_recall=1.0)
-            gates.append(
-                _release_candidate_gate_result(
-                    name="context_pack_benchmark",
-                    command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
-                    mutates_workspace=False,
-                    data=pack_benchmark,
-                    problems=pack_benchmark_problems,
-                    warnings=[{"code": "context_pack_benchmark_retrieval_only", "message": "context pack benchmark measures source pack recall only; it does not validate generated answers or task scope"}],
-                    summary={
-                        "case_count": pack_benchmark.get("case_count", 0),
-                        **(pack_benchmark.get("summary", {}) if isinstance(pack_benchmark.get("summary"), dict) else {}),
-                    },
+            if not _has_errors(context_materialize_problems):
+                gates.append(
+                    _release_candidate_gate_result(
+                        name="context_benchmark",
+                        command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+                        mutates_workspace=False,
+                        data=context_benchmark,
+                        problems=context_benchmark_problems,
+                        warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
+                        summary={
+                            "question_count": context_benchmark.get("question_count", 0),
+                            **(context_benchmark.get("summary", {}) if isinstance(context_benchmark.get("summary"), dict) else {}),
+                        },
+                    )
                 )
-            )
+        except BaseException:
+            cleanup_benchmark_metadata()
+            raise
+
+    if pack_enabled:
+        try:
+            if (pack_fixture / "tasks.json").exists():
+                pack_materialize, pack_materialize_problems = materialize_task_context_pack_benchmark_tasks(root, fixture=pack_fixture, force=False)
+                pack_cleanup_entries = _pack_materialize_cleanup_entries(root, pack_materialize)
+                pack_cleanup: dict[str, Any] = {}
+                pack_benchmark: dict[str, Any] = {}
+                pack_benchmark_problems: list[Problem] = []
+                try:
+                    if not _has_errors(pack_materialize_problems):
+                        target = require_repo_target(root, repo_id=repo_id)
+                        pack_benchmark, pack_benchmark_problems = run_task_context_pack_benchmark(root, target=target, fixture=pack_fixture, min_must_read_recall=1.0)
+                finally:
+                    pack_cleanup, pack_cleanup_problems = _cleanup_materialized_entries(root, pack_cleanup_entries)
+                    pack_materialize_problems.extend(pack_cleanup_problems)
+                gates.append(
+                    _release_candidate_gate_result(
+                        name="context_pack_benchmark_materialize",
+                        command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
+                        mutates_workspace=True,
+                        data=pack_materialize,
+                        problems=pack_materialize_problems,
+                        warnings=[{"code": "context_pack_benchmark_materialize_mutates_workspace", "message": "context pack benchmark materialize writes archived fixture tasks for controlled startup-pack tests"}],
+                        summary={**(pack_materialize.get("totals", {}) if pack_materialize else {}), "auto_cleanup": pack_cleanup},
+                    )
+                )
+            else:
+                pack_materialize_problems = []
+                pack_benchmark = {}
+                pack_benchmark_problems = []
+            if not _has_errors(pack_materialize_problems):
+                gates.append(
+                    _release_candidate_gate_result(
+                        name="context_pack_benchmark",
+                        command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
+                        mutates_workspace=False,
+                        data=pack_benchmark,
+                        problems=pack_benchmark_problems,
+                        warnings=[{"code": "context_pack_benchmark_retrieval_only", "message": "context pack benchmark measures source pack recall only; it does not validate generated answers or task scope"}],
+                        summary={
+                            "case_count": pack_benchmark.get("case_count", 0),
+                            **(pack_benchmark.get("summary", {}) if isinstance(pack_benchmark.get("summary"), dict) else {}),
+                        },
+                    )
+                )
+        finally:
+            cleanup_benchmark_metadata()
+    else:
+        cleanup_benchmark_metadata()
+
+    if benchmark_metadata:
+        materialize_gate = next(
+            (gate for gate in gates if gate.get("name") in {"context_benchmark_materialize", "context_pack_benchmark_materialize"}),
+            None,
+        )
+        if materialize_gate is not None:
+            summary = materialize_gate.get("summary") if isinstance(materialize_gate.get("summary"), dict) else {}
+            summary["temporary_repometa"] = {
+                "created_count": int(benchmark_metadata.get("created_count") or 0),
+                "auto_cleanup": benchmark_metadata_cleanup,
+            }
+            materialize_gate["summary"] = summary
+            if benchmark_metadata_cleanup_problems:
+                materialize_gate["problems"].extend(_problem_dicts(benchmark_metadata_cleanup_problems))
+                materialize_gate["ok"] = False
 
     multi_fixture = root / "tests/fixtures/context-benchmark-multirepo"
     if _has_configured_repositories(root, {"web", "api"}) and (multi_fixture / "corpus.json").exists():
         multi_materialize, multi_materialize_problems = materialize_context_benchmark_corpus(root, fixture=multi_fixture, repo_id="", force=False)
+        multi_cleanup_entries = _context_materialize_cleanup_entries(root, multi_materialize)
+        multi_cleanup: dict[str, Any] = {}
+        multi_benchmark: dict[str, Any] = {}
+        multi_benchmark_problems: list[Problem] = []
+        try:
+            if not _has_errors(multi_materialize_problems):
+                multi_benchmark, multi_benchmark_problems = run_context_benchmark(
+                    root,
+                    fixture=multi_fixture,
+                    min_category_packed_recall={"multi-repo-isolation": 1.0},
+                    require_fixture_corpus=True,
+                    require_no_cross_repo=True,
+                    require_no_forbidden=True,
+                )
+        finally:
+            multi_cleanup, multi_cleanup_problems = _cleanup_materialized_entries(root, multi_cleanup_entries)
+            multi_materialize_problems.extend(multi_cleanup_problems)
         gates.append(
             _release_candidate_gate_result(
                 name="context_benchmark_multirepo_materialize",
@@ -592,19 +714,10 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 data=multi_materialize,
                 problems=multi_materialize_problems,
                 warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
-                summary=multi_materialize.get("totals", {}) if multi_materialize else {},
-                cleanup=_context_materialize_cleanup_entries(root, multi_materialize),
+                summary={**(multi_materialize.get("totals", {}) if multi_materialize else {}), "auto_cleanup": multi_cleanup},
             )
         )
         if not _has_errors(multi_materialize_problems):
-            multi_benchmark, multi_benchmark_problems = run_context_benchmark(
-                root,
-                fixture=multi_fixture,
-                min_category_packed_recall={"multi-repo-isolation": 1.0},
-                require_fixture_corpus=True,
-                require_no_cross_repo=True,
-                require_no_forbidden=True,
-            )
             gates.append(
                 _release_candidate_gate_result(
                     name="context_benchmark_multirepo_isolation",
@@ -755,76 +868,6 @@ def _compare_field_gate_runs(
     return data, problems
 
 
-def _cleanup_field_gate_run(root: Path, *, artifact_path: Path) -> tuple[dict[str, Any], list[Problem]]:
-    problems: list[Problem] = []
-    artifact = _read_field_gate_artifact(artifact_path, problems, label="cleanup", allow_failed=True)
-    if not artifact:
-        return {}, problems
-    cleanup_entries = _field_gate_cleanup_entries(artifact)
-    removed: list[dict[str, str]] = []
-    skipped: list[dict[str, str]] = []
-    for entry in cleanup_entries:
-        kind = str(entry.get("kind") or "")
-        rel = str(entry.get("path") or "")
-        expected_digest = str(entry.get("content_sha256") or "")
-        stop_rel = str(entry.get("stop_at") or "")
-        if kind != "created_file" or not rel or not expected_digest.startswith("sha256:") or not stop_rel:
-            problems.append(Problem("error", "field_gate_cleanup_entry_invalid", "field gate cleanup entry is invalid", rel or artifact_path.as_posix()))
-            continue
-        path = root / rel
-        stop_at = root / stop_rel
-        try:
-            path.resolve().relative_to(root.resolve())
-            stop_at.resolve().relative_to(root.resolve())
-        except ValueError:
-            problems.append(Problem("error", "field_gate_cleanup_path_outside_workspace", "field gate cleanup path must stay inside workspace", rel))
-            continue
-        if not path.exists():
-            skipped.append({"path": rel, "reason": "missing"})
-            continue
-        if not path.is_file():
-            problems.append(Problem("error", "field_gate_cleanup_not_file", "field gate cleanup path is not a file", rel))
-            continue
-        actual_digest = _file_digest(path)
-        if actual_digest != expected_digest:
-            problems.append(Problem("error", "field_gate_cleanup_digest_mismatch", "field gate cleanup file digest no longer matches artifact", rel))
-            continue
-        path.unlink()
-        removed.append({"path": rel, "content_sha256": expected_digest})
-        _remove_empty_parents(path.parent, stop_at=stop_at, root=root)
-    data = {
-        "schema": "repoctl.field_gate.cleanup",
-        "schema_version": 1,
-        "artifact": _field_gate_identity(artifact_path, artifact),
-        "cleanup_entry_count": len(cleanup_entries),
-        "removed_count": len(removed),
-        "skipped_count": len(skipped),
-        "removed": removed,
-        "skipped": skipped,
-    }
-    data["cleanup_digest"] = digest_data(data)
-    return data, problems
-
-
-def _field_gate_cleanup_entries(data: dict[str, Any]) -> list[dict[str, str]]:
-    entries: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    gates = data.get("gates") if isinstance(data.get("gates"), list) else []
-    for gate in gates:
-        if not isinstance(gate, dict):
-            continue
-        cleanup = gate.get("cleanup") if isinstance(gate.get("cleanup"), list) else []
-        for entry in cleanup:
-            if not isinstance(entry, dict):
-                continue
-            key = (str(entry.get("kind") or ""), str(entry.get("path") or ""), str(entry.get("content_sha256") or ""), str(entry.get("stop_at") or ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            entries.append({str(k): str(v) for k, v in entry.items() if isinstance(k, str)})
-    return entries
-
-
 def _remove_empty_parents(path: Path, *, stop_at: Path, root: Path) -> None:
     try:
         stop = stop_at.resolve()
@@ -898,16 +941,20 @@ def _repo_scoped_frontmatter(task: Any) -> bool:
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
 
 
-def _discovery_guidance_actions(task_id: str, *, repo_path: str = "repos") -> list[dict[str, str]]:
+def _discovery_guidance_actions(task_id: str, *, repo_id: str = "main", repo_path: str = "repos") -> list[dict[str, str]]:
     candidate = f"{repo_path.rstrip('/')}/<path>"
     return [
         {
-            "label": "Record structured Discovery evidence",
-            "command": f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed {candidate} --chosen {candidate} --json",
+            "label": "Record the candidate query",
+            "command": f"./scripts/repoctl task discovery add {task_id} --query '<query>' --json",
         },
         {
-            "label": "Check finish readiness",
-            "command": f"./scripts/repoctl task doctor {task_id} --json",
+            "label": "Find likely product files",
+            "command": f"./scripts/repoctl context query '<query>' --repo-id {repo_id} --json",
+        },
+        {
+            "label": "Record inspected and chosen files",
+            "command": f"./scripts/repoctl task discovery add {task_id} --reviewed {candidate} --chosen {candidate} --json",
         },
     ]
 
@@ -1139,25 +1186,6 @@ def cmd_field_gate_compare(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def cmd_field_gate_cleanup(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    data, problems = _cleanup_field_gate_run(root, artifact_path=Path(args.artifact))
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "field-gate cleanup",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        print(f"field gate cleanup removed={data.get('removed_count', 0) if data else 0} skipped={data.get('skipped_count', 0) if data else 0}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
 def cmd_repo_list(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     layout = repo_layout(root)
@@ -1296,27 +1324,24 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         atomic_write(result["task"].path, result["text"])
     next_actions: list[dict[str, str]] = []
     chosen_files = result["discovery"]["chosen_files"]
+    try:
+        target = _repo_target_for_task_command(root, result["task"])
+    except RepoctlError:
+        target = None
+    if args.query and target is not None:
+        next_actions.append(
+            {
+                "label": "Find likely product files",
+                "command": f"./scripts/repoctl context query {shlex.quote(args.query)} --repo-id {target.id} --json",
+            }
+        )
     if chosen_files:
-        try:
-            target = _repo_target_for_task_command(root, result["task"])
-        except RepoctlError:
-            target = None
-        if target is not None:
-            next_actions.append(
-                {
-                    "label": "Refresh scoped Context Pack",
-                    "command": (
-                        f"./scripts/repoctl context pack --task {args.task_id} --repo-id {target.id} "
-                        f"--format markdown --output .repoctl-state/context-pack/{args.task_id}.md"
-                    ),
-                }
-            )
-    next_actions.append(
-        {
-            "label": "Check finish readiness",
-            "command": f"./scripts/repoctl task doctor {args.task_id} --json",
-        }
-    )
+        next_actions.append(
+            {
+                "label": "Check finish readiness",
+                "command": f"./scripts/repoctl task doctor {args.task_id} --json",
+            }
+        )
     payload = {
         "ok": True,
         "command": "task.discovery.add",
@@ -1526,13 +1551,15 @@ def cmd_task_create(args: argparse.Namespace) -> int:
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(task):
         repo_path = "repos"
+        repo_id = str(task.frontmatter.get("repo_id") or "main")
         try:
             target = _repo_target_for_task_command(root, task)
             if target is not None:
                 repo_path = target.display_path
+                repo_id = target.id
         except RepoctlError:
             pass
-        next_actions = _discovery_guidance_actions(task.id, repo_path=repo_path)
+        next_actions = _discovery_guidance_actions(task.id, repo_id=repo_id, repo_path=repo_path)
     payload = {
         "ok": True,
         "command": "task.create",
@@ -1651,13 +1678,15 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(result["task"]):
         repo_path = "repos"
+        repo_id = str(result["task"].frontmatter.get("repo_id") or "main")
         try:
             target = _repo_target_for_task_command(root, result["task"])
             if target is not None:
                 repo_path = target.display_path
+                repo_id = target.id
         except RepoctlError:
             pass
-        next_actions = _discovery_guidance_actions(args.task_id, repo_path=repo_path)
+        next_actions = _discovery_guidance_actions(args.task_id, repo_id=repo_id, repo_path=repo_path)
     payload = {"ok": True, "command": "task.start", "data": data, **data, "problems": [], "warnings": [problem.to_dict() for problem in result.get("warnings", [])], "next_actions": next_actions}
     if args.json:
         _json(payload)
@@ -1686,9 +1715,7 @@ def _task_verification_input(root: Path, task_id: str) -> VerificationInput:
     )
 
 
-def _verification_input_arg(root: Path, task_id: str, *, verification_file: str | None, use_task_verification: bool, command: str) -> VerificationInput:
-    if verification_file and use_task_verification:
-        raise RepoctlError(f"{command} accepts either --verification-file or --use-task-verification, not both")
+def _verification_input_arg(root: Path, task_id: str, *, verification_file: str | None, command: str) -> VerificationInput:
     if verification_file:
         path = Path(verification_file)
         validate_verification_file(root, path)
@@ -1706,8 +1733,6 @@ def _verification_input_arg(root: Path, task_id: str, *, verification_file: str 
     try:
         return _task_verification_input(root, task_id)
     except RepoctlError:
-        if use_task_verification:
-            raise
         raise RepoctlError(
             f"task {command} requires --verification-file or a completed ## Verification section",
             code="missing_verification_file",
@@ -2043,7 +2068,7 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
 
 def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="finish")
+    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="finish")
     with repoctl_lock(root):
         meta_gate, delta, result = _prepare_task_finish(
             root,
@@ -2090,7 +2115,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
 
 def cmd_task_cancel(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="cancel")
+    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="cancel")
     with repoctl_lock(root):
         cancel_gate = _cancel_dirty_gate(root, args.task_id, allow_dirty_cancel=args.allow_dirty_cancel)
         result = cancel_task(root, args.task_id, verification=verification, meta_gate=cancel_gate)
@@ -2123,7 +2148,7 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
 
 def cmd_task_block(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, use_task_verification=args.use_task_verification, command="block")
+    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="block")
     with repoctl_lock(root):
         result = block_task(root, args.task_id, verification=verification)
         _write_task_result(root, result)
@@ -2733,7 +2758,6 @@ def cmd_context_pack_compare(args: argparse.Namespace) -> int:
         baseline_path=baseline,
         candidate_path=candidate,
         max_must_read_drop=args.max_must_read_drop,
-        max_reviewed_knowledge_drop=args.max_reviewed_knowledge_drop,
         require_warning_stability=args.require_warning_stability,
     )
     payload = {
@@ -2748,8 +2772,7 @@ def cmd_context_pack_compare(args: argparse.Namespace) -> int:
     else:
         deltas = data.get("count_deltas", {}) if data else {}
         must_read = deltas.get("must_read", {}).get("delta", 0)
-        reviewed = deltas.get("reviewed_knowledge", {}).get("delta", 0)
-        print(f"context pack compare must_read_delta={must_read} reviewed_knowledge_delta={reviewed}")
+        print(f"context pack compare must_read_delta={must_read}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -3564,11 +3587,6 @@ def build_parser() -> argparse.ArgumentParser:
     field_gate_compare.add_argument("--require-no-gate-regressions", action="store_true")
     field_gate_compare.add_argument("--json", action="store_true")
     field_gate_compare.set_defaults(func=cmd_field_gate_compare)
-    field_gate_cleanup = field_gate_sub.add_parser("cleanup")
-    field_gate_cleanup.add_argument("--artifact", required=True)
-    field_gate_cleanup.add_argument("--json", action="store_true")
-    field_gate_cleanup.set_defaults(func=cmd_field_gate_cleanup)
-
     repo = sub.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True, parser_class=RepoctlArgumentParser)
     repo_list = repo_sub.add_parser("list")
@@ -3654,20 +3672,17 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish = task_sub.add_parser("finish")
     task_finish.add_argument("task_id")
     task_finish.add_argument("--verification-file")
-    task_finish.add_argument("--use-task-verification", action="store_true", help="use the current ## Verification section as the finish evidence")
     task_finish.add_argument("--use-committed-diff", action="store_true", help="validate recorded task-start HEAD through current HEAD when product changes were committed before finish")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block")
     task_block.add_argument("task_id")
     task_block.add_argument("--verification-file")
-    task_block.add_argument("--use-task-verification", action="store_true", help="use the current ## Verification section as blocker evidence")
     task_block.add_argument("--json", action="store_true")
     task_block.set_defaults(func=cmd_task_block)
     task_cancel = task_sub.add_parser("cancel")
     task_cancel.add_argument("task_id")
     task_cancel.add_argument("--verification-file")
-    task_cancel.add_argument("--use-task-verification", action="store_true", help="use the current ## Verification section as cancellation evidence")
     task_cancel.add_argument("--allow-dirty-cancel", action="store_true", help="archive cancellation even when task-scoped repos/ changes remain, recording them as explicit evidence")
     task_cancel.add_argument("--json", action="store_true")
     task_cancel.set_defaults(func=cmd_task_cancel)
@@ -3802,7 +3817,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_query = context_sub.add_parser("query")
     context_query.add_argument("query")
     context_query.add_argument("--repo-id")
-    context_query.add_argument("--budget-tokens", type=int, default=3000)
+    context_query.add_argument("--budget-tokens", type=int, default=1200)
     context_query.add_argument("--mode", default="")
     context_query.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     context_query.add_argument("--explain", action="store_true")
@@ -3812,7 +3827,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark = context_sub.add_parser("benchmark")
     context_benchmark.add_argument("--fixture", default="tests/fixtures/context-benchmark")
     context_benchmark.add_argument("--repo-id")
-    context_benchmark.add_argument("--budget-tokens", type=int, default=3000)
+    context_benchmark.add_argument("--budget-tokens", type=int, default=1200)
     context_benchmark.add_argument("--min-recall-at-5", type=float)
     context_benchmark.add_argument("--min-precision-at-5", type=float)
     context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
@@ -3847,7 +3862,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack = context_sub.add_parser("pack")
     context_pack.add_argument("--task", required=True)
     context_pack.add_argument("--repo-id", required=True)
-    context_pack.add_argument("--budget-tokens", type=int, default=5000)
+    context_pack.add_argument("--budget-tokens", type=int, default=1500)
     context_pack.add_argument("--explain", action="store_true")
     context_pack.add_argument("--output")
     context_pack.add_argument("--format", choices=["text", "json", "markdown"], default="text")
@@ -3858,14 +3873,13 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_compare.add_argument("--baseline", required=True)
     context_pack_compare.add_argument("--candidate", required=True)
     context_pack_compare.add_argument("--max-must-read-drop", type=int)
-    context_pack_compare.add_argument("--max-reviewed-knowledge-drop", type=int)
     context_pack_compare.add_argument("--require-warning-stability", action="store_true")
     context_pack_compare.add_argument("--json", action="store_true")
     context_pack_compare.set_defaults(func=cmd_context_pack_compare)
     context_pack_benchmark = context_sub.add_parser("pack-benchmark")
     context_pack_benchmark.add_argument("--fixture", default="tests/fixtures/context-pack-benchmark")
     context_pack_benchmark.add_argument("--repo-id", required=True)
-    context_pack_benchmark.add_argument("--budget-tokens", type=int, default=5000)
+    context_pack_benchmark.add_argument("--budget-tokens", type=int, default=1500)
     context_pack_benchmark.add_argument("--explain", action="store_true")
     context_pack_benchmark.add_argument("--min-must-read-recall", type=float)
     context_pack_benchmark.add_argument("--output")

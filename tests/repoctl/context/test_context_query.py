@@ -5,7 +5,9 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.context import compact_context_bundle
+from tools.repoctl.context_chunks import chunk_text_source
 from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
+from tools.repoctl.context_retrieval import retrieve_context
 from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
 from tests.repoctl.context_test_helpers import (
     _write_completion_receipt,
@@ -66,7 +68,19 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert payload["warnings"][0]["code"] == "context_not_authoritative"
 
 
-def test_context_query_prioritizes_product_docs_for_project_queries(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_fts_preserves_sqlite_match_order(tmp_path: Path) -> None:
+    chunks = [
+        chunk_text_source(tmp_path, "a.py", "alpha alpha alpha alpha alpha alpha helper filler words", kind="current_source", section="a.py"),
+        chunk_text_source(tmp_path, "b.py", "alpha helper filler words only once here", kind="current_source", section="b.py"),
+    ]
+
+    results = retrieve_context("alpha", chunks)
+
+    assert [candidate.source_ref.path for candidate in results] == ["a.py", "b.py"]
+    assert results[0].score_breakdown["fts"] > results[1].score_breakdown["fts"]
+
+
+def test_context_query_does_not_inject_unmatched_project_files(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "README.md").write_text("# Product Architecture\n\nRuntime product architecture and current decisions live here.\n", encoding="utf-8")
     (repo / "package.json").write_text('{"name": "product-runtime", "scripts": {"test": "pytest"}}\n', encoding="utf-8")
@@ -76,14 +90,24 @@ def test_context_query_prioritizes_product_docs_for_project_queries(tmp_path: Pa
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     packed_paths = [item["source_ref"]["path"] for item in bundle["selected_source_refs"]]
     assert "repos/README.md" in packed_paths
-    assert "repos/package.json" in packed_paths
-    assert "docs/PRD.md" in packed_paths
+    assert "repos/package.json" not in packed_paths
     assert "candidates" not in bundle
 
-    assert main(["context", "query", "current project architecture and recent decisions", "--repo-id", "main", "--budget-tokens", "1200", "--full", "--json"]) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    prd_candidate = next(item for item in bundle["candidates"] if item["source_ref"]["path"] == "docs/PRD.md")
-    assert "product/recent evidence priority" in prd_candidate["selection_reasons"]
+
+def test_context_query_rejects_unknown_mode(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_context_workspace(tmp_path, monkeypatch)
+
+    assert main(["context", "query", "validate_token", "--mode", "autority", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"] == [
+        {
+            "severity": "error",
+            "code": "invalid_context_mode",
+            "message": "unsupported context mode: autority",
+            "path": "autority",
+        }
+    ]
 
 
 def test_context_query_read_first_populates_must_read(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -91,7 +115,7 @@ def test_context_query_read_first_populates_must_read(tmp_path: Path, monkeypatc
     (repo / "README.md").write_text("# Product\n\nRead this product overview first.\n", encoding="utf-8")
     (repo / "pyproject.toml").write_text("[project]\nname = \"read-first-product\"\n", encoding="utf-8")
 
-    assert main(["context", "query", "이 프로젝트에서 다음 개발을 시작하려면 무엇을 먼저 읽어야 하나?", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "이 프로젝트에서 다음 개발을 시작하려면 무엇을 먼저 읽어야 하나?", "--repo-id", "main", "--mode", "startup-reading", "--json"]) == 0
 
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     assert bundle["query"]["mode"] == "startup_reading"
@@ -130,7 +154,7 @@ def test_context_query_markdown_uses_same_grouped_sources(tmp_path: Path, monkey
     assert "# Context Bundle" in output
     assert "## Must Read" in output
     assert "## Likely Change Surface" in output
-    assert "<graph-query:symbol:" in output
+    assert "repos/auth.py" in output
     assert "validate_token" in output
 
 
@@ -171,11 +195,28 @@ def test_context_query_isolates_invalid_completion_receipts(tmp_path: Path, monk
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     warning_codes = {warning["code"] for warning in [*payload["warnings"], *payload["problems"]]}
-    assert "context_completion_receipt_invalid" in warning_codes
     assert "context_graph_completion_receipt_invalid" in warning_codes
     bundle = payload["data"]["bundle"]
     assert bundle["completeness"]["receipt_problem_count"] == 1
     assert bundle["completeness"]["graph_completeness"]["receipt_set_complete"] is False
+
+
+def test_default_context_query_keeps_completion_history_out_of_code_results(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "auth.py").write_text("def validate_token(token: str) -> bool:\n    return bool(token)\n", encoding="utf-8")
+    _write_completion_receipt(tmp_path)
+
+    assert main(["context", "query", "validate_token token validation", "--repo-id", "main", "--json"]) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    refs = [
+        item.get("source_ref", {})
+        for items in bundle["groups"].values()
+        for item in items
+        if isinstance(item, dict)
+    ]
+    assert any(ref.get("path") == "repos/auth.py" for ref in refs)
+    assert all(ref.get("kind") not in {"completion_receipt", "task_artifact"} for ref in refs)
 
 
 def test_context_query_configured_multi_requires_repo_id(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -319,7 +360,7 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
 
     record_id = _approve_knowledge_source(capsys, build_args=["--kind", "decision"])["data"]["record"]["id"]
 
-    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--explain", "--full", "--json"]) == 0
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--mode", "authority", "--explain", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     bundle = payload["data"]["bundle"]
@@ -335,7 +376,7 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
     source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
 
-    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--mode", "authority", "--full", "--json"]) == 0
     stale_payload = json.loads(capsys.readouterr().out)
     stale_bundle = stale_payload["data"]["bundle"]
     assert stale_bundle["knowledge_results"] == []

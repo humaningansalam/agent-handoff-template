@@ -105,6 +105,60 @@ def test_graph_skips_shadowed_cross_file_python_imported_function_calls(tmp_path
     assert not any(edge["kind"] == "CALLS" and edge["from"] == login_id and edge["to"] == issue_id for edge in snapshot["edges"])
 
 
+def test_graph_python_calls_follow_lexical_scopes(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "scope.py").write_text(
+        "def target():\n"
+        "    return 1\n\n"
+        "def other():\n"
+        "    return 2\n\n"
+        "def outer():\n"
+        "    def inner():\n"
+        "        return target()\n"
+        "    return inner()\n\n"
+        "def shadowed(target):\n"
+        "    return target()\n\n"
+        "def comprehension_shadow(values):\n"
+        "    return [target() for target in values]\n\n"
+        "def comprehension_direct(values):\n"
+        "    return [target() for value in values]\n\n"
+        "def call_before_alias():\n"
+        "    target()\n"
+        "    target = other\n\n"
+        "def call_before_definition():\n"
+        "    inner()\n"
+        "    def inner():\n"
+        "        return 1\n",
+        encoding="utf-8",
+    )
+    (repo / "dependency.py").write_text("def remote_target():\n    return 1\n", encoding="utf-8")
+    (repo / "local_import.py").write_text(
+        "def call_before_import():\n"
+        "    remote_target()\n"
+        "    from dependency import remote_target\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--full", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    names = {
+        node["id"]: node["facts"]["provider"]["qualified_name"]
+        for node in snapshot["nodes"]
+        if node["kind"] == "symbol"
+    }
+    calls = {(names[edge["from"]], names[edge["to"]]) for edge in snapshot["edges"] if edge["kind"] == "CALLS"}
+    assert calls == {
+        ("comprehension_direct", "target"),
+        ("outer", "outer.inner"),
+        ("outer.inner", "target"),
+    }
+
+
 def test_graph_query_symbol_callers_and_callees(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -193,4 +247,3 @@ def test_graph_query_js_ts_impact_is_file_level(tmp_path: Path, monkeypatch, cap
     result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(path["edge"] == "IMPORTS_FILE" and path["from"]["path"] == "frontend/src/client.ts" for path in result["paths"])
     assert not any(path["edge"] == "CALLS" for path in result["paths"])
-

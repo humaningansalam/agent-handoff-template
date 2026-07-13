@@ -24,7 +24,7 @@ def run_context_benchmark(
     *,
     fixture: Path,
     repo_id: str = "",
-    budget_tokens: int = 3000,
+    budget_tokens: int = 1200,
     min_recall_at_5: float | None = None,
     min_precision_at_5: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
@@ -56,7 +56,14 @@ def run_context_benchmark(
         question_id = str(question.get("id") or "")
         target_repo_id = repo_id or str(question.get("repo_id") or "")
         target = require_repo_target(root, repo_id=target_repo_id or None)
-        bundle, bundle_problems, _meta = build_context_bundle(root, target=target, query=str(question.get("question") or ""), budget_tokens=budget_tokens, explain=True)
+        bundle, bundle_problems, _meta = build_context_bundle(
+            root,
+            target=target,
+            query=str(question.get("question") or ""),
+            budget_tokens=budget_tokens,
+            explain=True,
+            mode=str(question.get("mode") or ""),
+        )
         snapshot, graph_problems, _graph_meta = build_graph(root, target=target)
         problems.extend(bundle_problems)
         problems.extend(graph_problems)
@@ -514,6 +521,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "category": str(question.get("category") or ""),
         "repo_id": str(question.get("repo_id") or ""),
         "query": str(question.get("question") or ""),
+        "mode": str(bundle.query.get("mode") or "") if bundle is not None else str(question.get("mode") or "auto"),
         "metrics": {
             "recall_at_5": _ratio(len(required_top5), len(required)),
             "recall_at_10": _ratio(len(required_top10), len(required)),
@@ -829,7 +837,8 @@ def _cross_repo_refs(refs: list[dict[str, Any]], *, expected_repo_id: str) -> li
         return []
     leaked: list[dict[str, Any]] = []
     for ref in refs:
-        ref_repo_id = str(ref.get("repo_id") or "") or _repo_id_from_graph_ref(str(ref.get("path") or ""))
+        path = str(ref.get("path") or "")
+        ref_repo_id = str(ref.get("repo_id") or "") or _repo_id_from_graph_ref(path) or _repo_id_from_source_ref(path, expected_repo_id=expected_repo_id)
         if ref_repo_id and ref_repo_id != expected_repo_id:
             leaked.append(ref)
     return leaked
@@ -841,6 +850,13 @@ def _repo_id_from_graph_ref(path: str) -> str:
     rest = path[len("<graph:repo:") : -1]
     encoded_repo_id = rest.split(":", 1)[0]
     return unquote(encoded_repo_id)
+
+
+def _repo_id_from_source_ref(path: str, *, expected_repo_id: str) -> str:
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[0] == "repos" and expected_repo_id != "main":
+        return parts[1]
+    return ""
 
 
 def _ratio(numerator: int, denominator: int) -> float:

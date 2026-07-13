@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.context_task_pack import render_task_context_pack_markdown
 from tools.repoctl.graph_model import digest_data
 from tests.repoctl.context_test_helpers import (
     _setup_context_multirepo_workspace,
@@ -45,14 +46,95 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert data["stop_reason"] in {"required_evidence_satisfied", "budget_reached"}
     assert data["budget"]["final_render_estimated_tokens"] <= 1200
     assert any(item["source_ref"]["path"] == "docs/contracts/repoctl-context-contract.md" for item in data["groups"]["must_read"])
-    assert data["groups"]["reviewed_knowledge"] == []
     assert data["metrics"]["group_counts"]["must_read"] == len(data["groups"]["must_read"])
-    assert data["metrics"]["group_counts"]["reviewed_knowledge"] == 0
     assert data["metrics"]["unique_must_read_source_count"] >= 1
     assert data["metrics"]["requested_tokens"] == 1200
     assert any(ref["path"] == "docs/contracts/repoctl-context-contract.md" for ref in data["metrics"]["must_read_source_refs"])
     assert "bundle" not in data
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
+
+
+def test_context_pack_keeps_chosen_and_supporting_sets_disjoint(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    (repo / "b.py").write_text("def beta():\n    return 2\n", encoding="utf-8")
+    task_id = "T-20260622010121Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="disjoint-scope",
+        title="Keep task pack scope disjoint",
+        query="alpha beta",
+        goal="Keep edit and supporting evidence distinct.",
+        reviewed="repos/a.py",
+        chosen="repos/a.py",
+    )
+    task_path = next((tmp_path / "docs/tasks").glob(f"{task_id}--*.md"))
+    task_path.write_text(
+        task_path.read_text(encoding="utf-8").replace(
+            "- Candidate files reviewed: `repos/a.py`",
+            "- Candidate files reviewed:\n  - `repos/a.py`\n  - `repos/b.py`",
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--json"]) == 0
+
+    groups = json.loads(capsys.readouterr().out)["data"]["groups"]
+    edit = {item["source_ref"]["path"] for item in groups["edit_candidates"]}
+    supporting = {item["source_ref"]["path"] for item in groups["supporting_evidence"]}
+    assert edit == {"repos/a.py"}
+    assert supporting == {"repos/b.py"}
+    assert edit.isdisjoint(supporting)
+
+
+def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    context_docs = []
+    for index in range(14):
+        rel = f"docs/contracts/required-{index}.md"
+        context_docs.append(rel)
+        (tmp_path / rel).write_text(f"# Required {index}\n\nRequired evidence {index}.\n", encoding="utf-8")
+    task_id = "T-20260622010122Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="required-budget",
+        title="Preserve required evidence",
+        query="run",
+        goal="Keep all required startup evidence visible.",
+        context_doc=context_docs[0],
+    )
+    task_path = next((tmp_path / "docs/tasks").glob(f"{task_id}--*.md"))
+    task_path.write_text(
+        task_path.read_text(encoding="utf-8").replace(
+            f"- `{context_docs[0]}`",
+            "\n".join(f"- `{path}`" for path in context_docs),
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", "450", "--full", "--json"]) == 0
+
+    data = json.loads(capsys.readouterr().out)["data"]
+    required_paths = {
+        item["source_ref"]["path"]
+        for items in data["groups"].values()
+        for item in items
+        if item.get("requirement") == "required" and isinstance(item.get("source_ref"), dict)
+    }
+    assert set(context_docs).issubset(required_paths)
+    assert "AGENTS.md" in required_paths
+    assert f"docs/tasks/{task_id}--required-budget.md" in required_paths
+    assert "repos/app.py" in required_paths
+    assert data["stop_reason"] == "required_evidence_exceeds_budget"
+    assert data["budget"]["final_render_estimated_tokens"] > data["budget"]["maximum_estimated_tokens"]
+    rendered = render_task_context_pack_markdown(data)
+    assert all(path in rendered for path in context_docs)
+    assert "AGENTS.md" in rendered
+    assert f"docs/tasks/{task_id}--required-budget.md" in rendered
+    assert "repos/app.py" in rendered
 
 
 def test_context_pack_compact_filters_noisy_graph_items(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -297,7 +379,7 @@ def test_context_pack_rejects_output_symlink_escape(tmp_path: Path, monkeypatch,
     assert not (escape / "out.json").exists()
 
 
-def test_context_pack_does_not_write_failed_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_pack_does_not_load_unrelated_knowledge_history(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_workspace(tmp_path, monkeypatch)
     _write_context_pack_task(
         tmp_path,
@@ -318,46 +400,12 @@ def test_context_pack_does_not_write_failed_artifact(tmp_path: Path, monkeypatch
     event_path.write_text(json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     output = tmp_path / ".repoctl-state/context-pack/failed.json"
 
-    assert main(["context", "pack", "--task", "T-20260622012121Z", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 1
+    assert main(["context", "pack", "--task", "T-20260622012121Z", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "knowledge_event_record_digest_mismatch"
-    assert not output.exists()
-
-
-def test_context_pack_groups_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_context_workspace(tmp_path, monkeypatch)
-    _write_context_pack_task(
-        tmp_path,
-        task_id="T-20260622020202Z",
-        slug="knowledge-pack",
-        title="Use reviewed knowledge for source authority",
-        query="source authority knowledge",
-        goal="Use reviewed knowledge source authority.",
-    )
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    old_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
-    replacement_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
-    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-
-    assert main(["context", "pack", "--task", "T-20260622020202Z", "--repo-id", "main", "--explain", "--full", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    reviewed = payload["data"]["groups"]["reviewed_knowledge"]
-    assert reviewed[0]["record"]["id"] == record_id
-    assert reviewed[0]["record"]["status"] == "reviewed"
-    assert reviewed[0]["record"]["lifecycle_relations"]["supersedes"] == [old_record_id]
-    assert reviewed[0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
-    assert payload["data"]["metrics"]["group_counts"]["reviewed_knowledge"] == 1
-    assert payload["data"]["metrics"]["group_estimated_tokens"]["reviewed_knowledge"] > 0
-    assert payload["data"]["bundle"]["query"]["explain"] is True
-    assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["available_statuses"] == {"reviewed": 1, "superseded": 1}
-    assert payload["data"]["bundle"]["completeness"]["knowledge_lifecycle"]["returned_statuses"] == {"reviewed": 1}
-    assert any(warning["code"] == "context_pack_knowledge_superseded_excluded" for warning in payload["warnings"])
+    assert payload["problems"] == []
+    assert "reviewed_knowledge" not in payload["data"]["groups"]
+    assert output.exists()
 
 
 def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -370,10 +418,6 @@ def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> 
         query="source authority knowledge",
         goal="Use reviewed knowledge source authority.",
     )
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
     baseline = tmp_path / ".repoctl-state/context-pack/baseline.json"
     candidate = tmp_path / ".repoctl-state/context-pack/candidate.json"
 
@@ -381,18 +425,16 @@ def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> 
     capsys.readouterr()
     candidate.write_text(baseline.read_text(encoding="utf-8"), encoding="utf-8")
 
-    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--max-reviewed-knowledge-drop", "0", "--json"]) == 0
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--json"]) == 0
 
     pass_payload = json.loads(capsys.readouterr().out)
     assert pass_payload["data"]["count_deltas"]["must_read"]["delta"] == 0
-    assert pass_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] == 0
     assert pass_payload["data"]["metric_deltas"]["unique_must_read_source_count"]["delta"] == 0
     assert pass_payload["data"]["metric_deltas"]["estimated_tokens"]["delta"] == 0
     assert pass_payload["data"]["warning_deltas"]["missing_codes"] == []
     assert pass_payload["data"]["warning_deltas"]["added_codes"] == []
     assert "context_pack_not_authoritative" in pass_payload["data"]["warning_deltas"]["baseline_codes"]
     assert pass_payload["data"]["missing_must_read_refs"] == []
-    assert pass_payload["data"]["missing_reviewed_knowledge_ids"] == []
     assert pass_payload["problems"] == []
 
     changed_warnings = json.loads(baseline.read_text(encoding="utf-8"))
@@ -415,21 +457,6 @@ def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> 
     assert warning_gate_payload["data"]["gates"]["require_warning_stability"] is True
     assert any(problem["code"] == "context_pack_warning_missing" and problem["path"] == original_warning_code for problem in warning_gate_payload["problems"])
 
-    swapped_knowledge = json.loads(baseline.read_text(encoding="utf-8"))
-    original_record_id = swapped_knowledge["data"]["groups"]["reviewed_knowledge"][0]["record"]["id"]
-    swapped_knowledge["data"]["groups"]["reviewed_knowledge"][0]["record"]["id"] = "K-20260622000000Z--other"
-    digest_basis = {key: value for key, value in swapped_knowledge["data"].items() if key not in {"pack_digest", "artifact", "repository", "graph"}}
-    swapped_knowledge["data"]["pack_digest"] = digest_data(digest_basis)
-    swapped_knowledge["data"]["artifact"]["pack_digest"] = swapped_knowledge["data"]["pack_digest"]
-    candidate.write_text(json.dumps(swapped_knowledge, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-reviewed-knowledge-drop", "0", "--json"]) == 1
-
-    swapped_knowledge_payload = json.loads(capsys.readouterr().out)
-    assert swapped_knowledge_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] == 0
-    assert original_record_id in swapped_knowledge_payload["data"]["missing_reviewed_knowledge_ids"]
-    assert any(problem["code"] == "context_pack_reviewed_knowledge_missing" for problem in swapped_knowledge_payload["problems"])
-
     swapped = json.loads(baseline.read_text(encoding="utf-8"))
     assert len(swapped["data"]["groups"]["must_read"]) > 1
     missing_ref = swapped["data"]["groups"]["must_read"][0]["source_ref"]
@@ -448,19 +475,16 @@ def test_context_pack_compare_artifacts(tmp_path: Path, monkeypatch, capsys) -> 
 
     regressed = json.loads(candidate.read_text(encoding="utf-8"))
     regressed["data"]["groups"]["must_read"] = []
-    regressed["data"]["groups"]["reviewed_knowledge"] = []
     digest_basis = {key: value for key, value in regressed["data"].items() if key not in {"pack_digest", "artifact", "repository", "graph"}}
     regressed["data"]["pack_digest"] = digest_data(digest_basis)
     regressed["data"]["artifact"]["pack_digest"] = regressed["data"]["pack_digest"]
     candidate.write_text(json.dumps(regressed, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--max-reviewed-knowledge-drop", "0", "--json"]) == 1
+    assert main(["context", "pack-compare", "--baseline", baseline.as_posix(), "--candidate", candidate.as_posix(), "--max-must-read-drop", "0", "--json"]) == 1
 
     fail_payload = json.loads(capsys.readouterr().out)
     assert fail_payload["data"]["count_deltas"]["must_read"]["delta"] < 0
-    assert fail_payload["data"]["count_deltas"]["reviewed_knowledge"]["delta"] < 0
     assert any(problem["code"] == "context_pack_must_read_regressed" for problem in fail_payload["problems"])
-    assert any(problem["code"] == "context_pack_reviewed_knowledge_regressed" for problem in fail_payload["problems"])
 
     failed_artifact = json.loads(baseline.read_text(encoding="utf-8"))
     failed_artifact["ok"] = False

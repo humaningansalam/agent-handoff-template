@@ -97,6 +97,39 @@ class GraphEdge:
 
 
 @dataclass(frozen=True)
+class ProviderCoverage:
+    capability: str
+    eligible_paths: tuple[str, ...]
+    analyzed_paths: tuple[str, ...]
+    unsupported_paths: tuple[str, ...]
+    failed_paths: tuple[str, ...]
+    evidence_level: str
+
+    @property
+    def status(self) -> str:
+        if not self.eligible_paths:
+            return "complete"
+        if self.failed_paths and not self.analyzed_paths and not self.unsupported_paths:
+            return "unavailable"
+        if self.unsupported_paths and not self.analyzed_paths and not self.failed_paths:
+            return "unsupported"
+        if self.failed_paths or self.unsupported_paths:
+            return "partial"
+        return "complete"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "capability": self.capability,
+            "status": self.status,
+            "eligible_paths": list(self.eligible_paths),
+            "analyzed_paths": list(self.analyzed_paths),
+            "unsupported_paths": list(self.unsupported_paths),
+            "failed_paths": list(self.failed_paths),
+            "evidence_level": self.evidence_level,
+        }
+
+
+@dataclass(frozen=True)
 class GraphSnapshot:
     repository: dict[str, str]
     sources: list[dict[str, str]]

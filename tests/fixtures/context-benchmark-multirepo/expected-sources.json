@@ -3,13 +3,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:api:file:app.py>"
+        "path": "repos/api/app.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:web:file:app.py>"
+        "path": "repos/web/app.py"
       }
     ]
   },
@@ -17,13 +17,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:web:file:app.py>"
+        "path": "repos/web/app.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:api:file:app.py>"
+        "path": "repos/api/app.py"
       }
     ]
   },
@@ -31,13 +31,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:api:file:auth%2Fclient.py>"
+        "path": "repos/api/auth/client.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:web:file:auth%2Fclient.py>"
+        "path": "repos/web/auth/client.py"
       }
     ]
   },
@@ -45,13 +45,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:web:file:auth%2Fclient.py>"
+        "path": "repos/web/auth/client.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:api:file:auth%2Fclient.py>"
+        "path": "repos/api/auth/client.py"
       }
     ]
   },
@@ -59,13 +59,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:api:file:config%2Fsettings.py>"
+        "path": "repos/api/config/settings.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:web:file:config%2Fsettings.py>"
+        "path": "repos/web/config/settings.py"
       }
     ]
   },
@@ -73,13 +73,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:web:file:config%2Fsettings.py>"
+        "path": "repos/web/config/settings.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:api:file:config%2Fsettings.py>"
+        "path": "repos/api/config/settings.py"
       }
     ]
   },
@@ -87,13 +87,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:api:file:shared%2Fsession.py>"
+        "path": "repos/api/shared/session.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:web:file:shared%2Fsession.py>"
+        "path": "repos/web/shared/session.py"
       }
     ]
   },
@@ -101,13 +101,13 @@
     "acceptable": [],
     "noise": [
       {
-        "path": "<graph:repo:web:file:shared%2Fsession.py>"
+        "path": "repos/web/shared/session.py"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "<graph:repo:api:file:shared%2Fsession.py>"
+        "path": "repos/api/shared/session.py"
       }
     ]
   }
