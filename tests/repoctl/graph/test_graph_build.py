@@ -9,6 +9,7 @@ from tools.repoctl.code_index import CodeIndexEntry
 from tools.repoctl.cli import main
 from tools.repoctl.graph import build_graph
 from tools.repoctl.graph_model import canonical_json, file_id, import_ref_id, topic_id
+from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.repositories import require_repo_target
 from tools.repoctl.tasks import Problem
 from tests.repoctl.workspace.test_check import write_workspace
@@ -167,6 +168,68 @@ def test_graph_snapshot_is_byte_stable(tmp_path: Path) -> None:
     assert first is not None
     assert second is not None
     assert canonical_json(first.to_dict()) == canonical_json(second.to_dict())
+
+
+def test_graph_materialization_updates_only_changed_python_dependents(tmp_path: Path, monkeypatch) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "a.py").write_text("def target():\n    return 1\n", encoding="utf-8")
+    (repo / "b.py").write_text("from a import target\n\ndef caller():\n    return target()\n", encoding="utf-8")
+    (repo / "unrelated.py").write_text("def unrelated():\n    return 1\n", encoding="utf-8")
+    target = require_repo_target(tmp_path, repo_id="main")
+    first, problems, _meta = materialize_graph(tmp_path, target=target)
+    assert first is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+
+    from tools.repoctl import graph_store
+
+    original = graph_store.build_semantic_provider
+    analyzed: list[tuple[str, list[str]]] = []
+
+    def recording_provider(provider, *args, **kwargs):
+        analyzed.append((provider, sorted(kwargs.get("analysis_paths") or [])))
+        return original(provider, *args, **kwargs)
+
+    monkeypatch.setattr(graph_store, "build_semantic_provider", recording_provider)
+    (repo / "a.py").write_text("def target():\n    return 2\n", encoding="utf-8")
+
+    second, problems, _meta = materialize_graph(tmp_path, target=target)
+
+    assert second is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    assert analyzed == [("python_ast", ["a.py", "b.py"])]
+    assert any(
+        node.kind == "symbol" and node.facts.get("provider", {}).get("qualified_name") == "unrelated"
+        for node in second.nodes
+    )
+
+
+def test_graph_materialization_reuses_unchanged_source_evidence(tmp_path: Path, monkeypatch) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    target = require_repo_target(tmp_path, repo_id="main")
+    first, problems, _meta = materialize_graph(tmp_path, target=target)
+    assert first is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+
+    monkeypatch.setattr("tools.repoctl.code_index._index_file", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source reindexed")))
+    monkeypatch.setattr("tools.repoctl.evidence_store._source_chunks", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source reread")))
+    monkeypatch.setattr("tools.repoctl.graph_store.build_semantic_provider", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("provider rerun")))
+
+    second, problems, meta = materialize_graph(tmp_path, target=target)
+
+    assert second is not None
+    assert second.snapshot_digest == first.snapshot_digest
+    assert not [problem for problem in problems if problem.severity == "error"]
+    assert meta["materialization"]["status"] == "reused"
+    assert meta["materialization"]["code_index"]["changed_paths"] == []
+
+
 
 def test_graph_index_truncation_fails(tmp_path: Path, monkeypatch) -> None:
     write_workspace(tmp_path)

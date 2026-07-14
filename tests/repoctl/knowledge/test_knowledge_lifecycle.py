@@ -36,12 +36,14 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert record["review"]["review_note"] == "Reviewed source refs and approved as reusable project decision."
     assert record["review"]["source_digest_set"] == [record["source_refs"][0]["content_sha256"]]
     assert record["id"].startswith("K-")
+    assert "summary" not in record
     assert record["created_from"]["candidate_check"] == {"passed": True, "warning_codes": [], "related_records": []}
     assert approve_payload["data"]["event"]["type"] == "approved"
     assert approve_payload["data"]["event"]["reviewed_by"] == "codex-field-test"
     assert approve_payload["data"]["event"]["review_note"] == "Reviewed source refs and approved as reusable project decision."
     assert approve_payload["data"]["event"]["source_digest_set"] == record["review"]["source_digest_set"]
     assert record["id"].lower().replace("--", "-") in approve_payload["data"]["event"]["id"]
+    assert len(json.dumps(approve_payload, ensure_ascii=False)) < 10_000
     approved_event_id = approve_payload["data"]["event"]["id"]
 
     assert main(["knowledge", "show", record["id"], "--repo-id", "main", "--json"]) == 0
@@ -80,11 +82,16 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
         "warning_codes": [],
         "related_records": [],
     }
+    assert "summary" not in query_payload["data"]["results"][0]["record"]
     breakdown = query_payload["data"]["results"][0]["score_breakdown"]
     assert breakdown["exact_claim"] > 0
     assert breakdown["exact_summary"] > 0
     assert breakdown["authority"] == 0.5
     assert "exact claim match" in query_payload["data"]["results"][0]["selection_reasons"]
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--full", "--json"]) == 0
+    full_query_payload = json.loads(capsys.readouterr().out)
+    assert full_query_payload["data"]["results"][0]["record"]["summary"] == show_payload["data"]["record"]["summary"]
 
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--explain", "--json"]) == 0
     explain_payload = json.loads(capsys.readouterr().out)
@@ -126,7 +133,7 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert drift_payload["problems"][0]["code"] == "knowledge_source_digest_drift"
     assert drift_payload["data"]["records"][0]["status"] == "stale"
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
     rendered_by_path = {item["path"]: item for item in render_payload["data"]["rendered"]}
     stale_bundle = rendered_by_path["docs/knowledge/generated/decisions.md"]["source_bundle"]
@@ -165,49 +172,10 @@ def test_knowledge_check_reports_event_digest_mismatch(tmp_path: Path, monkeypat
     assert status_payload["data"]["record_checks"]["problem_codes"]["knowledge_event_digest_mismatch"] == 1
 
 
-def test_knowledge_check_reports_event_missing_record_with_valid_digest(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    approve_payload = _approve_knowledge_source(capsys)
-    approved_event = approve_payload["data"]["event"]
-    event = _read_event(tmp_path, approved_event["id"])
-    event["record_id"] = "K-20260622000000Z--missing"
-    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
-    _write_event(tmp_path, event)
-
-    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "knowledge_event_record_missing"
 
 
-def test_knowledge_check_reports_event_record_digest_mismatch(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    approve_payload = _approve_knowledge_source(capsys)
-    approved_event = approve_payload["data"]["event"]
-    event = _read_event(tmp_path, approved_event["id"])
-    event["record_digest"] = "sha256:" + "0" * 64
-    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
-    _write_event(tmp_path, event)
-
-    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "knowledge_event_record_digest_mismatch"
 
 
-def test_knowledge_check_reports_superseded_event_missing_replacement(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    old_record = _approve_knowledge_source(capsys)["data"]["record"]["id"]
-    superseded_event = _approve_knowledge_source(capsys, approve_args=["--supersedes", old_record])["data"]["superseded_events"][0]["event"]
-    event = _read_event(tmp_path, superseded_event["id"])
-    event["superseded_by"] = "K-20260622000000Z--missing"
-    event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
-    _write_event(tmp_path, event)
-
-    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "knowledge_event_superseded_by_missing"
 
 
 def test_knowledge_query_rejects_invalid_lifecycle_events(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -1,0 +1,523 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from .code_index import CodeIndexEntry
+from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
+from .context_model import ContextCandidate, ContextSourceRef
+from .context_retrieval import context_query_terms, rank_context_chunks
+from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, receipt_artifact_paths
+from .graph_model import GraphSnapshot, digest_data
+from .language_profiles import collect_verification_hints, is_semantic_source_language
+from .repositories import RepoTarget
+from .tasks import Problem, collect_completion_receipts
+
+
+EVIDENCE_INDEX_SCHEMA_VERSION = 2
+STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
+
+
+def _database_path(root: Path, target: RepoTarget) -> Path:
+    return root / ".repoctl-state/graph" / target.id / "evidence.sqlite3"
+
+
+def _connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
+    if read_only:
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _initialize(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        PRAGMA journal_mode=DELETE;
+        PRAGMA synchronous=FULL;
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY,
+            source_key TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            section TEXT NOT NULL,
+            line_start INTEGER NOT NULL,
+            line_end INTEGER NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            body TEXT NOT NULL,
+            title TEXT NOT NULL,
+            file_fingerprint TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS chunks_path_idx ON chunks(path, kind);
+        CREATE INDEX IF NOT EXISTS chunks_kind_idx ON chunks(kind, path);
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            path,
+            section,
+            body,
+            content='chunks',
+            content_rowid='id'
+        );
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunks_fts(rowid, path, section, body)
+            VALUES (new.id, new.path, new.section, new.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, path, section, body)
+            VALUES ('delete', old.id, old.path, old.section, old.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, path, section, body)
+            VALUES ('delete', old.id, old.path, old.section, old.body);
+            INSERT INTO chunks_fts(rowid, path, section, body)
+            VALUES (new.id, new.path, new.section, new.body);
+        END;
+        """
+    )
+
+
+def _metadata(connection: sqlite3.Connection) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    try:
+        rows = connection.execute("SELECT key, value FROM metadata").fetchall()
+    except sqlite3.Error:
+        return values
+    for row in rows:
+        try:
+            values[str(row["key"])] = json.loads(str(row["value"]))
+        except json.JSONDecodeError:
+            values[str(row["key"])] = str(row["value"])
+    return values
+
+
+def _write_metadata(connection: sqlite3.Connection, values: dict[str, Any]) -> None:
+    connection.execute("DELETE FROM metadata")
+    connection.executemany(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        [
+            (key, json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            for key, value in sorted(values.items())
+        ],
+    )
+
+
+def _source_key(chunk: DocumentChunk) -> str:
+    return digest_data(
+        {
+            "kind": chunk.source_ref.kind,
+            "path": chunk.source_ref.path,
+            "section": chunk.source_ref.section,
+            "line_start": chunk.source_ref.line_start,
+            "line_end": chunk.source_ref.line_end,
+        }
+    )
+
+
+def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], *, file_fingerprint: str = "") -> None:
+    connection.executemany(
+        """
+        INSERT INTO chunks(
+            source_key, kind, path, section, line_start, line_end,
+            content_sha256, body, title, file_fingerprint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_key) DO UPDATE SET
+            kind=excluded.kind,
+            path=excluded.path,
+            section=excluded.section,
+            line_start=excluded.line_start,
+            line_end=excluded.line_end,
+            content_sha256=excluded.content_sha256,
+            body=excluded.body,
+            title=excluded.title,
+            file_fingerprint=excluded.file_fingerprint
+        """,
+        [
+            (
+                _source_key(chunk),
+                chunk.source_ref.kind,
+                chunk.source_ref.path,
+                chunk.source_ref.section,
+                chunk.source_ref.line_start,
+                chunk.source_ref.line_end,
+                chunk.source_ref.content_sha256,
+                chunk.text,
+                chunk.title,
+                file_fingerprint,
+            )
+            for chunk in chunks
+        ],
+    )
+
+
+def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChunk], set[str], list[Problem]]:
+    chunks: list[DocumentChunk] = []
+    static_paths: set[str] = set()
+    problems: list[Problem] = []
+    for path in context_document_paths(root, target=target):
+        rel = path.relative_to(root).as_posix()
+        static_paths.add(rel)
+        try:
+            chunks.extend(chunk_markdown_file(root, path))
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(Problem("warning", "context_source_unreadable", str(exc), rel))
+    for path in context_product_manifest_paths(root, target=target):
+        rel = path.relative_to(root).as_posix()
+        static_paths.add(rel)
+        try:
+            chunks.append(chunk_text_source(root, rel, path.read_text(encoding="utf-8"), kind="product_manifest", section=path.name))
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(Problem("warning", "context_manifest_unreadable", str(exc), rel))
+    for hint in collect_verification_hints(target.root_path):
+        path = target.root_path / hint.source_path
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
+        chunks.append(chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}"))
+    receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
+    problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
+    for receipt in receipts:
+        task_id = str(receipt.get("task_id") or "")
+        rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
+        text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
+        chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=task_id or "completion receipt"))
+        for artifact in receipt_artifact_paths(receipt):
+            path = root / artifact
+            if not path.is_file():
+                continue
+            try:
+                chunks.extend(chunk_markdown_file(root, path, kind="task_artifact"))
+            except (OSError, UnicodeDecodeError) as exc:
+                problems.append(Problem("warning", "context_task_artifact_unreadable", str(exc), artifact))
+    return chunks, static_paths, problems
+
+
+def _symbol_ranges(snapshot: GraphSnapshot, path: str) -> list[tuple[str, int, int]]:
+    nodes = {node.id: node for node in snapshot.nodes}
+    symbol_ids = {
+        edge.to_id
+        for edge in snapshot.edges
+        if edge.kind == "DEFINES"
+        and str(nodes.get(edge.from_id).identity.get("path") if nodes.get(edge.from_id) is not None else "") == path
+    }
+    anchor_ids = {
+        edge.from_id: edge.to_id
+        for edge in snapshot.edges
+        if edge.kind == "ANCHORS" and edge.from_id in symbol_ids
+    }
+    ranges: list[tuple[str, int, int]] = []
+    for symbol_id in sorted(symbol_ids):
+        symbol = nodes.get(symbol_id)
+        anchor = nodes.get(anchor_ids.get(symbol_id, ""))
+        if symbol is None or anchor is None:
+            continue
+        provider = symbol.facts.get("provider") if isinstance(symbol.facts.get("provider"), dict) else {}
+        section = str(provider.get("qualified_name") or provider.get("name") or "symbol")
+        try:
+            start = int(anchor.identity.get("start_line") or 0)
+            end = int(anchor.identity.get("end_line") or 0)
+        except (TypeError, ValueError):
+            continue
+        if start > 0 and end >= start:
+            ranges.append((section, start, end))
+    return sorted(set(ranges), key=lambda item: (item[1], item[2], item[0]))
+
+
+def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot) -> tuple[list[DocumentChunk], Problem | None]:
+    path = root / entry.workspace_path
+    try:
+        if path.stat().st_size > MAX_CONTEXT_SOURCE_BYTES:
+            return [], Problem(
+                "warning",
+                "context_current_source_too_large",
+                f"current source exceeds {MAX_CONTEXT_SOURCE_BYTES} byte indexing limit",
+                entry.workspace_path,
+            )
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return [], None
+    except OSError as exc:
+        return [], Problem("warning", "context_current_source_unreadable", str(exc), entry.workspace_path)
+    if not text.strip():
+        return [], None
+    lines = text.splitlines()
+    digest = sha256_text(text)
+    ranges = _symbol_ranges(snapshot, entry.path)
+    if not ranges:
+        return [chunk_text_source(root, entry.workspace_path, text, kind="current_source", section=entry.path)], None
+
+    chunks: list[DocumentChunk] = []
+    covered = [False] * len(lines)
+    for section, start, end in ranges:
+        bounded_start = max(1, start)
+        bounded_end = min(len(lines), end)
+        if bounded_end < bounded_start:
+            continue
+        for index in range(bounded_start - 1, bounded_end):
+            covered[index] = True
+        body = "\n".join(lines[bounded_start - 1 : bounded_end]).strip()
+        if not body:
+            continue
+        chunks.append(
+            DocumentChunk(
+                source_ref=ContextSourceRef(
+                    kind="current_source",
+                    path=entry.workspace_path,
+                    section=section,
+                    line_start=bounded_start,
+                    line_end=bounded_end,
+                    content_sha256=digest,
+                ),
+                text=body,
+                title=section,
+            )
+        )
+    module_body = "\n".join(line for index, line in enumerate(lines) if not covered[index]).strip()
+    if module_body:
+        chunks.append(
+            DocumentChunk(
+                source_ref=ContextSourceRef(
+                    kind="current_source",
+                    path=entry.workspace_path,
+                    section=f"{entry.path} module",
+                    line_start=1,
+                    line_end=max(1, len(lines)),
+                    content_sha256=digest,
+                ),
+                text=module_body,
+                title=f"{entry.path} module",
+            )
+        )
+    return chunks, None
+
+
+def _source_manifest(connection: sqlite3.Connection, kinds: set[str]) -> str:
+    placeholders = ",".join("?" for _ in kinds)
+    rows = connection.execute(
+        f"SELECT kind, path, section, line_start, line_end, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, line_start, line_end",
+        tuple(sorted(kinds)),
+    ).fetchall()
+    return digest_data([dict(row) for row in rows])
+
+
+def materialize_evidence_index(
+    root: Path,
+    *,
+    target: RepoTarget,
+    snapshot: GraphSnapshot,
+    entries: list[CodeIndexEntry],
+    file_fingerprints: dict[str, str],
+    changed_paths: set[str],
+    graph_input_digest: str,
+    rebuild: bool = False,
+) -> tuple[dict[str, Any], list[Problem]]:
+    path = _database_path(root, target)
+    if path.is_file():
+        try:
+            connection = _connect(path)
+            current_meta = _metadata(connection)
+            connection.close()
+        except sqlite3.Error:
+            current_meta = {}
+        if int(current_meta.get("schema_version") or 0) != EVIDENCE_INDEX_SCHEMA_VERSION:
+            path.unlink(missing_ok=True)
+            rebuild = True
+    else:
+        rebuild = True
+
+    connection = _connect(path)
+    problems: list[Problem] = []
+    try:
+        _initialize(connection)
+        with connection:
+            if rebuild:
+                connection.execute("DELETE FROM chunks")
+            static_chunks, static_paths, static_problems = _static_chunks(root, target=target)
+            problems.extend(static_problems)
+            placeholders = ",".join("?" for _ in STATIC_KINDS)
+            connection.execute(f"DELETE FROM chunks WHERE kind IN ({placeholders})", tuple(sorted(STATIC_KINDS)))
+            _insert_chunks(connection, static_chunks)
+
+            entries_by_path = {entry.path: entry for entry in entries}
+            update_paths = set(entries_by_path) if rebuild else set(changed_paths)
+            for repo_path in sorted(update_paths):
+                workspace_path = f"{target.display_path.rstrip('/')}/{repo_path}"
+                connection.execute("DELETE FROM chunks WHERE path = ? AND kind = 'current_source'", (workspace_path,))
+                entry = entries_by_path.get(repo_path)
+                if (
+                    entry is None
+                    or entry.classification == "excluded"
+                    or not is_semantic_source_language(entry.language)
+                    or workspace_path in static_paths
+                ):
+                    continue
+                chunks, problem = _source_chunks(root, entry=entry, snapshot=snapshot)
+                if problem is not None:
+                    problems.append(problem)
+                _insert_chunks(connection, chunks, file_fingerprint=file_fingerprints.get(repo_path, ""))
+
+            counts = {
+                str(row["kind"]): int(row["count"])
+                for row in connection.execute("SELECT kind, COUNT(*) AS count FROM chunks GROUP BY kind ORDER BY kind")
+            }
+            metadata = {
+                "schema": "repoctl.evidence.index",
+                "schema_version": EVIDENCE_INDEX_SCHEMA_VERSION,
+                "repository": target.to_dict(),
+                "graph_input_digest": graph_input_digest,
+                "snapshot_digest": snapshot.snapshot_digest,
+                "chunk_counts": counts,
+                "document_manifest_digest": _source_manifest(connection, {"document", "product_manifest", "verification_hint"}),
+                "receipt_manifest_digest": _source_manifest(connection, {"completion_receipt", "task_artifact"}),
+                "current_source_manifest_digest": _source_manifest(connection, {"current_source"}),
+                "problems": [
+                    problem.to_dict()
+                    for problem in problems
+                    if problem.code != "invalid_completion_receipt"
+                ],
+            }
+            _write_metadata(connection, metadata)
+        return {
+            "path": path.relative_to(root).as_posix(),
+            "status": "rebuilt" if rebuild else "updated",
+            "updated_paths": sorted(changed_paths),
+            **metadata,
+        }, problems
+    except sqlite3.Error as exc:
+        return {}, [*problems, Problem("error", "evidence_index_materialization_failed", str(exc), path.relative_to(root).as_posix())]
+    finally:
+        connection.close()
+
+
+def load_evidence_index_metadata(root: Path, *, target: RepoTarget) -> tuple[dict[str, Any], list[Problem]]:
+    path = _database_path(root, target)
+    if not path.is_file():
+        return {}, [Problem("error", "evidence_index_missing", "materialized evidence index is missing; run repoctl graph build", target.display_path)]
+    try:
+        connection = _connect(path, read_only=True)
+        metadata = _metadata(connection)
+        connection.close()
+    except sqlite3.Error as exc:
+        return {}, [Problem("error", "evidence_index_unavailable", str(exc), path.relative_to(root).as_posix())]
+    if int(metadata.get("schema_version") or 0) != EVIDENCE_INDEX_SCHEMA_VERSION:
+        return {}, [Problem("error", "evidence_index_schema_invalid", "materialized evidence index schema is invalid; run repoctl graph build --rebuild", path.relative_to(root).as_posix())]
+    return metadata, []
+
+
+def _row_chunk(row: sqlite3.Row) -> DocumentChunk:
+    return DocumentChunk(
+        source_ref=ContextSourceRef(
+            kind=str(row["kind"]),
+            path=str(row["path"]),
+            section=str(row["section"]),
+            line_start=int(row["line_start"]),
+            line_end=int(row["line_end"]),
+            content_sha256=str(row["content_sha256"]),
+        ),
+        text=str(row["body"]),
+        title=str(row["title"]),
+    )
+
+
+def _retrieval_filter(mode: str, target: RepoTarget) -> tuple[str, list[Any]]:
+    prefix = f"{target.display_path.rstrip('/')}/%"
+    if mode == "auto":
+        return "c.path LIKE ? AND c.kind NOT IN ('completion_receipt', 'task_artifact')", [prefix]
+    if mode in {"code_location", "call_impact", "file_impact"}:
+        return "c.path LIKE ? AND c.kind IN ('current_source', 'product_manifest', 'verification_hint')", [prefix]
+    if mode in {"past_decision", "failure_mode"}:
+        return "1 = 1", []
+    return "c.kind NOT IN ('completion_receipt', 'task_artifact')", []
+
+
+def query_evidence_index(
+    root: Path,
+    *,
+    target: RepoTarget,
+    query: str,
+    mode: str,
+    limit: int = 24,
+) -> tuple[list[ContextCandidate], dict[str, Any], list[Problem]]:
+    metadata, problems = load_evidence_index_metadata(root, target=target)
+    if problems:
+        return [], metadata, problems
+    terms = sorted(context_query_terms(query))
+    if not terms:
+        return [], metadata, []
+    path = _database_path(root, target)
+    connection = _connect(path, read_only=True)
+    try:
+        filter_sql, filter_params = _retrieval_filter(mode, target)
+        phrase = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        fts_rows = connection.execute(
+            f"""
+            SELECT c.*, bm25(chunks_fts) AS rank
+            FROM chunks_fts
+            JOIN chunks AS c ON c.id = chunks_fts.rowid
+            WHERE chunks_fts MATCH ? AND {filter_sql}
+            ORDER BY rank, c.path, c.line_start
+            LIMIT 80
+            """,
+            [phrase, *filter_params],
+        ).fetchall()
+        exact_clauses: list[str] = []
+        exact_params: list[Any] = []
+        for term in terms[:12]:
+            exact_clauses.append("(instr(lower(c.path), ?) > 0 OR instr(lower(c.section), ?) > 0 OR instr(lower(c.body), ?) > 0)")
+            exact_params.extend([term.casefold(), term.casefold(), term.casefold()])
+        exact_rows = connection.execute(
+            f"SELECT c.* FROM chunks AS c WHERE {filter_sql} AND ({' OR '.join(exact_clauses)}) ORDER BY c.path, c.line_start LIMIT 160",
+            [*filter_params, *exact_params],
+        ).fetchall()
+        rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in [*fts_rows, *exact_rows]}
+        chunks = [_row_chunk(row) for _row_id, row in sorted(rows.items())]
+        fts_scores = {
+            _row_chunk(row).source_ref.key(): 1.0 / position
+            for position, row in enumerate(fts_rows, start=1)
+        }
+        return rank_context_chunks(query, chunks, fts_scores=fts_scores, limit=limit), metadata, []
+    except sqlite3.Error as exc:
+        return [], metadata, [Problem("error", "evidence_index_query_failed", str(exc), path.relative_to(root).as_posix())]
+    finally:
+        connection.close()
+
+
+def evidence_chunks_for_paths(
+    root: Path,
+    *,
+    target: RepoTarget,
+    workspace_paths: set[str],
+    kinds: set[str] | None = None,
+) -> tuple[list[DocumentChunk], list[Problem]]:
+    if not workspace_paths:
+        return [], []
+    metadata, problems = load_evidence_index_metadata(root, target=target)
+    if problems:
+        return [], problems
+    del metadata
+    path = _database_path(root, target)
+    connection = _connect(path, read_only=True)
+    try:
+        path_placeholders = ",".join("?" for _ in workspace_paths)
+        params: list[Any] = [*sorted(workspace_paths)]
+        kind_sql = ""
+        if kinds:
+            kind_placeholders = ",".join("?" for _ in kinds)
+            kind_sql = f" AND kind IN ({kind_placeholders})"
+            params.extend(sorted(kinds))
+        rows = connection.execute(
+            f"SELECT * FROM chunks WHERE path IN ({path_placeholders}){kind_sql} ORDER BY path, line_start, section",
+            params,
+        ).fetchall()
+        return [_row_chunk(row) for row in rows], []
+    except sqlite3.Error as exc:
+        return [], [Problem("error", "evidence_index_query_failed", str(exc), path.relative_to(root).as_posix())]
+    finally:
+        connection.close()

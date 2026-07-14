@@ -17,7 +17,6 @@ class LanguageProfile:
     manifest_patterns: tuple[str, ...] = ()
     exclude_patterns: tuple[str, ...] = ()
     capability: str = "inventory evidence"
-    precise_semantics: bool = False
     semantic_source: bool = False
     notes: tuple[str, ...] = ()
 
@@ -45,8 +44,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         suffixes=(".py",),
         manifest_patterns=("pyproject.toml", "pytest.ini", "tox.ini", "noxfile.py", "requirements.txt", "requirements-*.txt"),
         exclude_patterns=(".venv/**", "venv/**", "env/**", ".pytest_cache/**", ".mypy_cache/**", ".ruff_cache/**", ".tox/**", ".nox/**", "*.egg-info/**", "__pycache__/**", "**/__pycache__/**", "*.pyc", "*.pyo", "**/*.pyc", "**/*.pyo"),
-        capability="Python AST symbols and conservative call/import evidence",
-        precise_semantics=True,
+        capability="Python AST semantic provider",
         semantic_source=True,
     ),
     LanguageProfile(
@@ -55,9 +53,8 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         suffixes=(".js", ".jsx", ".mjs", ".cjs"),
         manifest_patterns=("package.json", "jsconfig.json", "vite.config.*", "next.config.*", "playwright.config.*"),
         exclude_patterns=("node_modules/**", ".next/**", ".nuxt/**", ".svelte-kit/**", ".turbo/**", ".parcel-cache/**", ".firebase/**", ".playwright-browsers/**", "dist/**", "build/**", "coverage/**", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"),
-        capability="inventory evidence and conservative relative import resolution",
+        capability="TypeScript compiler semantic provider when Node.js is available",
         semantic_source=True,
-        notes=("No provider-confirmed CALLS/REFERENCES edges.",),
     ),
     LanguageProfile(
         id="typescript",
@@ -65,9 +62,8 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         suffixes=(".ts", ".tsx", ".mts", ".cts"),
         manifest_patterns=("package.json", "tsconfig.json", "jsconfig.json", "vite.config.*", "next.config.*", "playwright.config.*"),
         exclude_patterns=("node_modules/**", ".next/**", ".nuxt/**", ".svelte-kit/**", ".turbo/**", ".parcel-cache/**", ".firebase/**", ".playwright-browsers/**", "dist/**", "build/**", "coverage/**", "*.tsbuildinfo", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"),
-        capability="inventory evidence and conservative relative import resolution",
+        capability="TypeScript compiler semantic provider when Node.js is available",
         semantic_source=True,
-        notes=("No provider-confirmed CALLS/REFERENCES edges.",),
     ),
     LanguageProfile(
         id="dart",
@@ -75,9 +71,8 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         suffixes=(".dart",),
         manifest_patterns=("pubspec.yaml", "analysis_options.yaml"),
         exclude_patterns=(".dart_tool/**", "build/**", ".flutter-plugins", ".flutter-plugins-dependencies"),
-        capability="inventory evidence and conservative Dart import resolution",
+        capability="Dart analysis server semantic provider when the Dart SDK is available",
         semantic_source=True,
-        notes=("No provider-confirmed widget/call/reference graph.",),
     ),
     LanguageProfile(
         id="csharp",
@@ -85,9 +80,8 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
         suffixes=(".cs",),
         manifest_patterns=("*.csproj", "*.sln", "Packages/manifest.json", "ProjectSettings/ProjectVersion.txt", "Assets/**/*.asmdef"),
         exclude_patterns=("Library/**", "Temp/**", "Obj/**", "obj/**", "bin/**", "Build/**", "Builds/**", "Logs/**", "UserSettings/**", "MemoryCaptures/**"),
-        capability="inventory/declaration evidence",
+        capability="Roslyn semantic provider when Mono and compiler APIs are available",
         semantic_source=True,
-        notes=("No provider-confirmed Unity scene/prefab/reference graph.",),
     ),
     LanguageProfile(id="go", display_name="Go", suffixes=(".go",), manifest_patterns=("go.mod",), exclude_patterns=("vendor/**", "bin/**", "coverage/**"), capability="inventory evidence", semantic_source=True),
     LanguageProfile(id="rust", display_name="Rust", suffixes=(".rs",), manifest_patterns=("Cargo.toml",), exclude_patterns=("target/**", "coverage/**"), capability="inventory evidence", semantic_source=True),
@@ -124,9 +118,6 @@ LANGUAGE_BY_FILENAME = {filename: profile.id for profile in LANGUAGE_PROFILES fo
 PROFILE_BY_ID = {profile.id: profile for profile in LANGUAGE_PROFILES}
 
 DART_IMPORT_RE = re.compile(r"\bimport\s+['\"]([^'\"]+)['\"]")
-CS_DECL_RE = re.compile(r"\b(?:class|struct|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)")
-
-
 def default_indexing_excludes() -> list[str]:
     patterns: list[str] = [*COMMON_EXCLUDE_PATTERNS]
     for profile in LANGUAGE_PROFILES:
@@ -155,12 +146,11 @@ def graph_language_capabilities(languages: set[str]) -> dict[str, Any]:
     for language in sorted(language for language in languages if language):
         profile = PROFILE_BY_ID.get(language)
         if profile is None:
-            result[language] = {"capability": "inventory evidence", "precise_semantics": False, "notes": ["No registered language profile."]}
+            result[language] = {"capability": "inventory evidence", "semantic_source": False, "notes": ["No registered language profile."]}
             continue
         result[language] = {
             "display_name": profile.display_name,
             "capability": profile.capability,
-            "precise_semantics": profile.precise_semantics,
             "semantic_source": profile.semantic_source,
             "notes": list(profile.notes),
         }
@@ -175,11 +165,6 @@ def is_semantic_source_language(language: str) -> bool:
 def index_dart(text: str) -> tuple[list[str], list[str], list[str], str, str]:
     imports = [match.group(1) for match in DART_IMPORT_RE.finditer(text)]
     return [], _dedupe(imports), [], "ok", ""
-
-
-def index_csharp(text: str) -> tuple[list[str], list[str], list[str], str, str]:
-    symbols = [match.group(1) for match in CS_DECL_RE.finditer(text)]
-    return _dedupe(symbols), [], [], "ok", ""
 
 
 def collect_verification_hints(repo: Path) -> list[VerificationHint]:

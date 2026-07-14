@@ -6,10 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .language_profiles import index_csharp, index_dart, language_for_path
+from .language_profiles import index_dart, language_for_path
 from .meta import FileClassification, meta_inventory
 from .repositories import RepoTarget
 from .tasks import Problem
+
+
+CODE_INDEX_INPUT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -53,9 +56,6 @@ def semantic_provider_entries(entries: list[CodeIndexEntry]) -> list[CodeIndexEn
 
 
 JS_IMPORT_RE = re.compile(r"(?:import\s+(?:[^'\"]+\s+from\s+)?|require\()\s*['\"]([^'\"]+)['\"]")
-JS_SYMBOL_RE = re.compile(r"\b(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)|\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=")
-JS_CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
-JS_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch", "function"}
 
 EFFECT_IMPORT_PREFIXES = {
     "crypto": ("hashlib", "crypto", "bcrypt", "jwt"),
@@ -110,12 +110,9 @@ def _index_python(text: str) -> tuple[list[str], list[str], list[str], str, str]
     return _dedupe_sorted(symbols), _dedupe_sorted(imports), _dedupe_sorted(calls), "ok", ""
 
 
-def _index_js_like(text: str) -> tuple[list[str], list[str], list[str], str, str]:
-    symbols = [match.group(1) or match.group(2) for match in JS_SYMBOL_RE.finditer(text)]
+def _index_js_imports(text: str) -> tuple[list[str], list[str], list[str], str, str]:
     imports = [match.group(1) for match in JS_IMPORT_RE.finditer(text)]
-    calls = [match.group(1) for match in JS_CALL_RE.finditer(text)]
-    calls = [call for call in calls if call not in JS_CALL_KEYWORDS]
-    return _dedupe_sorted(symbols), _dedupe_sorted(imports), _dedupe_sorted(calls), "ok", ""
+    return [], _dedupe_sorted(imports), [], "ok", ""
 
 
 def _observed_effects_for(imports: list[str], calls: list[str]) -> list[str]:
@@ -133,6 +130,10 @@ def _index_file(repo: Path, file: FileClassification) -> CodeIndexEntry:
     language = language_for_path(file.path)
     if file.classification == "excluded":
         return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "skipped", "excluded by policy")
+    if language == "csharp":
+        return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "ok", "")
+    if language not in {"python", "javascript", "typescript", "dart"}:
+        return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, [], [], [], [], [], "skipped", "unsupported language")
 
     path = repo / file.path
     try:
@@ -145,17 +146,87 @@ def _index_file(repo: Path, file: FileClassification) -> CodeIndexEntry:
     if language == "python":
         symbols, imports, calls, status, error = _index_python(text)
     elif language in {"javascript", "typescript"}:
-        symbols, imports, calls, status, error = _index_js_like(text)
-    elif language == "dart":
-        symbols, imports, calls, status, error = index_dart(text)
-    elif language == "csharp":
-        symbols, imports, calls, status, error = index_csharp(text)
+        symbols, imports, calls, status, error = _index_js_imports(text)
     else:
-        symbols, imports, calls, status, error = [], [], [], "skipped", "unsupported language"
+        symbols, imports, calls, status, error = index_dart(text)
 
     deps = _dedupe_sorted([import_name.split(".", 1)[0] for import_name in imports])
     effects = _observed_effects_for(imports, calls)
     return CodeIndexEntry(file.path, file.workspace_path, language, file.classification, symbols, imports, calls, deps, effects, status, error)
+
+
+def _reused_index_entry(file: FileClassification, previous: CodeIndexEntry) -> CodeIndexEntry:
+    return CodeIndexEntry(
+        path=file.path,
+        workspace_path=file.workspace_path,
+        language=language_for_path(file.path),
+        classification=file.classification,
+        symbols=list(previous.symbols),
+        imports=list(previous.imports),
+        calls=list(previous.calls),
+        deps=list(previous.deps),
+        observed_effects=list(previous.observed_effects),
+        parse_status=previous.parse_status,
+        parse_error=previous.parse_error,
+    )
+
+
+def build_code_index_from_inventory(
+    root: Path,
+    *,
+    files: list[FileClassification],
+    inventory_problems: list[Problem],
+    inventory_meta: dict[str, Any],
+    target: RepoTarget,
+    previous_entries: list[CodeIndexEntry] | None = None,
+    reindex_paths: set[str] | None = None,
+    limit: int = -1,
+) -> tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]]:
+    if inventory_problems:
+        return [], inventory_problems, {**inventory_meta, "authoritative": False}
+    previous_by_path = {entry.path: entry for entry in previous_entries or []}
+    reindex_paths = reindex_paths or set()
+    entries: list[CodeIndexEntry] = []
+    reindexed = 0
+    reused = 0
+    for file in files:
+        if file.classification in {"orphan_annotation", "orphan_exclusion"}:
+            continue
+        previous = previous_by_path.get(file.path)
+        excluded_boundary_changed = previous is not None and ((previous.classification == "excluded") != (file.classification == "excluded"))
+        can_reuse = (
+            previous is not None
+            and file.path not in reindex_paths
+            and previous.language == language_for_path(file.path)
+            and not excluded_boundary_changed
+        )
+        if can_reuse:
+            entries.append(_reused_index_entry(file, previous))
+            reused += 1
+        else:
+            entries.append(_index_file(target.root_path, file))
+            reindexed += 1
+    entries.sort(key=lambda entry: entry.path)
+    total_before_limit = len(entries)
+    if limit >= 0:
+        entries = entries[:limit]
+    returned = len(entries)
+    summary = {
+        "total": total_before_limit,
+        "returned": returned,
+        "truncated": returned < total_before_limit,
+        "dropped_count": max(0, total_before_limit - returned),
+        "ok": sum(1 for entry in entries if entry.parse_status == "ok"),
+        "skipped": sum(1 for entry in entries if entry.parse_status == "skipped"),
+        "parse_error": sum(1 for entry in entries if entry.parse_status == "parse_error"),
+        "reindexed": reindexed,
+        "reused": reused,
+        "languages": {
+            language: sum(1 for entry in entries if entry.language == language)
+            for language in sorted({entry.language for entry in entries})
+        },
+    }
+    return entries, inventory_problems, {**inventory_meta, "summary": summary, "authoritative": False}
 
 
 def build_code_index(root: Path, *, changed: bool = False, limit: int = 200, target: RepoTarget | None = None) -> tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]]:

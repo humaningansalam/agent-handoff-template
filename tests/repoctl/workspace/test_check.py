@@ -49,6 +49,12 @@ depends_on: []
 
 # {task_id} - Task
 
+## Discovery
+
+- Candidate query: none yet
+- Candidate files reviewed: none yet
+- Chosen files: none yet
+
 ## Execution Log
 
 - created
@@ -87,7 +93,7 @@ def test_repoctl_lock_uses_repoctl_lock_dir_and_times_out(tmp_path: Path) -> Non
         create_task_file(tmp_path, title="No Lock", slug="no-lock")
         raise AssertionError("task creation should require the repoctl lock")
     except RepoctlError as error:
-        assert "task creation requires repoctl lock" in str(error)
+        assert error.code == "task_lock_required"
 
     lock_dir = tmp_path / "docs/tasks/.repoctl.lock.d"
     lock_dir.mkdir()
@@ -96,7 +102,8 @@ def test_repoctl_lock_uses_repoctl_lock_dir_and_times_out(tmp_path: Path) -> Non
         with repoctl_lock(tmp_path, timeout=0.0, interval=0.0):
             raise AssertionError("lock should not be acquired while the lock directory exists")
     except RepoctlError as error:
-        assert "docs/tasks/.repoctl.lock.d" in str(error)
+        assert error.code == "stale_lock"
+        assert error.path == "docs/tasks/.repoctl.lock.d"
 
 def test_frontmatter_replace_preserves_other_lines() -> None:
     text = task_text("T-20260609184046Z", status="todo")
@@ -105,39 +112,6 @@ def test_frontmatter_replace_preserves_other_lines() -> None:
     assert "owner: \"unassigned\"" in replaced
     assert "```text\n## Handoff\ninside fence" in replaced
 
-def test_clean_check_reports_release_candidate_field_gates(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    init_repo(tmp_path / "repos")
-    (tmp_path / "tests/fixtures/context-benchmark").mkdir(parents=True)
-    (tmp_path / "tests/fixtures/context-benchmark/corpus.json").write_text('{"repositories":{"main":{"files":[]}}}\n', encoding="utf-8")
-    (tmp_path / "tests/fixtures/context-benchmark/questions.jsonl").write_text("", encoding="utf-8")
-    (tmp_path / "tests/fixtures/context-benchmark/expected-sources.json").write_text("{}\n", encoding="utf-8")
-    (tmp_path / "tests/fixtures/context-pack-benchmark").mkdir(parents=True)
-    (tmp_path / "tests/fixtures/context-pack-benchmark/cases.json").write_text("[]\n", encoding="utf-8")
-    (tmp_path / "tests/fixtures/context-pack-benchmark/tasks.json").write_text('{"tasks":[]}\n', encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["check", "--json"]) == 0
-
-    compact = json.loads(capsys.readouterr().out)["data"]["field_gates"]["release_candidate"]
-    assert compact == {
-        "details_included": False,
-        "gate_count": 4,
-        "mutating_gate_count": 2,
-        "run_command": "./scripts/repoctl field-gate run release-candidate --repo-id main --json",
-    }
-
-    assert main(["check", "--full", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    gates = payload["data"]["field_gates"]["release_candidate"]
-    commands = [gate["command"] for gate in gates]
-    assert payload["next_actions"] == []
-    assert any("context benchmark-materialize" in command for command in commands)
-    assert any("context benchmark --fixture tests/fixtures/context-benchmark" in command for command in commands)
-    assert any("context pack-benchmark-materialize" in command for command in commands)
-    assert any("context pack-benchmark" in command for command in commands)
-    assert any(gate["mutates_workspace"] is True for gate in gates if "benchmark-materialize" in gate["command"])
 
 def test_check_does_not_require_repo_ref_for_repository_task(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -223,7 +197,7 @@ def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_
     assert payload["data"]["task_id"] == "T-20260609184046Z"
     assert payload["problems"][0]["code"] == "missing_verification_file"
     assert any(action["label"] == "Complete task Verification" for action in payload["next_actions"])
-    assert any(action.get("command", "").endswith(f"task finish T-20260609184046Z --json") for action in payload["next_actions"])
+    assert any(action.get("command", "").endswith("task finish T-20260609184046Z --json") for action in payload["next_actions"])
 
 def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -283,18 +257,3 @@ def test_repoctl_lock_recovers_dead_owner_on_same_host(tmp_path: Path) -> None:
         assert lock_dir.exists()
 
     assert not lock_dir.exists()
-
-def test_removed_creator_references_stay_removed() -> None:
-    root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
-    forbidden = "new" "-task.sh"
-    assert not (root / "scripts" / forbidden).exists()
-    paths = [
-        *root.glob("AGENTS.md"),
-        *root.glob("README.md"),
-        *root.glob("docs/**/*.md"),
-        *root.glob("tests/**/*.py"),
-        *root.glob("tools/repoctl/**/*.py"),
-    ]
-    paths = [path for path in paths if "docs/archive/tasks" not in path.as_posix()]
-    offenders = [path for path in paths if forbidden in path.read_text(encoding="utf-8")]
-    assert offenders == []

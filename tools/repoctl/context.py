@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 from typing import Any
 
 from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
-from .context_pack import pack_candidates
-from .context_retrieval import excerpt_for_query, retrieve_context
-from .context_sources import collect_context_sources
-from .graph import build_graph, query_graph
+from .context_retrieval import excerpt_for_query, rank_context_chunks, retrieve_context
+from .context_sources import collect_context_sources, context_graph_problems, context_overlay_chunks, current_source_chunks_for_paths
+from .evidence_store import evidence_chunks_for_paths, query_evidence_index
+from .graph import project_context_neighborhood
 from .graph_model import digest_data
+from .graph_store import graph_materialization_freshness, load_materialized_graph
 from .io import RepoctlError
 from .knowledge_candidates import query_knowledge_records
 from .repositories import RepoTarget
@@ -22,6 +22,7 @@ CONTEXT_GROUPS = (
     "callers_and_dependents",
     "tests_and_verification",
     "reviewed_knowledge",
+    "related_history",
     "supporting_evidence",
     "warnings_and_completeness",
 )
@@ -36,6 +37,7 @@ CONTEXT_MODES = {
     "invariant",
     "failure_mode",
 }
+GRAPH_EXPANSION_MODES = {"auto", "code_location", "call_impact", "file_impact"}
 
 
 def build_context_bundle(
@@ -43,49 +45,240 @@ def build_context_bundle(
     *,
     target: RepoTarget,
     query: str,
-    budget_tokens: int = 1200,
     explain: bool = False,
     mode: str = "",
     graph_result: tuple[Any, list[Problem], dict[str, Any]] | None = None,
+    include_linked_records: bool = True,
 ) -> tuple[ContextBundle | None, list[Problem], dict[str, Any]]:
     query_mode = normalize_context_mode(mode)
-    snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else build_graph(root, target=target)
+    snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else load_materialized_graph(root, target=target)
+    if snapshot is not None:
+        freshness, freshness_problems = graph_materialization_freshness(root, target=target)
+    else:
+        freshness, freshness_problems = {"status": "missing", "changed_paths": []}, []
     include_history = query_mode in {"past_decision", "failure_mode"}
-    chunks, source_snapshots, completeness, source_problems = collect_context_sources(
-        root,
-        target=target,
-        snapshot=snapshot,
-        graph_problems=graph_problems,
-        graph_meta=graph_meta,
-        include_history=include_history,
+    indexed_candidates, index_meta, index_problems = query_evidence_index(root, target=target, query=query, mode=query_mode, limit=24)
+    index_available = (
+        snapshot is not None
+        and not any(problem.severity == "error" for problem in index_problems)
+        and str(index_meta.get("snapshot_digest") or "") == snapshot.snapshot_digest
     )
-    problems = [*source_problems]
-    retrieval_chunks = _retrieval_chunks(chunks, mode=query_mode, target=target)
-    retrieved_candidates = retrieve_context(query, retrieval_chunks, limit=24)
-    if query_mode == "auto":
-        graph_candidates, graph_warnings = _graph_context_candidates_from_sources(
+    if index_available:
+        chunks: list[Any] = []
+        indexed_chunk_counts = index_meta.get("chunk_counts") if isinstance(index_meta.get("chunk_counts"), dict) else {}
+        source_count = sum(int(value or 0) for value in indexed_chunk_counts.values())
+        source_snapshots = {
+            key: str(index_meta.get(key) or "")
+            for key in ("document_manifest_digest", "receipt_manifest_digest", "current_source_manifest_digest", "snapshot_digest")
+            if index_meta.get(key)
+        }
+        receipt_problems = snapshot.completeness.get("receipt_problems", []) if snapshot is not None else []
+        completeness = {
+            "documents_checked": int((index_meta.get("chunk_counts") or {}).get("document") or 0),
+            "manifests_checked": int((index_meta.get("chunk_counts") or {}).get("product_manifest") or 0),
+            "receipts_checked": int((index_meta.get("chunk_counts") or {}).get("completion_receipt") or 0),
+            "current_sources_checked": int((index_meta.get("chunk_counts") or {}).get("current_source") or 0),
+            "history_loaded": include_history,
+            "receipt_problem_count": len(receipt_problems),
+            "receipt_problem_paths": sorted(str(problem.get("path") or "") for problem in receipt_problems if isinstance(problem, dict) and problem.get("path")),
+            "graph_available": snapshot is not None,
+            "graph_meta": graph_meta,
+        }
+        evidence_index_problems = [
+            Problem(
+                str(item.get("severity") or "warning"),
+                str(item.get("code") or "context_evidence_index_problem"),
+                str(item.get("message") or "evidence index source was not available"),
+                str(item.get("path") or ""),
+            )
+            for item in index_meta.get("problems", [])
+            if isinstance(item, dict)
+        ]
+        completeness["evidence_problem_count"] = len(evidence_index_problems)
+        completeness["evidence_problem_paths"] = sorted(
+            problem.path
+            for problem in evidence_index_problems
+            if problem.path
+        )
+        if snapshot is not None:
+            completeness["graph_completeness"] = snapshot.completeness
+        completeness["graph_freshness"] = freshness
+        problems = [problem for problem in index_problems if problem.severity != "error"]
+        problems.extend(evidence_index_problems)
+        receipt_graph_problems = [
+            Problem(
+                str(problem.get("severity") or "warning"),
+                str(problem.get("code") or "invalid_completion_receipt"),
+                str(problem.get("message") or "completion receipt is invalid"),
+                str(problem.get("path") or ""),
+            )
+            for problem in receipt_problems
+            if isinstance(problem, dict)
+        ]
+        problems.extend(context_graph_problems([*graph_problems, *receipt_graph_problems]))
+        changed_repo_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
+        stale_workspace_paths = {
+            *{f"{target.display_path.rstrip('/')}/{path}" for path in changed_repo_paths},
+            *{str(path) for path in freshness.get("changed_root_paths", []) if str(path)},
+        }
+        indexed_candidates = [candidate for candidate in indexed_candidates if candidate.source_ref.path not in stale_workspace_paths]
+        classifications = freshness.get("changed_path_classifications") if isinstance(freshness.get("changed_path_classifications"), dict) else {}
+        overlay_candidates, overlay_chunks, overlay_problems = _changed_source_candidates(
+            root,
+            target=target,
+            query=query,
+            repo_paths={path for path in changed_repo_paths if str(classifications.get(path) or "") != "excluded"},
+        )
+        problems.extend(overlay_problems)
+        static_overlay_chunks, static_overlay_problems = context_overlay_chunks(
+            root,
+            target=target,
+            workspace_paths=stale_workspace_paths,
+            include_history=include_history,
+        )
+        problems.extend(static_overlay_problems)
+        static_overlay_candidates = retrieve_context(
+            query,
+            _retrieval_chunks(static_overlay_chunks, mode=query_mode, target=target),
+            limit=24,
+        )
+        overlay_chunks.extend(static_overlay_chunks)
+        if overlay_chunks:
+            source_snapshots["overlay_manifest_digest"] = digest_data(
+                [chunk.source_ref.to_dict() for chunk in sorted(overlay_chunks, key=lambda item: item.source_ref.key())]
+            )
+        retrieved_candidates = _dedupe_candidates([*indexed_candidates, *overlay_candidates, *static_overlay_candidates])[:24]
+    else:
+        overlay_chunks = []
+        chunks, source_snapshots, completeness, source_problems = collect_context_sources(
+            root,
+            target=target,
+            snapshot=snapshot,
+            graph_problems=graph_problems,
+            graph_meta=graph_meta,
+            include_history=include_history,
+        )
+        problems = [*source_problems]
+        source_count = len(chunks)
+        retrieval_chunks = _retrieval_chunks(chunks, mode=query_mode, target=target)
+        retrieved_candidates = retrieve_context(query, retrieval_chunks, limit=24)
+    if _task_history_stale(freshness) and isinstance(completeness.get("graph_completeness"), dict):
+        graph_completeness = dict(completeness["graph_completeness"])
+        capabilities = dict(graph_completeness.get("capabilities") or {})
+        capabilities["task_history"] = "partial"
+        graph_completeness["capabilities"] = capabilities
+        graph_completeness["status"] = "partial"
+        graph_completeness["task_history_fresh"] = False
+        completeness["graph_completeness"] = graph_completeness
+    graph_projection: dict[str, Any] = {}
+    if query_mode in GRAPH_EXPANSION_MODES:
+        if snapshot is not None:
+            stale_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
+            seed_paths = [path for path in _graph_seed_paths(retrieved_candidates, target=target) if path not in stale_paths]
+            graph_projection = project_context_neighborhood(snapshot, seed_paths=seed_paths) if seed_paths else {}
+            graph_projection = _fresh_graph_projection(
+                graph_projection,
+                stale_paths=stale_paths,
+                task_history_stale=_task_history_stale(freshness),
+            )
+            if index_available:
+                projected_paths = {
+                    f"{target.display_path.rstrip('/')}/{path}"
+                    for path in [*seed_paths, *[str(path) for path in graph_projection.get("related_paths", [])]]
+                    if path and path not in stale_paths
+                }
+                chunks, chunk_problems = evidence_chunks_for_paths(
+                    root,
+                    target=target,
+                    workspace_paths=projected_paths,
+                    kinds={"current_source"},
+                )
+                problems.extend(chunk_problems)
+        graph_candidates, graph_warnings, graph_projection = _graph_context_candidates(
             snapshot,
             chunks=chunks,
             target=target,
             source_candidates=retrieved_candidates,
             query=query,
+            projection=graph_projection or None,
         )
     else:
-        graph_candidates, graph_warnings = _graph_context_candidates(snapshot, chunks=chunks, target=target, query=query, mode=query_mode)
-    startup_candidates = _startup_query_candidates(chunks, target=target, mode=query_mode)
-    candidates = _dedupe_candidates([*startup_candidates, *graph_candidates, *retrieved_candidates])
-    packed, budget = pack_candidates(candidates, budget_tokens=budget_tokens)
+        graph_candidates, graph_warnings = [], []
+    if freshness.get("status") == "stale":
+        stale_source_count = int(freshness.get("changed_path_count") or 0)
+        stale_root_count = int(freshness.get("changed_root_path_count") or 0)
+        graph_warnings.append(
+            {
+                "code": "context_graph_stale",
+                "message": f"Graph snapshot is stale for {stale_source_count} product path(s) and {stale_root_count} workspace evidence path(s); stale evidence was excluded or overlaid from current files",
+            }
+        )
+    if _task_history_stale(freshness):
+        graph_warnings.append(
+            {
+                "code": "context_task_history_stale",
+                "message": "Task receipt or artifact evidence changed after Graph materialization; related history is omitted until Graph is rebuilt",
+            }
+        )
+    if freshness_problems:
+        graph_warnings.append(
+            {
+                "code": "context_graph_freshness_unavailable",
+                "message": "Graph freshness could not be fully verified; rebuild Graph before relying on semantic relations",
+            }
+        )
+    if index_available and query_mode == "startup_reading":
+        startup_chunks, startup_problems = evidence_chunks_for_paths(
+            root,
+            target=target,
+            workspace_paths=set(_startup_source_priority(target)),
+        )
+        problems.extend(startup_problems)
+        startup_chunks = [chunk for chunk in startup_chunks if chunk.source_ref.path not in stale_workspace_paths]
+        startup_chunks.extend(overlay_chunks)
+    else:
+        startup_chunks = chunks
+    startup_candidates = _startup_query_candidates(startup_chunks, target=target, mode=query_mode)
+    evidence = _dedupe_candidates([*startup_candidates, *graph_candidates, *retrieved_candidates])
+    selection = {"evidence_count": len(evidence)}
     knowledge_data: dict[str, Any] = {}
-    if query_mode in {"authority_or_contract", "invariant", "past_decision", "failure_mode"}:
+    if query_mode == "auto" and include_linked_records:
+        related_paths = _knowledge_related_paths(target=target, evidence=evidence)
+        knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(
+            root,
+            repo_id=target.id,
+            query=query,
+            include_stale=False,
+            limit=3,
+            explain=explain,
+            related_paths=related_paths,
+            require_related=True,
+        )
+        problems.extend(
+            Problem(
+                "warning",
+                "context_linked_knowledge_unavailable",
+                f"{problem.code}: {problem.message}; current source and Graph results remain available",
+                problem.path,
+            )
+            for problem in knowledge_problems
+        )
+        problems.extend(knowledge_warnings)
+    elif query_mode in {"authority_or_contract", "invariant", "past_decision", "failure_mode"}:
         knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(root, repo_id=target.id, query=query, include_stale=False, limit=10, explain=explain)
         problems.extend(knowledge_problems)
         problems.extend(knowledge_warnings)
     groups = _context_groups(
-        packed,
+        evidence,
         knowledge_results=knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else [],
-        repo_id=target.id,
+        target=target,
         completeness=completeness,
         graph_warnings=graph_warnings,
+        related_history=_related_path_history(
+            target=target,
+            evidence=evidence,
+            history=graph_projection.get("history", []) if include_linked_records and isinstance(graph_projection.get("history"), list) else [],
+        ),
     )
     bundle = ContextBundle(
         repository=target.to_dict(),
@@ -93,15 +286,14 @@ def build_context_bundle(
         source_snapshots=source_snapshots,
         completeness={
             **completeness,
-            "source_count": len(chunks),
+            "source_count": source_count,
             "group_names": list(CONTEXT_GROUPS),
             "knowledge_available_record_count": int(knowledge_data.get("available_record_count") or 0),
             "knowledge_result_count": int(knowledge_data.get("result_count") or 0),
             "knowledge_lifecycle": knowledge_data.get("lifecycle", {}) if isinstance(knowledge_data.get("lifecycle"), dict) else {},
         },
-        candidates=candidates,
-        packed_context=packed,
-        budget=budget,
+        evidence=evidence,
+        selection=selection,
         knowledge_results=knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else [],
         groups=groups,
     ).with_digest()
@@ -128,9 +320,65 @@ def normalize_context_mode(explicit_mode: str = "") -> str:
     return normalized
 
 
+def _changed_source_candidates(
+    root: Path,
+    *,
+    target: RepoTarget,
+    query: str,
+    repo_paths: set[str],
+) -> tuple[list[ContextCandidate], list[Any], list[Problem]]:
+    chunks, problems = current_source_chunks_for_paths(
+        root,
+        target=target,
+        repo_paths=repo_paths,
+    )
+    return retrieve_context(query, chunks, limit=24), chunks, problems
+
+
+def _fresh_graph_projection(
+    projection: dict[str, Any],
+    *,
+    stale_paths: set[str],
+    task_history_stale: bool,
+) -> dict[str, Any]:
+    relations = projection.get("relations") if isinstance(projection.get("relations"), list) else []
+    fresh_relations = [
+        relation
+        for relation in relations
+        if isinstance(relation, dict)
+        and str(relation.get("from_path") or "") not in stale_paths
+        and str(relation.get("to_path") or "") not in stale_paths
+    ]
+    return {
+        **projection,
+        "seed_paths": [path for path in projection.get("seed_paths", []) if str(path) not in stale_paths],
+        "related_paths": [path for path in projection.get("related_paths", []) if str(path) not in stale_paths],
+        "relations": fresh_relations,
+        "history": [] if task_history_stale else projection.get("history", []),
+    }
+
+
+def _task_history_stale(freshness: dict[str, Any]) -> bool:
+    prefixes = (
+        "docs/tasks/.repoctl-state/completions/",
+        "docs/tasks/",
+        "docs/archive/tasks/",
+    )
+    return any(
+        str(path).startswith(prefixes)
+        for path in freshness.get("changed_root_paths", [])
+    )
+
+
 def _retrieval_chunks(chunks: list[Any], *, mode: str, target: RepoTarget) -> list[Any]:
     if mode == "auto":
-        return [chunk for chunk in chunks if chunk.source_ref.kind not in {"completion_receipt", "task_artifact"}]
+        product_prefix = f"{target.display_path.rstrip('/')}/"
+        return [
+            chunk
+            for chunk in chunks
+            if chunk.source_ref.path.startswith(product_prefix)
+            and chunk.source_ref.kind not in {"completion_receipt", "task_artifact"}
+        ]
     if mode not in {"code_location", "call_impact", "file_impact"}:
         return chunks
     product_prefix = f"{target.display_path.rstrip('/')}/"
@@ -149,7 +397,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     data = bundle.to_dict()
     query = data["query"]
     lines = [
-        f"# Context Bundle",
+        "# Context Bundle",
         "",
         f"- Query: {query.get('text', '')}",
         f"- Mode: `{query.get('mode', '')}`",
@@ -163,6 +411,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
         "callers_and_dependents": "Callers And Dependents",
         "tests_and_verification": "Tests And Verification",
         "reviewed_knowledge": "Reviewed Knowledge",
+        "related_history": "Related History",
         "supporting_evidence": "Supporting Evidence",
         "warnings_and_completeness": "Warnings And Completeness",
     }
@@ -186,30 +435,35 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 240) -> dict[str, Any]:
-    """Return the default agent-facing view without raw candidate/debug payloads."""
+def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 120) -> dict[str, Any]:
+    """Return the default agent-facing view without full evidence diagnostics."""
     group_limits = {
         "must_read": 5,
         "likely_change_surface": 5,
         "callers_and_dependents": 3,
-        "tests_and_verification": 3,
+        "tests_and_verification": 4,
         "reviewed_knowledge": 2,
-        "supporting_evidence": 3,
-        "warnings_and_completeness": 5,
+        "related_history": 3,
+        "supporting_evidence": 1,
+        "warnings_and_completeness": 3,
     }
     groups = {
-        group: [
-            _compact_group_item(item, excerpt_chars=excerpt_chars)
-            for item in items[: min(max_group_items, group_limits.get(group, max_group_items))]
-        ]
+        group: _compact_group_items(
+            items,
+            limit=min(max_group_items, group_limits.get(group, max_group_items)),
+            excerpt_chars=excerpt_chars,
+        )
         for group, items in sorted(bundle.groups.items())
     }
     group_counts = {group: len(items) for group, items in sorted(bundle.groups.items())}
-    selected_refs = _selected_source_refs(bundle.packed_context)
+    displayed_group_counts = {group: len(items) for group, items in sorted(groups.items())}
     omitted = {
-        "candidate_count": len(bundle.candidates),
-        "packed_context_count": len(bundle.packed_context),
         "group_counts": group_counts,
+        "displayed_group_counts": displayed_group_counts,
+        "omitted_group_items": {
+            group: max(0, group_counts.get(group, 0) - displayed_group_counts.get(group, 0))
+            for group in sorted(group_counts)
+        },
     }
     return {
         "schema": bundle.schema,
@@ -218,47 +472,70 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "authoritative": bundle.authoritative,
         "repository": bundle.repository,
         "query": bundle.query,
-        "source_snapshots": dict(sorted(bundle.source_snapshots.items())),
-        "completeness": bundle.completeness,
+        "completeness": _compact_completeness(bundle.completeness),
         "groups": groups,
-        "selected_source_refs": selected_refs,
-        "budget": {**bundle.budget, **omitted},
+        "selection": {**bundle.selection, **omitted},
         "knowledge_result_count": len(bundle.knowledge_results),
         "bundle_digest": bundle.bundle_digest,
     }
 
 
-def _selected_source_refs(candidates: list[ContextCandidate]) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, int, int]] = set()
-    for candidate in sorted(candidates, key=lambda item: (-item.score, item.source_ref.path, item.source_ref.section, item.source_ref.line_start)):
-        ref = candidate.source_ref
-        key = ref.key()
-        if key in seen:
-            continue
-        seen.add(key)
-        refs.append({"source_ref": ref.to_dict()})
-    return refs
+def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
+    graph = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
+    capabilities = graph.get("capabilities") if isinstance(graph.get("capabilities"), dict) else {}
+    provider_coverage = graph.get("provider_coverage") if isinstance(graph.get("provider_coverage"), dict) else {}
+    return {
+        "graph_available": bool(completeness.get("graph_available")),
+        "status": str(graph.get("status") or ("unavailable" if not completeness.get("graph_available") else "partial")),
+        "capabilities": {str(key): str(value) for key, value in sorted(capabilities.items())},
+        "provider_coverage": {
+            str(name): {
+                "status": str(value.get("status") or ""),
+                "evidence_level": str(value.get("evidence_level") or ""),
+            }
+            for name, value in sorted(provider_coverage.items())
+            if isinstance(value, dict)
+        },
+        "code_facts_complete": bool(graph.get("code_facts_complete", False)),
+        "receipt_set_complete": bool(graph.get("receipt_set_complete", False)),
+        "receipt_problem_count": int(completeness.get("receipt_problem_count") or 0),
+        "evidence_problem_count": int(completeness.get("evidence_problem_count") or 0),
+        "knowledge_available_record_count": int(completeness.get("knowledge_available_record_count") or 0),
+        "knowledge_result_count": int(completeness.get("knowledge_result_count") or 0),
+    }
 
 
 def _compact_group_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    for key in ("repo_id", "status", "record_id", "code", "selection_reason"):
+    for key in ("record_id", "code"):
         if item.get(key):
             compact[key] = item[key]
+    if item.get("selection_reason"):
+        compact["selection_reason"] = _truncate(str(item["selection_reason"]), 120)
+    if item.get("status") not in {None, "", "current", "recorded"}:
+        compact["status"] = item["status"]
     ref = item.get("source_ref")
     if isinstance(ref, dict):
         compact["source_ref"] = ref
-    score_breakdown = item.get("score_breakdown")
-    if isinstance(score_breakdown, dict) and score_breakdown:
-        compact["score_breakdown"] = score_breakdown
     excerpt = item.get("excerpt")
     if excerpt:
         compact["excerpt"] = _truncate(str(excerpt), excerpt_chars)
     graph_path = item.get("graph_path")
     if isinstance(graph_path, list) and graph_path:
         compact["graph_path_count"] = len(graph_path)
+    continuations = item.get("continuations")
+    if isinstance(continuations, list) and continuations:
+        compact["continuations"] = continuations[:4]
     return compact
+
+
+def _compact_group_items(items: list[dict[str, Any]], *, limit: int, excerpt_chars: int) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for item in items:
+        selected.append(_compact_group_item(item, excerpt_chars=excerpt_chars))
+        if len(selected) == limit:
+            break
+    return selected
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -268,8 +545,26 @@ def _truncate(value: str, limit: int) -> str:
     return compact[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _query_tokens(query: str) -> list[str]:
-    return re.findall(r"[A-Za-z_][A-Za-z0-9_./:-]*|[./][A-Za-z0-9_./:-]+", query)
+def _knowledge_related_paths(*, target: RepoTarget, evidence: list[ContextCandidate]) -> set[str]:
+    paths: set[str] = set()
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    for candidate in evidence:
+        path = candidate.source_ref.path
+        if path and not path.startswith("<"):
+            paths.add(path)
+            if path.startswith(product_prefix):
+                paths.add(path.removeprefix(product_prefix))
+    return paths
+
+
+def _related_path_history(*, target: RepoTarget, evidence: list[ContextCandidate], history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    selected_paths = {
+        candidate.source_ref.path.removeprefix(product_prefix)
+        for candidate in evidence
+        if candidate.source_ref.kind == "current_source" and candidate.source_ref.path.startswith(product_prefix)
+    }
+    return [item for item in history if isinstance(item, dict) and str(item.get("path") or "") in selected_paths]
 
 
 def _startup_query_candidates(chunks: list[Any], *, target: RepoTarget, mode: str) -> list[ContextCandidate]:
@@ -277,13 +572,20 @@ def _startup_query_candidates(chunks: list[Any], *, target: RepoTarget, mode: st
         return []
     wanted = _startup_source_priority(target)
     selected: list[ContextCandidate] = []
-    seen_paths: set[str] = set()
+    chunks_by_path: dict[str, list[Any]] = {}
     for chunk in chunks:
         path = chunk.source_ref.path
-        score = wanted.get(path)
-        if score is None or path in seen_paths:
+        if path not in wanted:
             continue
-        seen_paths.add(path)
+        chunks_by_path.setdefault(path, []).append(chunk)
+    for path, score in sorted(wanted.items(), key=lambda item: (-item[1], item[0])):
+        path_chunks = chunks_by_path.get(path, [])
+        if not path_chunks:
+            continue
+        chunk = next(
+            (item for item in path_chunks if len(item.text.strip()) >= 80),
+            max(path_chunks, key=lambda item: (len(item.text.strip()), -item.source_ref.line_start)),
+        )
         selected.append(
             ContextCandidate(
                 source_ref=chunk.source_ref,
@@ -327,181 +629,181 @@ def _graph_context_candidates(
     *,
     chunks: list[Any],
     target: RepoTarget,
-    query: str,
-    mode: str,
-) -> tuple[list[ContextCandidate], list[dict[str, str]]]:
-    if snapshot is None:
-        return [], [{"code": "context_graph_unavailable", "message": "Graph snapshot was not available for context query"}]
-    warnings: list[dict[str, str]] = []
-    candidates: list[ContextCandidate] = []
-    seen_queries: set[tuple[str, str]] = set()
-    product_prefix = f"{target.display_path.rstrip('/')}/"
-    source_chunks = {
-        chunk.source_ref.path.removeprefix(product_prefix): chunk
-        for chunk in chunks
-        if chunk.source_ref.kind == "current_source" and chunk.source_ref.path.startswith(product_prefix)
-    }
-    for token in _query_tokens(query):
-        token = token.strip("`'\".,()[]{}")
-        if len(token) < 2:
-            continue
-        graph_results: list[dict[str, Any]] = []
-        if "/" in token or token.endswith((".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".cs")):
-            if mode in {"file_impact", "call_impact"}:
-                key = ("impact_file", token)
-                if key not in seen_queries:
-                    seen_queries.add(key)
-                    result, problems = query_graph(snapshot, impact_file=token, depth=2)
-                    graph_results.extend(_usable_graph_results(result, problems, warnings))
-            key = ("file", token)
-            if key not in seen_queries:
-                seen_queries.add(key)
-                result, problems = query_graph(snapshot, file=token)
-                graph_results.extend(_usable_graph_results(result, problems, warnings))
-        elif mode in {"code_location", "call_impact", "file_impact"}:
-            if mode == "code_location":
-                key = ("symbol", token)
-                if key not in seen_queries:
-                    seen_queries.add(key)
-                    result, problems = query_graph(snapshot, symbol=token)
-                    graph_results.extend(_usable_graph_results(result, problems, warnings))
-            if mode in {"call_impact", "file_impact"}:
-                for selector in ("callers_of", "impact_symbol"):
-                    key = (selector, token)
-                    if key in seen_queries:
-                        continue
-                    seen_queries.add(key)
-                    kwargs = {"callers_of": token} if selector == "callers_of" else {"impact_symbol": token, "depth": 2}
-                    result, problems = query_graph(snapshot, **kwargs)
-                    graph_results.extend(_usable_graph_results(result, problems, warnings))
-        for result in graph_results:
-            candidates.extend(_graph_result_source_candidates(result, source_chunks=source_chunks, query=query))
-            graph_candidate = _graph_candidate(result, repo_id=str(snapshot.repository.get("id") or ""), mode=mode)
-            if graph_candidate.graph_path:
-                candidates.append(graph_candidate)
-    return _dedupe_candidates(candidates), warnings
-
-
-def _graph_context_candidates_from_sources(
-    snapshot: Any,
-    *,
-    chunks: list[Any],
-    target: RepoTarget,
     source_candidates: list[ContextCandidate],
     query: str,
-) -> tuple[list[ContextCandidate], list[dict[str, str]]]:
+    projection: dict[str, Any] | None = None,
+) -> tuple[list[ContextCandidate], list[dict[str, str]], dict[str, Any]]:
     if snapshot is None:
-        return [], [{"code": "context_graph_unavailable", "message": "Graph snapshot was not available for context query"}]
+        return [], [{"code": "context_graph_unavailable", "message": "Graph snapshot was not available for context query"}], {}
     if not source_candidates:
-        return [], []
+        return [], [], {}
     product_prefix = f"{target.display_path.rstrip('/')}/"
-    source_chunks = {
-        chunk.source_ref.path.removeprefix(product_prefix): chunk
-        for chunk in chunks
-        if chunk.source_ref.kind == "current_source" and chunk.source_ref.path.startswith(product_prefix)
-    }
-    seed_paths: list[str] = []
-    for candidate in source_candidates[:8]:
+    source_chunks: dict[str, list[Any]] = {}
+    for chunk in chunks:
+        if chunk.source_ref.kind != "current_source" or not chunk.source_ref.path.startswith(product_prefix):
+            continue
+        source_chunks.setdefault(chunk.source_ref.path.removeprefix(product_prefix), []).append(chunk)
+    retrieval_by_path: dict[str, ContextCandidate] = {}
+    for candidate in source_candidates:
         path = candidate.source_ref.path
         if candidate.source_ref.kind != "current_source" or not path.startswith(product_prefix):
             continue
         repo_path = path.removeprefix(product_prefix)
-        if repo_path not in seed_paths:
-            seed_paths.append(repo_path)
-        if len(seed_paths) == 3:
-            break
+        retrieval_by_path.setdefault(repo_path, candidate)
+    seed_paths = _graph_seed_paths(source_candidates, target=target)
     if not seed_paths:
-        return [], []
+        return [], [], {}
 
     candidates: list[ContextCandidate] = []
-    warnings: list[dict[str, str]] = []
-    for path in seed_paths:
-        result, result_problems = query_graph(snapshot, impact_file=path, depth=2)
-        usable = _usable_graph_results(result, result_problems, warnings)
-        for graph_result in usable:
-            candidates.extend(_graph_result_source_candidates(graph_result, source_chunks=source_chunks, query=query))
-            graph_candidate = _graph_candidate(graph_result, repo_id=str(snapshot.repository.get("id") or ""), mode="auto")
-            if graph_candidate.graph_path:
-                candidates.append(graph_candidate)
-    return _dedupe_candidates(candidates), warnings
-
-
-def _usable_graph_results(result: dict[str, Any] | None, problems: list[Problem], warnings: list[dict[str, str]]) -> list[dict[str, Any]]:
-    for problem in problems:
-        if problem.code == "graph_query_ambiguous_symbol" and result is not None:
-            warnings.append({"code": problem.code, "message": problem.message})
-            return [result]
-        if problem.severity == "error":
-            continue
-        warnings.append({"code": problem.code, "message": problem.message})
-    if result is None or str(result.get("query_status") or "") != "found":
-        return []
-    if not result.get("matches") and not result.get("paths"):
-        return []
-    return [result]
-
-
-def _graph_result_source_candidates(result: dict[str, Any], *, source_chunks: dict[str, Any], query: str) -> list[ContextCandidate]:
-    matched_paths = {
-        str(match.get("path") or "")
-        for match in result.get("matches", [])
-        if isinstance(match, dict) and str(match.get("path") or "")
+    projection = projection or project_context_neighborhood(snapshot, seed_paths=seed_paths)
+    relations = projection.get("relations") if isinstance(projection.get("relations"), list) else []
+    anchor_scores = {
+        path: retrieval_by_path[path].score
+        for path in seed_paths
+        if path in retrieval_by_path
     }
-    related_paths: set[str] = set()
-    for node in result.get("nodes", []):
-        if not isinstance(node, dict) or str(node.get("kind") or "") != "file":
+    relations_by_path: dict[str, list[dict[str, Any]]] = {}
+    for relation in relations:
+        if not isinstance(relation, dict):
             continue
-        identity = node.get("identity") if isinstance(node.get("identity"), dict) else {}
-        path = str(identity.get("path") or "")
-        if path:
-            related_paths.add(path)
+        for key in ("from_path", "to_path"):
+            path = str(relation.get(key) or "")
+            if path:
+                relations_by_path.setdefault(path, []).append(relation)
+    for path_relations in relations_by_path.values():
+        path_relations.sort(key=lambda relation: -_relation_relevance(relation, anchor_scores=anchor_scores, retrieval_by_path=retrieval_by_path))
+    for relation in sorted(
+        (relation for relation in relations if isinstance(relation, dict)),
+        key=lambda item: -_relation_relevance(item, anchor_scores=anchor_scores, retrieval_by_path=retrieval_by_path),
+    ):
+        candidates.append(
+            _graph_relation_candidate(
+                relation,
+                score=_relation_relevance(relation, anchor_scores=anchor_scores, retrieval_by_path=retrieval_by_path),
+            )
+        )
 
-    candidates: list[ContextCandidate] = []
-    for path in sorted(matched_paths | related_paths):
-        chunk = source_chunks.get(path)
+    projected_paths = list(dict.fromkeys([*seed_paths, *[str(path) for path in projection.get("related_paths", [])]]))
+    seed_path_set = set(seed_paths)
+    for path in projected_paths:
+        path_chunks = source_chunks.get(str(path), [])
+        chunk = _graph_source_chunk(path_chunks, query=query, retrieved=retrieval_by_path.get(str(path)))
         if chunk is None:
             continue
-        matched = path in matched_paths
+        path_relations = relations_by_path.get(str(path), [])
+        scoring_relations = path_relations
+        propagated_score = 0.0
+        for relation in scoring_relations:
+            distance = max(1, int(relation.get("distance") or 1))
+            origins = relation.get("origin_paths") if isinstance(relation.get("origin_paths"), list) else []
+            for origin in origins:
+                origin_path = str(origin or "")
+                if origin_path == path:
+                    continue
+                propagated_score = max(propagated_score, anchor_scores.get(origin_path, 0.0) / distance)
+        if path in seed_path_set and propagated_score <= 0:
+            continue
+        reasons = [_relation_reason(relation) for relation in scoring_relations[:3]]
+        retrieved = retrieval_by_path.get(str(path))
+        lexical_score = retrieved.score if retrieved is not None else 0.0
+        if retrieved is not None:
+            reasons.extend(retrieved.selection_reasons)
         candidates.append(
             ContextCandidate(
                 source_ref=chunk.source_ref,
                 text=excerpt_for_query(chunk.text, query, limit=700),
-                score=6.0 if matched else 5.0,
-                score_breakdown={"exact": 0.0, "fts": 0.0, "authority": 0.0, "graph": 1.0},
-                selection_reasons=["Graph matched source file" if matched else "Graph related source file"],
+                score=propagated_score + lexical_score,
+                score_breakdown={
+                    "exact": float(retrieved.score_breakdown.get("exact", 0.0)) if retrieved is not None else 0.0,
+                    "fts": float(retrieved.score_breakdown.get("fts", 0.0)) if retrieved is not None else 0.0,
+                    "authority": float(retrieved.score_breakdown.get("authority", 0.0)) if retrieved is not None else 0.0,
+                    "graph": propagated_score,
+                },
+                selection_reasons=reasons or ["Graph direct file relation"],
+                graph_path=scoring_relations[:3],
             )
         )
-    return candidates
+    return _dedupe_candidates(candidates), [], projection
 
 
-def _graph_candidate(result: dict[str, Any], *, repo_id: str, mode: str) -> ContextCandidate:
-    query = result.get("query") if isinstance(result.get("query"), dict) else {}
-    paths = result.get("paths") if isinstance(result.get("paths"), list) else []
-    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
-    lines: list[str] = []
-    for match in matches[:5]:
-        label = match.get("qualified_name") or match.get("path") or match.get("raw_import") or match.get("id")
-        location = match.get("path") or ""
-        lines.append(f"match {label} {location}".rstrip())
-    relationship_paths = [path for path in paths if str(path.get("edge") or "") not in {"DEFINES", "ANCHORS"}]
-    display_paths = relationship_paths or paths
-    for path in display_paths[:10]:
-        from_node = path.get("from", {}) if isinstance(path.get("from"), dict) else {}
-        to_node = path.get("to", {}) if isinstance(path.get("to"), dict) else {}
-        from_label = from_node.get("qualified_name") or from_node.get("path") or from_node.get("id")
-        to_label = to_node.get("qualified_name") or to_node.get("path") or to_node.get("id")
-        lines.append(f"{from_label} --{path.get('edge')}--> {to_label}: {path.get('reason')}")
-    text = "\n".join(lines) if lines else f"Graph query matched {len(matches)} node(s)."
-    digest = digest_data(result)
-    query_type = str(query.get("type") or "graph")
+def _graph_seed_paths(source_candidates: list[ContextCandidate], *, target: RepoTarget) -> list[str]:
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    source_paths: list[str] = []
+    test_paths: list[str] = []
+    for candidate in source_candidates:
+        path = candidate.source_ref.path
+        if candidate.source_ref.kind != "current_source" or not path.startswith(product_prefix):
+            continue
+        repo_path = path.removeprefix(product_prefix)
+        selected = test_paths if _looks_like_test_ref(repo_path.lower()) else source_paths
+        if repo_path not in selected:
+            selected.append(repo_path)
+    return [*source_paths, *test_paths]
+
+
+def _graph_source_chunk(chunks: list[Any], *, query: str, retrieved: ContextCandidate | None) -> Any | None:
+    if not chunks:
+        return None
+    if retrieved is not None:
+        for chunk in chunks:
+            if chunk.source_ref.key() == retrieved.source_ref.key():
+                return chunk
+    ranked = rank_context_chunks(query, chunks, fts_scores={}, limit=1)
+    if ranked:
+        wanted = ranked[0].source_ref.key()
+        for chunk in chunks:
+            if chunk.source_ref.key() == wanted:
+                return chunk
+    module_chunks = [chunk for chunk in chunks if chunk.source_ref.section.endswith(" module")]
+    return sorted(module_chunks or chunks, key=lambda item: (item.source_ref.line_start, item.source_ref.line_end, item.source_ref.section))[0]
+
+
+def _graph_relation_candidate(relation: dict[str, Any], *, score: float) -> ContextCandidate:
+    relation_digest = digest_data(relation)
     return ContextCandidate(
-        source_ref=ContextSourceRef(kind="graph_query", path=f"<graph-query:{query_type}:{digest[7:19]}>", section=query_type, content_sha256=digest),
-        text=text,
-        score=4.0 if paths else 3.0,
+        source_ref=ContextSourceRef(
+            kind="graph_relation",
+            path=f"<graph-relation:{relation_digest[7:19]}>",
+            section=str(relation.get("edge") or "relation"),
+            content_sha256=relation_digest,
+        ),
+        text=_relation_reason(relation),
+        score=score,
         score_breakdown={"exact": 0.0, "fts": 0.0, "authority": 0.0, "graph": 1.0},
-        selection_reasons=[f"Graph {query_type} evidence for {mode}"],
-        graph_path=paths,
+        selection_reasons=["Graph direct relation"],
+        graph_path=[relation],
     )
+
+
+def _relation_relevance(
+    relation: dict[str, Any],
+    *,
+    anchor_scores: dict[str, float],
+    retrieval_by_path: dict[str, ContextCandidate],
+) -> float:
+    distance = max(1, int(relation.get("distance") or 1))
+    origins = relation.get("origin_paths") if isinstance(relation.get("origin_paths"), list) else []
+    propagated = max((anchor_scores.get(str(origin or ""), 0.0) / distance for origin in origins), default=0.0)
+    endpoint_score = sum(
+        retrieval_by_path[path].score
+        for path in {
+            str(relation.get("from_path") or ""),
+            str(relation.get("to_path") or ""),
+        }
+        if path in retrieval_by_path
+    )
+    return propagated + endpoint_score
+
+
+def _relation_reason(relation: dict[str, Any]) -> str:
+    from_path = str(relation.get("from_path") or "")
+    to_path = str(relation.get("to_path") or "")
+    edge = str(relation.get("edge") or "RELATED")
+    from_symbol = relation.get("from_symbol") if isinstance(relation.get("from_symbol"), dict) else {}
+    to_symbol = relation.get("to_symbol") if isinstance(relation.get("to_symbol"), dict) else {}
+    from_label = str(from_symbol.get("qualified_name") or from_symbol.get("name") or from_path)
+    to_label = str(to_symbol.get("qualified_name") or to_symbol.get("name") or to_path)
+    return f"{from_label} --{edge}--> {to_label}"
 
 
 def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
@@ -511,32 +813,86 @@ def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandid
         previous = best.get(key)
         if previous is None or candidate.score > previous.score:
             best[key] = candidate
-    return sorted(best.values(), key=lambda item: (-item.score, item.source_ref.path, item.source_ref.line_start))
+    return sorted(best.values(), key=_candidate_sort_key)
+
+
+def _candidate_sort_key(candidate: ContextCandidate) -> tuple[int, float, str, int]:
+    breakdown = candidate.score_breakdown
+    direct_query_evidence = any(
+        float(breakdown.get(key) or 0.0) > 0
+        for key in ("startup_reading", "exact", "fts")
+    )
+    stage = 0 if direct_query_evidence else 1 if float(breakdown.get("graph") or 0.0) > 0 else 2
+    return (stage, -candidate.score, candidate.source_ref.path, candidate.source_ref.line_start)
 
 
 def _context_groups(
-    packed: list[ContextCandidate],
+    evidence: list[ContextCandidate],
     *,
     knowledge_results: list[dict[str, Any]],
-    repo_id: str,
+    target: RepoTarget,
     completeness: dict[str, Any],
     graph_warnings: list[dict[str, str]],
+    related_history: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
+    repo_id = target.id
     groups: dict[str, list[dict[str, Any]]] = {group: [] for group in CONTEXT_GROUPS}
-    for candidate in packed:
+    for candidate in evidence:
         group = _candidate_group(candidate)
-        groups[group].append(_candidate_group_item(candidate, repo_id=repo_id, status="current"))
+        groups[group].append(_candidate_group_item(candidate, target=target, status="current"))
     for result in knowledge_results:
         record = result.get("record") if isinstance(result.get("record"), dict) else {}
+        matched_paths = result.get("matched_paths") if isinstance(result.get("matched_paths"), list) else []
         groups["reviewed_knowledge"].append(
             {
                 "repo_id": repo_id,
                 "record_id": record.get("id", ""),
                 "status": result.get("status") or record.get("status") or "reviewed",
-                "selection_reason": "reviewed knowledge match",
+                "selection_reason": f"reviewed knowledge linked to {', '.join(str(path) for path in matched_paths)}" if matched_paths else "reviewed knowledge match",
                 "score_breakdown": result.get("score_breakdown", {}),
                 "excerpt": record.get("claim") or record.get("summary") or "",
-                "source_ref": {"kind": "knowledge_record", "path": f"docs/knowledge/records/{record.get('id', '')}.json", "content_sha256": record.get("record_sha256", "")},
+                "source_ref": {"kind": "knowledge_record", "path": f"docs/knowledge/records/{record.get('id', '')}.json", "content_sha256": record.get("record_digest", "")},
+                "continuations": _knowledge_continuations(record),
+            }
+        )
+    history_by_task: dict[str, dict[str, Any]] = {}
+    for item in related_history:
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task_id") or "")
+        if not task_id:
+            continue
+        aggregate = history_by_task.setdefault(
+            task_id,
+            {
+                "task_path": str(item.get("task_path") or ""),
+                "completed_at": str(item.get("completed_at") or ""),
+                "attribution": str(item.get("attribution") or ""),
+                "paths": set(),
+            },
+        )
+        changed_path = str(item.get("path") or "")
+        if changed_path:
+            aggregate["paths"].add(changed_path)
+    for task_id, item in sorted(history_by_task.items(), key=lambda pair: (str(pair[1].get("completed_at") or ""), pair[0]), reverse=True):
+        task_path = str(item.get("task_path") or "")
+        changed_paths = sorted(str(path) for path in item.get("paths", set()) if str(path))
+        groups["related_history"].append(
+            {
+                "repo_id": repo_id,
+                "record_id": task_id,
+                "status": "recorded",
+                "selection_reason": f"completion evidence touched {', '.join(changed_paths)}",
+                "excerpt": " ".join(
+                    part
+                    for part in (
+                        str(item.get("completed_at") or ""),
+                        str(item.get("attribution") or ""),
+                    )
+                    if part
+                ),
+                "source_ref": {"kind": "task_artifact", "path": task_path, "section": task_id} if task_path else {"kind": "task_history", "path": task_id},
+                "continuations": _task_history_continuations(task_id=task_id, task_path=task_path),
             }
         )
     for warning in graph_warnings:
@@ -553,18 +909,6 @@ def _context_groups(
                 }
             )
     graph_meta = completeness.get("graph_meta") if isinstance(completeness.get("graph_meta"), dict) else {}
-    precise_provider = graph_meta.get("precise_provider") if isinstance(graph_meta.get("precise_provider"), dict) else {}
-    provider = str(precise_provider.get("provider") or "")
-    if provider:
-        languages = precise_provider.get("languages") if isinstance(precise_provider.get("languages"), list) else []
-        groups["warnings_and_completeness"].append(
-            {
-                "repo_id": repo_id,
-                "status": "warning",
-                "code": "context_graph_capability",
-                "selection_reason": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
-            }
-        )
     provider_coverage = graph_meta.get("provider_coverage") if isinstance(graph_meta.get("provider_coverage"), dict) else {}
     incomplete_coverage = {
         name: value.get("status")
@@ -587,25 +931,26 @@ def _candidate_group(candidate: ContextCandidate) -> str:
     ref = candidate.source_ref
     path = ref.path.lower()
     section = ref.section.lower()
-    text = candidate.text.lower()
     if candidate.score_breakdown.get("startup_reading"):
         return "must_read"
     if ref.kind == "current_source":
-        return "tests_and_verification" if _looks_like_test_ref(path) else "likely_change_surface"
-    if ref.kind == "graph_query":
+        if _looks_like_test_ref(path):
+            return "tests_and_verification"
+        return "likely_change_surface"
+    if ref.kind == "graph_relation":
         return "callers_and_dependents" if candidate.graph_path else "supporting_evidence"
-    if _is_low_value_generated_or_unsupported(candidate):
-        return "supporting_evidence"
+    if _is_product_document_ref(ref):
+        return "must_read"
     if path.startswith("docs/adr/") or path.startswith("docs/contracts/") or path in {"agents.md", "docs/prd.md"} or section in {"decision", "authority rules", "future layer rules"}:
         return "must_read"
-    if ref.kind in {"completion_receipt", "verification_hint"} or "verification" in text or "test" in path or "test" in text:
+    if ref.kind in {"completion_receipt", "verification_hint"} or _looks_like_test_ref(path):
         return "tests_and_verification"
     return "supporting_evidence"
 
 
-def _candidate_group_item(candidate: ContextCandidate, *, repo_id: str, status: str) -> dict[str, Any]:
+def _candidate_group_item(candidate: ContextCandidate, *, target: RepoTarget, status: str) -> dict[str, Any]:
     return {
-        "repo_id": repo_id,
+        "repo_id": target.id,
         "status": status,
         "source_ref": candidate.source_ref.to_dict(),
         "content_sha256": candidate.source_ref.content_sha256,
@@ -613,45 +958,99 @@ def _candidate_group_item(candidate: ContextCandidate, *, repo_id: str, status: 
         "score_breakdown": candidate.score_breakdown,
         "excerpt": candidate.text,
         "graph_path": candidate.graph_path,
+        "continuations": _candidate_continuations(candidate, target=target),
     }
 
 
-def _is_low_value_generated_or_unsupported(candidate: ContextCandidate) -> bool:
-    path = candidate.source_ref.path.lower()
-    text = candidate.text.lower()
-    noisy_parts = (
-        "/.cxx/",
-        "/.dart_tool/",
-        "/.firebase/",
-        "/.gradle/",
-        "/.next/",
-        "/.nuxt/",
-        "/.parcel-cache/",
-        "/.playwright-browsers/",
-        "/.pytest_cache/",
-        "/.svelte-kit/",
-        "/.temp/",
-        "/.turbo/",
-        "/__pycache__/",
-        "/build/",
-        "/builds/",
-        "/dist/",
-        "/egg-info/",
-        "/library/",
-        "/logs/",
-        "/node_modules/",
-        "/obj/",
-        "/target/",
-        "/temp/",
-        "/usersettings/",
-    )
-    noisy_suffixes = (".pkl", ".pyc", ".tsbuildinfo", ".lock", ".log", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
-    return (
-        any(part in path for part in noisy_parts)
-        or path.endswith(noisy_suffixes)
-        or "parse_status" in text
-        and any(marker in text for marker in ('"skipped"', "unsupported", "non-utf8"))
-    )
+def _candidate_continuations(candidate: ContextCandidate, *, target: RepoTarget) -> list[dict[str, Any]]:
+    continuations: list[dict[str, Any]] = []
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    path = candidate.source_ref.path
+    if path.startswith(product_prefix):
+        continuations.append(_file_continuation(path.removeprefix(product_prefix)))
+    elif path and not path.startswith("<"):
+        continuations.append(_document_continuation(path))
+    for relation in candidate.graph_path:
+        if not isinstance(relation, dict):
+            continue
+        for path_key, symbol_key in (("from_path", "from_symbol"), ("to_path", "to_symbol")):
+            repo_path = str(relation.get(path_key) or "")
+            if repo_path:
+                continuations.append(_file_continuation(repo_path))
+            symbol = relation.get(symbol_key) if isinstance(relation.get(symbol_key), dict) else {}
+            qualified_name = str(symbol.get("qualified_name") or symbol.get("name") or "")
+            if qualified_name:
+                continuations.append(_symbol_continuation(qualified_name, in_file=repo_path))
+    return _dedupe_continuations(continuations)[:4]
+
+
+def _knowledge_continuations(record: dict[str, Any]) -> list[dict[str, Any]]:
+    record_id = str(record.get("id") or "")
+    continuations = [
+        {
+            "selector": {"kind": "knowledge_record", "value": record_id},
+            "actions": ["knowledge.show"],
+        }
+    ] if record_id else []
+    for ref in record.get("source_refs", []):
+        if isinstance(ref, dict) and str(ref.get("path") or ""):
+            continuations.append(_document_continuation(str(ref["path"])))
+    return _dedupe_continuations(continuations)[:4]
+
+
+def _task_history_continuations(*, task_id: str, task_path: str) -> list[dict[str, Any]]:
+    continuations = [
+        {
+            "selector": {"kind": "task", "value": task_id},
+            "actions": ["graph.task", "task.show"],
+        }
+    ]
+    if task_path:
+        document = _document_continuation(task_path)
+        document["actions"].insert(0, "graph.artifact")
+        continuations.append(document)
+    return continuations
+
+
+def _file_continuation(path: str) -> dict[str, Any]:
+    return {
+        "selector": {"kind": "file", "value": path},
+        "actions": ["workspace.open", "graph.file", "graph.impact_file"],
+    }
+
+
+def _symbol_continuation(symbol: str, *, in_file: str) -> dict[str, Any]:
+    return {
+        "selector": {"kind": "symbol", "value": symbol, **({"in_file": in_file} if in_file else {})},
+        "actions": ["graph.symbol"],
+    }
+
+
+def _document_continuation(path: str) -> dict[str, Any]:
+    return {
+        "selector": {"kind": "document", "value": path},
+        "actions": ["workspace.open"],
+    }
+
+
+def _dedupe_continuations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        selector = item.get("selector") if isinstance(item.get("selector"), dict) else {}
+        key = (
+            str(selector.get("kind") or ""),
+            str(selector.get("value") or ""),
+            str(selector.get("in_file") or ""),
+        )
+        if key[0] and key[1]:
+            unique.setdefault(key, item)
+    return [unique[key] for key in sorted(unique)]
+
+
+def _is_product_document_ref(ref: ContextSourceRef) -> bool:
+    path = ref.path.lower()
+    name = path.rsplit("/", 1)[-1]
+    return ref.kind == "document" and path.startswith("repos/") and ("/docs/" in path or name.startswith("readme"))
 
 
 def _looks_like_test_ref(path: str) -> bool:
@@ -662,5 +1061,5 @@ def _looks_like_test_ref(path: str) -> bool:
         or path.startswith("tests/")
         or path.startswith("test/")
         or name.startswith("test_")
-        or name.endswith(("_test.py", ".test.js", ".test.ts", "_test.dart"))
+        or name.endswith(("_test.py", ".test.js", ".test.ts", ".test.mjs", ".test.mts", "_test.mjs", "_test.mts", "_test.dart"))
     )

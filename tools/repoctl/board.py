@@ -81,7 +81,6 @@ def read_backlog_items(board_text: str) -> list[BacklogItem]:
     current_start: int | None = None
     current_end: int | None = None
     current_line_start = 0
-    current_line_end = 0
     offset = section.body_start
     line_no = board_text.count("\n", 0, section.body_start) + 1
 
@@ -103,10 +102,8 @@ def read_backlog_items(board_text: str) -> list[BacklogItem]:
             current_start = offset
             current_end = offset + len(line)
             current_line_start = line_no
-            current_line_end = line_no
         elif current_start is not None and (line.startswith((" ", "\t")) or not line.strip()):
             current_end = offset + len(line)
-            current_line_end = line_no
         elif current_start is not None:
             flush()
             current_start = None

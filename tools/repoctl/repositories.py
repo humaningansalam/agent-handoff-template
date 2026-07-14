@@ -75,13 +75,17 @@ class RepoLayout:
 def _safe_rel(value: str) -> str:
     raw = value.strip().replace("\\", "/")
     if Path(raw).is_absolute():
-        raise RepoctlError(f"repository path must be workspace-relative: {value}")
+        raise RepoctlError(
+            f"repository path must be workspace-relative: {value}",
+            code="repository_topology_invalid",
+            path=value,
+        )
     while raw.startswith("./"):
         raw = raw[2:]
     raw = raw.strip("/")
     parts = [part for part in raw.split("/") if part not in {"", "."}]
     if not parts or any(part == ".." for part in parts):
-        raise RepoctlError(f"invalid repository path: {value}")
+        raise RepoctlError(f"invalid repository path: {value}", code="repository_topology_invalid", path=value)
     return "/".join(parts)
 
 
@@ -295,7 +299,11 @@ def _layout_from_settings(root: Path, settings: dict[str, Any]) -> RepoLayout:
         layout = RepoLayout("empty", (), registry_ready=True)
         return RepoLayout("empty", (), registry_ready=True, revision=_revision(layout.to_dict()))
     if "repos" in discovered and len(discovered) > 1:
-        raise RepoctlError(f"ambiguous product repositories detected; configure docs/repoctl.json repositories: {', '.join(discovered)}")
+        raise RepoctlError(
+            f"ambiguous product repositories detected; configure docs/repoctl.json repositories: {', '.join(discovered)}",
+            code="repository_topology_invalid",
+            path="repos",
+        )
     if discovered == ["repos"]:
         targets = (_target(root, "main", "repos", identity_source="reserved"),)
         problems = _nested_git_root_problems(root, {"repos"})

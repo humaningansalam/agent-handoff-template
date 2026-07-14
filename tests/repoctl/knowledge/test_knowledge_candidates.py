@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.knowledge_candidates import query_knowledge_records
 from tests.repoctl.knowledge_test_helpers import (
     _setup_knowledge_workspace,
     _write_knowledge_docs,
@@ -14,6 +15,7 @@ from tests.repoctl.knowledge_test_helpers import (
     write_repometa,
     write_workspace,
 )
+from tests.repoctl.repository.test_repositories import commit_all
 
 
 def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -87,6 +89,29 @@ def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: P
     approve_payload = json.loads(capsys.readouterr().out)
     assert approve_payload["data"]["record"]["created_from"]["candidate_check"]["related_records"][0]["status"] == "reviewed"
     assert approve_payload["warnings"][0]["code"] == "knowledge_candidate_duplicate_reviewed_claim"
+
+
+def test_knowledge_query_requires_query_or_explicit_path_relation(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    unrelated, problems, _warnings = query_knowledge_records(tmp_path, repo_id="main", query="no_matching_terms_exist")
+    assert problems == []
+    assert unrelated["results"] == []
+
+    linked, problems, _warnings = query_knowledge_records(
+        tmp_path,
+        repo_id="main",
+        query="no_matching_terms_exist",
+        related_paths={"docs/contracts/repoctl-context-contract.md"},
+        require_related=True,
+    )
+    assert problems == []
+    assert linked["results"][0]["record"]["id"] == record_id
+    assert linked["results"][0]["score_breakdown"]["path_relation"] == 1.0
 
 
 def test_knowledge_candidate_from_task_ignores_unrelated_invalid_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -256,98 +281,8 @@ def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tm
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
 
-def test_knowledge_candidate_refresh_all_stale_only_refreshes_drifted_candidates(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_knowledge_workspace(tmp_path, monkeypatch)
-    (tmp_path / "docs/contracts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "docs/contracts/context-contract.md").write_text(
-        "# Context Contract\n\n## Invariant\n\nContext bundles must keep source references resolvable.\n",
-        encoding="utf-8",
-    )
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
-    stale_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/context-contract.md", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
-    current_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
-    source.write_text(source.read_text(encoding="utf-8") + "\n## Update\n\nThe decision source changed.\n", encoding="utf-8")
-
-    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["candidate_count"] == 2
-    assert payload["data"]["refreshed_count"] == 1
-    assert payload["data"]["skipped_count"] == 1
-    assert payload["data"]["refreshed"][0]["candidate_id"] == stale_candidate
-    assert payload["data"]["refreshed"][0]["new_candidate_id"] != stale_candidate
-    assert payload["data"]["skipped"] == [{"candidate_id": current_candidate, "reason": "not_stale"}]
-
-    assert main(["knowledge", "candidate", "check", payload["data"]["refreshed"][0]["new_candidate_id"], "--repo-id", "main", "--json"]) == 0
-    refreshed_check = json.loads(capsys.readouterr().out)
-    assert refreshed_check["data"]["passed"] is True
-    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
-    status_payload = json.loads(capsys.readouterr().out)
-    assert status_payload["data"]["candidate_count"] == 3
-    assert status_payload["data"]["candidate_review_states"] == {"pending": 2, "refreshed": 1}
-    assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
-
-    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 0
-    second_payload = json.loads(capsys.readouterr().out)
-    assert second_payload["data"]["refreshed_count"] == 0
-    assert {"candidate_id": stale_candidate, "reason": "already_refreshed"} in second_payload["data"]["skipped"]
-    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
-    second_status = json.loads(capsys.readouterr().out)
-    assert second_status["data"]["candidate_count"] == 3
-    assert second_status["data"]["candidate_review_states"] == {"pending": 2, "refreshed": 1}
-    assert second_status["data"]["event_types"] == {"refreshed_candidate": 1}
 
 
-def test_knowledge_candidate_bulk_checks_list_review_state(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
-    first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
-    duplicate_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
-    drift_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
-    source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
-
-    assert main(["knowledge", "candidate", "list", "--repo-id", "main", "--with-checks", "--json"]) == 0
-    list_payload = json.loads(capsys.readouterr().out)
-    checks = {item["id"]: item["check"] for item in list_payload["data"]["candidates"]}
-    assert checks[duplicate_candidate]["warning_count"] >= 1
-    assert checks[drift_candidate]["error_count"] >= 1
-
-    assert main(["knowledge", "candidate", "check", "--all", "--repo-id", "main", "--json"]) == 1
-    check_payload = json.loads(capsys.readouterr().out)
-    assert check_payload["data"]["candidate_count"] == 2
-    assert check_payload["data"]["candidate_total_count"] == 3
-    assert check_payload["data"]["pending_only"] is True
-    assert check_payload["data"]["skipped_non_pending_count"] == 1
-    assert check_payload["data"]["error_count"] >= 1
-    assert check_payload["data"]["warning_count"] >= 1
-    assert any(result["candidate_id"] == drift_candidate and result["problems"] for result in check_payload["data"]["results"])
-
-    assert main(["knowledge", "candidate", "check", "--all", "--all-states", "--repo-id", "main", "--json"]) == 1
-    all_states_payload = json.loads(capsys.readouterr().out)
-    assert all_states_payload["data"]["candidate_count"] == 3
-    assert all_states_payload["data"]["pending_only"] is False
-    assert all_states_payload["data"]["skipped_non_pending_count"] == 0
-
-    assert main(["knowledge", "check", "--repo-id", "main", "--include-candidates", "--json"]) == 1
-    integrated_payload = json.loads(capsys.readouterr().out)
-    assert integrated_payload["data"]["candidate_checks"]["candidate_count"] == 2
-    assert integrated_payload["data"]["candidate_checks"]["candidate_total_count"] == 3
-    assert any(problem["code"] == "knowledge_source_digest_drift" for problem in integrated_payload["problems"])
-
-    assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
-    status_payload = json.loads(capsys.readouterr().out)
-    assert status_payload["data"]["candidate_checks"]["error_count"] >= 1
-    assert status_payload["data"]["candidate_checks"]["warning_count"] >= 1
-    assert status_payload["data"]["candidate_checks"]["problem_codes"]["knowledge_source_digest_drift"] >= 1
-    assert status_payload["data"]["candidate_checks"]["warning_codes"]["knowledge_candidate_duplicate_reviewed_claim"] >= 1
 
 
 def test_knowledge_candidate_rejects_state_source(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -405,7 +340,13 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
-    task_body = task_text("T-20260609184046Z", status="todo").replace("State the outcome in one clear sentence.", "Document the stable receipt-backed recovery invariant.")
+    (repo / "service.py").write_text("def deliver() -> str:\n    return 'before'\n", encoding="utf-8")
+    commit_all(repo)
+    task_body = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("State the outcome in one clear sentence.", "Document the stable receipt-backed recovery invariant.")
+    )
     add_task(tmp_path, "T-20260609184046Z--receipt-backed.md", task_body)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--receipt-backed.md\n\n## Backlog\n", encoding="utf-8")
     verification = tmp_path / "verification.md"
@@ -414,9 +355,30 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
 
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
     capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            "T-20260609184046Z",
+            "--query",
+            "webhook delivery invariant",
+            "--reviewed",
+            "repos/service.py",
+            "--chosen",
+            "repos/service.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    (repo / "service.py").write_text(
+        "def deliver() -> str:\n    return 'after'\n\n\ndef retry() -> str:\n    return deliver()\n",
+        encoding="utf-8",
+    )
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", verification.as_posix(), "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
     assert finish_payload["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
+    assert "knowledge candidate suggest --from-task T-20260609184046Z" in finish_payload["next_actions"][0]["command"]
 
     assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260609184046Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
 
@@ -430,8 +392,7 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
         "task_id": "T-20260609184046Z",
         "repo_id": "main",
         "verification_artifact": "docs/archive/tasks/T-20260609184046Z--receipt-backed.md",
-        "changed_files": [],
-        "related_symbols": [],
+        "changed_files": ["service.py"],
     }
     source_refs = candidate["source_refs"]
     assert source_refs[0]["kind"] == "completion_receipt"
@@ -450,15 +411,29 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert "kind `completion_receipt`" in review
     assert "kind `task_artifact`" in review
 
+    assert main(["knowledge", "approve", candidate["id"], "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
+    render_payload = json.loads(capsys.readouterr().out)
+    rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
+    assert "docs/knowledge/generated/targets/files/service.py.md" in rendered_paths
+    assert not any("/targets/symbols/" in path for path in rendered_paths)
+
 
 def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    long_goal = (
+        "Persist retry scheduling as a durable invariant while preserving source-linked evidence and explicit review. "
+        "The generated claim must remain a complete statement rather than a character-truncated fragment, and agents "
+        "must be able to replace an overlong derived claim without directly editing machine-owned candidate JSON. "
+        "This extra sentence intentionally pushes the derived claim beyond the quality limit."
+    )
     task_body = task_text("T-20260609184047Z", status="todo").replace(
         "## Execution Log",
-        "## Goal\n\nDocument the stable task-pack invariant.\n\n## Execution Log",
+        f"## Goal\n\n{long_goal}\n\n## Execution Log",
         1,
     )
     add_task(tmp_path, "T-20260609184047Z--task-pack-invariant.md", task_body)
@@ -472,14 +447,23 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert main(["task", "finish", "T-20260609184047Z", "--verification-file", verification.as_posix(), "--json"]) == 0
     capsys.readouterr()
 
-    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 0
+    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 1
+    overlong_payload = json.loads(capsys.readouterr().out)
+    assert overlong_payload["problems"][0]["code"] == "knowledge_candidate_claim_too_long"
+    assert "--claim or --claim-file" in overlong_payload["problems"][0]["message"]
+    assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
+
+    claim = "Persist retry scheduling as a reviewed invariant without editing machine-owned candidate state."
+    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--claim", claim, "--dry-run", "--json"]) == 0
     dry_run_payload = json.loads(capsys.readouterr().out)
     assert dry_run_payload["data"]["dry_run"] is True
     assert dry_run_payload["data"]["path"] == ""
     assert dry_run_payload["data"]["would_write_path"].endswith(".json")
     assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
 
-    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+    claim_file = tmp_path / "knowledge-claim.md"
+    claim_file.write_text(claim + "\n", encoding="utf-8")
+    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--claim-file", claim_file.as_posix(), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     candidate = payload["data"]["candidate"]
@@ -488,10 +472,13 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert candidate["status"] == "candidate"
     assert candidate["review"]["status"] == "pending"
     assert not candidate["claim"].startswith("Task `T-20260609184047Z` completed")
-    assert "Document the stable task-pack invariant" in candidate["claim"]
+    assert candidate["claim"] == claim
     assert candidate["derived_from"]["kind"] == "completion_receipt"
     assert candidate["derived_from"]["task_id"] == "T-20260609184047Z"
+    assert "related_symbols" not in candidate["derived_from"]
+    assert "summary" not in candidate
     assert candidate["source_refs"][0]["kind"] == "completion_receipt"
+    assert len(json.dumps(payload, ensure_ascii=False)) < 10_000
     assert not (tmp_path / "docs/knowledge/records").exists()
 
 

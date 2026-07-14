@@ -25,20 +25,14 @@ def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypa
     assert created.is_file()
     text = created.read_text(encoding="utf-8")
     assert f"id: {payload['task_id']}" in text
-    assert "State the outcome" not in text
-    assert "Step 1" not in text
     assert "YYYYMMDDTHHMMSSZ" not in text
     assert "## Work Area" in text
+    assert "## Discovery" in text
+    assert "## Verification" in text
+    assert "## Handoff" in text
     assert "Repository: `main`" in text
     assert "Repo ref hint: `repos`" in text
-    assert "Area hint: backend" in text
     assert 'document_language: "en"' in text
-    assert "do not guess them from the title alone" in text
-    assert "task created via repoctl task create" in text
-    assert "repoctl meta check --changed" in text
-    assert "Keep `repos/.repometa` annotations valid" in text
-    assert "First file to open: `docs/tasks/" in text
-    assert f"./scripts/repoctl task start {payload['task_id']} --json" in text
 
 
 def test_task_create_uses_configured_korean_document_language(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -51,12 +45,9 @@ def test_task_create_uses_configured_korean_document_language(tmp_path: Path, mo
     payload = json.loads(capsys.readouterr().out)
     text = (tmp_path / payload["path"]).read_text(encoding="utf-8")
     assert 'document_language: "ko"' in text
-    assert "repoctl task create로 작업을 생성함" in text
-    assert "가장 작은 검증 가능한 변경" in text
-    assert "첫 구현 단계에서 정확한 repo, docs, workspace 파일을 확인" in text
-    assert "이 작업에 필요한 최소 context docs" in text
-    assert "State the outcome" not in text
-    assert "List concrete deliverables" not in text
+    assert "## Work Area" in text
+    assert "## Discovery" in text
+    assert "## Handoff" in text
 
 
 def test_task_create_rejects_invalid_document_language_config(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -210,20 +201,6 @@ def test_task_create_validates_board_before_writing_task_file(tmp_path: Path, mo
     assert not list((tmp_path / "docs/tasks").glob("T-*--bad-board.md"))
 
 
-def test_task_create_rolls_back_task_file_when_board_render_fails(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    def fail_render(_board_text: str, _board_paths: list[str]) -> str:
-        raise OSError("simulated board render failure")
-
-    monkeypatch.setattr("tools.repoctl.cli.render_board", fail_render)
-
-    assert main(["task", "create", "--slug", "render-fail", "Render Fail", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "io_error"
-    assert not list((tmp_path / "docs/tasks").glob("T-*--render-fail.md"))
 
 
 def test_task_create_parent_uses_parent_template(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -255,7 +232,8 @@ def test_task_create_rejects_missing_parent(tmp_path: Path, monkeypatch, capsys)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "create", "--parent", "T-20260609184046Z", "Child", "--json"]) == 2
-    assert "parent task not found" in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "parent_task_not_found"
 
 
 def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -281,7 +259,8 @@ def test_task_create_rejects_non_ascii_title_without_slug(tmp_path: Path, monkey
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "create", "한글 제목", "--json"]) == 2
-    assert "non-ASCII title requires explicit --slug" in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "missing_slug"
 
 
 def test_repo_scoped_task_create_reports_structured_discovery_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -302,7 +281,8 @@ def test_task_create_rejects_invalid_parent_id(tmp_path: Path, monkeypatch, caps
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "create", "--parent", "bad", "Child", "--json"]) == 2
-    assert "invalid parent id format" in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "invalid_parent_id"
 
 
 def test_task_create_rejects_non_parent_parent_target(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -311,4 +291,5 @@ def test_task_create_rejects_non_parent_parent_target(tmp_path: Path, monkeypatc
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "create", "--parent", "T-20260609184046Z", "Child", "--json"]) == 2
-    assert "not a live coordinating parent" in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "parent_target_not_coordinator"

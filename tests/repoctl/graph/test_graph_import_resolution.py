@@ -26,7 +26,7 @@ def test_graph_imports_are_raw_import_refs(tmp_path: Path, monkeypatch, capsys) 
     raw_import_id = import_ref_id("main", "typescript", "axios")
     assert any(node["id"] == raw_import_id and node["kind"] == "import_ref" for node in snapshot["nodes"])
     assert any(edge["kind"] == "DECLARES_IMPORT" and edge["to"] == raw_import_id for edge in snapshot["edges"])
-    assert not any(node["kind"] in {"module", "package", "symbol"} for node in snapshot["nodes"])
+    assert not any(node["kind"] in {"module", "package"} for node in snapshot["nodes"])
 
 
 def test_graph_resolves_repo_local_python_imports(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -56,11 +56,50 @@ def test_graph_resolves_repo_local_python_imports(tmp_path: Path, monkeypatch, c
     assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_node_id and edge["to"] == target_file_id for edge in snapshot["edges"])
     assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in snapshot["edges"])
 
-    assert main(["graph", "query", "--file", "utils/tokens.py", "--json"]) == 0
+    assert main(["graph", "query", "--file", "utils/tokens.py", "--full", "--json"]) == 0
 
     result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(node["id"] == source_file_id for node in result["nodes"])
     assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == target_file_id for edge in result["edges"])
+
+
+def test_graph_resolves_python_imports_from_manifest_declared_src_root(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "pyproject.toml").write_text(
+        '[tool.setuptools]\npackage-dir = {"" = "src"}\n\n[tool.setuptools.packages.find]\nwhere = ["src"]\n',
+        encoding="utf-8",
+    )
+    (repo / "src/relayboard").mkdir(parents=True)
+    (repo / "src/relayboard/__init__.py").write_text("", encoding="utf-8")
+    (repo / "src/relayboard/retry_worker.py").write_text("class RetryWorker:\n    pass\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests/test_retry_worker.py").write_text(
+        "from relayboard.retry_worker import RetryWorker\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--full", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    importer_id = file_id("main", "tests/test_retry_worker.py")
+    target_id = file_id("main", "src/relayboard/retry_worker.py")
+    import_id = import_ref_id("main", "python", "relayboard.retry_worker.RetryWorker")
+    assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == import_id and edge["to"] == target_id for edge in snapshot["edges"])
+    assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == importer_id and edge["to"] == target_id for edge in snapshot["edges"])
+
+    assert main(["graph", "query", "--file", "src/relayboard/retry_worker.py", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(
+        relation["edge"] == "IMPORTS_FILE"
+        and relation["from"].get("path") == "tests/test_retry_worker.py"
+        and relation["to"].get("path") == "src/relayboard/retry_worker.py"
+        for relation in result["relations"]
+    )
 
 
 def test_graph_resolves_relative_python_imports(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -156,7 +195,6 @@ def test_graph_resolves_dart_relative_and_local_package_imports(tmp_path: Path, 
     assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == local_import_id and edge["to"] == file_id("main", "lib/src/local.dart") for edge in snapshot["edges"])
     assert any(edge["kind"] == "RESOLVES_TO" and edge["from"] == package_import_id and edge["to"] == file_id("main", "lib/src/session.dart") for edge in snapshot["edges"])
     assert any(edge["kind"] == "IMPORTS_FILE" and edge["from"] == source_file_id and edge["to"] == file_id("main", "lib/src/session.dart") for edge in snapshot["edges"])
-    assert snapshot["completeness"]["language_capabilities"]["dart"]["precise_semantics"] is False
 
 
 def test_graph_skips_ambiguous_js_ts_relative_import_resolution(tmp_path: Path, monkeypatch, capsys) -> None:

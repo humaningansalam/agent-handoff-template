@@ -22,7 +22,6 @@ AREAS = {"", "repo", "backend", "frontend", "infra", "docs", "ops", "mobile"}
 REPO_REQUIRED_AREAS = {"repo", "backend", "frontend", "infra", "mobile"}
 TASK_RE = re.compile(r"^(T-[0-9]{14}Z)--[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
 ID_RE = re.compile(r"^T-[0-9]{14}Z$")
-TASK_ID_WITH_SLUG_RE = re.compile(r"^(T-[0-9]{14}Z)--[a-z0-9]+(?:-[a-z0-9]+)*$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
 TASK_STATE_SCHEMA_VERSION = 3
@@ -300,16 +299,10 @@ def utc_stamp() -> str:
 
 
 def normalize_task_id(task_id: str) -> str:
-    candidate = Path(str(task_id)).name
+    candidate = str(task_id)
     if ID_RE.match(candidate):
         return candidate
-    file_match = TASK_RE.match(candidate)
-    if file_match:
-        return file_match.group(1)
-    slug_match = TASK_ID_WITH_SLUG_RE.match(candidate)
-    if slug_match:
-        return slug_match.group(1)
-    raise RepoctlError("invalid task id format; expected T-YYYYMMDDHHMMSSZ or T-YYYYMMDDHHMMSSZ--slug")
+    raise RepoctlError("invalid task id format; expected T-YYYYMMDDHHMMSSZ", code="invalid_task_id")
 
 
 def resolve_live_task(root: Path, task_id: str) -> Task:
@@ -595,7 +588,7 @@ def _valid_receipt_task_path(value: str, *, allow_empty: bool = False) -> bool:
     filename = normalized.removeprefix(prefix)
     if "/" in filename or not filename.endswith(".md"):
         return False
-    return bool(TASK_ID_WITH_SLUG_RE.match(filename[:-3]))
+    return bool(TASK_RE.match(filename))
 
 
 def _read_receipt_artifact(root: Path, task_id: str, value: str) -> str:
@@ -694,7 +687,7 @@ def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tu
         rel = path.relative_to(root).as_posix()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, json.JSONDecodeError):
             problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt is unreadable: {rel}", rel))
             continue
         if not isinstance(data, dict):
@@ -787,8 +780,8 @@ def _read_task_state(root: Path, task_id: str) -> dict[str, Any] | None:
         raise RepoctlError(f"task state has invalid schema: {path.relative_to(root).as_posix()}", code="task_state_invalid", path=path.relative_to(root).as_posix())
     if data.get("schema") != "repoctl.task.state" or data.get("schema_version") != TASK_STATE_SCHEMA_VERSION:
         raise RepoctlError(
-            "task state schema requires an explicit repoctl upgrade; the initial baseline will not be inferred",
-            code="task_state_upgrade_required",
+            "task state schema is unsupported; the initial baseline will not be inferred",
+            code="task_state_schema_unsupported",
             path=path.relative_to(root).as_posix(),
         )
     if str(data.get("task_id") or "") != task_id or not isinstance(data.get("initial"), dict) or not isinstance(data.get("ownership", {}), dict):
@@ -1597,22 +1590,22 @@ def _slug_from_title(title: str) -> str:
     try:
         title.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise RepoctlError("non-ASCII title requires explicit --slug") from exc
+        raise RepoctlError("non-ASCII title requires explicit --slug", code="missing_slug") from exc
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
     if not slug:
-        raise RepoctlError("title cannot be converted to a slug; pass --slug")
+        raise RepoctlError("title cannot be converted to a slug; pass --slug", code="missing_slug")
     return slug
 
 
 def _validate_slug(slug: str) -> None:
     if not SLUG_RE.match(slug):
-        raise RepoctlError("invalid slug; use lowercase kebab-case [a-z0-9-]")
+        raise RepoctlError("invalid slug; use lowercase kebab-case [a-z0-9-]", code="invalid_slug")
 
 
 def _validate_parent_id(parent: str) -> None:
     if parent and not ID_RE.match(parent):
-        raise RepoctlError("invalid parent id format; expected T-YYYYMMDDHHMMSSZ")
+        raise RepoctlError("invalid parent id format; expected T-YYYYMMDDHHMMSSZ", code="invalid_parent_id")
 
 
 def _validate_area(area: str) -> None:
@@ -1904,7 +1897,7 @@ def create_task_file(
     follow_up_of: str = "",
 ) -> Task:
     if not (root / LOCK_REL).is_dir():
-        raise RepoctlError(f"task creation requires repoctl lock: {LOCK_REL}")
+        raise RepoctlError(f"task creation requires repoctl lock: {LOCK_REL}", code="task_lock_required", path=LOCK_REL.as_posix())
     _validate_title(title)
     _validate_area(area)
     _validate_repo_ref(repo_ref)
@@ -1931,15 +1924,15 @@ def create_task_file(
         if not any(target.id == repo_id for target in layout.targets):
             raise RepoctlError(f"repository not found: {repo_id}", code="repository_not_found")
     if task_type == "parent" and parent:
-        raise RepoctlError("parent tasks cannot have a parent id")
+        raise RepoctlError("parent tasks cannot have a parent id", code="parent_cannot_have_parent")
     _validate_parent_id(parent)
     _validate_parent_id(follow_up_of)
     if parent:
         parent_matches = [task for task in load_tasks(root) if not task.archived and task.id == parent]
         if not parent_matches:
-            raise RepoctlError(f"parent task not found: {parent}")
+            raise RepoctlError(f"parent task not found: {parent}", code="parent_task_not_found")
         if parent_matches[0].status not in LIVE or not is_parent_task(parent_matches[0]):
-            raise RepoctlError(f"parent task is not a live coordinating parent: {parent}")
+            raise RepoctlError(f"parent task is not a live coordinating parent: {parent}", code="parent_target_not_coordinator")
     if follow_up_of:
         previous = next((task for task in load_tasks(root) if task.id == follow_up_of), None)
         if previous is None:

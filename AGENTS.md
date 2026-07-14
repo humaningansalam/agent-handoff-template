@@ -26,18 +26,21 @@ For repo-scoped implementation tasks, use this order before editing product file
 1. Start the task.
 2. Record the explicit Candidate query in `## Discovery`.
 3. Run compact `repoctl context query` to find likely product files and tests.
-4. Inspect those files read-only; refine the query and repeat when evidence is insufficient.
+4. Inspect those files read-only; use `repoctl graph query --file/--impact-file` and returned typed continuation actions to follow imports, callers, callees, adjacent files, completion tasks/artifacts, and linked source documents when needed. Refine the Context query when evidence is still insufficient.
 5. Record Reviewed files and the active Chosen files.
 6. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
 
 ```bash
 ./scripts/repoctl task discovery add T-... --query "<query>" --json
 ./scripts/repoctl context query "<query>" --repo-id main --json
+./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl task discovery add T-... --reviewed repos/path --chosen repos/path --json
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
 Context Pack is optional read-only evidence and never defines task scope. If generated before Chosen files exist, refresh it after Discovery before relying on its scoped view.
+
+`graph query` reads the last materialized snapshot and never rebuilds automatically. It reports freshness and exact changed paths; run `graph build` explicitly when no snapshot exists or after changes that must be reflected in Graph traversal. With a snapshot, `context query` uses the persistent evidence index and reads only stale path overlays. Without a snapshot, it still returns lexical source/document evidence and marks Graph relations unavailable.
 
 If no active task is assigned:
 
@@ -112,6 +115,7 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - Parent tasks archive only after live children are done, canceled, or re-parented.
 - Done/canceled tasks and their completion receipts are immutable.
 - Additional work uses a new task: `./scripts/repoctl task create --follow-up-of T-old --slug ... "Follow-up title" --json`. The new task gets a new baseline; the old task is not moved or rewritten.
+- After finish, create a Knowledge candidate only when the task established a reusable cross-task decision, invariant, or failure mode. Use the `knowledge candidate suggest --from-task ... --dry-run` next action first, choose the correct `--kind`, and leave approval to explicit review. If the derived claim is too long or imprecise, rerun with `--claim` or `--claim-file`; never hand-edit candidate JSON. Routine implementation details should remain in task history rather than durable Knowledge.
 
 ## Documentation Language
 

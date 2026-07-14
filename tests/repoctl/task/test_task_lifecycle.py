@@ -52,18 +52,6 @@ def test_task_show_and_log_append_use_repoctl_lifecycle_boundary(tmp_path: Path,
     assert "frontmatter" not in summary_payload["data"]
 
 
-def test_task_commands_accept_slugged_task_file_id(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="todo"))
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "show", "T-20260609184046Z--alpha", "--json"]) == 0
-    show_payload = json.loads(capsys.readouterr().out)
-    assert show_payload["task"]["id"] == "T-20260609184046Z"
-
-    assert main(["task", "start", "T-20260609184046Z--alpha.md", "--json"]) == 0
-    start_payload = json.loads(capsys.readouterr().out)
-    assert start_payload["status"] == "doing"
 
 
 def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -80,7 +68,7 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
             "add",
             "T-20260609184046Z",
             "--query",
-            "repoctl meta suggest --text checkout retry",
+            "checkout retry behavior",
             "--reviewed",
             "repos/src/checkout.py",
             "--reviewed",
@@ -97,7 +85,7 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
     assert payload["command"] == "task.discovery.add"
     assert payload["data"]["discovery"]["chosen_files"] == ["repos/src/checkout.py"]
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert "- Candidate query: `repoctl meta suggest --text checkout retry`" in task_body
+    assert "- Candidate query: `checkout retry behavior`" in task_body
     assert "  - `repos/tests/test_checkout.py`" in task_body
     assert "- Notes: `retry behavior lives in checkout service`" in task_body
 
@@ -232,22 +220,6 @@ def test_task_create_blocks_root_repo_ref_alias(tmp_path: Path, monkeypatch, cap
     assert payload["problems"][0]["code"] == "invalid_repo_ref"
 
 
-def test_backlog_promotion_uses_repo_id_not_repo_ref_as_selector(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    init_repo(repo)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["backlog", "add", "Add product feature", "--json"]) == 0
-    backlog_id = json.loads(capsys.readouterr().out)["data"]["item"]["id"]
-
-    assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "product-feature", "--area", "repo", "--repo-id", "main", "Add product feature", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    task_text_body = (tmp_path / payload["path"]).read_text(encoding="utf-8")
-    assert 'repo_id: "main"' in task_text_body
-    assert 'repo_ref: ""' in task_text_body
-    assert "- Repository: `main`" in task_text_body
 
 
 def test_task_start_blocks_repo_scoped_task_without_repo_git(tmp_path: Path, monkeypatch, capsys) -> None:

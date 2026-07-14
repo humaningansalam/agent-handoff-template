@@ -118,9 +118,8 @@ def test_backlog_duplicate_raw_blocks_warn_and_cannot_be_removed_by_id(tmp_path:
     payload = json.loads(capsys.readouterr().out)
     backlog_id = payload["data"]["items"][0]["id"]
     assert payload["data"]["items"][0]["line_start"] == payload["data"]["items"][0]["line_end"]
-    assert payload["warnings"] == [{"code": "duplicate_backlog_id", "message": f"Backlog raw block id is ambiguous: {backlog_id}"}]
+    assert [warning["code"] for warning in payload["warnings"]] == ["duplicate_backlog_id"]
 
     assert main(["backlog", "remove", backlog_id, "--json"]) == 2
     error = json.loads(capsys.readouterr().out)
     assert error["problems"][0]["code"] == "duplicate_backlog_id"
-

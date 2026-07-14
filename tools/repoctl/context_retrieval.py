@@ -40,7 +40,17 @@ STOPWORDS = {
 
 
 def retrieve_context(query: str, chunks: list[DocumentChunk], *, limit: int = 20) -> list[ContextCandidate]:
-    terms = _terms(query)
+    return rank_context_chunks(query, chunks, fts_scores=_fts_scores(query, chunks), limit=limit)
+
+
+def rank_context_chunks(
+    query: str,
+    chunks: list[DocumentChunk],
+    *,
+    fts_scores: dict[tuple[str, str, str, int, int], float] | None = None,
+    limit: int = 20,
+) -> list[ContextCandidate]:
+    terms = context_query_terms(query)
     scores: dict[tuple[str, str, str, int, int], dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "fts": 0.0, "authority": 0.0})
     reasons: dict[tuple[str, str, str, int, int], set[str]] = defaultdict(set)
     by_key = {chunk.source_ref.key(): chunk for chunk in chunks}
@@ -54,7 +64,7 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, limit: int = 20
             reasons[key].add("exact term/path/heading match")
         scores[key]["authority"] = _authority_score(chunk)
 
-    for key, fts_score in _fts_scores(query, chunks).items():
+    for key, fts_score in (fts_scores or {}).items():
         scores[key]["fts"] = max(scores[key]["fts"], fts_score)
         reasons[key].add("SQLite FTS match")
 
@@ -83,7 +93,7 @@ def retrieve_context(query: str, chunks: list[DocumentChunk], *, limit: int = 20
     return sorted(candidates, key=lambda item: (-item.score, item.source_ref.path, item.source_ref.line_start))[:limit]
 
 
-def _terms(query: str) -> set[str]:
+def context_query_terms(query: str) -> set[str]:
     terms: set[str] = set()
     for token in TOKEN_RE.findall(query):
         for part in _identifier_terms(token):
@@ -137,7 +147,7 @@ def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str,
         conn.execute("CREATE VIRTUAL TABLE chunks USING fts5(path, section, body)")
         rows = [(chunk.source_ref.path, chunk.source_ref.section, chunk.text) for chunk in chunks]
         conn.executemany("INSERT INTO chunks(path, section, body) VALUES (?, ?, ?)", rows)
-        phrase = " OR ".join(_escape_fts(token) for token in _terms(query))
+        phrase = " OR ".join(_escape_fts(token) for token in context_query_terms(query))
         if not phrase:
             return {}
         result: dict[tuple[str, str, str, int, int], float] = {}
@@ -172,7 +182,7 @@ def _current_source_priority(chunk: DocumentChunk) -> float:
         return -0.6
     if _looks_like_test_path(path):
         return 0.35
-    if path.endswith((".py", ".js", ".jsx", ".ts", ".tsx", ".dart", ".cs", ".java", ".kt", ".go", ".rs", ".sql", ".sh")):
+    if path.endswith((".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".dart", ".cs", ".java", ".kt", ".go", ".rs", ".sql", ".sh")):
         return 0.3
     return 0.0
 
@@ -185,7 +195,7 @@ def _looks_like_test_path(path: str) -> bool:
         or path.startswith("tests/")
         or path.startswith("test/")
         or name.startswith("test_")
-        or name.endswith(("_test.py", ".test.js", ".test.ts", "_test.dart"))
+        or name.endswith(("_test.py", ".test.js", ".test.ts", ".test.mjs", ".test.mts", "_test.mjs", "_test.mts", "_test.dart"))
     )
 
 
@@ -213,4 +223,4 @@ def _excerpt(text: str, *, terms: set[str], limit: int = 900) -> str:
 
 
 def excerpt_for_query(text: str, query: str, *, limit: int = 900) -> str:
-    return _excerpt(text, terms=_terms(query), limit=limit)
+    return _excerpt(text, terms=context_query_terms(query), limit=limit)

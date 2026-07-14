@@ -4,7 +4,10 @@ import argparse
 import hashlib
 import json
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +17,9 @@ from .context import build_context_bundle, compact_context_bundle, render_contex
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
-from .graph import build_graph, query_graph
+from .graph import query_graph
 from .graph_model import digest_data
+from .graph_store import graph_materialization_freshness, load_materialized_graph, materialize_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
@@ -40,9 +44,12 @@ class RepoctlArgumentParser(argparse.ArgumentParser):
         super().exit(status, message)
 
 
-def _json(data: Any) -> None:
+def _json(data: Any, *, compact: bool = False) -> None:
     _complete_json_envelope(data)
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    if compact:
+        print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+    else:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def _complete_json_envelope(data: Any) -> None:
@@ -285,7 +292,7 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
         )
         add(
             "Run multi-repo isolation benchmark gate",
-            command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-packed-recall multi-repo-isolation=1.0 --json",
+            command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
             mutates_workspace=False,
             requires=["tests/fixtures/context-benchmark-multirepo/questions.jsonl", "tests/fixtures/context-benchmark-multirepo/expected-sources.json"],
         )
@@ -478,6 +485,37 @@ def _release_candidate_gate_result(
     }
 
 
+def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    temporary = tempfile.TemporaryDirectory(prefix="repoctl-field-gate-")
+    isolated = Path(temporary.name) / "workspace"
+    shutil.copytree(
+        root,
+        isolated,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(".git", "repos", ".repoctl-state", ".venv", "__pycache__", "generated"),
+    )
+    for rel in ("docs/tasks", "docs/archive/tasks", "docs/knowledge/records", "docs/knowledge/events", "docs/knowledge/generated"):
+        path = isolated / rel
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+    for target in repo_layout(root).targets:
+        repo = isolated / target.display_path
+        repo.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(["git", "init", "-q"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode != 0:
+            temporary.cleanup()
+            raise RepoctlError(
+                f"cannot initialize isolated benchmark repository: {result.stderr.strip()}",
+                code="field_gate_benchmark_workspace_unavailable",
+                path=target.display_path,
+            )
+        source_metadata = target.root_path / ".repometa"
+        if source_metadata.is_dir():
+            shutil.copytree(source_metadata, repo / ".repometa", dirs_exist_ok=True)
+    return temporary, isolated
+
+
 def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str, Any]:
     gates: list[dict[str, Any]] = []
     check_payload, check_problems, _live_paths = _check_payload(root)
@@ -550,12 +588,13 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         )
     )
 
-    context_fixture = root / "tests/fixtures/context-benchmark"
-    context_enabled = _repo_target_available(root, repo_id) and _fixture_has_repository(context_fixture, repo_id)
-    pack_fixture = root / "tests/fixtures/context-pack-benchmark"
-    pack_enabled = _repo_target_available(root, repo_id) and (pack_fixture / "cases.json").exists()
+    benchmark_temporary, benchmark_root = _isolated_benchmark_workspace(root)
+    context_fixture = benchmark_root / "tests/fixtures/context-benchmark"
+    context_enabled = _repo_target_available(benchmark_root, repo_id) and _fixture_has_repository(context_fixture, repo_id)
+    pack_fixture = benchmark_root / "tests/fixtures/context-pack-benchmark"
+    pack_enabled = _repo_target_available(benchmark_root, repo_id) and (pack_fixture / "cases.json").exists()
     benchmark_metadata, benchmark_metadata_entries = _temporary_benchmark_metadata(
-        root,
+        benchmark_root,
         repo_id=repo_id,
         enabled=context_enabled or pack_enabled,
     )
@@ -566,20 +605,20 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         nonlocal benchmark_metadata_cleanup, benchmark_metadata_cleanup_problems, benchmark_metadata_entries
         if not benchmark_metadata_entries:
             return
-        benchmark_metadata_cleanup, benchmark_metadata_cleanup_problems = _cleanup_materialized_entries(root, benchmark_metadata_entries)
+        benchmark_metadata_cleanup, benchmark_metadata_cleanup_problems = _cleanup_materialized_entries(benchmark_root, benchmark_metadata_entries)
         benchmark_metadata_entries = []
 
     if context_enabled:
         try:
-            context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(root, fixture=context_fixture, repo_id=repo_id, force=False)
-            context_cleanup_entries = _context_materialize_cleanup_entries(root, context_materialize)
+            context_materialize, context_materialize_problems = materialize_context_benchmark_corpus(benchmark_root, fixture=context_fixture, repo_id=repo_id, force=False)
+            context_cleanup_entries = _context_materialize_cleanup_entries(benchmark_root, context_materialize)
             context_cleanup: dict[str, Any] = {}
             context_benchmark: dict[str, Any] = {}
             context_benchmark_problems: list[Problem] = []
             try:
                 if not _has_errors(context_materialize_problems):
                     context_benchmark, context_benchmark_problems = run_context_benchmark(
-                        root,
+                        benchmark_root,
                         fixture=context_fixture,
                         repo_id=repo_id,
                         min_recall_at_5=0.85,
@@ -588,16 +627,16 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                         require_no_forbidden=True,
                     )
             finally:
-                context_cleanup, context_cleanup_problems = _cleanup_materialized_entries(root, context_cleanup_entries)
+                context_cleanup, context_cleanup_problems = _cleanup_materialized_entries(benchmark_root, context_cleanup_entries)
                 context_materialize_problems.extend(context_cleanup_problems)
             gates.append(
                 _release_candidate_gate_result(
                     name="context_benchmark_materialize",
                     command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
-                    mutates_workspace=True,
+                    mutates_workspace=False,
                     data=context_materialize,
                     problems=context_materialize_problems,
-                    warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
+                    warnings=[{"code": "context_benchmark_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
                     summary={**(context_materialize.get("totals", {}) if context_materialize else {}), "auto_cleanup": context_cleanup},
                 )
             )
@@ -623,26 +662,26 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
     if pack_enabled:
         try:
             if (pack_fixture / "tasks.json").exists():
-                pack_materialize, pack_materialize_problems = materialize_task_context_pack_benchmark_tasks(root, fixture=pack_fixture, force=False)
-                pack_cleanup_entries = _pack_materialize_cleanup_entries(root, pack_materialize)
+                pack_materialize, pack_materialize_problems = materialize_task_context_pack_benchmark_tasks(benchmark_root, fixture=pack_fixture, force=False)
+                pack_cleanup_entries = _pack_materialize_cleanup_entries(benchmark_root, pack_materialize)
                 pack_cleanup: dict[str, Any] = {}
                 pack_benchmark: dict[str, Any] = {}
                 pack_benchmark_problems: list[Problem] = []
                 try:
                     if not _has_errors(pack_materialize_problems):
-                        target = require_repo_target(root, repo_id=repo_id)
-                        pack_benchmark, pack_benchmark_problems = run_task_context_pack_benchmark(root, target=target, fixture=pack_fixture, min_must_read_recall=1.0)
+                        target = require_repo_target(benchmark_root, repo_id=repo_id)
+                        pack_benchmark, pack_benchmark_problems = run_task_context_pack_benchmark(benchmark_root, target=target, fixture=pack_fixture, min_must_read_recall=1.0)
                 finally:
-                    pack_cleanup, pack_cleanup_problems = _cleanup_materialized_entries(root, pack_cleanup_entries)
+                    pack_cleanup, pack_cleanup_problems = _cleanup_materialized_entries(benchmark_root, pack_cleanup_entries)
                     pack_materialize_problems.extend(pack_cleanup_problems)
                 gates.append(
                     _release_candidate_gate_result(
                         name="context_pack_benchmark_materialize",
                         command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
-                        mutates_workspace=True,
+                        mutates_workspace=False,
                         data=pack_materialize,
                         problems=pack_materialize_problems,
-                        warnings=[{"code": "context_pack_benchmark_materialize_mutates_workspace", "message": "context pack benchmark materialize writes archived fixture tasks for controlled startup-pack tests"}],
+                        warnings=[{"code": "context_pack_benchmark_isolated_workspace", "message": "benchmark tasks were materialized only inside an isolated temporary workspace"}],
                         summary={**(pack_materialize.get("totals", {}) if pack_materialize else {}), "auto_cleanup": pack_cleanup},
                     )
                 )
@@ -686,34 +725,34 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 materialize_gate["problems"].extend(_problem_dicts(benchmark_metadata_cleanup_problems))
                 materialize_gate["ok"] = False
 
-    multi_fixture = root / "tests/fixtures/context-benchmark-multirepo"
-    if _has_configured_repositories(root, {"web", "api"}) and (multi_fixture / "corpus.json").exists():
-        multi_materialize, multi_materialize_problems = materialize_context_benchmark_corpus(root, fixture=multi_fixture, repo_id="", force=False)
-        multi_cleanup_entries = _context_materialize_cleanup_entries(root, multi_materialize)
+    multi_fixture = benchmark_root / "tests/fixtures/context-benchmark-multirepo"
+    if _has_configured_repositories(benchmark_root, {"web", "api"}) and (multi_fixture / "corpus.json").exists():
+        multi_materialize, multi_materialize_problems = materialize_context_benchmark_corpus(benchmark_root, fixture=multi_fixture, repo_id="", force=False)
+        multi_cleanup_entries = _context_materialize_cleanup_entries(benchmark_root, multi_materialize)
         multi_cleanup: dict[str, Any] = {}
         multi_benchmark: dict[str, Any] = {}
         multi_benchmark_problems: list[Problem] = []
         try:
             if not _has_errors(multi_materialize_problems):
                 multi_benchmark, multi_benchmark_problems = run_context_benchmark(
-                    root,
+                    benchmark_root,
                     fixture=multi_fixture,
-                    min_category_packed_recall={"multi-repo-isolation": 1.0},
+                    min_category_visible_recall={"multi-repo-isolation": 1.0},
                     require_fixture_corpus=True,
                     require_no_cross_repo=True,
                     require_no_forbidden=True,
                 )
         finally:
-            multi_cleanup, multi_cleanup_problems = _cleanup_materialized_entries(root, multi_cleanup_entries)
+            multi_cleanup, multi_cleanup_problems = _cleanup_materialized_entries(benchmark_root, multi_cleanup_entries)
             multi_materialize_problems.extend(multi_cleanup_problems)
         gates.append(
             _release_candidate_gate_result(
                 name="context_benchmark_multirepo_materialize",
                 command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
-                mutates_workspace=True,
+                mutates_workspace=False,
                 data=multi_materialize,
                 problems=multi_materialize_problems,
-                warnings=[{"code": "context_benchmark_materialize_mutates_workspace", "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests"}],
+                warnings=[{"code": "context_benchmark_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
                 summary={**(multi_materialize.get("totals", {}) if multi_materialize else {}), "auto_cleanup": multi_cleanup},
             )
         )
@@ -721,7 +760,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
             gates.append(
                 _release_candidate_gate_result(
                     name="context_benchmark_multirepo_isolation",
-                    command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-packed-recall multi-repo-isolation=1.0 --json",
+                    command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
                     mutates_workspace=False,
                     data=multi_benchmark,
                     problems=multi_benchmark_problems,
@@ -732,6 +771,8 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                     },
                 )
             )
+
+    benchmark_temporary.cleanup()
 
     knowledge_records = root / "docs/knowledge/records"
     if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
@@ -1139,8 +1180,8 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
-                "code": "field_gate_runner_mutates_workspace",
-                "message": "release-candidate field gate materializes controlled benchmark fixtures before running read-only gates",
+                "code": "field_gate_benchmarks_isolated",
+                "message": "release-candidate benchmarks run in an isolated temporary workspace and do not materialize fixtures in product repositories",
             }
         ],
     }
@@ -2089,6 +2130,16 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "finish_summary": finish_summary,
         "completion_receipt": result["receipt_path"].relative_to(root).as_posix(),
     }
+    receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
+    repo_id = str(receipt.get("repo_id") or "")
+    next_actions = []
+    if repo_id:
+        next_actions.append(
+            {
+                "label": "Preview a Knowledge candidate only if this task produced a reusable decision, invariant, or failure mode",
+                "command": f"./scripts/repoctl knowledge candidate suggest --from-task {args.task_id} --repo-id {repo_id} --dry-run --json",
+            }
+        )
     payload = {
         "ok": True,
         "command": "task.finish",
@@ -2096,6 +2147,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         **data,
         "problems": [],
         "warnings": [],
+        "next_actions": next_actions,
     }
     if args.json:
         _json(payload)
@@ -2328,8 +2380,7 @@ def cmd_meta_query(args: argparse.Namespace) -> int:
 def cmd_meta_suggest(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = _repo_target_from_args(root, args)
-    text = args.text or args.text_arg or ""
-    candidates, problems, meta = meta_suggest(root, text=text, limit=args.limit, target=target)
+    candidates, problems, meta = meta_suggest(root, text=args.text, limit=args.limit, target=target)
     warning = {
         "code": "suggestion_not_authoritative",
         "message": "meta suggest returns candidate files only; inspect files before creating or changing task scope",
@@ -2386,7 +2437,8 @@ def cmd_index_code(args: argparse.Namespace) -> int:
 def cmd_graph_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    snapshot, problems, meta = build_graph(root, target=target)
+    with repoctl_lock(root):
+        snapshot, problems, meta = materialize_graph(root, target=target, rebuild=args.rebuild)
     summary = _graph_snapshot_summary(snapshot, meta=meta) if snapshot is not None else None
     data = {"summary": summary, **meta}
     if args.full:
@@ -2400,7 +2452,7 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
             *[problem.to_dict() for problem in problems if problem.severity == "warning"],
             {
                 "code": "graph_not_authoritative",
-                "message": "graph build is a read-only derived snapshot; source authorities remain repo registry, code index, and .repometa",
+                "message": "graph build materializes a derived index under .repoctl-state; source authorities remain product files, task receipts, and .repometa",
             }
         ],
     }
@@ -2433,15 +2485,14 @@ def _graph_snapshot_summary(snapshot: Any, *, meta: dict[str, Any]) -> dict[str,
         "completeness": snapshot.completeness,
         "capabilities": snapshot.capabilities,
         "index": meta.get("index", {}),
-        "precise_provider": meta.get("precise_provider", {}),
-        "precise_calls": meta.get("precise_calls", {}),
+        "semantic_providers": meta.get("semantic_providers", []),
     }
 
 
 def cmd_graph_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    snapshot, build_problems, meta = build_graph(root, target=target)
+    snapshot, build_problems, meta = load_materialized_graph(root, target=target)
     if snapshot is None or _has_errors(build_problems):
         payload = {
             "ok": False,
@@ -2451,11 +2502,13 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             "warnings": [],
         }
         if args.json:
-            _json(payload)
+            _json(payload, compact=not args.full)
         else:
             for problem in build_problems:
                 print(problem.message)
         return 1 if _has_errors(build_problems) else 0
+
+    freshness, freshness_problems = graph_materialization_freshness(root, target=target)
 
     result, query_problems = query_graph(
         snapshot,
@@ -2467,32 +2520,52 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         callees_of=args.callees_of or "",
         impact_file=args.impact_file or "",
         impact_symbol=args.impact_symbol or "",
+        task=args.task or "",
+        artifact=args.artifact or "",
         in_file=args.in_file or "",
         depth=args.depth,
     )
     query_status = str((result or {}).get("query_status") or "unavailable")
     outcome_ok = query_status in {"found", "not_found"}
+    result_data = result if args.full or result is None else _compact_graph_query_result(result)
+    completeness = result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness
+    result_warnings = result.get("warnings", []) if isinstance(result, dict) and isinstance(result.get("warnings"), list) else []
     payload = {
         "ok": result is not None and outcome_ok and not _has_errors(query_problems),
         "command": "graph query",
         "data": {
-            "result": result,
+            "result": result_data,
             "query_status": query_status,
-            "completeness": result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness,
+            "completeness": completeness if args.full else _compact_graph_completeness(completeness),
             "repository": target.to_dict(),
             "snapshot_digest": snapshot.snapshot_digest,
+            "freshness": freshness,
         },
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
             *[problem.to_dict() for problem in build_problems if problem.severity == "warning"],
+            *[problem.to_dict() for problem in freshness_problems],
+            *result_warnings,
+            *(
+                [
+                    {
+                        "code": "graph_snapshot_stale",
+                        "message": "materialized Graph does not match current source or workspace evidence; run repoctl graph build before relying on changed relations",
+                        "changed_paths": freshness.get("changed_paths", []),
+                        "changed_root_paths": freshness.get("changed_root_paths", []),
+                    }
+                ]
+                if freshness.get("status") == "stale"
+                else []
+            ),
             {
                 "code": "graph_not_authoritative",
-                "message": "graph query uses a read-only derived snapshot; inspect source files before changing task scope",
+                "message": "graph query reads the materialized derived index; inspect source files before changing task scope",
             }
         ],
     }
     if args.json:
-        _json(payload)
+        _json(payload, compact=not args.full)
     else:
         if result is not None:
             print(f"graph query {result['query']} matches={len(result.get('matches', []))} paths={len(result.get('paths', []))} nodes={len(result['nodes'])} edges={len(result['edges'])}")
@@ -2511,17 +2584,134 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(query_problems) or query_status in {"unsupported", "unavailable"} else 0
 
 
+def _compact_graph_query_result(result: dict[str, Any]) -> dict[str, Any]:
+    nodes = result.get("nodes") if isinstance(result.get("nodes"), list) else []
+    edges = result.get("edges") if isinstance(result.get("edges"), list) else []
+    node_summaries = {
+        str(node.get("id") or ""): _compact_graph_node(node, include_id=False)
+        for node in nodes
+        if isinstance(node, dict) and str(node.get("id") or "")
+    }
+    compact = {
+        "query": result.get("query", {}),
+        "query_status": result.get("query_status", "unavailable"),
+        "matches": result.get("matches", []),
+        "paths": [_compact_graph_path(path) for path in result.get("paths", []) if isinstance(path, dict)],
+        "continuations": [
+            {
+                "selector": continuation.get("selector", {}),
+                "query_types": continuation.get("query_types", []),
+                "actions": continuation.get("actions", []),
+            }
+            for continuation in result.get("continuations", [])
+            if isinstance(continuation, dict)
+        ],
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "warnings": result.get("warnings", []),
+    }
+    if not compact["paths"]:
+        compact["relations"] = [
+            _compact_graph_relation(edge, node_summaries)
+            for edge in edges
+            if isinstance(edge, dict)
+        ]
+    return compact
+
+
+def _compact_graph_node(node: dict[str, Any], *, include_id: bool = True) -> dict[str, Any]:
+    summary: dict[str, Any] = {"kind": node.get("kind", "")}
+    if include_id:
+        summary["id"] = node.get("id", "")
+    identity = node.get("identity") if isinstance(node.get("identity"), dict) else {}
+    facts = node.get("facts") if isinstance(node.get("facts"), dict) else {}
+    provider = facts.get("provider") if isinstance(facts.get("provider"), dict) else {}
+    for key, value in (
+        ("path", identity.get("path")),
+        ("task_id", identity.get("task_id")),
+        ("raw_import", identity.get("raw_import")),
+        ("topic", identity.get("topic")),
+        ("name", provider.get("name")),
+        ("qualified_name", provider.get("qualified_name")),
+        ("symbol_kind", provider.get("kind")),
+    ):
+        if value not in (None, ""):
+            summary[key] = value
+    return summary
+
+
+def _compact_graph_path(path: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(path)
+    for key in ("from", "to"):
+        endpoint = compact.get(key)
+        if isinstance(endpoint, dict):
+            compact[key] = {name: value for name, value in endpoint.items() if name != "id"}
+    return compact
+
+
+def _compact_graph_relation(edge: dict[str, Any], nodes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    relation: dict[str, Any] = {
+        "from": nodes.get(str(edge.get("from") or ""), {"id": edge.get("from", "")}),
+        "edge": edge.get("kind", ""),
+        "to": nodes.get(str(edge.get("to") or ""), {"id": edge.get("to", "")}),
+        "assertion": edge.get("assertion", ""),
+        "source": edge.get("source", ""),
+    }
+    if isinstance(edge.get("facts"), dict) and edge["facts"]:
+        relation["facts"] = edge["facts"]
+    return relation
+
+
+def _compact_graph_completeness(completeness: Any) -> dict[str, Any]:
+    if not isinstance(completeness, dict):
+        return {}
+    compact = {
+        key: completeness[key]
+        for key in (
+            "status",
+            "capabilities",
+            "inventory_complete",
+            "metadata_store_valid",
+            "receipt_set_complete",
+            "invalid_completion_receipts",
+            "index_truncated",
+            "code_facts_complete",
+            "parse_error_count",
+        )
+        if key in completeness
+    }
+    failures = completeness.get("provider_failures") if isinstance(completeness.get("provider_failures"), list) else []
+    compact["provider_failure_count"] = len(failures)
+    coverage = completeness.get("provider_coverage") if isinstance(completeness.get("provider_coverage"), dict) else {}
+    compact["provider_coverage"] = {
+        name: {
+            "status": value.get("status", ""),
+            "evidence_level": value.get("evidence_level", ""),
+            "eligible_path_count": len(value.get("eligible_paths", [])) if isinstance(value.get("eligible_paths"), list) else 0,
+            "analyzed_path_count": len(value.get("analyzed_paths", [])) if isinstance(value.get("analyzed_paths"), list) else 0,
+            "unsupported_path_count": len(value.get("unsupported_paths", [])) if isinstance(value.get("unsupported_paths"), list) else 0,
+            "failed_path_count": len(value.get("failed_paths", [])) if isinstance(value.get("failed_paths"), list) else 0,
+        }
+        for name, value in sorted(coverage.items())
+        if isinstance(value, dict)
+    }
+    return compact
+
+
 def cmd_context_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, budget_tokens=args.budget_tokens, explain=args.explain, mode=args.mode or "")
+    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, explain=args.explain, mode=args.mode or "")
     bundle_data = None
     if bundle is not None:
         bundle_data = bundle.to_dict() if args.full else compact_context_bundle(bundle)
+    data = {"bundle": bundle_data, "repository": target.to_dict()}
+    if args.full or args.explain:
+        data.update(meta)
     payload = {
         "ok": bundle is not None and not _has_errors(problems),
         "command": "context query",
-        "data": {"bundle": bundle_data, **meta},
+        "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
@@ -2532,7 +2722,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     }
     output_format = "json" if args.json else args.format
     if output_format == "json":
-        _json(payload)
+        _json(payload, compact=not args.full and not args.explain)
     elif output_format == "markdown":
         if bundle is not None:
             print(render_context_markdown(bundle), end="")
@@ -2540,7 +2730,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
             print(problem.message)
     else:
         if bundle is not None:
-            print(f"context bundle {bundle.bundle_digest} repository={target.id} packed={len(bundle.packed_context)} candidates={len(bundle.candidates)}")
+            print(f"context bundle {bundle.bundle_digest} repository={target.id} evidence={len(bundle.evidence)}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -2554,26 +2744,25 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     category_gates, category_gate_problems = _parse_category_recall_gates(args.min_category_recall_at_5 or [])
     knowledge_category_gates, knowledge_category_gate_problems = _parse_category_recall_gates(args.min_category_knowledge_recall_at_5 or [])
     edge_category_gates, edge_category_gate_problems = _parse_category_recall_gates(args.min_category_graph_edge_recall or [])
-    packed_category_gates, packed_category_gate_problems = _parse_category_recall_gates(args.min_category_packed_recall or [])
+    visible_category_gates, visible_category_gate_problems = _parse_category_recall_gates(args.min_category_visible_recall or [])
     data, problems = run_context_benchmark(
         root,
         fixture=fixture,
         repo_id=args.repo_id or "",
-        budget_tokens=args.budget_tokens,
         min_recall_at_5=args.min_recall_at_5,
         min_precision_at_5=args.min_precision_at_5,
         min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
         min_category_recall_at_5=category_gates,
         min_category_knowledge_recall_at_5=knowledge_category_gates,
         min_category_graph_edge_recall=edge_category_gates,
-        min_category_packed_recall=packed_category_gates,
+        min_category_visible_recall=visible_category_gates,
         require_source_integrity=args.require_source_integrity,
         require_knowledge_source_current=args.require_knowledge_source_current,
         require_no_forbidden=args.require_no_forbidden,
         require_no_cross_repo=args.require_no_cross_repo,
         require_fixture_corpus=args.require_fixture_corpus,
     )
-    problems = [*category_gate_problems, *knowledge_category_gate_problems, *edge_category_gate_problems, *packed_category_gate_problems, *problems]
+    problems = [*category_gate_problems, *knowledge_category_gate_problems, *edge_category_gate_problems, *visible_category_gate_problems, *problems]
     payload = {
         "ok": not _has_errors(problems),
         "command": "context benchmark",
@@ -2886,23 +3075,37 @@ def cmd_context_pack_benchmark_compare(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
+    claim, claim_problems = _knowledge_candidate_claim_input(root, args)
     from_task = getattr(args, "from_task", "")
     source_modes = [bool(args.source), bool(args.from_receipt), bool(args.from_pack), bool(from_task)]
-    if sum(1 for enabled in source_modes if enabled) != 1:
+    if claim_problems:
+        data = {}
+        problems = claim_problems
+    elif sum(1 for enabled in source_modes if enabled) != 1:
         data: dict[str, Any] = {}
         problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, --from-pack, or --from-task")]
     elif from_task:
-        data, problems = build_knowledge_candidate_from_receipt(root, task_id=from_task, repo_id=args.repo_id, kind=args.kind, write=not getattr(args, "dry_run", False))
+        data, problems = build_knowledge_candidate_from_receipt(
+            root,
+            task_id=from_task,
+            repo_id=args.repo_id,
+            kind=args.kind,
+            write=not getattr(args, "dry_run", False),
+            claim=claim,
+        )
     elif args.from_receipt:
-        data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind)
+        data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind, claim=claim)
     elif args.from_pack:
-        data, problems = build_knowledge_candidate_from_pack(root, pack=Path(args.from_pack), repo_id=args.repo_id, kind=args.kind)
+        data, problems = build_knowledge_candidate_from_pack(root, pack=Path(args.from_pack), repo_id=args.repo_id, kind=args.kind, claim=claim)
     else:
-        data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind)
+        data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind, claim=claim)
+    response_data = data
+    if getattr(args, "knowledge_candidate_command", "") == "suggest" and not getattr(args, "full", False):
+        response_data = _compact_knowledge_candidate_data(data)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge candidate suggest" if getattr(args, "knowledge_candidate_command", "") == "suggest" else "knowledge candidate build",
-        "data": data,
+        "data": response_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
@@ -2919,6 +3122,57 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _knowledge_candidate_claim_input(root: Path, args: argparse.Namespace) -> tuple[str, list[Problem]]:
+    claim = str(getattr(args, "claim", "") or "").strip()
+    claim_file = str(getattr(args, "claim_file", "") or "").strip()
+    if not claim_file:
+        return claim, []
+    path = Path(claim_file)
+    resolved = path if path.is_absolute() else root / path
+    if not resolved.is_file():
+        return "", [Problem("error", "knowledge_candidate_claim_file_missing", "knowledge candidate claim file is missing", claim_file)]
+    try:
+        claim = resolved.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", [Problem("error", "knowledge_candidate_claim_file_unreadable", str(exc), claim_file)]
+    if not claim:
+        return "", [Problem("error", "knowledge_candidate_claim_file_empty", "knowledge candidate claim file is empty", claim_file)]
+    return claim, []
+
+
+def _compact_knowledge_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
+    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else None
+    if candidate is None:
+        return data
+    compact_candidate = dict(candidate)
+    compact_candidate.pop("summary", None)
+    derived = compact_candidate.get("derived_from") if isinstance(compact_candidate.get("derived_from"), dict) else {}
+    compact_candidate["derived_from"] = _compact_knowledge_derived_from(derived)
+    return {**data, "candidate": compact_candidate}
+
+
+def _compact_knowledge_derived_from(derived: dict[str, Any]) -> dict[str, Any]:
+    compact_derived = dict(derived)
+    compact_derived.pop("related_symbols", None)
+    compact_derived.pop("related_symbol_warnings", None)
+    return compact_derived
+
+
+def _compact_knowledge_approval_data(data: dict[str, Any]) -> dict[str, Any]:
+    record = data.get("record") if isinstance(data.get("record"), dict) else None
+    if record is None:
+        return data
+    compact_record = dict(record)
+    compact_record.pop("summary", None)
+    created_from = compact_record.get("created_from") if isinstance(compact_record.get("created_from"), dict) else {}
+    compact_created_from = dict(created_from)
+    candidate_derived = compact_created_from.get("candidate_derived_from")
+    if isinstance(candidate_derived, dict):
+        compact_created_from["candidate_derived_from"] = _compact_knowledge_derived_from(candidate_derived)
+    compact_record["created_from"] = compact_created_from
+    return {**data, "record": compact_record}
 
 
 def cmd_knowledge_candidate_list(args: argparse.Namespace) -> int:
@@ -3076,9 +3330,6 @@ def _render_knowledge_candidate_review_markdown(data: dict[str, Any], check_data
         changed_files = derived.get("changed_files") if isinstance(derived.get("changed_files"), list) else []
         if changed_files:
             lines.append("- Changed files: " + ", ".join(f"`{item}`" for item in changed_files))
-        related_symbols = derived.get("related_symbols") if isinstance(derived.get("related_symbols"), list) else []
-        if related_symbols:
-            lines.append("- Related symbols: " + ", ".join(f"`{item}`" for item in related_symbols))
     else:
         lines.append("- Kind: `authority_document`")
     lines.extend(["", "## Source Refs", ""])
@@ -3230,12 +3481,21 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
             review_note=review_note,
         )
     record = data.get("record", {}) if data else {}
+    response_data = data if getattr(args, "full", False) else _compact_knowledge_approval_data(data)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge approve",
-        "data": data,
+        "data": response_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": _knowledge_approval_warnings(record),
+        "next_actions": [
+            {
+                "label": "Refresh the non-authoritative llmwiki view",
+                "command": f"./scripts/repoctl knowledge render --repo-id {args.repo_id} --json",
+            }
+        ]
+        if data and not _has_errors(problems)
+        else [],
     }
     if args.json:
         _json(payload)
@@ -3372,15 +3632,16 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
                 args.repo_id,
             )
         )
+    response_data = data if args.full else _compact_knowledge_query_data(data)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge query",
-        "data": data,
+        "data": response_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [problem.to_dict() for problem in warnings],
     }
     if args.json:
-        _json(payload)
+        _json(payload, compact=not args.full and not args.explain)
     else:
         print(f"knowledge query repo_id={args.repo_id} results={data.get('result_count', 0)}")
         for problem in [*problems, *warnings]:
@@ -3388,15 +3649,34 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def _compact_knowledge_query_data(data: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(data)
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    compact_results: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        compact_item = dict(item)
+        record = item.get("record") if isinstance(item.get("record"), dict) else None
+        if record is not None:
+            compact_record = dict(record)
+            compact_record.pop("summary", None)
+            compact_item["record"] = compact_record
+        compact_results.append(compact_item)
+    compact["results"] = compact_results
+    return compact
+
+
 def cmd_knowledge_render(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     output = Path(args.output) if args.output else _default_knowledge_render_output(args.repo_id)
     data, problems = render_knowledge(root, repo_id=args.repo_id, output=output, check=args.check)
+    response_data = data if args.full else _compact_knowledge_render_data(data)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge render",
-        "data": data,
+        "data": response_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
@@ -3412,6 +3692,32 @@ def cmd_knowledge_render(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _compact_knowledge_render_data(data: dict[str, Any]) -> dict[str, Any]:
+    rendered = data.get("rendered") if isinstance(data.get("rendered"), list) else []
+    removed = data.get("removed") if isinstance(data.get("removed"), list) else []
+    compact = {key: value for key, value in data.items() if key not in {"rendered", "removed"}}
+    counts = {
+        "records": 0,
+        "file_targets": 0,
+        "symbol_targets": 0,
+        "other": 0,
+    }
+    for item in rendered:
+        path = str(item.get("path") or "") if isinstance(item, dict) else ""
+        if "/records/" in path:
+            counts["records"] += 1
+        elif "/targets/files/" in path:
+            counts["file_targets"] += 1
+        elif "/targets/symbols/" in path:
+            counts["symbol_targets"] += 1
+        else:
+            counts["other"] += 1
+    compact["page_counts"] = {"total": len(rendered), **counts}
+    if "removed" in data:
+        compact["removed_count"] = len(removed)
+    return compact
 
 
 def _default_knowledge_render_output(repo_id: str) -> Path:
@@ -3743,9 +4049,8 @@ def build_parser() -> argparse.ArgumentParser:
     meta_query_cmd.add_argument("--json", action="store_true")
     meta_query_cmd.set_defaults(func=cmd_meta_query)
     meta_suggest_cmd = meta_sub.add_parser("suggest")
-    meta_suggest_cmd.add_argument("text_arg", nargs="?")
     meta_suggest_cmd.add_argument("--repo-id")
-    meta_suggest_cmd.add_argument("--text")
+    meta_suggest_cmd.add_argument("--text", required=True)
     meta_suggest_cmd.add_argument("--limit", type=int, default=20)
     meta_suggest_cmd.add_argument("--json", action="store_true")
     meta_suggest_cmd.set_defaults(func=cmd_meta_suggest)
@@ -3794,6 +4099,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_sub = graph.add_subparsers(dest="graph_command", required=True, parser_class=RepoctlArgumentParser)
     graph_build = graph_sub.add_parser("build")
     graph_build.add_argument("--repo-id")
+    graph_build.add_argument("--rebuild", action="store_true", help="discard reusable provider materialization and rebuild all provider results")
     graph_build.add_argument("--full", action="store_true", help="include full nodes/edges snapshot; default JSON is compact summary")
     graph_build.add_argument("--json", action="store_true")
     graph_build.set_defaults(func=cmd_graph_build)
@@ -3807,8 +4113,11 @@ def build_parser() -> argparse.ArgumentParser:
     graph_query.add_argument("--callees-of", dest="callees_of", default="")
     graph_query.add_argument("--impact-file", dest="impact_file", default="")
     graph_query.add_argument("--impact-symbol", dest="impact_symbol", default="")
+    graph_query.add_argument("--task", default="")
+    graph_query.add_argument("--artifact", default="")
     graph_query.add_argument("--in-file", dest="in_file", default="")
     graph_query.add_argument("--depth", type=int, default=1)
+    graph_query.add_argument("--full", action="store_true", help="include raw graph nodes, edges, and full provider diagnostics")
     graph_query.add_argument("--json", action="store_true")
     graph_query.set_defaults(func=cmd_graph_query)
 
@@ -3817,24 +4126,22 @@ def build_parser() -> argparse.ArgumentParser:
     context_query = context_sub.add_parser("query")
     context_query.add_argument("query")
     context_query.add_argument("--repo-id")
-    context_query.add_argument("--budget-tokens", type=int, default=1200)
     context_query.add_argument("--mode", default="")
     context_query.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     context_query.add_argument("--explain", action="store_true")
-    context_query.add_argument("--full", action="store_true", help="include raw candidates and full packed context in JSON output")
+    context_query.add_argument("--full", action="store_true", help="include full evidence and source diagnostics in JSON output")
     context_query.add_argument("--json", action="store_true")
     context_query.set_defaults(func=cmd_context_query)
     context_benchmark = context_sub.add_parser("benchmark")
     context_benchmark.add_argument("--fixture", default="tests/fixtures/context-benchmark")
     context_benchmark.add_argument("--repo-id")
-    context_benchmark.add_argument("--budget-tokens", type=int, default=1200)
     context_benchmark.add_argument("--min-recall-at-5", type=float)
     context_benchmark.add_argument("--min-precision-at-5", type=float)
     context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
     context_benchmark.add_argument("--min-category-recall-at-5", action="append", default=[])
     context_benchmark.add_argument("--min-category-knowledge-recall-at-5", action="append", default=[])
     context_benchmark.add_argument("--min-category-graph-edge-recall", action="append", default=[])
-    context_benchmark.add_argument("--min-category-packed-recall", action="append", default=[])
+    context_benchmark.add_argument("--min-category-visible-recall", action="append", default=[])
     context_benchmark.add_argument("--require-source-integrity", action="store_true")
     context_benchmark.add_argument("--require-knowledge-source-current", action="store_true")
     context_benchmark.add_argument("--require-no-forbidden", action="store_true")
@@ -3908,6 +4215,9 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_build.add_argument("--from-task", dest="from_task")
     knowledge_candidate_build.add_argument("--repo-id", required=True)
     knowledge_candidate_build.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
+    knowledge_candidate_build_claim = knowledge_candidate_build.add_mutually_exclusive_group()
+    knowledge_candidate_build_claim.add_argument("--claim", default="")
+    knowledge_candidate_build_claim.add_argument("--claim-file", default="")
     knowledge_candidate_build.add_argument("--json", action="store_true")
     knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build, knowledge_candidate_command="build")
     knowledge_candidate_suggest = knowledge_candidate_sub.add_parser("suggest")
@@ -3915,6 +4225,10 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_suggest.add_argument("--repo-id", required=True)
     knowledge_candidate_suggest.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
     knowledge_candidate_suggest.add_argument("--dry-run", action="store_true")
+    knowledge_candidate_suggest_claim = knowledge_candidate_suggest.add_mutually_exclusive_group()
+    knowledge_candidate_suggest_claim.add_argument("--claim", default="")
+    knowledge_candidate_suggest_claim.add_argument("--claim-file", default="")
+    knowledge_candidate_suggest.add_argument("--full", action="store_true", help="include the full candidate summary")
     knowledge_candidate_suggest.add_argument("--json", action="store_true")
     knowledge_candidate_suggest.set_defaults(func=cmd_knowledge_candidate_build, source="", from_receipt="", from_pack="", knowledge_candidate_command="suggest")
     knowledge_candidate_list = knowledge_candidate_sub.add_parser("list")
@@ -3967,6 +4281,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_approve.add_argument("--supersedes", action="append", default=[])
     knowledge_approve.add_argument("--reviewed-by", default="human")
     knowledge_approve.add_argument("--note-file")
+    knowledge_approve.add_argument("--full", action="store_true", help="include the full record summary")
     knowledge_approve.add_argument("--json", action="store_true")
     knowledge_approve.set_defaults(func=cmd_knowledge_approve)
     knowledge_show = knowledge_sub.add_parser("show")
@@ -4000,12 +4315,14 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("--include-history", action="store_true")
     knowledge_query.add_argument("--explain", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
+    knowledge_query.add_argument("--full", action="store_true", help="include full reviewed record summaries")
     knowledge_query.add_argument("--json", action="store_true")
     knowledge_query.set_defaults(func=cmd_knowledge_query)
     knowledge_render = knowledge_sub.add_parser("render")
     knowledge_render.add_argument("--repo-id", required=True)
     knowledge_render.add_argument("--output")
     knowledge_render.add_argument("--check", action="store_true")
+    knowledge_render.add_argument("--full", action="store_true", help="include per-page digests and source bundles in JSON output")
     knowledge_render.add_argument("--json", action="store_true")
     knowledge_render.set_defaults(func=cmd_knowledge_render)
 
@@ -4038,11 +4355,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(data["version"])
         return 0
-    if raw_argv == ["help"]:
-        parser.print_help()
-        return 0
-    if raw_argv and raw_argv[0] == "llmwiki":
-        raw_argv = ["knowledge", "render", *raw_argv[1:]]
     try:
         args = parser.parse_args(raw_argv)
     except RepoctlArgparseError as error:

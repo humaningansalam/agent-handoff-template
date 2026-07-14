@@ -302,6 +302,111 @@ def repo_path_fingerprints(root: Path, paths: list[str], target: RepoTarget | No
     return fingerprints, state
 
 
+def _git_index_records(repo: Path) -> dict[str, dict[str, str]]:
+    records: dict[str, dict[str, str]] = {}
+    for token in _git_bytes(repo, ["ls-files", "--stage", "-z"]).split(b"\0"):
+        if not token or b"\t" not in token:
+            continue
+        raw_identity, raw_path = token.split(b"\t", 1)
+        parts = raw_identity.decode("ascii", errors="ignore").split()
+        path = normalize_repo_path(raw_path.decode("utf-8", errors="surrogateescape"))
+        if len(parts) != 3 or not path or parts[2] != "0":
+            continue
+        records[path] = {"mode": parts[0], "object": parts[1]}
+    return records
+
+
+def _stat_probe(path: Path) -> dict[str, Any]:
+    try:
+        file_stat = os.lstat(path)
+    except OSError:
+        return {"kind": "missing"}
+    probe: dict[str, Any] = {
+        "mode": f"{stat.S_IMODE(file_stat.st_mode):04o}",
+        "size": int(file_stat.st_size),
+        "mtime_ns": int(file_stat.st_mtime_ns),
+        "ctime_ns": int(file_stat.st_ctime_ns),
+    }
+    if stat.S_ISLNK(file_stat.st_mode):
+        probe.update({"kind": "symlink", "target": os.readlink(path)})
+    elif stat.S_ISREG(file_stat.st_mode):
+        probe["kind"] = "file"
+    else:
+        probe["kind"] = "other"
+    return probe
+
+
+def repo_file_state_records(
+    root: Path,
+    *,
+    paths: list[str],
+    target: RepoTarget | None = None,
+    previous: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, dict[str, Any]], RepoGitState]:
+    """Return content identities without rereading clean tracked files.
+
+    Git object IDs identify clean tracked files. Dirty and untracked files use a
+    stat probe to reuse the previous content digest when their working-tree
+    state has not changed.
+    """
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    if not state.available:
+        return {}, state
+    assert selected is not None
+    repo = selected.root_path
+    index_records = _git_index_records(repo)
+    changes, change_state = repo_changed_entries(root, selected)
+    if not change_state.available:
+        return {}, change_state
+    changes_by_path: dict[str, list[dict[str, str]]] = {}
+    for change, path, old_path in changes:
+        if path:
+            item = {"change": change}
+            if old_path:
+                item["old_path"] = old_path
+            changes_by_path.setdefault(path, []).append(item)
+    previous = previous or {}
+    records: dict[str, dict[str, Any]] = {}
+    for path in sorted({normalized for value in paths if (normalized := normalize_repo_path(value))}):
+        index = index_records.get(path, {})
+        path_changes = sorted(changes_by_path.get(path, []), key=lambda item: (item.get("change", ""), item.get("old_path", "")))
+        if index and not path_changes:
+            records[path] = {
+                "path": path,
+                "source": "git_index",
+                "mode": index.get("mode", ""),
+                "object": index.get("object", ""),
+            }
+            continue
+
+        probe = {
+            "index": index,
+            "changes": path_changes,
+            "stat": _stat_probe(repo / path),
+        }
+        old = previous.get(path)
+        if isinstance(old, dict) and old.get("probe") == probe and old.get("source") == "working_tree":
+            records[path] = old
+            continue
+
+        record: dict[str, Any] = {
+            "path": path,
+            "source": "working_tree",
+            "probe": probe,
+        }
+        kind = str(probe["stat"].get("kind") or "")
+        if kind == "file":
+            try:
+                record["content_sha256"] = _sha256_bytes((repo / path).read_bytes())
+            except OSError:
+                record["content_sha256"] = _sha256_bytes(b"<unreadable>")
+        elif kind == "symlink":
+            record["symlink_target"] = str(probe["stat"].get("target") or "")
+        records[path] = record
+    return records, state
+
+
 def _sorted_changed_entries(entries: list[ChangedEntry]) -> list[dict[str, str]]:
     values: list[dict[str, str]] = []
     for change, path, old_path in sorted(set(entries), key=lambda item: (item[1], item[2], item[0])):

@@ -18,9 +18,10 @@ from .tasks import Problem, collect_completion_receipts, normalize_task_id
 ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
 ALLOWED_SOURCE_PREFIXES = ("docs/adr/", "docs/contracts/", "docs/workflows/")
 EXCLUDED_SOURCE_PARTS = {".repoctl-state", "generated", "plans"}
+MAX_KNOWLEDGE_CLAIM_LENGTH = 300
 
 
-def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: str) -> tuple[dict[str, Any], list[Problem]]:
+def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: str, claim: str = "") -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     rel = _source_rel(root, source)
@@ -33,10 +34,10 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
     if not chunks:
         return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", rel)]
     primary = _primary_chunk(chunks, kind)
-    return _write_candidate_from_chunk(root, repo_id=repo_id, kind=kind, primary=primary)
+    return _write_candidate_from_chunk(root, repo_id=repo_id, kind=kind, primary=primary, claim_override=claim)
 
 
-def build_knowledge_candidate_from_pack(root: Path, *, pack: Path, repo_id: str, kind: str) -> tuple[dict[str, Any], list[Problem]]:
+def build_knowledge_candidate_from_pack(root: Path, *, pack: Path, repo_id: str, kind: str, claim: str = "") -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     pack_path = pack if pack.is_absolute() else root / pack
@@ -60,6 +61,7 @@ def build_knowledge_candidate_from_pack(root: Path, *, pack: Path, repo_id: str,
         repo_id=repo_id,
         kind=kind,
         primary=primary,
+        claim_override=claim,
         derived_from={
             "kind": "context_pack",
             "path": pack_path.relative_to(root).as_posix() if pack_path.is_relative_to(root) else pack_path.as_posix(),
@@ -80,9 +82,17 @@ def _write_candidate_from_chunk(
     repo_id: str,
     kind: str,
     primary: Any,
+    claim_override: str = "",
     derived_from: dict[str, Any] | None = None,
     checklist: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
+    candidate_claim, claim_problem = _validated_candidate_claim(
+        primary.text,
+        override=claim_override,
+        problem_path=primary.source_ref.path,
+    )
+    if claim_problem is not None:
+        return {}, [claim_problem]
     candidate_id = _unique_candidate_id(root, repo_id, primary.title, primary.source_ref.content_sha256)
     candidate = {
         "schema": "repoctl.knowledge.candidate",
@@ -93,7 +103,7 @@ def _write_candidate_from_chunk(
         "status": "candidate",
         "authoritative": False,
         "title": primary.title,
-        "claim": _claim(primary.text),
+        "claim": candidate_claim,
         "summary": _summary(primary.text),
         "source_refs": [primary.source_ref.to_dict()],
         "review": {
@@ -117,7 +127,15 @@ def _write_candidate_from_chunk(
     return {"candidate": candidate, "path": destination.relative_to(root).as_posix()}, []
 
 
-def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id: str, kind: str, write: bool = True) -> tuple[dict[str, Any], list[Problem]]:
+def build_knowledge_candidate_from_receipt(
+    root: Path,
+    *,
+    task_id: str,
+    repo_id: str,
+    kind: str,
+    write: bool = True,
+    claim: str = "",
+) -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     normalized_task_id = normalize_task_id(task_id)
@@ -138,9 +156,15 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
     artifact_text = artifact_path.read_text(encoding="utf-8")
     title = _receipt_title(receipt, artifact_text)
     summary = _receipt_summary(receipt, artifact_text)
+    candidate_claim, claim_problem = _validated_candidate_claim(
+        summary,
+        override=claim,
+        problem_path=normalized_task_id,
+    )
+    if claim_problem is not None:
+        return {}, [claim_problem]
     receipt_text = (root / receipt_rel).read_text(encoding="utf-8")
     changed_files = _receipt_changed_files(receipt)
-    related_symbols, related_symbol_warnings = _receipt_related_symbols(root, repo_id=repo_id, changed_files=changed_files)
     source_refs = [
         {
             "kind": "completion_receipt",
@@ -165,7 +189,7 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
         "status": "candidate",
         "authoritative": False,
         "title": title,
-        "claim": _claim(summary),
+        "claim": candidate_claim,
         "summary": summary,
         "source_refs": source_refs,
         "review": {
@@ -184,11 +208,8 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
             "repo_id": repo_id,
             "verification_artifact": artifact_rel,
             "changed_files": changed_files,
-            "related_symbols": related_symbols,
         },
     }
-    if related_symbol_warnings:
-        candidate["derived_from"]["related_symbol_warnings"] = related_symbol_warnings
     candidate["candidate_digest"] = digest_data(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
     data = {"candidate": candidate, "path": destination.relative_to(root).as_posix()}
@@ -200,65 +221,6 @@ def build_knowledge_candidate_from_receipt(root: Path, *, task_id: str, repo_id:
     destination.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(destination, json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return data, []
-
-
-def _receipt_related_symbols(root: Path, *, repo_id: str, changed_files: list[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not changed_files:
-        return [], []
-    try:
-        from .graph import build_graph
-        from .repositories import require_repo_target
-
-        target = require_repo_target(root, repo_id=repo_id)
-        snapshot, problems, _meta = build_graph(root, target=target)
-    except Exception as exc:  # pragma: no cover - defensive; candidate creation must remain best-effort here.
-        return [], [{"code": "knowledge_candidate_related_symbols_unavailable", "message": str(exc)}]
-    warnings = [problem.to_dict() for problem in problems if problem.severity == "warning"]
-    if snapshot is None:
-        warnings.extend(problem.to_dict() for problem in problems if problem.severity == "error")
-        return [], warnings
-    changed = set(changed_files)
-    nodes = {node.id: node for node in snapshot.nodes}
-    anchors_by_symbol: dict[str, dict[str, Any]] = {}
-    for edge in snapshot.edges:
-        if edge.kind != "ANCHORS":
-            continue
-        anchor = nodes.get(edge.to_id)
-        if anchor is not None and anchor.kind == "anchor":
-            anchors_by_symbol[edge.from_id] = dict(anchor.identity)
-    symbols: dict[str, dict[str, Any]] = {}
-    for edge in snapshot.edges:
-        if edge.kind != "DEFINES":
-            continue
-        file_node = nodes.get(edge.from_id)
-        symbol_node = nodes.get(edge.to_id)
-        if file_node is None or symbol_node is None or file_node.kind != "file" or symbol_node.kind != "symbol":
-            continue
-        path = str(file_node.identity.get("path") or "")
-        if path not in changed:
-            continue
-        provider_facts = symbol_node.facts.get("provider") if isinstance(symbol_node.facts.get("provider"), dict) else {}
-        symbol: dict[str, Any] = {
-            "id": symbol_node.id,
-            "provider": str(symbol_node.identity.get("provider") or ""),
-            "provider_symbol_id": str(symbol_node.identity.get("provider_symbol_id") or ""),
-            "path": path,
-        }
-        for key in ("qualified_name", "name"):
-            value = str(provider_facts.get(key) or "")
-            if value:
-                symbol[key] = value
-        if provider_facts.get("kind"):
-            symbol["kind"] = str(provider_facts.get("kind") or "")
-            symbol["symbol_kind"] = str(provider_facts.get("kind") or "")
-        if edge.to_id in anchors_by_symbol:
-            symbol["range"] = {
-                key: anchors_by_symbol[edge.to_id][key]
-                for key in ("start_line", "start_col", "end_line", "end_col")
-                if key in anchors_by_symbol[edge.to_id]
-            }
-        symbols[symbol_node.id] = {key: value for key, value in symbol.items() if value not in ("", None, {})}
-    return sorted(symbols.values(), key=lambda item: (str(item.get("id") or ""), str(item.get("path") or ""), str(item.get("qualified_name") or item.get("name") or ""))), warnings
 
 
 def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = False) -> dict[str, Any]:
@@ -686,7 +648,7 @@ def approve_knowledge_candidate(
         "created_from": {
             "candidate_id": candidate_id,
             "candidate_digest": candidate.get("candidate_digest", ""),
-            "candidate_derived_from": candidate.get("derived_from", {}) if isinstance(candidate.get("derived_from"), dict) else {},
+            "candidate_derived_from": _candidate_record_derivation(candidate),
             "candidate_check": {
                 "passed": True,
                 "warning_codes": sorted(problem.code for problem in quality_results if problem.severity == "warning"),
@@ -879,7 +841,26 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     }, problems
 
 
-def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_stale: bool = False, include_superseded: bool = False, include_deprecated: bool = False, limit: int = 10, explain: bool = False) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
+def _candidate_record_derivation(candidate: dict[str, Any]) -> dict[str, Any]:
+    derived = dict(candidate.get("derived_from")) if isinstance(candidate.get("derived_from"), dict) else {}
+    derived.pop("related_symbols", None)
+    derived.pop("related_symbol_warnings", None)
+    return derived
+
+
+def query_knowledge_records(
+    root: Path,
+    *,
+    repo_id: str,
+    query: str,
+    include_stale: bool = False,
+    include_superseded: bool = False,
+    include_deprecated: bool = False,
+    limit: int = 10,
+    explain: bool = False,
+    related_paths: set[str] | None = None,
+    require_related: bool = False,
+) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
     problems: list[Problem] = []
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
@@ -907,6 +888,8 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
     available_statuses: dict[str, int] = {}
     excluded_statuses: dict[str, int] = {}
     scored: list[dict[str, Any]] = []
+    fts_scores = _record_fts_scores(query, records)
+    wanted_paths = {str(path).strip() for path in (related_paths or set()) if str(path).strip()}
     for record in records:
         status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
         available_statuses[status] = available_statuses.get(status, 0) + 1
@@ -924,8 +907,23 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
             continue
         if status not in {"reviewed", "stale", "superseded", "deprecated"}:
             continue
-        score, breakdown, reasons = _record_score(query, record)
-        if score <= 0:
+        matched_paths = sorted(wanted_paths & _record_target_paths(record))
+        if require_related and not matched_paths:
+            continue
+        score, breakdown, reasons = _record_score(
+            query,
+            record,
+            fts=fts_scores.get(str(record.get("id") or ""), 0.0),
+        )
+        query_matched = any(
+            float(breakdown.get(key) or 0.0) > 0
+            for key in ("exact_identity", "exact_title", "exact_claim", "exact_summary", "exact_source", "fts")
+        )
+        if matched_paths:
+            breakdown["path_relation"] = 1.0
+            reasons.append("explicit source/path relation")
+            score += 1.0
+        if not query_matched and not matched_paths:
             continue
         item = {
             "record": _public_record(record, status=status, lifecycle_relations=_record_lifecycle_relations(record, events)),
@@ -933,6 +931,8 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
             "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
             "selection_reasons": reasons,
         }
+        if matched_paths:
+            item["matched_paths"] = matched_paths
         if explain:
             item["explain"] = {
                 "status": status,
@@ -954,7 +954,14 @@ def query_knowledge_records(root: Path, *, repo_id: str, query: str, include_sta
         "schema": "repoctl.knowledge.query",
         "schema_version": 1,
         "repo_id": repo_id,
-        "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "include_deprecated": include_deprecated, "explain": explain},
+        "query": {
+            "text": query,
+            "include_stale": include_stale,
+            "include_superseded": include_superseded,
+            "include_deprecated": include_deprecated,
+            "explain": explain,
+            "require_related": require_related,
+        },
         "lifecycle": {
             "available_statuses": dict(sorted(available_statuses.items())),
             "excluded_statuses": dict(sorted(excluded_statuses.items())),
@@ -1096,7 +1103,7 @@ def _receipt_summary(receipt: dict[str, Any], artifact_text: str) -> str:
         changed = ", ".join(str(item.get("path") or "") for item in changed_entries if isinstance(item, dict) and item.get("path"))
         if changed:
             parts.append(f"Changed files: {changed}")
-    return "\n\n".join(part.strip() for part in parts if part.strip())[:1000]
+    return "\n\n".join(part.strip() for part in parts if part.strip())
 
 
 def _receipt_changed_files(receipt: dict[str, Any]) -> list[str]:
@@ -1141,13 +1148,26 @@ def _claim(text: str) -> str:
     for line in text.splitlines():
         stripped = line.strip().lstrip("-").strip()
         if stripped and not stripped.startswith("```") and not stripped.startswith("#"):
-            return stripped[:240]
+            return stripped
     return ""
 
 
+def _validated_candidate_claim(text: str, *, override: str, problem_path: str) -> tuple[str, Problem | None]:
+    claim = override.strip() or _claim(text)
+    if not claim:
+        return "", Problem("error", "knowledge_candidate_claim_missing", "candidate claim is missing", problem_path)
+    if len(claim) > MAX_KNOWLEDGE_CLAIM_LENGTH:
+        return "", Problem(
+            "error",
+            "knowledge_candidate_claim_too_long",
+            f"candidate claim exceeds {MAX_KNOWLEDGE_CLAIM_LENGTH} characters; provide a concise complete claim with --claim or --claim-file",
+            problem_path,
+        )
+    return claim, None
+
+
 def _summary(text: str) -> str:
-    compact = " ".join(line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("```"))
-    return compact[:500]
+    return " ".join(line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("```"))
 
 
 def _sha256_text(text: str) -> str:
@@ -1462,7 +1482,7 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
     claim = str(candidate.get("claim") or "").strip()
     if not claim:
         problems.append(Problem("error", "knowledge_candidate_claim_missing", "candidate claim is missing", candidate_id))
-    if len(claim) > 300:
+    if len(claim) > MAX_KNOWLEDGE_CLAIM_LENGTH:
         problems.append(Problem("error", "knowledge_candidate_claim_too_long", "candidate claim is too long", candidate_id))
     review = candidate.get("review")
     if not isinstance(review, dict) or review.get("required") is not True:
@@ -1621,6 +1641,7 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
         "summary": record.get("summary", ""),
         "source_refs": record.get("source_refs", []),
         "record_digest": record.get("record_digest", ""),
+        "applies_to": {"paths": sorted(_record_target_paths(record))},
     }
     if lifecycle_relations:
         public["lifecycle_relations"] = lifecycle_relations
@@ -1628,6 +1649,23 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
     if approval_context:
         public["approval_context"] = approval_context
     return public
+
+
+def _record_target_paths(record: dict[str, Any]) -> set[str]:
+    paths: set[str] = set()
+    source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
+    for ref in source_refs:
+        if isinstance(ref, dict) and str(ref.get("path") or "").strip():
+            paths.add(str(ref.get("path") or "").strip())
+    for container_name, field_name in (("scope", "paths"), ("applies_to", "files"), ("applies_to", "paths")):
+        container = record.get(container_name) if isinstance(record.get(container_name), dict) else {}
+        values = container.get(field_name) if isinstance(container.get(field_name), list) else []
+        paths.update(str(value).strip() for value in values if str(value).strip())
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
+    changed_files = derived.get("changed_files") if isinstance(derived.get("changed_files"), list) else []
+    paths.update(str(value).strip() for value in changed_files if str(value).strip())
+    return paths
 
 
 def _record_lifecycle_relations(record: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1663,7 +1701,20 @@ def _approval_context(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _record_score(query: str, record: dict[str, Any]) -> tuple[float, dict[str, float], list[str]]:
+def _record_search_body(record: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            str(record.get("id") or ""),
+            str(record.get("kind") or ""),
+            str(record.get("title") or ""),
+            str(record.get("claim") or ""),
+            str(record.get("summary") or ""),
+            json.dumps(record.get("source_refs", []), ensure_ascii=False, sort_keys=True),
+        ]
+    )
+
+
+def _record_score(query: str, record: dict[str, Any], *, fts: float = 0.0) -> tuple[float, dict[str, float], list[str]]:
     identity_text = "\n".join([str(record.get("id") or ""), str(record.get("kind") or "")])
     title_text = str(record.get("title") or "")
     claim_text = str(record.get("claim") or "")
@@ -1674,8 +1725,6 @@ def _record_score(query: str, record: dict[str, Any]) -> tuple[float, dict[str, 
     exact_claim = _exact_score(query, claim_text)
     exact_summary = _exact_score(query, summary_text)
     exact_source = _exact_score(query, source_text)
-    body = "\n".join([identity_text, title_text, claim_text, summary_text, source_text])
-    fts = _fts_score(query, body)
     authority = 0.5 if str(record.get("status") or "") == "reviewed" else 0.0
     score = exact_identity * 1.0 + exact_title * 2.4 + exact_claim * 2.0 + exact_summary * 1.2 + exact_source * 0.8 + fts * 1.2 + authority
     reasons: list[str] = []
@@ -1713,21 +1762,32 @@ def _exact_score(query: str, body: str) -> float:
     return min(1.0, hits / len(terms))
 
 
-def _fts_score(query: str, body: str) -> float:
+def _record_fts_scores(query: str, records: list[dict[str, Any]]) -> dict[str, float]:
     terms = _query_terms(query)
-    if not terms:
-        return 0.0
+    if not terms or not records:
+        return {}
     conn = sqlite3.connect(":memory:")
     try:
-        conn.execute("CREATE VIRTUAL TABLE records USING fts5(body)")
-        conn.execute("INSERT INTO records(body) VALUES (?)", (body,))
+        conn.execute("CREATE VIRTUAL TABLE records USING fts5(record_id UNINDEXED, body)")
+        conn.executemany(
+            "INSERT INTO records(record_id, body) VALUES (?, ?)",
+            [
+                (str(record.get("id") or ""), _record_search_body(record))
+                for record in records
+                if str(record.get("id") or "")
+            ],
+        )
         phrase = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-        row = conn.execute("SELECT bm25(records) AS rank FROM records WHERE records MATCH ? LIMIT 1", (phrase,)).fetchone()
-        if row is None:
-            return 0.0
-        return 1.0 / (1.0 + abs(float(row[0])))
+        rows = conn.execute(
+            "SELECT record_id, bm25(records) AS rank FROM records WHERE records MATCH ? ORDER BY rank, record_id",
+            (phrase,),
+        ).fetchall()
+        return {
+            str(record_id): 1.0 / position
+            for position, (record_id, _rank) in enumerate(rows, start=1)
+        }
     except sqlite3.Error:
-        return 0.0
+        return {}
     finally:
         conn.close()
 

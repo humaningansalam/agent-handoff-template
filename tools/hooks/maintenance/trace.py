@@ -197,8 +197,6 @@ def _read_recent_events(path: Path) -> list[dict[str, Any]]:
         if not line.strip():
             continue
         try:
-            import json
-
             loaded = json.loads(line)
         except Exception:
             continue

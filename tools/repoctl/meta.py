@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from .git import ChangedEntry, repo_changed_entries, repo_git_state
 from .io import RepoctlError, atomic_write
 from .language_profiles import default_indexing_excludes
 from .markdown import parse_frontmatter
-from .repositories import RepoTarget, default_repo_target, require_repo_target
+from .repositories import RepoTarget, default_repo_target
 from .tasks import Problem, utc_stamp
 
 REPOMETA_DIR = ".repometa"
@@ -519,8 +520,39 @@ def _policy_scan_skip_dir_names(policy: dict[str, Any]) -> set[str]:
 
 
 def _list_repo_files(repo: Path, policy: dict[str, Any]) -> list[str]:
-    files: list[str] = []
     skip_dir_names = _policy_scan_skip_dir_names(policy)
+    listed = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    deleted = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "ls-files", "--deleted", "-z"],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if listed.returncode == 0 and deleted.returncode == 0:
+        deleted_paths = {
+            normalize_repo_path(token.decode("utf-8", errors="surrogateescape"))
+            for token in deleted.stdout.split(b"\0")
+            if token
+        }
+        files = {
+            normalize_repo_path(token.decode("utf-8", errors="surrogateescape"))
+            for token in listed.stdout.split(b"\0")
+            if token
+        }
+        return sorted(
+            path
+            for path in files - deleted_paths
+            if path and not any(part in skip_dir_names for part in Path(path).parts)
+        )
+
+    files: list[str] = []
     for path in repo.rglob("*"):
         try:
             rel_path = path.relative_to(repo)

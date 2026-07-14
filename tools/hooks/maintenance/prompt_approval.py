@@ -7,7 +7,7 @@ from typing import Any
 
 from tools.agent_harness import paths as harness_paths
 from tools.agent_harness.harness import ApprovalRequired, ArtifactRecord, MaintenanceHarness, Phase
-from tools.agent_harness.policy import APPROVAL_HASH_PREFIX_LENGTH, approval_phrase
+from tools.agent_harness.policy import approval_phrase
 from tools.hooks.maintenance.scope import active_marker_for_session, write_marker_record
 from tools.runtime.json_io import read_json_object, write_json_atomic_under_root
 

@@ -8,33 +8,6 @@ from tools.repoctl.cli import main
 from tests.repoctl.workspace.test_check import write_workspace
 
 
-BASE_POLICY = {
-    "schema_version": 1,
-    "indexing": {
-        "exclude": [
-            ".git/**",
-            ".repometa/**",
-            "local-cache/**",
-            "build-output/**",
-            "third-party-snapshot/**",
-            "generated-output/**",
-            "**/__pycache__/**",
-            "**/*.png",
-        ]
-    },
-    "vocab": {
-        "roles": {"base": ["service", "adapter", "config", "test", "workflow", "spec"], "extend": []},
-        "declared_effects": {"base": ["none", "db", "net", "fs", "ui", "time", "crypto", "config"], "extend": ["queue"]},
-    },
-    "defaults": {
-        "areas": {"backend": ["backend/**"], "frontend": ["frontend/**"], "infra": [".github/**"]},
-        "topics": {"tests": ["**/tests/**", "**/*test*"], "api": ["frontend/src/api/**"], "auth": ["**/auth/**", "**/*token*"]},
-    },
-    "coverage": {"require_annotations": []},
-}
-
-
-
 def test_meta_query_filters_annotated_files_by_role_topic_area_and_effect(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -153,22 +126,6 @@ def test_meta_suggest_preserves_unicode_query_tokens(tmp_path: Path, monkeypatch
     assert "filename:검색" in payload["data"]["candidates"][0]["signals"]
 
 
-def test_meta_suggest_accepts_positional_text_alias(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    repo.mkdir()
-    init_repo(repo)
-    write_repometa(repo)
-    rel = "src/search.ts"
-    (repo / "src").mkdir()
-    (repo / rel).write_text("export const search = true\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["meta", "suggest", "search flow", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["suggestion"]["text"] == "search flow"
-    assert payload["data"]["candidates"][0]["path"] == rel
 
 
 def test_meta_suggest_matches_identifier_tokens_not_arbitrary_substrings(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -182,10 +139,9 @@ def test_meta_suggest_matches_identifier_tokens_not_arbitrary_substrings(tmp_pat
     (repo / "src/release-gate.ts").write_text("export const gate = true\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "suggest", "release gate", "--json"]) == 0
+    assert main(["meta", "suggest", "--text", "release gate", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     paths = [candidate["path"] for candidate in payload["data"]["candidates"]]
     assert "src/release-gate.ts" in paths
     assert "src/DelegateAdapter.ts" not in paths
-

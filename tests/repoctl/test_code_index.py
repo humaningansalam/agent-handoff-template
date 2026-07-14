@@ -42,7 +42,7 @@ def test_index_code_extracts_python_facts_without_writing_annotations(tmp_path: 
     assert (repo / ".repometa/annotations" / "0.json").read_text(encoding="utf-8") == before
 
 
-def test_index_code_extracts_typescript_facts(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_index_code_keeps_typescript_inventory_separate_from_semantic_provider(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     repo.mkdir()
@@ -63,11 +63,11 @@ def test_index_code_extracts_typescript_facts(tmp_path: Path, monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     entry = next(file for file in payload["data"]["files"] if file["path"] == rel)
     assert entry["language"] == "typescript"
-    assert entry["symbols"] == ["BillingClient", "charge"]
+    assert entry["symbols"] == []
     assert entry["imports"] == ["axios"]
-    assert "fetch" in entry["calls"]
+    assert entry["calls"] == []
     assert entry["deps"] == ["axios"]
-    assert "net" in entry["observed_effects"]
+    assert entry["observed_effects"] == ["net"]
 
 
 def test_index_code_extracts_dart_and_csharp_inventory(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -91,7 +91,7 @@ def test_index_code_extracts_dart_and_csharp_inventory(tmp_path: Path, monkeypat
     assert dart_entry["imports"] == ["package:demo/app.dart"]
     assert dart_entry["parse_status"] == "ok"
     assert csharp_entry["language"] == "csharp"
-    assert csharp_entry["symbols"] == ["PlayerController"]
+    assert csharp_entry["symbols"] == []
     assert csharp_entry["parse_status"] == "ok"
     assert payload["data"]["summary"]["languages"]["dart"] == 1
     assert payload["data"]["summary"]["languages"]["csharp"] == 1

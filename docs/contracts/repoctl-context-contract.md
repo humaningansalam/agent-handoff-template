@@ -11,7 +11,13 @@ Context is not authoritative. Source authorities remain the repo registry, sourc
 ./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --mode authority --format markdown
 ```
 
-`--mode` is optional. When omitted, `auto` performs lexical retrieval over current sources and documents, then expands bounded Graph relationships from the top current-source results. It does not infer intent from query wording. Knowledge and historical task evidence require an explicit mode.
+`--mode` is optional. When omitted, `auto` uses the persistent FTS/source-symbol index to choose current source and test anchors. It then projects at most two levels of provider-confirmed import/call relations, preserving both source and test anchors so a high-degree file cannot starve another seed. Related reviewed Knowledge and completion history are included only when their explicit source paths, changed files, or explicit file targets overlap the selected paths. It does not infer relationships from query wording.
+
+Context never triggers a hidden Graph build. With a materialized Graph, queries read the persistent SQLite evidence index and do not reread unchanged product sources. Product paths or root evidence changed after materialization are removed from stored results and read directly as a small query-time overlay; deleted paths contribute no overlay. The overlay never mutates the index. When no materialized Graph exists, lexical document/current-source retrieval still succeeds through the explicit fallback and `warnings_and_completeness` reports that Graph relations are unavailable. Run `repoctl graph build` explicitly when import/call traversal or completion-history projection is needed.
+
+Current-source text indexing is limited to registered `semantic_source` language profiles and files up to 1 MiB. Larger files remain Graph inventory nodes but are omitted from Context text retrieval with a persistent `context_current_source_too_large` warning and path in evidence-index completeness. JSON, manifests, and documents enter through their typed evidence sources rather than being treated as arbitrary source code.
+
+Direct query anchors remain ahead of Graph-only dependencies in source and test groups. Graph expansion may enrich an anchor and rank related files within the expansion stage, but a shared dependency must not displace a file selected directly by exact lexical or FTS evidence merely because several anchors import it.
 
 Supported modes are:
 
@@ -37,26 +43,26 @@ Default `--json` output is the compact agent-facing view. It includes:
 
 ```text
 query.mode
-source_snapshots
 completeness
 groups
-selected_source_refs
-budget
+selection
 knowledge_result_count
 bundle_digest
 ```
 
-`selected_source_refs` is derived from the full packed evidence, not the display-limited group items. Use it when an agent needs the complete source-ref set for the selected pack.
+Repository-wide source snapshots, provider path inventories, full evidence, and score diagnostics are omitted from the compact view. Compact JSON is serialized without pretty-print whitespace. Use `--full --json` or `--explain` only when diagnostics are required.
 
 Use `--full --json` to include raw retrieval/debug fields:
 
 ```text
-candidates
-packed_context
+evidence
 knowledge_results
+source_snapshots
 ```
 
-`groups` organizes packed evidence into:
+`evidence` contains query-matching source and document evidence plus provider-confirmed Graph relations projected from the lexical source and test anchors. Token cost never participates in retrieval or evidence selection. Compact output only shortens excerpts and applies role-specific display limits; `selection` reports total, displayed, and omitted counts so an agent can refine the query or inspect `--full` without losing the underlying evidence.
+
+`groups` organizes selected evidence into:
 
 ```text
 must_read
@@ -64,19 +70,47 @@ likely_change_surface
 callers_and_dependents
 tests_and_verification
 reviewed_knowledge
+related_history
 supporting_evidence
 warnings_and_completeness
 ```
 
-`reviewed_knowledge` is populated only for explicit `authority_or_contract`, `invariant`, `past_decision`, or `failure_mode` queries. Completion receipts and archived task artifacts are loaded only for explicit `past_decision` or `failure_mode` queries.
+In `auto`, `reviewed_knowledge` and `related_history` contain only evidence structurally linked to current-source paths in the query evidence. Explicit `authority_or_contract`, `invariant`, `past_decision`, and `failure_mode` modes may perform broader reviewed-Knowledge retrieval.
 
-Every grouped evidence item keeps `repo_id`, `status`, `source_ref`, `content_sha256`, `selection_reason`, and deterministic scoring or relation evidence when available.
+The repository identity is stored once at bundle level. Compact group items keep the source ref, a bounded selection reason, a bounded excerpt, and up to four typed continuations; repeated per-item repo IDs, current-status markers, and score breakdowns are omitted. Full output retains deterministic scoring and relation evidence.
 
 ## Graph Evidence
 
-Context consumes Graph through internal Python objects and `query_graph`; it must not parse `graph query` stdout.
+Context consumes the materialized Graph through internal Python objects; it must not parse `graph query` stdout or invoke compiler providers. `auto`, `code_location`, `call_impact`, and `file_impact` all use the same query-centered file projection seeded only by lexical current-source results. The projection includes exact `IMPORTS_FILE` edges and provider-confirmed same-file or cross-file `CALLS` edges. Lexical anchor relevance propagates over those edges with distance decay; generic graph connectivity alone is not relevance.
 
-Graph-derived items use `source_ref.kind: graph_query` and preserve the Graph relation path. They are evidence for the current query only, not durable knowledge records.
+Context never converts free-form query tokens into Graph file or symbol selectors. Graph-derived Context items use `source_ref.kind: graph_relation`, preserve the exact provider relation and endpoint identities, and remain current-query evidence rather than durable knowledge records. Explicit `repoctl graph query` selectors remain a separate iterative exploration interface.
+
+`repoctl graph query` is also an iterative exploration interface. Every result includes `continuations` derived from returned Graph node identities. The compact view keeps a normalized selector and supported follow-up query types; `--full` also includes the source node identity and label:
+
+```text
+file -> file, impact_file
+symbol -> symbol, plus callers_of, callees_of, impact_symbol when call evidence is available
+import_ref -> import
+topic -> topic
+task -> task evidence and task show
+artifact -> artifact evidence and workspace open
+```
+
+Symbol continuations include `in_file` when available so repeated names remain unambiguous. Agents may follow these selectors repeatedly to inspect adjacent files and symbols. Continuations are tied to the result's `snapshot_digest`; run `graph build` after source changes, then rerun the query instead of treating an earlier traversal as durable knowledge.
+
+Context group items use the same selector plus action-enum shape across stores without merging their authorities:
+
+```text
+current product file -> Graph file and impact actions
+provider symbol relation -> Graph symbol action with in_file
+completion history -> Graph task, task show, artifact, workspace open
+reviewed Knowledge -> knowledge show
+Knowledge source ref or root document -> workspace open
+```
+
+Reviewed Knowledge requires either a lexical query match or an explicit path/source relation to qualify. Reviewed status is a ranking signal after eligibility; it must not make unrelated records appear in every query. Explicit path relation is independently sufficient, so a linked invariant or decision is not lost merely because its prose uses different words.
+
+When product source is stale, Context excludes every Graph relation whose endpoint is stale and overlays only the current file text. When receipt or task-artifact evidence is stale, related history is omitted and `task_history` becomes partial until the next explicit Graph build. Root document changes such as `docs/BOARD.md` do not force a product-wide fallback scan.
 
 ## Markdown Output
 
@@ -89,6 +123,7 @@ change surface
 callers/dependents
 tests/verification hints
 reviewed knowledge
+related completion history
 warnings/completeness
 ```
 
@@ -118,7 +153,7 @@ verification
 warnings
 ```
 
-Use `--full --json` to include the raw nested Context bundle and debug candidate details.
+Use `--full --json` to include the raw nested Context bundle and full evidence details.
 
 When `--output` is supplied, the full requested artifact is written to that path. Markdown stdout reports only the artifact path instead of duplicating the complete pack; omit `--output` when the rendered Markdown itself is required on stdout.
 
@@ -128,7 +163,7 @@ When `--output` is supplied, the full requested artifact is written to that path
 
 Retrieval query text comes from Candidate query history. Goal and Handoff prose are not parsed as symbols. A test is directly connected only through explicit Discovery evidence, a provider-confirmed relation, or manifest mapping.
 
-Task packs do not query reviewed knowledge or completion history. Use an explicit `context query --mode ...`, `knowledge query`, or an explicit Context Doc when historical evidence is needed.
+Task packs do not query reviewed knowledge or completion history. Use normal `context query` for path-linked history, an explicit historical mode for broader retrieval, or an explicit Context Doc when a task pack needs durable historical context.
 
 `input_digest` covers task content, Discovery query history, Reviewed and Chosen sets, explicit Context Docs and their content digests, repository identity, observed HEAD/snapshot, and capability matrix. A saved pack is stale when recomputing those inputs produces a different digest; read-only commands do not rewrite it.
 
@@ -149,4 +184,4 @@ Each Task Pack group item records `requirement: required | optional`. Required e
 
 Benchmark fixtures may label source refs as `must_find`, `acceptable`, `supporting`, or `noise`. `must_find` drives recall and first-correct rank; precision treats `must_find + acceptable` as relevant; `supporting` is reported separately and does not count against precision; visible `noise` is contamination. Verification hints use explicit `expected_verification_hints` labels rather than keyword inference.
 
-The first release records first-correct rank, labeled precision/recall, supporting hits, generated/ignored noise, verification-hint accuracy, and output size as baseline measurements. Existing source-integrity, explicit-source recall, forbidden-source, and cross-repo contamination gates remain. New precision/recall thresholds are not release gates until real benchmark history justifies them.
+The benchmark records labeled retrieval metrics plus the actual serialized compact byte size and its estimated token cost. Internal excerpt budgets are not accepted as output-size evidence. Existing source-integrity, forbidden-source, and cross-repo contamination gates remain; ranking thresholds are release gates only when they correspond to agent-visible results and have real benchmark history.

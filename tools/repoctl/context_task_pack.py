@@ -9,14 +9,18 @@ from typing import Any
 from .context import build_context_bundle
 from .context_chunks import chunk_markdown_file, chunk_text_source
 from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
-from .context_pack import estimate_tokens
+from .graph import project_context_neighborhood
 from .graph_model import digest_data
-from .graph import build_graph, query_graph
+from .graph_store import load_materialized_graph
 from .git import normalize_repo_path, repo_git_head
 from .language_profiles import collect_verification_hints
 from .markdown import find_section
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task, task_discovery_values
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + 3) // 4)
 
 
 def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, force: bool = False) -> tuple[dict[str, Any], list[Problem]]:
@@ -98,19 +102,17 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     bundle: ContextBundle | None = None
     problems: list[Problem] = []
     meta: dict[str, Any] = {"repository": target.to_dict()}
-    snapshot, graph_problems, graph_meta = build_graph(root, target=target)
+    snapshot, graph_problems, graph_meta = load_materialized_graph(root, target=target)
     if query:
         bundle, bundle_problems, meta = build_context_bundle(
             root,
             target=target,
             query=query,
-            budget_tokens=budget_tokens,
             explain=explain,
             graph_result=(snapshot, graph_problems, graph_meta),
+            include_linked_records=False,
         )
         problems.extend(bundle_problems)
-    else:
-        problems.extend(graph_problems)
     task_graph_evidence = _direct_task_graph_evidence(snapshot, target=target, chosen=chosen) if stage == "scoped" and snapshot is not None else []
     mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
     problems.extend(mandatory_problems)
@@ -122,18 +124,18 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     problems.extend(fallback_problems)
     verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
     problems.extend(verification_problems)
-    allowed_bundle_kinds = {"current_source", "product_manifest", "verification_hint", "graph_query"}
+    allowed_bundle_kinds = {"current_source", "product_manifest", "verification_hint", "graph_relation"}
     bundle_candidates = [
         candidate
-        for candidate in (bundle.packed_context if bundle is not None else [])
+        for candidate in (bundle.evidence if bundle is not None else [])
         if candidate.source_ref.kind in allowed_bundle_kinds
     ][:8]
     if stage == "scoped":
         fallback_candidates = [candidate for candidate in fallback_candidates if candidate.source_ref.kind == "product_manifest"]
-    packed_context = _dedupe_candidates(
+    context_candidates = _dedupe_candidates(
         [*required_candidates, *mandatory_candidates, *discovery_candidates, *fallback_candidates, *verification_candidates, *bundle_candidates]
     )
-    groups = _group_candidates(packed_context)
+    groups = _group_candidates(context_candidates)
     groups["task_graph_evidence"] = task_graph_evidence
     groups.update(_agent_pack_groups(groups, bundle))
     groups["edit_candidates"] = _candidate_items(
@@ -847,51 +849,45 @@ def _verification_hint_candidates(root: Path, *, target: RepoTarget) -> tuple[li
 
 
 def _direct_task_graph_evidence(snapshot: Any, *, target: RepoTarget, chosen: list[str]) -> list[dict[str, Any]]:
-    evidence: list[dict[str, Any]] = []
     prefix = f"{target.display_path.rstrip('/')}/"
+    seed_paths: list[str] = []
     for workspace_path in chosen:
         normalized = normalize_repo_path(workspace_path)
         if not normalized.startswith(prefix):
             continue
         repo_path = normalize_repo_path(normalized[len(prefix) :])
-        result, query_problems = query_graph(snapshot, impact_file=repo_path, depth=2)
-        if query_problems or result is None or result.get("query_status") != "found":
-            continue
-        if result.get("paths") or result.get("matches"):
-            evidence.append(_graph_result_item(result, reason=f"provider-confirmed impact evidence for `{workspace_path}`"))
-    return _dedupe_dict_items(evidence)
+        if repo_path and repo_path not in seed_paths:
+            seed_paths.append(repo_path)
+    if not seed_paths:
+        return []
+    projection = project_context_neighborhood(snapshot, seed_paths=seed_paths)
+    relations = projection.get("relations") if isinstance(projection.get("relations"), list) else []
+    return _dedupe_dict_items([
+        _graph_relation_item(relation, reason="provider-confirmed relation from active Chosen files")
+        for relation in relations
+        if isinstance(relation, dict)
+    ])
 
 
-def _graph_result_item(result: dict[str, Any], *, reason: str) -> dict[str, Any]:
-    digest = digest_data(result)
-    query = result.get("query") if isinstance(result.get("query"), dict) else {}
-    paths = result.get("paths") if isinstance(result.get("paths"), list) else []
-    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
-    lines: list[str] = []
-    for match in matches[:4]:
-        label = match.get("qualified_name") or match.get("path") or match.get("id")
-        location = match.get("path") or ""
-        lines.append(f"match {label} {location}".rstrip())
-    relationship_paths = [path for path in paths if str(path.get("edge") or "") not in {"DEFINES", "ANCHORS"}]
-    display_paths = relationship_paths or paths
-    for path in display_paths[:8]:
-        source = path.get("from") if isinstance(path.get("from"), dict) else {}
-        target = path.get("to") if isinstance(path.get("to"), dict) else {}
-        source_label = source.get("qualified_name") or source.get("path") or source.get("id")
-        target_label = target.get("qualified_name") or target.get("path") or target.get("id")
-        lines.append(f"{source_label} --{path.get('edge')}--> {target_label}: {path.get('reason')}")
+def _graph_relation_item(relation: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    digest = digest_data(relation)
+    source_symbol = relation.get("from_symbol") if isinstance(relation.get("from_symbol"), dict) else {}
+    target_symbol = relation.get("to_symbol") if isinstance(relation.get("to_symbol"), dict) else {}
+    source_label = source_symbol.get("qualified_name") or source_symbol.get("name") or relation.get("from_path")
+    target_label = target_symbol.get("qualified_name") or target_symbol.get("name") or relation.get("to_path")
+    edge = str(relation.get("edge") or "RELATED")
     return {
         "status": "current",
         "source_ref": {
-            "kind": "graph_query",
-            "path": f"<graph-query:{query.get('type', 'graph')}:{digest[7:19]}>",
-            "section": str(query.get("type") or "graph"),
+            "kind": "graph_relation",
+            "path": f"<graph-relation:{digest[7:19]}>",
+            "section": edge,
             "content_sha256": digest,
         },
         "selection_reason": reason,
         "score_breakdown": {"graph": 1.0},
-        "excerpt": "\n".join(lines),
-        "graph_path": paths,
+        "excerpt": f"{source_label} --{edge}--> {target_label}",
+        "graph_path": [relation],
     }
 
 
@@ -1146,8 +1142,7 @@ def _metric_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[
     keys = (
         "unique_must_read_source_count",
         "unique_verification_source_count",
-        "packed_context_count",
-        "candidate_context_count",
+        "evidence_context_count",
         "requested_tokens",
         "estimated_tokens",
     )
@@ -1308,7 +1303,7 @@ def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextB
     likely_change = _copy_items(groups.get("maybe_relevant"))
     impact = [
         *_copy_items(groups.get("task_graph_evidence")),
-        *_bundle_graph_query_items(bundle),
+        *_bundle_graph_relation_items(bundle),
         *_copy_items(_graph_items(groups.get("maybe_relevant", []))),
     ]
     verification = _copy_items(groups.get("verification_hints"))
@@ -1329,12 +1324,12 @@ def _graph_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item.get("source_ref"), dict) and str(item["source_ref"].get("kind") or "").startswith("graph")]
 
 
-def _bundle_graph_query_items(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+def _bundle_graph_relation_items(bundle: ContextBundle | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
     items: list[dict[str, Any]] = []
-    for candidate in bundle.candidates:
-        if candidate.source_ref.kind != "graph_query":
+    for candidate in bundle.evidence:
+        if candidate.source_ref.kind != "graph_relation":
             continue
         item = candidate.to_dict()
         item.setdefault("status", "current")
@@ -1402,7 +1397,7 @@ def _pack_metrics(groups: dict[str, list[dict[str, Any]]], bundle: Any) -> dict[
     }
     must_read_refs = _source_ref_keys(groups.get("must_read", []))
     verification_refs = _source_ref_keys(groups.get("verification", []) or groups.get("verification_hints", []))
-    budget = bundle.budget if bundle is not None else {}
+    selection = bundle.selection if bundle is not None else {}
     return {
         "group_counts": group_counts,
         "group_estimated_tokens": group_estimated_tokens,
@@ -1410,10 +1405,7 @@ def _pack_metrics(groups: dict[str, list[dict[str, Any]]], bundle: Any) -> dict[
         "verification_source_refs": verification_refs,
         "unique_must_read_source_count": len({(ref["kind"], ref["path"], ref["section"]) for ref in must_read_refs}),
         "unique_verification_source_count": len({(ref["kind"], ref["path"], ref["section"]) for ref in verification_refs}),
-        "packed_context_count": int(budget.get("packed_count") or 0),
-        "candidate_context_count": int(budget.get("candidate_count") or 0),
-        "requested_tokens": int(budget.get("requested_tokens") or 0),
-        "estimated_tokens": int(budget.get("estimated_tokens") or 0),
+        "evidence_context_count": int(selection.get("evidence_count") or 0),
     }
 
 
@@ -1517,17 +1509,6 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
             }
         )
     graph_completeness = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
-    graph_meta = completeness.get("graph_meta") if isinstance(completeness.get("graph_meta"), dict) else {}
-    precise_provider = graph_meta.get("precise_provider") if isinstance(graph_meta.get("precise_provider"), dict) else {}
-    provider = str(precise_provider.get("provider") or "")
-    languages = precise_provider.get("languages") if isinstance(precise_provider.get("languages"), list) else []
-    if provider:
-        warnings.append(
-            {
-                "code": "context_pack_graph_capability",
-                "message": f"Graph precise provider is {provider} for languages={languages}; other languages are inventory/index evidence unless a resolver reports otherwise",
-            }
-        )
     parse_error_count = int(graph_completeness.get("parse_error_count") or 0)
     if parse_error_count > 0 or graph_completeness.get("code_facts_complete") is False:
         warnings.append(

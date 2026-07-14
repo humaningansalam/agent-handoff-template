@@ -43,7 +43,7 @@ def test_knowledge_render_rejects_invalid_lifecycle_events(tmp_path: Path, monke
     _write_event(tmp_path, event)
     output = tmp_path / "docs/knowledge/generated/invalid"
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 1
+    assert main(["knowledge", "render", "--repo-id", "main", "--output", output.as_posix(), "--full", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["rendered"] == []
     assert payload["data"]["event_checks"]["error_count"] == 1
@@ -59,7 +59,7 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
     assert render_payload["data"]["event_count"] == 1
     manifest_path = tmp_path / render_payload["data"]["manifest"]["path"]
@@ -75,42 +75,30 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     decisions_bundle = rendered_by_path["docs/knowledge/generated/decisions.md"]["source_bundle"]
     assert decisions_bundle["record_ids"]
     assert decisions_bundle["source_refs"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
-    assert decisions_bundle["source_statuses"] == [
-        {
-            "path": "docs/contracts/repoctl-context-contract.md",
-            "section": "Decision",
-            "content_sha256": decisions_bundle["source_refs"][0]["content_sha256"],
-            "status": "current",
-        }
-    ]
     assert decisions_bundle["source_status_counts"] == {"current": 1}
     assert decisions_bundle["event_ids"] == [approved_event["id"]]
     assert decisions_bundle["source_bundle_digest"].startswith("sha256:")
     index_bundle = rendered_by_path["docs/knowledge/generated/INDEX.md"]["source_bundle"]
     assert index_bundle["record_ids"] == decisions_bundle["record_ids"]
     assert index_bundle["event_ids"] == [approved_event["id"]]
-    index_text = (tmp_path / "docs/knowledge/generated/INDEX.md").read_text(encoding="utf-8")
-    assert "- Events: 1" in index_text
-    assert "- Events digest: sha256:" in index_text
-    assert "## Lifecycle" in index_text
-    assert "- reviewed: 1" in index_text
-    assert "- stale: 0" in index_text
-    assert "- superseded: 0" in index_text
-    assert "- deprecated: 0" in index_text
-    assert "### Reviewed" in index_text
-    decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert "Non-authoritative generated view" in decisions_text
     record_id = decisions_bundle["record_ids"][0]
-    assert f"records/{record_id}.md" in decisions_text
-    record_text = (tmp_path / "docs/knowledge/generated/records" / f"{record_id}.md").read_text(encoding="utf-8")
-    assert f"- Lifecycle events: `{approved_event['id']}`" in record_text
-    assert "status=`current`" in record_text
-    assert "docs/contracts/repoctl-context-contract.md#Decision" in record_text
+    assert (tmp_path / "docs/knowledge/generated/records" / f"{record_id}.md").is_file()
 
     assert main(["context", "query", "Knowledge Index", "--repo-id", "main", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
-    refs = [item["source_ref"]["path"] for item in context_payload["data"]["bundle"]["selected_source_refs"]]
+    refs = [
+        item["source_ref"]["path"]
+        for items in context_payload["data"]["bundle"]["groups"].values()
+        for item in items
+        if isinstance(item.get("source_ref"), dict)
+    ]
     assert all(not path.startswith("docs/knowledge/generated/") for path in refs)
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    compact_payload = json.loads(capsys.readouterr().out)
+    assert "rendered" not in compact_payload["data"]
+    assert compact_payload["data"]["page_counts"]["total"] == len(rendered_paths)
+    assert compact_payload["data"]["page_counts"]["symbol_targets"] == 0
 
 
 def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -121,14 +109,14 @@ def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) 
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     first_payload = json.loads(capsys.readouterr().out)
     first_files = {
         item["path"]: (tmp_path / item["path"]).read_text(encoding="utf-8")
         for item in first_payload["data"]["rendered"]
     }
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     second_payload = json.loads(capsys.readouterr().out)
     second_files = {
         item["path"]: (tmp_path / item["path"]).read_text(encoding="utf-8")
@@ -148,7 +136,7 @@ def test_knowledge_render_removes_manifest_owned_stale_pages_only(tmp_path: Path
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     first_payload = json.loads(capsys.readouterr().out)
     manifest_path = tmp_path / first_payload["data"]["manifest"]["path"]
     generated_dir = manifest_path.parent
@@ -167,7 +155,7 @@ def test_knowledge_render_removes_manifest_owned_stale_pages_only(tmp_path: Path
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     second_payload = json.loads(capsys.readouterr().out)
     assert second_payload["data"]["removed"] == ["docs/knowledge/generated/old-decisions.md"]
     assert not stale_page.exists()

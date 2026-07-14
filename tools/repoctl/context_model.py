@@ -59,13 +59,12 @@ class ContextBundle:
     query: dict[str, Any]
     source_snapshots: dict[str, str]
     completeness: dict[str, Any]
-    candidates: list[ContextCandidate]
-    packed_context: list[ContextCandidate]
-    budget: dict[str, int]
+    evidence: list[ContextCandidate]
+    selection: dict[str, Any]
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 1
+    schema_version: int = 3
     authoritative: bool = False
     bundle_digest: str = ""
 
@@ -78,11 +77,10 @@ class ContextBundle:
             "query": self.query,
             "source_snapshots": dict(sorted(self.source_snapshots.items())),
             "completeness": self.completeness,
-            "candidates": [candidate.to_dict() for candidate in sorted(self.candidates, key=_candidate_sort_key)],
-            "packed_context": [candidate.to_dict() for candidate in sorted(self.packed_context, key=_candidate_sort_key)],
+            "evidence": [candidate.to_dict() for candidate in self.evidence],
             "knowledge_results": sorted(self.knowledge_results, key=_knowledge_sort_key),
             "groups": {key: value for key, value in sorted(self.groups.items())},
-            "budget": self.budget,
+            "selection": self.selection,
         }
         if include_digest:
             data["bundle_digest"] = self.bundle_digest or digest_data(data)
@@ -94,9 +92,8 @@ class ContextBundle:
             query=self.query,
             source_snapshots=self.source_snapshots,
             completeness=self.completeness,
-            candidates=self.candidates,
-            packed_context=self.packed_context,
-            budget=self.budget,
+            evidence=self.evidence,
+            selection=self.selection,
             knowledge_results=self.knowledge_results,
             groups=self.groups,
             schema=self.schema,
@@ -104,12 +101,6 @@ class ContextBundle:
             authoritative=self.authoritative,
             bundle_digest=digest_data(self.to_dict(include_digest=False)),
         )
-
-
-def _candidate_sort_key(candidate: ContextCandidate) -> tuple[float, str, str, int]:
-    ref = candidate.source_ref
-    return (-candidate.score, ref.path, ref.section, ref.line_start)
-
 
 def _knowledge_sort_key(item: dict[str, Any]) -> tuple[float, str]:
     record = item.get("record") if isinstance(item.get("record"), dict) else {}

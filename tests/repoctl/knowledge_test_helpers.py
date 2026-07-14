@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
-from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
+from tests.repoctl.workspace.test_check import (
+    add_task as add_task,
+    task_text as task_text,
+    write_workspace as write_workspace,
+)
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
 

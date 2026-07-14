@@ -1,0 +1,1031 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+from collections import defaultdict, deque
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import Any
+
+from .code_index import CODE_INDEX_INPUT_VERSION, CodeIndexEntry, build_code_index_from_inventory, semantic_provider_entries
+from .context_sources import context_document_paths, receipt_artifact_paths
+from .evidence_store import materialize_evidence_index
+from .graph import build_graph
+from .graph_import_resolver import ImportResolution, resolve_code_imports
+from .graph_model import GraphEdge, GraphNode, GraphSnapshot, digest_data
+from .graph_semantic_model import PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
+from .graph_semantic_provider import PROVIDER_INPUT_VERSIONS, PROVIDER_LANGUAGES, build_semantic_provider
+from .git import repo_file_state_records
+from .io import atomic_write
+from .language_profiles import language_for_path
+from .meta import meta_inventory
+from .repositories import RepoTarget
+from .tasks import Problem, collect_completion_receipts
+
+
+GRAPH_STATE_SCHEMA = "repoctl.graph.materialization"
+GRAPH_STATE_SCHEMA_VERSION = 3
+GRAPH_STATE_ROOT = Path(".repoctl-state/graph")
+PROVIDER_RESULT_SCHEMA_VERSION = 2
+PROVIDER_CONFIG_PATTERNS = {
+    "python_ast": ("pyproject.toml",),
+    "typescript_compiler": (
+        "package.json",
+        "tsconfig.json",
+        "jsconfig.json",
+        "*/package.json",
+        "*/tsconfig.json",
+        "*/jsconfig.json",
+        "**/package.json",
+        "**/tsconfig.json",
+        "**/jsconfig.json",
+    ),
+    "dart_analyzer": ("pubspec.yaml", "pubspec.lock", ".dart_tool/package_config.json"),
+    "csharp_roslyn": ("*.csproj", "*.asmdef", "**/*.csproj", "**/*.asmdef"),
+}
+
+
+def _file_record_fingerprint(record: dict[str, Any]) -> str:
+    if record.get("source") == "git_index":
+        identity = {
+            "source": "git_index",
+            "mode": str(record.get("mode") or ""),
+            "object": str(record.get("object") or ""),
+        }
+    else:
+        probe = record.get("probe") if isinstance(record.get("probe"), dict) else {}
+        stat_probe = probe.get("stat") if isinstance(probe.get("stat"), dict) else {}
+        identity = {
+            "source": "working_tree",
+            "kind": str(stat_probe.get("kind") or ""),
+            "mode": str(stat_probe.get("mode") or ""),
+            "content_sha256": str(record.get("content_sha256") or ""),
+            "symlink_target": str(record.get("symlink_target") or ""),
+        }
+    return digest_data(identity)
+
+
+def _code_index_entries(snapshot: GraphSnapshot | None) -> list[CodeIndexEntry]:
+    if snapshot is None:
+        return []
+    entries: list[CodeIndexEntry] = []
+    for node in snapshot.nodes:
+        if node.kind != "file":
+            continue
+        identity = node.identity if isinstance(node.identity, dict) else {}
+        index = node.facts.get("index") if isinstance(node.facts.get("index"), dict) else {}
+        path = str(identity.get("path") or "")
+        if not path or not index:
+            continue
+        entries.append(
+            CodeIndexEntry(
+                path=path,
+                workspace_path=str(identity.get("workspace_path") or ""),
+                language=str(index.get("language") or ""),
+                classification=str(index.get("classification") or ""),
+                symbols=[str(value) for value in index.get("symbol_names", []) if str(value)],
+                imports=[str(value) for value in index.get("imports", []) if str(value)],
+                calls=[str(value) for value in index.get("call_names", []) if str(value)],
+                deps=[str(value) for value in index.get("dependencies", []) if str(value)],
+                observed_effects=[str(value) for value in index.get("observed_effects", []) if str(value)],
+                parse_status=str(index.get("parse_status") or ""),
+                parse_error=str(index.get("parse_error") or ""),
+            )
+        )
+    return sorted(entries, key=lambda entry: entry.path)
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _path_record(
+    path: Path,
+    *,
+    logical_path: str,
+    language: str = "",
+    classification: str = "",
+    previous: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "path": logical_path,
+        "language": language,
+        "classification": classification,
+    }
+    try:
+        file_stat = os.lstat(path)
+    except OSError:
+        record.update({"kind": "missing", "mode": ""})
+        return record
+    mode = f"{stat.S_IMODE(file_stat.st_mode):04o}"
+    if stat.S_ISLNK(file_stat.st_mode):
+        probe = {"kind": "symlink", "mode": mode, "target": os.readlink(path)}
+        record.update({"kind": "symlink", "mode": mode, "target": probe["target"], "probe": probe})
+    elif stat.S_ISREG(file_stat.st_mode):
+        probe = {
+            "kind": "file",
+            "mode": mode,
+            "size": file_stat.st_size,
+            "mtime_ns": file_stat.st_mtime_ns,
+            "ctime_ns": file_stat.st_ctime_ns,
+        }
+        if previous is not None and previous.get("probe") == probe and previous.get("content_sha256"):
+            record.update({"kind": "file", "mode": mode, "content_sha256": previous["content_sha256"], "probe": probe})
+            return record
+        try:
+            content = path.read_bytes()
+        except OSError:
+            content = b"<unreadable>"
+        record.update({"kind": "file", "mode": mode, "content_sha256": _sha256_bytes(content), "probe": probe})
+    else:
+        probe = {"kind": "other", "mode": mode}
+        record.update({"kind": "other", "mode": mode, "probe": probe})
+    return record
+
+
+def _tree_records(root: Path, *, prefix: str, previous: dict[str, dict[str, Any]] | None = None) -> list[dict[str, object]]:
+    previous = previous or {}
+    if not root.exists() or root.is_symlink():
+        return [_path_record(root, logical_path=prefix, previous=previous.get(prefix))] if root.exists() else []
+    return [
+        _path_record(
+            path,
+            logical_path=f"{prefix}/{path.relative_to(root).as_posix()}",
+            previous=previous.get(f"{prefix}/{path.relative_to(root).as_posix()}"),
+        )
+        for path in sorted(candidate for candidate in root.rglob("*") if not candidate.is_dir())
+    ]
+
+
+def _config_records(
+    target: RepoTarget,
+    provider: str,
+    inventory_records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    patterns = PROVIDER_CONFIG_PATTERNS[provider]
+    records = [
+        record
+        for record in inventory_records
+        if any(fnmatch(str(record.get("path") or ""), pattern) for pattern in patterns)
+    ]
+    if provider == "dart_analyzer":
+        package_config = target.root_path / ".dart_tool/package_config.json"
+        if package_config.is_file():
+            records.append(_path_record(package_config, logical_path=".dart_tool/package_config.json"))
+    return sorted(records, key=lambda item: str(item.get("path") or ""))
+
+
+def _root_record_fingerprint(record: dict[str, Any]) -> str:
+    return digest_data(
+        {
+            "path": str(record.get("path") or ""),
+            "language": str(record.get("language") or ""),
+            "classification": str(record.get("classification") or ""),
+            "kind": str(record.get("kind") or ""),
+            "mode": str(record.get("mode") or ""),
+            "content_sha256": str(record.get("content_sha256") or ""),
+            "target": str(record.get("target") or ""),
+        }
+    )
+
+
+def _root_evidence_records(
+    root: Path,
+    target: RepoTarget,
+    *,
+    previous: dict[str, dict[str, Any]] | None = None,
+    discover_receipt_artifacts: bool = True,
+) -> list[dict[str, object]]:
+    previous = previous or {}
+    records = [
+        *_tree_records(target.root_path / ".repometa", prefix=f"{target.display_path}/.repometa", previous=previous),
+        *_tree_records(root / "docs/tasks/.repoctl-state/completions", prefix="docs/tasks/.repoctl-state/completions", previous=previous),
+    ]
+    product_root = target.root_path.resolve()
+    for path in context_document_paths(root, target=target):
+        if path.resolve().is_relative_to(product_root):
+            continue
+        logical_path = path.relative_to(root).as_posix()
+        records.append(_path_record(path, logical_path=logical_path, previous=previous.get(logical_path)))
+    artifact_paths = {
+        path
+        for path in previous
+        if path.startswith(("docs/tasks/", "docs/archive/tasks/"))
+        and not path.startswith("docs/tasks/.repoctl-state/completions/")
+    }
+    if discover_receipt_artifacts:
+        receipts, _problems = collect_completion_receipts(root, repo_id=target.id)
+        artifact_paths.update(value for receipt in receipts for value in receipt_artifact_paths(receipt))
+    for artifact in sorted(artifact_paths):
+        path = root / artifact
+        if path.is_file():
+            records.append(_path_record(path, logical_path=artifact, previous=previous.get(artifact)))
+    for relative in ("docs/repoctl.json", "repoctl-upgrade-manifest.json", "pyproject.toml"):
+        path = root / relative
+        if path.is_file():
+            records.append(_path_record(path, logical_path=relative, previous=previous.get(relative)))
+    by_path = {str(record.get("path") or ""): record for record in records if str(record.get("path") or "")}
+    return [by_path[path] for path in sorted(by_path)]
+
+
+def _provider_units(provider: str, target: RepoTarget, paths: set[str]) -> dict[str, str]:
+    if provider == "typescript_compiler":
+        from .graph_typescript_provider import typescript_analysis_units
+
+        return typescript_analysis_units(target.root_path, paths)
+    if provider == "csharp_roslyn":
+        from .graph_csharp_provider import csharp_analysis_units
+
+        return csharp_analysis_units(target.root_path, paths)
+    return {path: "" for path in sorted(paths)}
+
+
+def collect_graph_inputs(
+    root: Path,
+    *,
+    target: RepoTarget,
+    previous_manifest: dict[str, Any] | None = None,
+    previous_snapshot: GraphSnapshot | None = None,
+    rebuild: bool = False,
+) -> tuple[
+    tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]],
+    list[CodeIndexEntry],
+    tuple[list[ImportResolution], dict[str, object]],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    previous_manifest = previous_manifest or {}
+    inventory, inventory_problems, inventory_meta = meta_inventory(root, changed=False, target=target)
+    previous_file_records = previous_manifest.get("file_records") if isinstance(previous_manifest.get("file_records"), dict) else {}
+    file_records, git_state = repo_file_state_records(
+        root,
+        paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],
+        target=target,
+        previous={str(path): value for path, value in previous_file_records.items() if isinstance(value, dict)},
+    )
+    if not git_state.available:
+        inventory_problems = [*inventory_problems, Problem("error", "graph_git_unavailable", git_state.reason, target.display_path)]
+    file_fingerprints = {
+        path: _file_record_fingerprint(record)
+        for path, record in sorted(file_records.items())
+    }
+    previous_fingerprints = previous_manifest.get("file_fingerprints") if isinstance(previous_manifest.get("file_fingerprints"), dict) else {}
+    previous_entries = _code_index_entries(previous_snapshot)
+    full_reindex = (
+        rebuild
+        or previous_snapshot is None
+        or int(previous_manifest.get("code_index_input_version") or 0) != CODE_INDEX_INPUT_VERSION
+        or not previous_file_records
+    )
+    changed_paths = set(file_fingerprints) | set(str(path) for path in previous_fingerprints)
+    if not full_reindex:
+        changed_paths = {
+            path
+            for path in changed_paths
+            if str(file_fingerprints.get(path) or "") != str(previous_fingerprints.get(path) or "")
+        }
+    previous_by_path = {entry.path: entry for entry in previous_entries}
+    for item in inventory:
+        previous = previous_by_path.get(item.path)
+        if previous is not None and (previous.classification != item.classification or previous.language != str(language_for_path(item.path))):
+            changed_paths.add(item.path)
+    if full_reindex:
+        changed_paths = set(file_fingerprints) | set(previous_by_path)
+    index_result = build_code_index_from_inventory(
+        root,
+        files=inventory,
+        inventory_problems=inventory_problems,
+        inventory_meta=inventory_meta,
+        target=target,
+        previous_entries=previous_entries,
+        reindex_paths=changed_paths,
+        limit=-1,
+    )
+    entries, _problems, _meta = index_result
+    provider_entries = semantic_provider_entries(entries)
+    import_result = resolve_code_imports(provider_entries, repo=target.root_path)
+    inventory_records = [
+        {
+            "path": entry.path,
+            "language": entry.language,
+            "classification": entry.classification,
+            "fingerprint": file_fingerprints.get(entry.path, ""),
+        }
+        for entry in entries
+    ]
+    inventory_records.sort(key=lambda item: str(item.get("path") or ""))
+
+    providers: dict[str, dict[str, Any]] = {}
+    for provider, languages in PROVIDER_LANGUAGES.items():
+        source_records = [
+            {
+                "path": entry.path,
+                "language": entry.language,
+                "classification": entry.classification,
+                "fingerprint": file_fingerprints.get(entry.path, ""),
+            }
+            for entry in provider_entries
+            if entry.language in languages
+        ]
+        source_records.sort(key=lambda item: str(item.get("path") or ""))
+        paths = {str(record["path"]) for record in source_records}
+        configs = _config_records(target, provider, inventory_records)
+        providers[provider] = {
+            "input_version": PROVIDER_INPUT_VERSIONS[provider],
+            "files": {str(record["path"]): digest_data(record) for record in source_records},
+            "config_digest": digest_data(configs),
+            "units": _provider_units(provider, target, paths),
+        }
+
+    previous_root_records = previous_manifest.get("root_evidence_records") if isinstance(previous_manifest.get("root_evidence_records"), dict) else {}
+    root_records = _root_evidence_records(
+        root,
+        target,
+        previous={str(path): value for path, value in previous_root_records.items() if isinstance(value, dict)},
+    )
+    root_evidence_records = {
+        str(record.get("path") or ""): record
+        for record in root_records
+        if str(record.get("path") or "")
+    }
+    root_evidence_fingerprints = {
+        path: _root_record_fingerprint(record)
+        for path, record in root_evidence_records.items()
+    }
+    state = {
+        "schema": GRAPH_STATE_SCHEMA,
+        "schema_version": GRAPH_STATE_SCHEMA_VERSION,
+        "repository": target.to_dict(),
+        "code_index_input_version": CODE_INDEX_INPUT_VERSION,
+        "file_records": file_records,
+        "file_fingerprints": file_fingerprints,
+        "inventory_digest": digest_data(inventory_records),
+        "root_evidence_digest": digest_data(root_evidence_fingerprints),
+        "root_evidence_records": root_evidence_records,
+        "root_evidence_fingerprints": root_evidence_fingerprints,
+        "providers": providers,
+    }
+    state["input_digest"] = digest_data(
+        {
+            key: value
+            for key, value in state.items()
+            if key not in {"file_records", "root_evidence_records"}
+        }
+    )
+    return index_result, provider_entries, import_result, state, {
+        "changed_paths": sorted(changed_paths),
+        "full_reindex": full_reindex,
+    }
+
+
+def _state_dir(root: Path, target: RepoTarget) -> Path:
+    return root / GRAPH_STATE_ROOT / target.id
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _anchor_from_dict(data: Any) -> SourceAnchor | None:
+    if not isinstance(data, dict):
+        return None
+    try:
+        return SourceAnchor(
+            path=str(data["path"]),
+            start_line=int(data["start_line"]),
+            start_col=int(data["start_col"]),
+            end_line=int(data["end_line"]),
+            end_col=int(data["end_col"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _provider_result_to_dict(result: SemanticProviderResult) -> dict[str, object]:
+    return {
+        "schema": "repoctl.graph.semantic-provider-result",
+        "schema_version": PROVIDER_RESULT_SCHEMA_VERSION,
+        "provider": result.provider,
+        "languages": list(result.languages),
+        "symbols": [symbol.to_dict() for symbol in result.symbols],
+        "calls": [call.to_dict() for call in result.calls],
+        "symbol_analyzed_paths": list(result.symbol_analyzed_paths),
+        "call_analyzed_paths": list(result.call_analyzed_paths),
+        "symbol_failed_paths": list(result.symbol_failed_paths),
+        "call_failed_paths": list(result.call_failed_paths),
+        "failures": [failure.to_dict() for failure in result.failures],
+        "tool": result.tool,
+    }
+
+
+def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) -> SemanticProviderResult | None:
+    if data.get("schema") != "repoctl.graph.semantic-provider-result" or data.get("schema_version") != PROVIDER_RESULT_SCHEMA_VERSION:
+        return None
+    if str(data.get("provider") or "") != expected_provider:
+        return None
+    symbols: list[PreciseSymbol] = []
+    for raw in data.get("symbols", []):
+        if not isinstance(raw, dict):
+            return None
+        anchor = _anchor_from_dict(raw.get("anchor"))
+        if anchor is None:
+            return None
+        symbols.append(
+            PreciseSymbol(
+                path=str(raw.get("path") or ""),
+                provider=expected_provider,
+                provider_symbol_id=str(raw.get("provider_symbol_id") or ""),
+                language=str(raw.get("language") or ""),
+                kind=str(raw.get("kind") or ""),
+                name=str(raw.get("name") or ""),
+                qualified_name=str(raw.get("qualified_name") or ""),
+                anchor=anchor,
+            )
+        )
+    calls: list[PreciseCall] = []
+    for raw in data.get("calls", []):
+        if not isinstance(raw, dict):
+            return None
+        anchor = _anchor_from_dict(raw.get("anchor"))
+        if anchor is None:
+            return None
+        calls.append(
+            PreciseCall(
+                path=str(raw.get("path") or ""),
+                provider=expected_provider,
+                caller_provider_symbol_id=str(raw.get("caller_provider_symbol_id") or ""),
+                callee_provider_symbol_id=str(raw.get("callee_provider_symbol_id") or ""),
+                language=str(raw.get("language") or ""),
+                scope=str(raw.get("scope") or ""),
+                anchor=anchor,
+            )
+        )
+    failures: list[ProviderFailure] = []
+    for raw in data.get("failures", []):
+        if not isinstance(raw, dict):
+            return None
+        failures.append(
+            ProviderFailure(
+                provider=expected_provider,
+                capability=str(raw.get("capability") or ""),
+                code=str(raw.get("code") or ""),
+                message=str(raw.get("message") or ""),
+                paths=tuple(sorted(str(path) for path in raw.get("paths", []) if str(path))),
+            )
+        )
+    return SemanticProviderResult(
+        provider=expected_provider,
+        languages=tuple(sorted(str(value) for value in data.get("languages", []) if str(value))),
+        symbols=tuple(symbols),
+        calls=tuple(calls),
+        symbol_analyzed_paths=tuple(sorted(str(value) for value in data.get("symbol_analyzed_paths", []) if str(value))),
+        call_analyzed_paths=tuple(sorted(str(value) for value in data.get("call_analyzed_paths", []) if str(value))),
+        symbol_failed_paths=tuple(sorted(str(value) for value in data.get("symbol_failed_paths", []) if str(value))),
+        call_failed_paths=tuple(sorted(str(value) for value in data.get("call_failed_paths", []) if str(value))),
+        failures=tuple(failures),
+        tool=data.get("tool") if isinstance(data.get("tool"), dict) else {},
+    )
+
+
+def _snapshot_from_dict(data: dict[str, Any]) -> GraphSnapshot | None:
+    if data.get("schema") != "repoctl.graph.snapshot" or data.get("schema_version") != 1:
+        return None
+    repository = data.get("repository")
+    sources = data.get("sources")
+    completeness = data.get("completeness")
+    raw_nodes = data.get("nodes")
+    raw_edges = data.get("edges")
+    capabilities = data.get("capabilities")
+    if not isinstance(repository, dict) or not isinstance(sources, list) or not isinstance(completeness, dict) or not isinstance(raw_nodes, list) or not isinstance(raw_edges, list) or not isinstance(capabilities, list):
+        return None
+    nodes: list[GraphNode] = []
+    for raw in raw_nodes:
+        if not isinstance(raw, dict) or not isinstance(raw.get("identity"), dict):
+            return None
+        nodes.append(
+            GraphNode(
+                id=str(raw.get("id") or ""),
+                kind=str(raw.get("kind") or ""),
+                identity=raw["identity"],
+                facts=raw.get("facts") if isinstance(raw.get("facts"), dict) else {},
+            )
+        )
+    edges: list[GraphEdge] = []
+    for raw in raw_edges:
+        if not isinstance(raw, dict):
+            return None
+        edges.append(
+            GraphEdge(
+                kind=str(raw.get("kind") or ""),
+                from_id=str(raw.get("from") or ""),
+                to_id=str(raw.get("to") or ""),
+                assertion=str(raw.get("assertion") or ""),
+                source=str(raw.get("source") or ""),
+                facts=raw.get("facts") if isinstance(raw.get("facts"), dict) else {},
+            )
+        )
+    snapshot = GraphSnapshot(
+        repository={str(key): str(value) for key, value in repository.items()},
+        sources=[source for source in sources if isinstance(source, dict)],
+        completeness=completeness,
+        nodes=nodes,
+        edges=edges,
+        schema="repoctl.graph.snapshot",
+        schema_version=1,
+        authoritative=bool(data.get("authoritative")),
+        capabilities=[str(value) for value in capabilities],
+    ).with_digest()
+    return snapshot if snapshot.snapshot_digest == str(data.get("snapshot_digest") or "") else None
+
+
+def _load_snapshot(root: Path, target: RepoTarget) -> GraphSnapshot | None:
+    data = _read_json(_state_dir(root, target) / "snapshot.json")
+    return _snapshot_from_dict(data) if data is not None else None
+
+
+def load_materialized_graph(
+    root: Path,
+    *,
+    target: RepoTarget,
+) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
+    state_dir = _state_dir(root, target)
+    manifest = _read_json(state_dir / "manifest.json")
+    snapshot = _load_snapshot(root, target)
+    if manifest is None or snapshot is None:
+        return (
+            None,
+            [Problem("error", "graph_snapshot_missing", "materialized Graph is missing; run repoctl graph build", target.display_path)],
+            {"repository": target.to_dict(), "materialization": {"status": "missing"}},
+        )
+    if manifest.get("schema") != GRAPH_STATE_SCHEMA or manifest.get("schema_version") != GRAPH_STATE_SCHEMA_VERSION:
+        return (
+            None,
+            [
+                Problem(
+                    "error",
+                    "graph_materialization_schema_mismatch",
+                    "materialized Graph schema is incompatible; run repoctl graph build --rebuild",
+                    state_dir.relative_to(root).as_posix(),
+                )
+            ],
+            {"repository": target.to_dict(), "materialization": {"status": "incompatible"}},
+        )
+    if str(manifest.get("snapshot_digest") or "") != snapshot.snapshot_digest:
+        return (
+            None,
+            [
+                Problem(
+                    "error",
+                    "graph_materialization_incomplete",
+                    "materialized Graph manifest and snapshot do not match; run repoctl graph build",
+                    state_dir.relative_to(root).as_posix(),
+                )
+            ],
+            {"repository": target.to_dict(), "materialization": {"status": "incomplete"}},
+        )
+    return snapshot, [], {
+        "repository": target.to_dict(),
+        "materialization": {
+            "status": "materialized",
+            "input_digest": str(manifest.get("input_digest") or ""),
+        },
+    }
+
+
+def graph_materialization_freshness(
+    root: Path,
+    *,
+    target: RepoTarget,
+) -> tuple[dict[str, Any], list[Problem]]:
+    manifest = _read_json(_state_dir(root, target) / "manifest.json")
+    if manifest is None:
+        return {"status": "missing", "changed_paths": []}, [
+            Problem("error", "graph_snapshot_missing", "materialized Graph is missing; run repoctl graph build", target.display_path)
+        ]
+    if manifest.get("schema") != GRAPH_STATE_SCHEMA or manifest.get("schema_version") != GRAPH_STATE_SCHEMA_VERSION:
+        return {"status": "incompatible", "changed_paths": []}, [
+            Problem(
+                "error",
+                "graph_materialization_schema_mismatch",
+                "materialized Graph schema is incompatible; run repoctl graph build --rebuild",
+                _state_dir(root, target).relative_to(root).as_posix(),
+            )
+        ]
+    inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
+    previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}
+    current_records, git_state = repo_file_state_records(
+        root,
+        paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],
+        target=target,
+        previous={str(path): value for path, value in previous_records.items() if isinstance(value, dict)},
+    )
+    problems = list(inventory_problems)
+    if not git_state.available:
+        problems.append(Problem("error", "graph_git_unavailable", git_state.reason, target.display_path))
+    current_fingerprints = {
+        path: _file_record_fingerprint(record)
+        for path, record in sorted(current_records.items())
+    }
+    previous_fingerprints = manifest.get("file_fingerprints") if isinstance(manifest.get("file_fingerprints"), dict) else {}
+    changed_paths = sorted(
+        path
+        for path in set(current_fingerprints) | set(str(value) for value in previous_fingerprints)
+        if str(current_fingerprints.get(path) or "") != str(previous_fingerprints.get(path) or "")
+    )
+    previous_root_records = manifest.get("root_evidence_records") if isinstance(manifest.get("root_evidence_records"), dict) else {}
+    root_records = _root_evidence_records(
+        root,
+        target,
+        previous={str(path): value for path, value in previous_root_records.items() if isinstance(value, dict)},
+        discover_receipt_artifacts=False,
+    )
+    current_root_fingerprints = {
+        str(record.get("path") or ""): _root_record_fingerprint(record)
+        for record in root_records
+        if str(record.get("path") or "")
+    }
+    previous_root_fingerprints = manifest.get("root_evidence_fingerprints") if isinstance(manifest.get("root_evidence_fingerprints"), dict) else {}
+    changed_root_paths = sorted(
+        path
+        for path in set(current_root_fingerprints) | set(str(value) for value in previous_root_fingerprints)
+        if str(current_root_fingerprints.get(path) or "") != str(previous_root_fingerprints.get(path) or "")
+    )
+    root_evidence_digest = digest_data(current_root_fingerprints)
+    root_evidence_changed = root_evidence_digest != str(manifest.get("root_evidence_digest") or "")
+    status = "current" if not changed_paths and not root_evidence_changed and not any(problem.severity == "error" for problem in problems) else "stale"
+    return {
+        "status": status,
+        "changed_paths": changed_paths,
+        "changed_path_count": len(changed_paths),
+        "changed_path_classifications": {
+            item.path: item.classification
+            for item in inventory
+            if item.path in changed_paths
+        },
+        "root_evidence_changed": root_evidence_changed,
+        "changed_root_paths": changed_root_paths,
+        "changed_root_path_count": len(changed_root_paths),
+        "materialized_input_digest": str(manifest.get("input_digest") or ""),
+    }, problems
+
+
+def _previous_import_pairs(snapshot: GraphSnapshot | None) -> set[tuple[str, str]]:
+    if snapshot is None:
+        return set()
+    nodes = {node.id: node for node in snapshot.nodes}
+    pairs: set[tuple[str, str]] = set()
+    for edge in snapshot.edges:
+        if edge.kind != "IMPORTS_FILE":
+            continue
+        importer = nodes.get(edge.from_id)
+        target = nodes.get(edge.to_id)
+        importer_path = str(importer.identity.get("path") or "") if importer is not None else ""
+        target_path = str(target.identity.get("path") or "") if target is not None else ""
+        if importer_path and target_path:
+            pairs.add((importer_path, target_path))
+    return pairs
+
+
+def _reverse_dependents(
+    seeds: set[str],
+    *,
+    current_paths: set[str],
+    import_resolutions: list[ImportResolution],
+    previous_snapshot: GraphSnapshot | None,
+) -> set[str]:
+    reverse: dict[str, set[str]] = defaultdict(set)
+    for resolution in import_resolutions:
+        reverse[resolution.target_path].add(resolution.importer_path)
+    for importer, target in _previous_import_pairs(previous_snapshot):
+        reverse[target].add(importer)
+    affected = set(seeds)
+    pending = deque(sorted(seeds))
+    while pending:
+        target = pending.popleft()
+        for importer in sorted(reverse.get(target, set())):
+            if importer in current_paths and importer not in affected:
+                affected.add(importer)
+                pending.append(importer)
+    return affected & current_paths
+
+
+def _affected_paths(
+    provider: str,
+    *,
+    changed_paths: set[str],
+    current_state: dict[str, Any],
+    previous_state: dict[str, Any],
+    import_resolutions: list[ImportResolution],
+    previous_snapshot: GraphSnapshot | None,
+) -> set[str]:
+    current_files = current_state.get("files") if isinstance(current_state.get("files"), dict) else {}
+    current_paths = set(str(path) for path in current_files)
+    current_units = current_state.get("units") if isinstance(current_state.get("units"), dict) else {}
+    previous_units = previous_state.get("units") if isinstance(previous_state.get("units"), dict) else {}
+    if provider == "csharp_roslyn":
+        changed_units = {
+            str(current_units.get(path) or previous_units.get(path) or "<unassigned>")
+            for path in changed_paths
+        }
+        return {
+            path
+            for path in current_paths
+            if str(current_units.get(path) or "<unassigned>") in changed_units
+        }
+    if provider == "typescript_compiler":
+        configured_units = {
+            str(current_units.get(path) or previous_units.get(path) or "")
+            for path in changed_paths
+            if str(current_units.get(path) or previous_units.get(path) or "")
+        }
+        configured = {
+            path
+            for path in current_paths
+            if str(current_units.get(path) or "") in configured_units
+        }
+        unconfigured_seeds = {
+            path
+            for path in changed_paths
+            if not str(current_units.get(path) or previous_units.get(path) or "")
+        }
+        return configured | _reverse_dependents(
+            unconfigured_seeds,
+            current_paths=current_paths,
+            import_resolutions=import_resolutions,
+            previous_snapshot=previous_snapshot,
+        )
+    return _reverse_dependents(
+        changed_paths,
+        current_paths=current_paths,
+        import_resolutions=import_resolutions,
+        previous_snapshot=previous_snapshot,
+    )
+
+
+def _empty_provider_result(provider: str) -> SemanticProviderResult:
+    return SemanticProviderResult(provider=provider, languages=tuple(sorted(PROVIDER_LANGUAGES[provider])))
+
+
+def _merge_failures(
+    previous: SemanticProviderResult,
+    update: SemanticProviderResult,
+    *,
+    replace_paths: set[str],
+    current_paths: set[str],
+) -> tuple[ProviderFailure, ...]:
+    failures: dict[tuple[str, str, str, tuple[str, ...]], ProviderFailure] = {}
+    for failure in previous.failures:
+        remaining = tuple(sorted(path for path in failure.paths if path not in replace_paths and path in current_paths))
+        if not remaining:
+            continue
+        retained = ProviderFailure(failure.provider, failure.capability, failure.code, failure.message, remaining)
+        failures[(retained.capability, retained.code, retained.message, retained.paths)] = retained
+    for failure in update.failures:
+        paths = tuple(sorted(path for path in failure.paths if path in current_paths))
+        if not paths:
+            continue
+        current = ProviderFailure(failure.provider, failure.capability, failure.code, failure.message, paths)
+        failures[(current.capability, current.code, current.message, current.paths)] = current
+    return tuple(failures[key] for key in sorted(failures))
+
+
+def _merge_provider_result(
+    previous: SemanticProviderResult,
+    update: SemanticProviderResult,
+    *,
+    replace_paths: set[str],
+    current_paths: set[str],
+) -> SemanticProviderResult:
+    symbols = {
+        symbol.provider_symbol_id: symbol
+        for symbol in previous.symbols
+        if symbol.path not in replace_paths and symbol.path in current_paths
+    }
+    symbols.update({symbol.provider_symbol_id: symbol for symbol in update.symbols if symbol.path in current_paths})
+    symbol_ids = set(symbols)
+    calls = {
+        (call.caller_provider_symbol_id, call.callee_provider_symbol_id, call.path, call.anchor.start_line, call.anchor.start_col): call
+        for call in previous.calls
+        if call.path not in replace_paths and call.path in current_paths
+    }
+    calls.update(
+        {
+            (call.caller_provider_symbol_id, call.callee_provider_symbol_id, call.path, call.anchor.start_line, call.anchor.start_col): call
+            for call in update.calls
+            if call.path in current_paths
+        }
+    )
+    calls = {
+        key: call
+        for key, call in calls.items()
+        if call.caller_provider_symbol_id in symbol_ids and call.callee_provider_symbol_id in symbol_ids
+    }
+
+    def merged_paths(previous_paths: tuple[str, ...], updated_paths: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(sorted(((set(previous_paths) - replace_paths) | set(updated_paths)) & current_paths))
+
+    return SemanticProviderResult(
+        provider=previous.provider,
+        languages=previous.languages or update.languages,
+        symbols=tuple(symbols[key] for key in sorted(symbols)),
+        calls=tuple(calls[key] for key in sorted(calls)),
+        symbol_analyzed_paths=merged_paths(previous.symbol_analyzed_paths, update.symbol_analyzed_paths),
+        call_analyzed_paths=merged_paths(previous.call_analyzed_paths, update.call_analyzed_paths),
+        symbol_failed_paths=merged_paths(previous.symbol_failed_paths, update.symbol_failed_paths),
+        call_failed_paths=merged_paths(previous.call_failed_paths, update.call_failed_paths),
+        failures=_merge_failures(previous, update, replace_paths=replace_paths, current_paths=current_paths),
+        tool=update.tool or previous.tool,
+    )
+
+
+def _load_provider_result(state_dir: Path, provider: str, manifest: dict[str, Any]) -> SemanticProviderResult | None:
+    data = _read_json(state_dir / "providers" / f"{provider}.json")
+    if data is None:
+        return None
+    expected = manifest.get("provider_result_digests") if isinstance(manifest.get("provider_result_digests"), dict) else {}
+    if str(expected.get(provider) or "") != digest_data(data):
+        return None
+    return _provider_result_from_dict(data, expected_provider=provider)
+
+
+def materialize_graph(
+    root: Path,
+    *,
+    target: RepoTarget,
+    rebuild: bool = False,
+) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
+    state_dir = _state_dir(root, target)
+    previous_manifest = _read_json(state_dir / "manifest.json") or {}
+    previous_snapshot = _load_snapshot(root, target)
+    index_result, provider_entries, import_result, current, index_update = collect_graph_inputs(
+        root,
+        target=target,
+        previous_manifest=previous_manifest,
+        previous_snapshot=previous_snapshot,
+        rebuild=rebuild,
+    )
+    if any(problem.severity == "error" for problem in index_result[1]):
+        return None, index_result[1], {"repository": target.to_dict(), "materialization": {"status": "unavailable"}}
+    import_resolutions, _import_meta = import_result
+    if not rebuild and previous_snapshot is not None and str(previous_manifest.get("input_digest") or "") == current["input_digest"]:
+        evidence, evidence_problems = materialize_evidence_index(
+            root,
+            target=target,
+            snapshot=previous_snapshot,
+            entries=index_result[0],
+            file_fingerprints=current["file_fingerprints"],
+            changed_paths=set(index_update["changed_paths"]),
+            graph_input_digest=current["input_digest"],
+        )
+        if any(problem.severity == "error" for problem in evidence_problems):
+            return previous_snapshot, evidence_problems, {
+                "repository": target.to_dict(),
+                "materialization": {"status": "failed", "input_digest": current["input_digest"], "evidence": evidence},
+            }
+        reused_manifest = {
+            **current,
+            "snapshot_digest": previous_snapshot.snapshot_digest,
+            "provider_result_digests": previous_manifest.get("provider_result_digests", {}),
+        }
+        atomic_write(state_dir / "manifest.json", json.dumps(reused_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        return previous_snapshot, evidence_problems, {
+            "repository": target.to_dict(),
+            "materialization": {
+                "status": "reused",
+                "input_digest": current["input_digest"],
+                "reused_providers": sorted(PROVIDER_LANGUAGES),
+                "updated_providers": [],
+                "updated_paths": {},
+                "code_index": index_update,
+                "evidence": evidence,
+            },
+        }
+
+    previous_provider_states = previous_manifest.get("providers") if isinstance(previous_manifest.get("providers"), dict) else {}
+    results: list[SemanticProviderResult] = []
+    reused_providers: list[str] = []
+    updated_providers: list[str] = []
+    updated_paths: dict[str, list[str]] = {}
+    for provider in PROVIDER_LANGUAGES:
+        current_state = current["providers"][provider]
+        previous_state = previous_provider_states.get(provider) if isinstance(previous_provider_states.get(provider), dict) else {}
+        previous_result = None if rebuild else _load_provider_result(state_dir, provider, previous_manifest)
+        current_files = current_state.get("files") if isinstance(current_state.get("files"), dict) else {}
+        previous_files = previous_state.get("files") if isinstance(previous_state.get("files"), dict) else {}
+        current_paths = set(str(path) for path in current_files)
+        old_paths = set(str(path) for path in previous_files)
+        config_changed = (
+            rebuild
+            or previous_result is None
+            or previous_state.get("input_version") != current_state.get("input_version")
+            or previous_state.get("config_digest") != current_state.get("config_digest")
+        )
+        changed_paths = {
+            path
+            for path in current_paths | old_paths
+            if str(current_files.get(path) or "") != str(previous_files.get(path) or "")
+        }
+        if config_changed:
+            analysis_paths = set(current_paths)
+            replace_paths = current_paths | old_paths
+        else:
+            analysis_paths = _affected_paths(
+                provider,
+                changed_paths=changed_paths,
+                current_state=current_state,
+                previous_state=previous_state,
+                import_resolutions=import_resolutions,
+                previous_snapshot=previous_snapshot,
+            )
+            replace_paths = analysis_paths | (changed_paths - current_paths)
+        if previous_result is not None and not replace_paths:
+            results.append(previous_result)
+            reused_providers.append(provider)
+            continue
+
+        base = previous_result or _empty_provider_result(provider)
+        update = (
+            build_semantic_provider(
+                provider,
+                root,
+                target=target,
+                entries=provider_entries,
+                import_resolutions=import_resolutions,
+                analysis_paths=analysis_paths,
+                previous=base,
+            )
+            if analysis_paths
+            else _empty_provider_result(provider)
+        )
+        result = _merge_provider_result(
+            base,
+            update,
+            replace_paths=replace_paths,
+            current_paths=current_paths,
+        )
+        results.append(result)
+        updated_providers.append(provider)
+        updated_paths[provider] = sorted(analysis_paths)
+
+    snapshot, problems, meta = build_graph(
+        root,
+        target=target,
+        code_index_result=index_result,
+        cached_semantic_results=results,
+    )
+    if snapshot is None or any(problem.severity == "error" for problem in problems):
+        return snapshot, problems, {**meta, "materialization": {"status": "failed", "input_digest": current["input_digest"]}}
+
+    evidence_update_paths = set(index_update["changed_paths"])
+    for paths in updated_paths.values():
+        evidence_update_paths.update(paths)
+    evidence, evidence_problems = materialize_evidence_index(
+        root,
+        target=target,
+        snapshot=snapshot,
+        entries=index_result[0],
+        file_fingerprints=current["file_fingerprints"],
+        changed_paths=evidence_update_paths,
+        graph_input_digest=current["input_digest"],
+        rebuild=bool(index_update["full_reindex"]),
+    )
+    problems.extend(evidence_problems)
+    if any(problem.severity == "error" for problem in evidence_problems):
+        return snapshot, problems, {
+            **meta,
+            "materialization": {"status": "failed", "input_digest": current["input_digest"], "evidence": evidence},
+        }
+
+    provider_result_digests: dict[str, str] = {}
+    for result in results:
+        data = _provider_result_to_dict(result)
+        provider_result_digests[result.provider] = digest_data(data)
+        atomic_write(
+            state_dir / "providers" / f"{result.provider}.json",
+            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+    atomic_write(state_dir / "snapshot.json", json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    manifest = {
+        **current,
+        "snapshot_digest": snapshot.snapshot_digest,
+        "provider_result_digests": provider_result_digests,
+    }
+    atomic_write(state_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return snapshot, problems, {
+        **meta,
+        "materialization": {
+            "status": "rebuilt" if rebuild or not previous_manifest else "updated",
+            "input_digest": current["input_digest"],
+            "reused_providers": reused_providers,
+            "updated_providers": updated_providers,
+            "updated_paths": updated_paths,
+            "code_index": index_update,
+            "evidence": evidence,
+        },
+    }

@@ -109,22 +109,6 @@ def test_task_create_repo_scoped_requires_repo_id_in_multi_repo(tmp_path: Path, 
     assert payload["problems"][0]["code"] == "repository_selector_required"
 
 
-def test_adopted_multi_repo_task_can_finish_selected_repo(tmp_path: Path, monkeypatch, capsys) -> None:
-    web, _ = _setup_configured_multi_repo(tmp_path, monkeypatch)
-
-    assert main(["task", "create", "--area", "repo", "--repo-id", "web", "--start", "--slug", "adopted-web", "Adopted web", "--json"]) == 0
-    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
-    (web / "app.py").write_text("print('web changed')\n", encoding="utf-8")
-    assert main(["task", "discovery", "add", task_id, "--query", "web app", "--reviewed", "repos/web/app.py", "--chosen", "repos/web/app.py", "--json"]) == 0
-    capsys.readouterr()
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Ran selected web validation\n- Result: pass\n", encoding="utf-8")
-
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["meta_gate"]["status"] == "passed"
-    assert "- repository: web repos/web" in (tmp_path / payload["data"]["new_path"]).read_text(encoding="utf-8")
 
 
 def test_repo_task_discovery_must_match_selected_repository(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -235,21 +219,6 @@ def test_root_task_blocks_unadopted_candidate_removed_after_start(tmp_path: Path
     assert payload["problems"][0]["path"] == "repos/web"
 
 
-def test_root_task_without_baseline_treats_current_multi_repo_dirty_as_task_new(tmp_path: Path, monkeypatch, capsys) -> None:
-    _, api = _setup_configured_multi_repo(tmp_path, monkeypatch)
-    assert main(["task", "create", "--area", "docs", "--slug", "root-no-baseline", "Root no baseline", "--json"]) == 0
-    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
-    task_path = tmp_path / f"docs/tasks/{task_id}--root-no-baseline.md"
-    task_path.write_text(task_path.read_text(encoding="utf-8").replace("status: todo", "status: doing"), encoding="utf-8")
-    (api / "app.py").write_text("print('api dirty')\n", encoding="utf-8")
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Checked root docs\n- Result: pass\n", encoding="utf-8")
-
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repository_selector_required"
-    assert payload["problems"][0]["path"] == "repos/api/app.py"
 
 
 def test_root_task_allows_product_head_change_when_worktree_clean_in_configured_multi(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -48,7 +48,7 @@ def test_repos_root_and_child_git_are_ambiguous(tmp_path: Path) -> None:
     try:
         repo_layout(tmp_path)
     except RepoctlError as exc:
-        assert "ambiguous product repositories detected" in str(exc)
+        assert exc.code == "repository_topology_invalid"
     else:
         raise AssertionError("repos/.git and repos/*/.git together should be ambiguous")
 

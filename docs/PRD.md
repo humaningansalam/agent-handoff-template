@@ -38,7 +38,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - A new agent can resume a live task from `AGENTS.md`, `docs/BOARD.md`, the task file, and Handoff without guessing.
 - Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
 - Task finish leaves auditable verification evidence and stable completion receipts.
-- Graph and Context answers preserve source refs, repo IDs, digests, and completeness warnings.
+- Graph and Context answers preserve source refs, repo IDs, digests, freshness, typed continuations, and completeness warnings.
 - Reviewed Knowledge records require approval and remain separate from generated llmwiki output.
 
 ## Core Requirements
@@ -65,8 +65,8 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 
 ### Evidence And Context
 
-- Build Graph as a deterministic, read-only evidence snapshot over source facts, metadata, receipts, imports, symbols, calls, and artifacts.
-- Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup.
+- Materialize Graph and its persistent evidence index as one deterministic boundary over source facts, metadata, documents, receipts, imports, symbols, calls, and artifacts; queries read it without hidden rebuilds or unchanged-source rescans.
+- Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays and typed continuations for iterative exploration.
 - Preserve source refs, digests, repo namespaces, and completeness diagnostics.
 - Do not turn Context output into task scope, source authority, or reviewed knowledge automatically.
 

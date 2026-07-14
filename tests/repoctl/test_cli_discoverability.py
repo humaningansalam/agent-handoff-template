@@ -7,7 +7,7 @@ from tools.repoctl.cli import main
 from tests.repoctl.context_test_helpers import _setup_context_workspace
 
 
-def test_repoctl_version_aliases(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_repoctl_version_surfaces(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_workspace(tmp_path, monkeypatch)
 
     assert main(["--version"]) == 0
@@ -20,22 +20,8 @@ def test_repoctl_version_aliases(tmp_path: Path, monkeypatch, capsys) -> None:
     assert payload["data"]["workspace_root"] == tmp_path.as_posix()
 
 
-def test_repoctl_help_alias(capsys) -> None:
-    assert main(["help"]) == 0
-
-    output = capsys.readouterr().out
-    assert "usage: repoctl" in output
-    assert "context" in output
 
 
-def test_llmwiki_alias_routes_to_knowledge_render(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_context_workspace(tmp_path, monkeypatch)
-
-    assert main(["llmwiki", "--repo-id", "main", "--check", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["command"] == "knowledge render"
-    assert payload["data"]["check"]["status"] == "empty_not_initialized"
 
 
 def test_upgrade_status_guides_to_plan(tmp_path: Path, monkeypatch, capsys) -> None:

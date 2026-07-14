@@ -6,74 +6,11 @@ from pathlib import Path
 
 from .code_index import CodeIndexEntry
 from .graph_import_resolver import ImportResolution
+from .graph_semantic_model import PreciseCall, PreciseSymbol, SourceAnchor
 from .repositories import RepoTarget
 
 
 PYTHON_PROVIDER_LANGUAGES = frozenset({"python"})
-
-
-@dataclass(frozen=True)
-class SourceAnchor:
-    path: str
-    start_line: int
-    start_col: int
-    end_line: int
-    end_col: int
-
-    def to_dict(self) -> dict[str, int | str]:
-        return {
-            "path": self.path,
-            "start_line": self.start_line,
-            "start_col": self.start_col,
-            "end_line": self.end_line,
-            "end_col": self.end_col,
-        }
-
-
-@dataclass(frozen=True)
-class PreciseSymbol:
-    path: str
-    provider: str
-    provider_symbol_id: str
-    language: str
-    kind: str
-    name: str
-    qualified_name: str
-    anchor: SourceAnchor
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "path": self.path,
-            "provider": self.provider,
-            "provider_symbol_id": self.provider_symbol_id,
-            "language": self.language,
-            "kind": self.kind,
-            "name": self.name,
-            "qualified_name": self.qualified_name,
-            "anchor": self.anchor.to_dict(),
-        }
-
-
-@dataclass(frozen=True)
-class PreciseCall:
-    path: str
-    provider: str
-    caller_provider_symbol_id: str
-    callee_provider_symbol_id: str
-    language: str
-    scope: str
-    anchor: SourceAnchor
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "path": self.path,
-            "provider": self.provider,
-            "caller_provider_symbol_id": self.caller_provider_symbol_id,
-            "callee_provider_symbol_id": self.callee_provider_symbol_id,
-            "language": self.language,
-            "scope": self.scope,
-            "anchor": self.anchor.to_dict(),
-        }
 
 
 @dataclass(frozen=True)
@@ -373,14 +310,13 @@ def _import_targets(
     symbols: list[PreciseSymbol],
     import_resolutions: list[ImportResolution],
 ) -> dict[tuple[str, str, str], PreciseSymbol]:
-    available_paths = {analysis.path for analysis in analyses}
+    analyzed_paths = {analysis.path for analysis in analyses}
     resolutions = {
         (resolution.importer_path, resolution.raw_import): resolution
         for resolution in import_resolutions
         if resolution.language == "python"
         and resolution.provider == "python_import_resolver"
-        and resolution.importer_path in available_paths
-        and resolution.target_path in available_paths
+        and resolution.importer_path in analyzed_paths
     }
     module_functions: dict[tuple[str, str], list[PreciseSymbol]] = {}
     for symbol in symbols:
@@ -610,12 +546,19 @@ def build_python_semantics(
     target: RepoTarget,
     entries: list[CodeIndexEntry],
     import_resolutions: list[ImportResolution] | None = None,
+    analysis_paths: set[str] | None = None,
+    known_symbols: tuple[PreciseSymbol, ...] = (),
 ) -> tuple[list[PreciseSymbol], list[PreciseCall], dict[str, object]]:
     del root
+    selected_paths = {
+        entry.path
+        for entry in entries
+        if entry.language == "python" and (analysis_paths is None or entry.path in analysis_paths)
+    }
     analyses: list[_ModuleAnalysis] = []
     failed_paths: list[str] = []
     for entry in entries:
-        if entry.language != "python":
+        if entry.path not in selected_paths:
             continue
         path = target.root_path / entry.path
         try:
@@ -628,7 +571,8 @@ def build_python_semantics(
         [symbol for analysis in analyses for symbol in analysis.symbols],
         key=lambda item: item.provider_symbol_id,
     )
-    import_targets = _import_targets(analyses, symbols, import_resolutions or [])
+    retained_known_symbols = [symbol for symbol in known_symbols if symbol.path not in selected_paths]
+    import_targets = _import_targets(analyses, [*retained_known_symbols, *symbols], import_resolutions or [])
     calls = sorted(
         [call for analysis in analyses for call in _calls_for_analysis(analysis, import_targets)],
         key=lambda item: (

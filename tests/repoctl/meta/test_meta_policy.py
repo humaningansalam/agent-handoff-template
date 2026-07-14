@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tests.repoctl.meta.test_meta_check import init_repo, write_repometa
+from tests.repoctl.meta.test_meta_check import BASE_POLICY, init_repo, write_repometa
 
 import json
 from pathlib import Path
@@ -7,33 +7,6 @@ from pathlib import Path
 from tools.repoctl.cli import main
 from tools.repoctl.meta import DEFAULT_POLICY
 from tests.repoctl.workspace.test_check import write_workspace
-
-
-BASE_POLICY = {
-    "schema_version": 1,
-    "indexing": {
-        "exclude": [
-            ".git/**",
-            ".repometa/**",
-            "local-cache/**",
-            "build-output/**",
-            "third-party-snapshot/**",
-            "generated-output/**",
-            "**/__pycache__/**",
-            "**/*.png",
-        ]
-    },
-    "vocab": {
-        "roles": {"base": ["service", "adapter", "config", "test", "workflow", "spec"], "extend": []},
-        "declared_effects": {"base": ["none", "db", "net", "fs", "ui", "time", "crypto", "config"], "extend": ["queue"]},
-    },
-    "defaults": {
-        "areas": {"backend": ["backend/**"], "frontend": ["frontend/**"], "infra": [".github/**"]},
-        "topics": {"tests": ["**/tests/**", "**/*test*"], "api": ["frontend/src/api/**"], "auth": ["**/auth/**", "**/*token*"]},
-    },
-    "coverage": {"require_annotations": []},
-}
-
 
 
 def test_default_policy_is_ecosystem_neutral() -> None:

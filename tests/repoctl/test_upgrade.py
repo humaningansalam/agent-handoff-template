@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -10,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
-from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
+from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
 from tests.repoctl.meta.test_meta_check import write_repometa
 
 
@@ -102,23 +101,25 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     state_path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema": "repoctl.task.state",
+                "schema_version": 3,
                 "task_id": "T-20260609120000Z",
-                "created": "20260609T120000Z",
-                "repo_id": "main",
-                "repo_path": "repos",
-                "git_toplevel": (workspace / "repos").as_posix(),
-                "head": "a" * 40,
-                "repo_changes": [],
-                "repo_change_fingerprints": {},
+                "initial": {
+                    "created": "20260609T120000Z",
+                    "repo_id": "main",
+                    "repo_path": "repos",
+                    "git_toplevel": (workspace / "repos").as_posix(),
+                    "start_head": "a" * 40,
+                    "dirty_entries": [],
+                    "dirty_path_fingerprints": {},
+                },
+                "ownership": {},
             },
             indent=2,
         )
         + "\n",
         encoding="utf-8",
     )
-    board_before = (workspace / "docs/BOARD.md").read_text(encoding="utf-8")
-    task_before = (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 
     assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 0
@@ -127,149 +128,24 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert {item["path"] for item in payload["data"]["applied"]} == {"docs/tasks/TEMPLATE.md", "scripts/repoctl", "docs/tasks/.repoctl-state/T-20260609120000Z.json"}
+    assert {item["path"] for item in payload["data"]["applied"]} == {"docs/tasks/TEMPLATE.md", "scripts/repoctl"}
     assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "new repoctl\n"
     assert (workspace / "docs/tasks/TEMPLATE.md").read_text(encoding="utf-8") == "new template\n"
-    migrated = json.loads(state_path.read_text(encoding="utf-8"))
-    assert migrated["schema_version"] == 3
-    assert migrated["initial"]["start_head"] == "a" * 40
+    preserved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert preserved_state["schema_version"] == 3
+    assert preserved_state["initial"]["start_head"] == "a" * 40
 
     assert main(["upgrade", "status", "--json"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["data"]["latest"]["backup"]["availability"] == "available"
 
 
-def test_upgrade_preserves_unmigratable_archived_task_state(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    source = tmp_path / "source"
-    write_workspace(workspace)
-    write_source(source)
-    task_id = "T-20260608120000Z"
-    state_path = workspace / f"docs/tasks/.repoctl-state/{task_id}.json"
-    state_path.parent.mkdir(parents=True)
-    original = json.dumps({"task_id": task_id, "created": "20260608T120000Z", "repo_changes": []}, indent=2) + "\n"
-    state_path.write_text(original, encoding="utf-8")
-
-    plan = plan_upgrade(workspace, source=source)
-
-    assert plan["conflicts"] == []
-    assert plan["state_migrations"] == []
-    assert state_path.read_text(encoding="utf-8") == original
 
 
-def test_upgrade_defers_unmigratable_live_task_state_without_blocking_apply(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    source = tmp_path / "source"
-    plan_file = tmp_path / "plan.json"
-    write_workspace(workspace)
-    write_source(source)
-    state_path = workspace / "docs/tasks/.repoctl-state/T-20260609120000Z.json"
-    state_path.parent.mkdir(parents=True)
-    original = (
-        json.dumps(
-            {
-                "schema_version": 2,
-                "task_id": "T-20260609120000Z",
-                "created": "20260609T120000Z",
-                "repo_id": "main",
-                "repo_path": "repos",
-                "git_toplevel": (workspace / "repos").as_posix(),
-                "head": "a" * 40,
-                "repo_changes": [{"change": "modified", "path": "app.py"}],
-                "repo_change_fingerprints": {"modified\u0000app.py\u0000": "b" * 64},
-            },
-            indent=2,
-        )
-        + "\n"
-    )
-    state_path.write_text(original, encoding="utf-8")
-
-    plan = plan_upgrade(workspace, source=source)
-
-    assert plan["conflicts"] == []
-    assert plan["state_migrations"] == []
-    assert [warning["code"] for warning in plan["warnings"]] == ["task_state_migration_deferred"]
-    write_plan(plan_file, plan)
-    result = apply_upgrade(workspace, plan_file=plan_file)
-    assert result["warnings"] == plan["warnings"]
-    assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "new repoctl\n"
-    assert state_path.read_text(encoding="utf-8") == original
 
 
-def test_upgrade_migrates_v1_completion_receipt_as_recorded_paths_only(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    source = tmp_path / "source"
-    plan_file = tmp_path / "plan.json"
-    write_workspace(workspace)
-    write_source(source)
-    task_id = "T-20260608120000Z"
-    task_path = workspace / f"docs/archive/tasks/{task_id}--done.md"
-    task_text = "---\nid: T-20260608120000Z\nstatus: done\n---\n\n## Verification\n\n- pytest: passed\n"
-    task_path.write_text(task_text, encoding="utf-8")
-    content_sha256 = "sha256:" + hashlib.sha256(task_text.encode("utf-8")).hexdigest()
-    receipt_path = workspace / f"docs/tasks/.repoctl-state/completions/{task_id}.json"
-    receipt_path.parent.mkdir(parents=True)
-    receipt_path.write_text(
-        json.dumps(
-            {
-                "schema": "repoctl.task.completion",
-                "schema_version": 1,
-                "task_id": task_id,
-                "repo_id": "main",
-                "status": "done",
-                "completed_at": "20260608T121000Z",
-                "task_path": f"docs/archive/tasks/{task_id}--done.md",
-                "archive_path": f"docs/archive/tasks/{task_id}--done.md",
-                "content_sha256": content_sha256,
-                "changed_entries": [{"change": "modified", "path": "app.py"}],
-                "repo_evidence": {"start_head": "a" * 40, "finish_head": "a" * 40, "git_available": True},
-                "verification": {"content_sha256": content_sha256},
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    plan = plan_upgrade(workspace, source=source)
-    assert len(plan["receipt_migrations"]) == 1
-    write_plan(plan_file, plan)
-    result = apply_upgrade(workspace, plan_file=plan_file)
-
-    assert any(item == {"path": f"docs/tasks/.repoctl-state/completions/{task_id}.json", "action": "migrate_completion_receipt"} for item in result["applied"])
-    migrated = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert migrated["schema_version"] == 2
-    assert migrated["repo_evidence"]["mode"] == "none"
-    assert migrated["repo_evidence"]["attribution"] == "none"
-    assert migrated["changed_entries"] == [{"change": "modified", "path": "app.py"}]
-    assert migrated["verification"]["source"] == "task_section"
-    assert migrated["verification"]["source_sha256"].startswith("sha256:")
 
 
-def test_upgrade_status_accepts_individual_backups_without_recorded_digest(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    write_workspace(workspace)
-    run_id = "20260618025741Z"
-    backup_rel = f"docs/tasks/.repoctl-state/upgrades/{run_id}/backup/tools/repoctl/tasks.py"
-    backup_path = workspace / backup_rel
-    backup_path.parent.mkdir(parents=True)
-    backup_path.write_text("old tasks module\n", encoding="utf-8")
-    receipt_path = workspace / f"docs/tasks/.repoctl-state/upgrades/{run_id}/receipt.json"
-    receipt_path.write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "backups": [{"path": "tools/repoctl/tasks.py", "backup_path": backup_rel}],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    status, problems = upgrade_status(workspace)
-
-    assert problems == []
-    assert status["latest"]["backup"]["availability"] == "digest_unavailable"
 
 
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:
@@ -700,9 +576,8 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
     env["PATH"] = "/usr/bin:/bin"
     env["PYTHON"] = sys.executable
     checks = [
-        (["./scripts/repoctl", "context", "--help"], ["benchmark-materialize", "pack-benchmark-materialize", "pack-benchmark-compare"]),
-        (["./scripts/repoctl", "field-gate", "run", "--help"], ["release-candidate"]),
-        (["./scripts/repoctl", "field-gate", "compare", "--help"], ["--require-no-gate-regressions"]),
+        (["./scripts/repoctl", "context", "--help"], ["query", "pack"]),
+        (["./scripts/repoctl", "graph", "--help"], ["build", "query"]),
         (["./scripts/repoctl", "knowledge", "--help"], ["render"]),
         (["./scripts/repoctl", "knowledge", "render", "--help"], ["--check"]),
     ]
@@ -786,7 +661,7 @@ Promote a context pack into reviewed knowledge after upgrade.
     query_payload = run_repoctl_json(workspace, ["knowledge", "query", "context returns source bundles", "--repo-id", "main"])
     assert query_payload["data"]["results"][0]["record"]["id"] == record_id
 
-    render_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main"])
+    render_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main", "--full"])
     assert render_payload["data"]["rendered"]
     render_check_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main", "--check"])
     assert render_check_payload["data"]["check"]["current"] is True

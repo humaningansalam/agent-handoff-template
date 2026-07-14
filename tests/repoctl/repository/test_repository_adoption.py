@@ -6,7 +6,6 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tests.repoctl.workspace.test_check import write_workspace
-from tests.repoctl.meta.test_meta_check import write_repometa
 
 
 
@@ -40,21 +39,6 @@ def test_unconfigured_collection_repo_check_reports_unbound_identity(tmp_path: P
     assert payload["data"]["candidates"][0]["suggested_id"] == "Web App"
 
 
-def test_unconfigured_collection_blocks_meta_until_adopted(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    web = tmp_path / "repos/web"
-    api = tmp_path / "repos/api"
-    init_repo(web)
-    init_repo(api)
-    write_repometa(web)
-    write_repometa(api)
-    (web / "app.py").write_text("print('web')\n", encoding="utf-8")
-    (api / "app.py").write_text("print('api')\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["meta", "inventory", "--repo-id", "api", "--json"]) == 2
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
 
 def test_unconfigured_collection_blocks_meta_init_index_and_product_task_without_selector(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -134,16 +118,3 @@ def test_repo_adopt_all_invalid_candidate_does_not_write_config(tmp_path: Path, 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_topology_invalid"
     assert not (tmp_path / "docs/repoctl.json").exists()
-
-
-def test_unconfigured_collection_task_create_requires_adoption(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    init_repo(tmp_path / "repos/web")
-    init_repo(tmp_path / "repos/api")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--area", "repo", "--repo-id", "web", "--slug", "unadopted-web", "Unadopted web", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repository_identity_unbound"
-

@@ -81,7 +81,6 @@ def _reconcile_state_with_evidence(root: Path, checkpoint: dict[str, Any], lates
     artifacts = [dict(row) for row in state.get("artifacts", []) if isinstance(row, dict)]
     indexed = {str(row.get("path") or ""): row for row in artifacts}
     original_indexed = {path: dict(row) for path, row in indexed.items()}
-    original_artifact_paths = set(indexed)
     original_worker_status = state.get("worker_status") if isinstance(state.get("worker_status"), dict) else {}
     candidate_state = _candidate_state(root)
     active_candidate = str(state.get("active_candidate_id") or "").strip() or str(candidate_state.get("active_candidate_id") or "").strip()
@@ -373,7 +372,6 @@ def _implementation_changed_files(root: Path, workflow_id: str) -> tuple[str, ..
 
 
 def _reconciled_pass_eligibility(root: Path, state: dict[str, Any], evidence_paths: set[str], worker_status: dict[str, dict[str, bool]]) -> dict[str, Any]:
-    existing = state.get("pass_eligibility") if isinstance(state.get("pass_eligibility"), dict) else {}
     blockers = [blocker for blocker in _pass_blockers(state) if blocker != "mandatory worker evidence pending"]
     policy = _policy_decision(root, state)
     mandatory_workers = policy.required_workers

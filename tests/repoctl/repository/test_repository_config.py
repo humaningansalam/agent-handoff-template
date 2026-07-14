@@ -19,7 +19,7 @@ def test_config_rejects_absolute_repository_path(tmp_path: Path) -> None:
     try:
         repo_layout(tmp_path)
     except RepoctlError as exc:
-        assert "workspace-relative" in str(exc)
+        assert exc.code == "repository_topology_invalid"
     else:
         raise AssertionError("absolute repository paths should be rejected")
 
@@ -33,7 +33,6 @@ def test_config_rejects_product_repo_outside_repos_boundary(tmp_path: Path) -> N
         repo_layout(tmp_path)
     except RepoctlError as exc:
         assert exc.code == "repository_topology_invalid"
-        assert "repos or repos/<id>" in str(exc)
     else:
         raise AssertionError("configured product repositories must stay under repos/")
 
@@ -47,7 +46,6 @@ def test_config_rejects_direct_repos_with_non_main_id(tmp_path: Path) -> None:
         repo_layout(tmp_path)
     except RepoctlError as exc:
         assert exc.code == "repository_topology_invalid"
-        assert "main" in str(exc)
     else:
         raise AssertionError("direct repos/ must use reserved id main")
 
@@ -64,7 +62,6 @@ def test_config_rejects_duplicate_git_toplevel_aliases(tmp_path: Path) -> None:
         repo_layout(tmp_path)
     except RepoctlError as exc:
         assert exc.code == "repository_topology_invalid"
-        assert "duplicate repository" in str(exc)
     else:
         raise AssertionError("two repo_id values must not point at the same real git repository")
 
@@ -139,4 +136,3 @@ def test_direct_repos_symlink_escape_is_not_ready_and_cannot_mutate(tmp_path: Pa
 
     capsys.readouterr()
     assert not (outside / ".repometa").exists()
-

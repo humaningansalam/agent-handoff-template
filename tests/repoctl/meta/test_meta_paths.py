@@ -10,33 +10,6 @@ from tools.repoctl.meta import shard_for_path
 from tests.repoctl.workspace.test_check import write_workspace
 
 
-BASE_POLICY = {
-    "schema_version": 1,
-    "indexing": {
-        "exclude": [
-            ".git/**",
-            ".repometa/**",
-            "local-cache/**",
-            "build-output/**",
-            "third-party-snapshot/**",
-            "generated-output/**",
-            "**/__pycache__/**",
-            "**/*.png",
-        ]
-    },
-    "vocab": {
-        "roles": {"base": ["service", "adapter", "config", "test", "workflow", "spec"], "extend": []},
-        "declared_effects": {"base": ["none", "db", "net", "fs", "ui", "time", "crypto", "config"], "extend": ["queue"]},
-    },
-    "defaults": {
-        "areas": {"backend": ["backend/**"], "frontend": ["frontend/**"], "infra": [".github/**"]},
-        "topics": {"tests": ["**/tests/**", "**/*test*"], "api": ["frontend/src/api/**"], "auth": ["**/auth/**", "**/*token*"]},
-    },
-    "coverage": {"require_annotations": []},
-}
-
-
-
 def test_meta_check_rejects_wrong_shard_and_duplicate_path(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -213,4 +186,3 @@ def test_meta_set_caution_file_round_trip(tmp_path: Path, monkeypatch, capsys) -
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["data"]["annotation"]["caution"] == ["keep response compatibility"]
     assert main(["meta", "check", "--json"]) == 0
-

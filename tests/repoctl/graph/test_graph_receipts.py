@@ -6,6 +6,8 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import file_id
+from tools.repoctl.graph_store import materialize_graph
+from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import commit_all, init_repo, write_settings
@@ -56,10 +58,22 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     assert main(["task", "start", task_id, "--json"]) == 0
     capsys.readouterr()
     (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")
-    task_path = tmp_path / "docs/tasks" / f"{task_id}--alpha.md"
-    task_text_value = task_path.read_text(encoding="utf-8")
-    discovery = "## Discovery\n\n- Candidate query: `run`\n- Candidate files reviewed: `repos/app.py`\n- Chosen files: `repos/app.py`\n\n"
-    task_path.write_text(task_text_value.replace("## Execution Log", discovery + "## Execution Log", 1), encoding="utf-8")
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "run implementation",
+            "--reviewed",
+            "repos/app.py",
+            "--chosen",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
     verification = tmp_path / "verification.md"
     verification.write_text("- Command: pytest\n- Result: pass\n", encoding="utf-8")
 
@@ -81,6 +95,18 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     assert any(edge["kind"] == "TASK_RECORDED_CHANGE" and edge["facts"]["attribution"] == "task_working_tree" for edge in snapshot["edges"])
     assert any(edge["kind"] == "CHANGE_AFFECTED_FILE" and edge["to"] == file_id("main", "app.py") for edge in snapshot["edges"])
     assert any(edge["kind"] == "TASK_VERIFIED_BY" and edge["from"] == task_node_id for edge in snapshot["edges"])
+
+    task_path = receipt["task_path_at_completion"]
+    assert main(["graph", "query", "--task", task_id, "--json"]) == 0
+    task_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(path["edge"] == "CHANGE_AFFECTED_FILE" for path in task_result["paths"])
+    assert any(item["selector"] == {"kind": "document", "value": task_path} for item in task_result["continuations"])
+    task_continuation = next(item for item in task_result["continuations"] if item["selector"] == {"kind": "task", "value": task_id})
+    assert "task.show" in task_continuation["actions"]
+
+    assert main(["graph", "query", "--artifact", task_path, "--json"]) == 0
+    artifact_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(item["selector"] == {"kind": "task", "value": task_id} for item in artifact_result["continuations"])
 
 
 def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -175,6 +201,9 @@ def test_graph_reports_unknown_scope_invalid_receipt_without_losing_current_inve
     receipt_dir.mkdir(parents=True)
     receipt_path = receipt_dir / "T-20260609184046Z.json"
     receipt_path.write_text(json.dumps({"broken": True}) + "\n", encoding="utf-8")
+    snapshot, problems, _meta = materialize_graph(tmp_path, target=require_repo_target(tmp_path, repo_id="main"))
+    assert snapshot is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["graph", "query", "--repo-id", "main", "--file", "app.py", "--json"]) == 0
@@ -184,6 +213,8 @@ def test_graph_reports_unknown_scope_invalid_receipt_without_losing_current_inve
     assert payload["data"]["completeness"]["capabilities"]["file_inventory"] == "complete"
     assert payload["data"]["completeness"]["capabilities"]["task_history"] == "partial"
     assert payload["data"]["completeness"]["invalid_completion_receipts"] == 1
+    assert payload["data"]["completeness"]["provider_failure_count"] == 0
+    assert all(warning["code"] != "graph_provider_failure" for warning in payload["data"]["result"]["warnings"])
     assert any(
         warning["code"] == "invalid_completion_receipt"
         and warning.get("path") == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"

@@ -5,10 +5,14 @@ import subprocess
 from pathlib import Path
 
 from tools.repoctl.cli import main
-from tools.repoctl.io import RepoctlError
-from tools.repoctl.markdown import find_section, replace_section
+from tools.repoctl.markdown import replace_section
 from tools.repoctl.meta import shard_for_path
-from tests.repoctl.workspace.test_check import add_task, init_repo, task_text, write_workspace
+from tests.repoctl.workspace.test_check import (
+    add_task,
+    init_repo as init_repo,
+    task_text as task_text,
+    write_workspace as write_workspace,
+)
 
 
 
@@ -105,11 +109,5 @@ def record_discovery(root: Path, task_id: str, *, query: str, reviewed: str, cho
         + field("Candidate files reviewed", reviewed_values)
         + field("Chosen files", chosen_values)
     )
-    try:
-        text = replace_section(text, "Discovery", discovery)
-    except RepoctlError as exc:
-        if exc.code != "missing_section":
-            raise
-        execution_log = find_section(text, "Execution Log")
-        text = text[: execution_log.start] + f"## Discovery\n\n{discovery}\n" + text[execution_log.start :]
+    text = replace_section(text, "Discovery", discovery)
     task_path.write_text(text, encoding="utf-8")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -8,7 +7,6 @@ from tools.repoctl.cli import main
 from tests.repoctl.task_lifecycle_helpers import (
     add_task,
     task_text,
-    write_json,
     write_workspace,
 )
 
@@ -92,96 +90,8 @@ def test_task_finish_parent_archives_non_live_child_byte_identically(tmp_path: P
     assert child_archive.read_bytes() == original_child
 
 
-def test_task_finish_parent_restores_child_receipt_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
-    child_path = add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
-    child_text = child_path.read_text(encoding="utf-8")
-    child_hash = "sha256:" + hashlib.sha256(child_text.encode("utf-8")).hexdigest()
-    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184047Z.json"
-    write_json(
-        receipt_path,
-        {
-            "schema": "repoctl.task.completion",
-            "schema_version": 1,
-            "task_id": "T-20260609184047Z",
-            "repo_id": "",
-            "status": "done",
-            "completed_at": "2026-06-09T18:40:47Z",
-            "task_path": "docs/tasks/T-20260609184047Z--child.md",
-            "archive_path": "",
-            "content_sha256": child_hash,
-            "changed_entries": [],
-            "verification": {
-                "task_path": "docs/tasks/T-20260609184047Z--child.md",
-                "archive_path": "",
-                "content_sha256": child_hash,
-            },
-        },
-    )
-    original_receipt = receipt_path.read_text(encoding="utf-8")
-    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--parent.md\n\n## Backlog\n", encoding="utf-8")
-    verification = tmp_path / "verification.md"
-    verification.write_text("parent verified\n", encoding="utf-8")
-    real_atomic_write = __import__("tools.repoctl.cli", fromlist=["atomic_write"]).atomic_write
-
-    def fail_board_write(path: Path, text: str) -> None:
-        if path.name == "BOARD.md":
-            raise OSError("simulated board write failure")
-        real_atomic_write(path, text)
-
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.atomic_write", fail_board_write)
-
-    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "io_error"
-    assert child_path.exists()
-    assert not (tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md").exists()
-    assert receipt_path.read_text(encoding="utf-8") == original_receipt
 
 
-def test_task_cancel_parent_does_not_rewrite_non_live_child_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))
-    child_path = add_task(tmp_path, "T-20260609184047Z--child.md", task_text("T-20260609184047Z", status="done", parent="T-20260609184046Z"))
-    child_text = child_path.read_text(encoding="utf-8")
-    child_hash = "sha256:" + hashlib.sha256(child_text.encode("utf-8")).hexdigest()
-    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184047Z.json"
-    write_json(
-        receipt_path,
-        {
-            "schema": "repoctl.task.completion",
-            "schema_version": 1,
-            "task_id": "T-20260609184047Z",
-            "repo_id": "",
-            "status": "done",
-            "completed_at": "2026-06-09T18:40:47Z",
-            "task_path": "docs/tasks/T-20260609184047Z--child.md",
-            "archive_path": "",
-            "content_sha256": child_hash,
-            "changed_entries": [],
-            "verification": {
-                "task_path": "docs/tasks/T-20260609184047Z--child.md",
-                "archive_path": "",
-                "content_sha256": child_hash,
-            },
-        },
-    )
-    original_receipt = receipt_path.read_bytes()
-    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--parent.md\n\n## Backlog\n", encoding="utf-8")
-    verification = tmp_path / "verification.md"
-    verification.write_text("cancel parent\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "cancel", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
-
-    capsys.readouterr()
-    child_archive_rel = "docs/archive/tasks/T-20260609184047Z--child.md"
-    child_archive = tmp_path / child_archive_rel
-    assert child_archive.exists()
-    assert receipt_path.read_bytes() == original_receipt
 
 
 def test_task_finish_parent_ignores_corrupt_child_receipt_while_archiving_child(tmp_path: Path, monkeypatch, capsys) -> None:

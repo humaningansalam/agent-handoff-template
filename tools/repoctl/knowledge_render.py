@@ -551,7 +551,7 @@ def _record_page(root: Path, record: dict[str, Any], *, superseded_ids: set[str]
             lines.append(f"- `{event.get('id', '')}` `{event.get('type', '')}`{suffix}")
     else:
         lines.append("- No lifecycle events found.")
-    lines.extend(["", "## Navigation", "", f"- [Index](../INDEX.md)", f"- [{kind_page}](../{kind_page})", "- [History](../history.md)"])
+    lines.extend(["", "## Navigation", "", "- [Index](../INDEX.md)", f"- [{kind_page}](../{kind_page})", "- [History](../history.md)"])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -680,7 +680,7 @@ def _record_symbol_target_items(record: dict[str, Any]) -> list[Any]:
     applies_to = record.get("applies_to") if isinstance(record.get("applies_to"), dict) else {}
     created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
     derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
-    for source in (scope.get("symbols"), applies_to.get("symbols"), derived.get("related_symbols"), derived.get("symbols")):
+    for source in (scope.get("symbols"), applies_to.get("symbols"), derived.get("symbols")):
         if isinstance(source, list):
             items.extend(source)
     return items

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .context import build_context_bundle
+from .context import build_context_bundle, compact_context_bundle
 from .context_model import ContextBundle
 from .graph import build_graph
 from .graph_model import GraphSnapshot
@@ -24,14 +24,13 @@ def run_context_benchmark(
     *,
     fixture: Path,
     repo_id: str = "",
-    budget_tokens: int = 1200,
     min_recall_at_5: float | None = None,
     min_precision_at_5: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
     min_category_recall_at_5: dict[str, float] | None = None,
     min_category_knowledge_recall_at_5: dict[str, float] | None = None,
     min_category_graph_edge_recall: dict[str, float] | None = None,
-    min_category_packed_recall: dict[str, float] | None = None,
+    min_category_visible_recall: dict[str, float] | None = None,
     require_source_integrity: bool = False,
     require_knowledge_source_current: bool = False,
     require_no_forbidden: bool = False,
@@ -52,23 +51,28 @@ def run_context_benchmark(
     if require_fixture_corpus:
         problems.extend(corpus_problems)
     results: list[dict[str, Any]] = []
+    graph_cache: dict[str, tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]] = {}
     for question in questions:
         question_id = str(question.get("id") or "")
         target_repo_id = repo_id or str(question.get("repo_id") or "")
         target = require_repo_target(root, repo_id=target_repo_id or None)
+        graph_result = graph_cache.get(target.id)
+        if graph_result is None:
+            graph_result = build_graph(root, target=target)
+            graph_cache[target.id] = graph_result
         bundle, bundle_problems, _meta = build_context_bundle(
             root,
             target=target,
             query=str(question.get("question") or ""),
-            budget_tokens=budget_tokens,
             explain=True,
             mode=str(question.get("mode") or ""),
+            graph_result=graph_result,
         )
-        snapshot, graph_problems, _graph_meta = build_graph(root, target=target)
+        _snapshot, graph_problems, _graph_meta = graph_result
         problems.extend(bundle_problems)
         problems.extend(graph_problems)
         spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
-        results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems], snapshot))
+        results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems]))
 
     summary = _summarize(results)
     problems.extend(
@@ -80,7 +84,7 @@ def run_context_benchmark(
             min_category_recall_at_5=min_category_recall_at_5 or {},
             min_category_knowledge_recall_at_5=min_category_knowledge_recall_at_5 or {},
             min_category_graph_edge_recall=min_category_graph_edge_recall or {},
-            min_category_packed_recall=min_category_packed_recall or {},
+            min_category_visible_recall=min_category_visible_recall or {},
             require_source_integrity=require_source_integrity,
             require_knowledge_source_current=require_knowledge_source_current,
             require_no_forbidden=require_no_forbidden,
@@ -100,7 +104,7 @@ def run_context_benchmark(
             "min_category_recall_at_5": dict(sorted((min_category_recall_at_5 or {}).items())),
             "min_category_knowledge_recall_at_5": dict(sorted((min_category_knowledge_recall_at_5 or {}).items())),
             "min_category_graph_edge_recall": dict(sorted((min_category_graph_edge_recall or {}).items())),
-            "min_category_packed_recall": dict(sorted((min_category_packed_recall or {}).items())),
+            "min_category_visible_recall": dict(sorted((min_category_visible_recall or {}).items())),
             "require_source_integrity": require_source_integrity,
             "require_knowledge_source_current": require_knowledge_source_current,
             "require_no_forbidden": require_no_forbidden,
@@ -477,7 +481,7 @@ def _append_drop_regression(problems: list[Problem], metric_deltas: dict[str, di
         problems.append(Problem("error", code, f"context benchmark {key} dropped more than allowed"))
 
 
-def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem], snapshot: GraphSnapshot | None = None) -> dict[str, Any]:
+def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem]) -> dict[str, Any]:
     labels = _source_labels(spec)
     required = labels["must_find"]
     required_knowledge = _refs(spec.get("required_knowledge_source_refs"))
@@ -485,8 +489,9 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     optional = labels["acceptable"]
     supporting = labels["supporting"]
     forbidden = labels["noise"]
-    candidate_refs = _bundle_refs(bundle, field="candidates")
-    packed_refs = _bundle_refs(bundle, field="packed_context")
+    evidence_refs = _bundle_refs(bundle)
+    compact_payload = compact_context_bundle(bundle) if bundle is not None else {}
+    visible_refs = _compact_source_refs(compact_payload)
     knowledge_refs = _knowledge_refs(bundle)
     knowledge_score_results = _knowledge_score_results(bundle)
     knowledge_source_statuses = _knowledge_source_statuses(bundle)
@@ -495,26 +500,26 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     superseded_knowledge_excluded = problem_codes.count("knowledge_superseded_record_excluded")
     deprecated_knowledge_excluded = problem_codes.count("knowledge_deprecated_record_excluded")
 
-    top5 = candidate_refs[:5]
-    top10 = candidate_refs[:10]
+    top5 = evidence_refs[:5]
+    top10 = evidence_refs[:10]
     knowledge_top5 = knowledge_refs[:5]
-    packed_required = [ref for ref in required if _contains_ref(packed_refs, ref)]
+    visible_required = [ref for ref in required if _contains_ref(visible_refs, ref)]
     required_top5 = [ref for ref in required if _contains_ref(top5, ref)]
     required_top10 = [ref for ref in required if _contains_ref(top10, ref)]
     required_knowledge_top5 = [ref for ref in required_knowledge if _contains_ref(knowledge_top5, ref)]
-    graph_edges = _graph_edges(snapshot)
+    graph_edges = _bundle_graph_edges(bundle)
     required_edges_found = [edge for edge in required_edges if _contains_edge(graph_edges, edge)]
-    selected_forbidden = [ref for ref in forbidden if _contains_ref(candidate_refs, ref) or _contains_ref(packed_refs, ref)]
-    cross_repo_refs = _cross_repo_refs([*candidate_refs, *packed_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
+    selected_forbidden = [ref for ref in forbidden if _contains_ref(visible_refs, ref)]
+    cross_repo_refs = _cross_repo_refs([*visible_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
     precision_top5 = [ref for ref in top5 if not _matches_any_expected(ref, supporting)]
     relevant_top5 = sum(1 for ref in precision_top5 if _matches_any_expected(ref, [*required, *optional]))
     supporting_top5 = [ref for ref in top5 if _matches_any_expected(ref, supporting)]
-    first_correct_rank = next((index for index, ref in enumerate(candidate_refs, start=1) if _matches_any_expected(ref, required)), 0)
-    generated_noise = [ref for ref in _dedupe_refs(packed_refs) if _is_generated_or_ignored_ref(ref) and not _matches_any_expected(ref, supporting)]
-    verification = _verification_hint_metrics(spec, packed_refs)
-    integrity_failures = [ref for ref in candidate_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
+    first_correct_rank = next((index for index, ref in enumerate(evidence_refs, start=1) if _matches_any_expected(ref, required)), 0)
+    generated_noise = [ref for ref in _dedupe_refs(visible_refs) if _is_generated_or_ignored_ref(ref) and not _matches_any_expected(ref, supporting)]
+    verification = _verification_hint_metrics(spec, visible_refs)
+    integrity_failures = [ref for ref in evidence_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
     knowledge_integrity_failures = [ref for ref in knowledge_refs if not str(ref.get("content_sha256") or "").startswith("sha256:")]
-    budget = bundle.budget if bundle is not None else {}
+    compact_bytes = len(json.dumps(compact_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     return {
         "id": str(question.get("id") or ""),
@@ -534,15 +539,16 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "generated_or_ignored_noise": len(generated_noise),
             "verification_hint_accuracy": verification["accuracy"],
             "verification_hint_expected_count": verification["expected_count"],
-            "output_estimated_tokens": int(budget.get("estimated_tokens") or 0),
-            "output_candidate_count": len(candidate_refs),
-            "output_packed_count": len(packed_refs),
-            "packed_recall": _ratio(len(packed_required), len(required)),
+            "output_estimated_tokens": (compact_bytes + 3) // 4,
+            "output_serialized_bytes": compact_bytes,
+            "output_evidence_count": len(evidence_refs),
+            "output_visible_count": len(visible_refs),
+            "visible_recall": _ratio(len(visible_required), len(required)),
             "source_ref_integrity": len(integrity_failures) == 0,
             "knowledge_source_ref_integrity": len(knowledge_integrity_failures) == 0,
             "forbidden_selected": len(selected_forbidden),
             "cross_repo_ref_count": len(cross_repo_refs),
-            "packed_required_found": len(packed_required),
+            "visible_required_found": len(visible_required),
             "knowledge_recall_at_5": _ratio(len(required_knowledge_top5), len(required_knowledge)) if required_knowledge else 0.0,
             "graph_edge_recall": _ratio(len(required_edges_found), len(required_edges)) if required_edges else 1.0,
             "required_graph_edge_count": len(required_edges),
@@ -557,8 +563,8 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
         "required_found_at_5": required_top5,
         "required_found_at_10": required_top10,
         "missing_required_at_10": [ref for ref in required if not _contains_ref(top10, ref)],
-        "packed_required_found_refs": packed_required,
-        "missing_required_from_packed": [ref for ref in required if not _contains_ref(packed_refs, ref)],
+        "visible_required_found_refs": visible_required,
+        "missing_required_from_visible": [ref for ref in required if not _contains_ref(visible_refs, ref)],
         "required_knowledge_found_at_5": required_knowledge_top5,
         "missing_required_knowledge_at_5": [ref for ref in required_knowledge if not _contains_ref(knowledge_top5, ref)],
         "required_graph_edges_found": required_edges_found,
@@ -595,9 +601,11 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "verification_hint_expected_questions": len(verification_metrics),
         "mean_output_estimated_tokens": _mean(metric["output_estimated_tokens"] for metric in metrics),
         "max_output_estimated_tokens": max((int(metric["output_estimated_tokens"]) for metric in metrics), default=0),
-        "mean_output_candidate_count": _mean(metric["output_candidate_count"] for metric in metrics),
-        "mean_output_packed_count": _mean(metric["output_packed_count"] for metric in metrics),
-        "mean_packed_recall": _mean(metric["packed_recall"] for metric in metrics),
+        "mean_output_serialized_bytes": _mean(metric["output_serialized_bytes"] for metric in metrics),
+        "max_output_serialized_bytes": max((int(metric["output_serialized_bytes"]) for metric in metrics), default=0),
+        "mean_output_evidence_count": _mean(metric["output_evidence_count"] for metric in metrics),
+        "mean_output_visible_count": _mean(metric["output_visible_count"] for metric in metrics),
+        "mean_visible_recall": _mean(metric["visible_recall"] for metric in metrics),
         "source_ref_integrity": all(metric["source_ref_integrity"] for metric in metrics),
         "knowledge_source_ref_integrity": all(metric["knowledge_source_ref_integrity"] for metric in metrics),
         "mean_knowledge_recall_at_5": _mean(metric["knowledge_recall_at_5"] for metric in metrics if metric["required_knowledge_count"]),
@@ -640,7 +648,7 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
             "mean_verification_hint_accuracy": _mean(metric.get("verification_hint_accuracy", 0.0) for metric in verification_metrics),
             "mean_output_estimated_tokens": _mean(metric.get("output_estimated_tokens", 0) for metric in items),
             "max_output_estimated_tokens": max((int(metric.get("output_estimated_tokens") or 0) for metric in items), default=0),
-            "mean_packed_recall": _mean(metric.get("packed_recall", 0.0) for metric in items),
+            "mean_visible_recall": _mean(metric.get("visible_recall", 0.0) for metric in items),
             "mean_knowledge_recall_at_5": _mean(metric.get("knowledge_recall_at_5", 0.0) for metric in items if metric.get("required_knowledge_count", 0)),
             "knowledge_expected_questions": sum(1 for metric in items if metric.get("required_knowledge_count", 0)),
             "mean_graph_edge_recall": _mean(metric.get("graph_edge_recall", 1.0) for metric in items if metric.get("required_graph_edge_count", 0)),
@@ -654,11 +662,23 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
     return summary
 
 
-def _bundle_refs(bundle: ContextBundle | None, *, field: str) -> list[dict[str, Any]]:
+def _bundle_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
-    values = bundle.candidates if field == "candidates" else bundle.packed_context
-    return [candidate.source_ref.to_dict() for candidate in values]
+    return [candidate.source_ref.to_dict() for candidate in bundle.evidence]
+
+
+def _compact_source_refs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = payload.get("groups") if isinstance(payload.get("groups"), dict) else {}
+    refs: list[dict[str, Any]] = []
+    for items in groups.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            ref = item.get("source_ref") if isinstance(item, dict) and isinstance(item.get("source_ref"), dict) else None
+            if ref is not None:
+                refs.append(ref)
+    return _dedupe_refs(refs)
 
 
 def _knowledge_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
@@ -765,13 +785,13 @@ def _is_generated_or_ignored_ref(ref: dict[str, Any]) -> bool:
     return bool(path and any(fnmatch.fnmatch(path, pattern) for pattern in IGNORED_SOURCE_PATTERNS))
 
 
-def _verification_hint_metrics(spec: dict[str, Any], packed_refs: list[dict[str, Any]]) -> dict[str, Any]:
+def _verification_hint_metrics(spec: dict[str, Any], visible_refs: list[dict[str, Any]]) -> dict[str, Any]:
     raw_expected = spec.get("expected_verification_hints")
     if not isinstance(raw_expected, list):
         return {"accuracy": 0.0, "expected_count": 0, "selected_count": 0, "found": [], "missing": [], "unexpected": []}
     expected = [item for item in raw_expected if isinstance(item, dict) and str(item.get("command_or_capability") or "").strip()]
     positive = [item for item in expected if str(item.get("status") or "acceptable") in {"must_find", "acceptable"}]
-    selected = [ref for ref in packed_refs if str(ref.get("kind") or "") == "verification_hint"]
+    selected = [ref for ref in visible_refs if str(ref.get("kind") or "") == "verification_hint"]
 
     def matches(ref: dict[str, Any], item: dict[str, Any]) -> bool:
         needle = str(item.get("command_or_capability") or "").casefold()
@@ -808,10 +828,28 @@ def _matches_any_expected(ref: dict[str, Any], expected: list[dict[str, Any]]) -
     return any(_contains_ref([ref], item) for item in expected)
 
 
-def _graph_edges(snapshot: GraphSnapshot | None) -> list[dict[str, Any]]:
-    if snapshot is None:
+def _bundle_graph_edges(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+    if bundle is None:
         return []
-    return [edge.to_dict() for edge in snapshot.edges]
+    edges: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for candidate in bundle.evidence:
+        for relation in candidate.graph_path:
+            if not isinstance(relation, dict):
+                continue
+            edge = {
+                "kind": str(relation.get("edge") or ""),
+                "from": str(relation.get("from_id") or ""),
+                "to": str(relation.get("to_id") or ""),
+                "assertion": str(relation.get("assertion") or ""),
+                "source": str(relation.get("provider") or ""),
+            }
+            key = (edge["kind"], edge["from"], edge["to"], edge["assertion"], edge["source"])
+            if not all(key[:3]) or key in seen:
+                continue
+            seen.add(key)
+            edges.append(edge)
+    return edges
 
 
 def _contains_edge(haystack: list[dict[str, Any]], needle: dict[str, Any]) -> bool:
@@ -881,7 +919,7 @@ def _gate_problems(
     min_category_recall_at_5: dict[str, float],
     min_category_knowledge_recall_at_5: dict[str, float],
     min_category_graph_edge_recall: dict[str, float],
-    min_category_packed_recall: dict[str, float],
+    min_category_visible_recall: dict[str, float],
     require_source_integrity: bool,
     require_knowledge_source_current: bool,
     require_no_forbidden: bool,
@@ -911,11 +949,11 @@ def _gate_problems(
         recall = float(category_summary.get("mean_graph_edge_recall") or 0.0)
         if recall < threshold:
             problems.append(Problem("error", "context_benchmark_category_graph_edge_gate_failed", f"context benchmark {category} graph edge recall is below gate", category))
-    for category, threshold in sorted(min_category_packed_recall.items()):
+    for category, threshold in sorted(min_category_visible_recall.items()):
         category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
-        recall = float(category_summary.get("mean_packed_recall") or 0.0)
+        recall = float(category_summary.get("mean_visible_recall") or 0.0)
         if recall < threshold:
-            problems.append(Problem("error", "context_benchmark_category_packed_recall_gate_failed", f"context benchmark {category} packed recall is below gate", category))
+            problems.append(Problem("error", "context_benchmark_category_visible_recall_gate_failed", f"context benchmark {category} visible recall is below gate", category))
     if require_source_integrity and not bool(summary.get("source_ref_integrity")):
         problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
     if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):

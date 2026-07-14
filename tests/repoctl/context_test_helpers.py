@@ -38,7 +38,15 @@ def _sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _write_completion_receipt(root: Path, *, task_id: str = "T-20260625010101Z", repo_id: str = "main") -> None:
+def _write_completion_receipt(
+    root: Path,
+    *,
+    task_id: str = "T-20260625010101Z",
+    repo_id: str = "main",
+    changed_paths: list[str] | None = None,
+    completed_at: str = "20260625T010101Z",
+) -> None:
+    changed_paths = ["auth.py"] if changed_paths is None else changed_paths
     archive_rel = f"docs/archive/tasks/{task_id}--knowledge-receipt.md"
     archive_text = f"""---
 id: {task_id}
@@ -75,10 +83,10 @@ Keep token validation centralized.
         "repo_id": repo_id,
         "task_id": task_id,
         "status": "done",
-        "completed_at": "20260625T010101Z",
+        "completed_at": completed_at,
         "task_path_at_completion": archive_rel,
         "content_sha256": archive_hash,
-        "changed_entries": [{"change": "modified", "path": "auth.py"}],
+        "changed_entries": [{"change": "modified", "path": path} for path in changed_paths],
         "repo_evidence": {
             "mode": "working_tree_diff",
             "attribution": "task_working_tree",
@@ -89,7 +97,7 @@ Keep token validation centralized.
             "fingerprint_manifest": {},
             "ownership": {},
             "meta_gate": {},
-            "delta": {"changed_count": 1},
+            "delta": {"changed_count": len(changed_paths)},
         },
         "verification": {
             "source": "task_section",

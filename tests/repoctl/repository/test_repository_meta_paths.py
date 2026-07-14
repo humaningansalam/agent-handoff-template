@@ -13,18 +13,6 @@ from tests.repoctl.meta.test_meta_check import BASE_POLICY, write_repometa
 
 
 
-def test_meta_check_changed_blocks_repos_without_git(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repos = tmp_path / "repos"
-    repos.mkdir()
-    write_repometa(repos)
-    (repos / "app.py").write_text("print('not git')\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["meta", "check", "--changed", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
 
 def test_meta_check_multi_repo_problem_paths_and_next_actions_use_selected_repo(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -94,7 +82,6 @@ def test_verification_file_must_be_outside_all_product_repos(tmp_path: Path) -> 
         validate_verification_file(tmp_path, verification)
     except RepoctlError as exc:
         assert exc.code == "verification_file_inside_repo"
-        assert "repos/api/" in str(exc)
     else:
         raise AssertionError("verification file inside a non-selected product repo should be rejected")
 
@@ -120,4 +107,3 @@ def test_verification_file_must_be_outside_unbound_candidate_when_target_configu
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "verification_file_inside_repo"
-
