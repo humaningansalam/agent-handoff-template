@@ -10,12 +10,6 @@ from pathlib import Path
 from tools.repoctl.release import build_release_archive
 
 
-
-
-
-
-
-
 def test_build_release_archive_uses_manifest_managed_paths(tmp_path: Path) -> None:
     root = tmp_path / "source"
     out = tmp_path / "dist"
@@ -107,8 +101,6 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
         assert expected in result.stdout
 
 
-
-
 def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
@@ -120,6 +112,8 @@ def test_release_archive_closes_maintenance_runtime_dependencies(tmp_path: Path)
     managed = {"repoctl-upgrade-manifest.json", *manifest["replace_paths"], *manifest["create_paths"]}
     missing = sorted(path for path in managed if f"{prefix}/{path}" not in names)
     assert missing == []
+    assert f"{prefix}/tests/test_release_repository.py" not in names
+    assert "tests/repoctl/test_release.py" in manifest["remove_paths"]
 
     settings_paths = [".claude/settings.json", ".claude/settings.maintenance.json"]
     hook_commands: set[str] = set()

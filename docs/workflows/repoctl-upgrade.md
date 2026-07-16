@@ -29,6 +29,8 @@ It must preserve project state:
    `./scripts/repoctl check --json`
    `./scripts/repoctl meta check --json`
 
+The adopter test command covers managed runtime and workspace contracts. Template release/publication policy tests remain in the source repository CI and are not distributed to adopting workspaces.
+
 ## Manifest Policy
 
 - `replace_paths` are managed control-plane files that may be replaced from the release.

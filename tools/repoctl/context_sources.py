@@ -10,7 +10,7 @@ from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints, is_semantic_source_language, language_for_path, product_manifest_patterns
 from .meta import meta_inventory
 from .repositories import RepoTarget
-from .tasks import Problem, collect_completion_receipts
+from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
 
 
 DOCUMENT_PATTERNS = (
@@ -30,6 +30,16 @@ PRODUCT_DOCUMENT_PATTERNS = (
 )
 EXCLUDED_PARTS = {".repoctl-state", "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".firebase", ".dart_tool", "Library", "Temp", "Obj", "obj", "Build", "Builds", "Logs", "UserSettings", "node_modules", "dist", "build", "target"}
 MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024
+
+
+def current_source_eligible(repo_path: str, classification: str) -> bool:
+    return (
+        bool(repo_path)
+        and "\\" not in repo_path
+        and normalize_repo_path(repo_path) == repo_path
+        and classification != "excluded"
+        and is_semantic_source_language(language_for_path(repo_path))
+    )
 
 
 def collect_context_sources(
@@ -84,7 +94,8 @@ def collect_context_sources(
             rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
             text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
             chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=str(receipt.get("task_id") or "completion receipt")))
-            for artifact in receipt_artifact_paths(receipt):
+            artifact = completion_receipt_artifact_path(root, receipt)
+            if artifact:
                 artifact_path = root / artifact
                 if artifact_path.is_file():
                     chunks.extend(chunk_markdown_file(root, artifact_path, kind="task_artifact"))
@@ -191,7 +202,7 @@ def _current_source_chunks_from_records(
     chunks: list[DocumentChunk] = []
     problems: list[Problem] = []
     for workspace_path, repo_path, classification in records:
-        if classification == "excluded":
+        if not current_source_eligible(repo_path, classification):
             continue
         if not workspace_path or workspace_path in existing_paths:
             continue
@@ -241,7 +252,7 @@ def current_source_chunks_for_paths(
                 )
             )
             continue
-        if not is_semantic_source_language(language_for_path(repo_path)):
+        if not current_source_eligible(repo_path, ""):
             continue
         workspace_path = f"{target.display_path.rstrip('/')}/{repo_path}"
         records.append((workspace_path, repo_path, ""))
@@ -308,7 +319,8 @@ def context_overlay_chunks(
         for receipt in receipts:
             task_id = str(receipt.get("task_id") or "")
             receipt_rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
-            artifacts = receipt_artifact_paths(receipt)
+            artifact = completion_receipt_artifact_path(root, receipt)
+            artifacts = [artifact] if artifact else []
             if receipt_rel in selected:
                 text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
                 chunks.append(chunk_text_source(root, receipt_rel, text, kind="completion_receipt", section=task_id or "completion receipt"))
@@ -339,21 +351,6 @@ def context_product_manifest_paths(root: Path, *, target: RepoTarget) -> list[Pa
     for pattern in product_manifest_patterns():
         paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
     return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
-
-
-def receipt_artifact_paths(receipt: dict[str, Any]) -> list[str]:
-    values: list[str] = []
-    for key in ("task_path", "archive_path"):
-        value = str(receipt.get(key) or "")
-        if value:
-            values.append(value)
-    verification = receipt.get("verification")
-    if isinstance(verification, dict):
-        for key in ("task_path", "archive_path"):
-            value = str(verification.get(key) or "")
-            if value:
-                values.append(value)
-    return sorted(set(values))
 
 
 def context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:

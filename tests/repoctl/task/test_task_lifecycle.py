@@ -83,7 +83,10 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "task.discovery.add"
-    assert payload["data"]["discovery"]["chosen_files"] == ["repos/src/checkout.py"]
+    assert payload["data"]["update"]["reviewed_files"]["added"] == ["repos/src/checkout.py", "repos/tests/test_checkout.py"]
+    assert payload["data"]["update"]["chosen_files"]["added"] == ["repos/src/checkout.py"]
+    assert payload["data"]["totals"]["chosen_file_count"] == 1
+    assert "discovery" not in payload["data"]
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "- Candidate query: `checkout retry behavior`" in task_body
     assert "  - `repos/tests/test_checkout.py`" in task_body
@@ -104,16 +107,29 @@ def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reas
     assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "q1", "--reviewed", "repos/a.py", "--chosen", "repos/a.py", "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "q2", "--reviewed", "repos/b.py", "--json"]) == 0
-    capsys.readouterr()
+    query_update = json.loads(capsys.readouterr().out)
+    assert query_update["data"]["update"]["chosen_files"] == {
+        "mode": "unchanged",
+        "added": [],
+        "removed": [],
+        "already_present": [],
+    }
+    assert "discovery" not in query_update["data"]
     assert main(["task", "discovery", "add", "T-20260609184046Z", "--replace-chosen", "repos/b.py", "--json"]) == 2
     missing_reason = json.loads(capsys.readouterr().out)
     assert missing_reason["problems"][0]["code"] == "missing_scope_change_reason"
 
-    assert main(["task", "discovery", "add", "T-20260609184046Z", "--replace-chosen", "repos/b.py", "--reason", "implementation moved", "--json"]) == 0
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--replace-chosen", "repos/b.py", "--reason", "implementation moved", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["discovery"]["candidate_query_history"] == ["q1", "q2"]
     assert payload["data"]["discovery"]["chosen_files"] == ["repos/b.py"]
+    assert payload["data"]["update"]["chosen_files"] == {
+        "mode": "replace",
+        "added": ["repos/b.py"],
+        "removed": ["repos/a.py"],
+        "already_present": [],
+    }
     assert all("context pack" not in action["command"] for action in payload["next_actions"])
     assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
@@ -154,7 +170,7 @@ def test_task_discovery_rejects_existing_directories_but_allows_future_files(tmp
 
     assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "future file", "--reviewed", "repos/existing.py", "--chosen", "repos/new.py", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["discovery"]["chosen_files"] == ["repos/new.py"]
+    assert payload["data"]["update"]["chosen_files"]["added"] == ["repos/new.py"]
 
 
 def test_task_create_print_id_and_root_work_area(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -336,7 +352,8 @@ def test_task_lifecycle_keeps_created_document_language_when_workspace_setting_c
     finish_payload = json.loads(capsys.readouterr().out)
     archived = (tmp_path / finish_payload["new_path"]).read_text(encoding="utf-8")
     assert "작업을 검증하고 완료함" in archived
-    assert "Repoctl 게이트 요약" in archived
+    assert "Repoctl 게이트 요약" not in archived
+    assert "- Command: pytest" in archived
     assert "## Last Active Handoff" in archived
     assert "## Closure" in archived
     assert "repoctl 관리 범위가 아님" in archived

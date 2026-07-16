@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "replace_paths": [
     ".agents/skills/maintenance-workflow/SKILL.md",
     ".claude/agents/README.md",
@@ -123,7 +123,6 @@
     "tests/repoctl/task_lifecycle_helpers.py",
     "tests/repoctl/test_cli_discoverability.py",
     "tests/repoctl/test_code_index.py",
-    "tests/repoctl/test_release.py",
     "tests/repoctl/test_upgrade.py",
     "tests/repoctl/workspace/__init__.py",
     "tests/repoctl/workspace/test_backlog.py",
@@ -238,6 +237,7 @@
     "tests/repoctl/test_check.py",
     "tests/repoctl/test_graph.py",
     "tests/repoctl/test_meta_check.py",
+    "tests/repoctl/test_release.py",
     "tests/repoctl/test_repositories.py",
     "tests/repoctl/test_task_lifecycle.py",
     "tools/repoctl/context_pack.py",

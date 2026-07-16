@@ -39,7 +39,7 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Query Context raw/debug JSON: `./scripts/repoctl context query "question" --repo-id main --full --json`
 - Pack task context compact JSON: `./scripts/repoctl context pack --task T-... --repo-id main --json`
 - Build knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
-- Suggest knowledge candidate from a finished task receipt: `./scripts/repoctl knowledge candidate suggest --from-task T-... --repo-id main --kind invariant --json`. If the derived claim is not concise and complete, pass `--claim` or `--claim-file` instead of editing candidate state.
+- Suggest knowledge candidate from a finished task receipt: `./scripts/repoctl knowledge candidate suggest --from-task T-... --repo-id main --kind invariant --claim "<reusable invariant>" --dry-run --json`. The task receipt supplies provenance; `--claim` or `--claim-file` supplies the reusable knowledge statement. Review with candidate show/check before approval.
 - Approve knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --reviewed-by <label> --note-file /tmp/review.md --json`
 - Query reviewed knowledge compact JSON: `./scripts/repoctl knowledge query "question" --repo-id main --json`
 - Inspect a full reviewed record: `./scripts/repoctl knowledge show K-... --repo-id main --json` or add `--full` to the query.

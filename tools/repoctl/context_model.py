@@ -64,7 +64,7 @@ class ContextBundle:
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 3
+    schema_version: int = 4
     authoritative: bool = False
     bundle_digest: str = ""
 

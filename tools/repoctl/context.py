@@ -9,7 +9,7 @@ from .context_sources import collect_context_sources, context_graph_problems, co
 from .evidence_store import evidence_chunks_for_paths, query_evidence_index
 from .graph import project_context_neighborhood
 from .graph_model import digest_data
-from .graph_store import graph_materialization_freshness, load_materialized_graph
+from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph
 from .io import RepoctlError
 from .knowledge_candidates import query_knowledge_records
 from .repositories import RepoTarget
@@ -38,6 +38,7 @@ CONTEXT_MODES = {
     "failure_mode",
 }
 GRAPH_EXPANSION_MODES = {"auto", "code_location", "call_impact", "file_impact"}
+COMPACT_CONTINUATION_LIMIT = 8
 
 
 def build_context_bundle(
@@ -48,21 +49,47 @@ def build_context_bundle(
     explain: bool = False,
     mode: str = "",
     graph_result: tuple[Any, list[Problem], dict[str, Any]] | None = None,
+    graph_state_root: Path | None = None,
     include_linked_records: bool = True,
 ) -> tuple[ContextBundle | None, list[Problem], dict[str, Any]]:
     query_mode = normalize_context_mode(mode)
     snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else load_materialized_graph(root, target=target)
+    materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
+    if snapshot is None and str(materialization.get("status") or "") != "missing":
+        return None, graph_problems, {"repository": target.to_dict(), "graph": graph_meta}
     if snapshot is not None:
-        freshness, freshness_problems = graph_materialization_freshness(root, target=target)
+        freshness, freshness_problems = graph_materialization_freshness(
+            root,
+            target=target,
+            state_root=graph_state_root,
+            snapshot=snapshot,
+        )
     else:
         freshness, freshness_problems = {"status": "missing", "changed_paths": []}, []
     include_history = query_mode in {"past_decision", "failure_mode"}
-    indexed_candidates, index_meta, index_problems = query_evidence_index(root, target=target, query=query, mode=query_mode, limit=24)
-    index_available = (
-        snapshot is not None
-        and not any(problem.severity == "error" for problem in index_problems)
-        and str(index_meta.get("snapshot_digest") or "") == snapshot.snapshot_digest
-    )
+    indexed_candidates: list[ContextCandidate] = []
+    index_meta: dict[str, Any] = {}
+    index_problems: list[Problem] = []
+    index_available = False
+    evidence_index_path = graph_state_root / target.id / "evidence.sqlite3" if graph_state_root is not None else None
+    if snapshot is not None:
+        indexed_candidates, index_meta, index_problems = query_evidence_index(
+            root,
+            target=target,
+            query=query,
+            mode=query_mode,
+            snapshot_digest=snapshot.snapshot_digest,
+            graph_input_digest=str(materialization.get("input_digest") or ""),
+            limit=24,
+            database_path=evidence_index_path,
+        )
+        if any(problem.severity == "error" for problem in index_problems):
+            return None, [*index_problems, *context_graph_problems(graph_problems)], {
+                "repository": target.to_dict(),
+                "graph": graph_meta,
+                "evidence_index": index_meta,
+            }
+        index_available = True
     if index_available:
         chunks: list[Any] = []
         indexed_chunk_counts = index_meta.get("chunk_counts") if isinstance(index_meta.get("chunk_counts"), dict) else {}
@@ -192,6 +219,7 @@ def build_context_bundle(
                     target=target,
                     workspace_paths=projected_paths,
                     kinds={"current_source"},
+                    database_path=evidence_index_path,
                 )
                 problems.extend(chunk_problems)
         graph_candidates, graph_warnings, graph_projection = _graph_context_candidates(
@@ -232,6 +260,7 @@ def build_context_bundle(
             root,
             target=target,
             workspace_paths=set(_startup_source_priority(target)),
+            database_path=evidence_index_path,
         )
         problems.extend(startup_problems)
         startup_chunks = [chunk for chunk in startup_chunks if chunk.source_ref.path not in stale_workspace_paths]
@@ -424,7 +453,9 @@ def render_context_markdown(bundle: ContextBundle) -> str:
         for item in items[:10]:
             ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
             label = ref.get("path") or item.get("record_id") or item.get("code") or "evidence"
-            section = f" ({ref.get('section')})" if ref.get("section") else ""
+            sections = item.get("sections") if isinstance(item.get("sections"), list) else []
+            section_names = [str(section.get("section") or "") for section in sections if isinstance(section, dict) and str(section.get("section") or "")]
+            section = f" ({', '.join(section_names[:3])})" if section_names else ""
             reason = item.get("selection_reason") or item.get("status") or ""
             lines.append(f"- `{label}`{section}: {reason}")
             excerpt = str(item.get("excerpt") or "").strip()
@@ -439,24 +470,27 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
     """Return the default agent-facing view without full evidence diagnostics."""
     group_limits = {
         "must_read": 5,
-        "likely_change_surface": 5,
-        "callers_and_dependents": 3,
-        "tests_and_verification": 4,
+        "likely_change_surface": 3,
+        "callers_and_dependents": 2,
+        "tests_and_verification": 2,
         "reviewed_knowledge": 2,
         "related_history": 3,
         "supporting_evidence": 1,
         "warnings_and_completeness": 3,
     }
+    displayed_items, continuations, continuation_counts = _compact_bundle_projection(
+        bundle.groups,
+        group_limits=group_limits,
+        max_group_items=max_group_items,
+        continuation_limit=COMPACT_CONTINUATION_LIMIT,
+    )
     groups = {
-        group: _compact_group_items(
-            items,
-            limit=min(max_group_items, group_limits.get(group, max_group_items)),
-            excerpt_chars=excerpt_chars,
-        )
-        for group, items in sorted(bundle.groups.items())
+        group: [_compact_group_item(item, excerpt_chars=excerpt_chars) for item in items]
+        for group, items in displayed_items.items()
     }
-    group_counts = {group: len(items) for group, items in sorted(bundle.groups.items())}
-    displayed_group_counts = {group: len(items) for group, items in sorted(groups.items())}
+    group_names = _ordered_context_group_names(bundle.groups)
+    group_counts = {group: len(bundle.groups[group]) for group in group_names}
+    displayed_group_counts = {group: len(groups[group]) for group in group_names}
     omitted = {
         "group_counts": group_counts,
         "displayed_group_counts": displayed_group_counts,
@@ -474,7 +508,8 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "query": bundle.query,
         "completeness": _compact_completeness(bundle.completeness),
         "groups": groups,
-        "selection": {**bundle.selection, **omitted},
+        "continuations": continuations,
+        "selection": {**bundle.selection, **omitted, "continuations": continuation_counts},
         "knowledge_result_count": len(bundle.knowledge_results),
         "bundle_digest": bundle.bundle_digest,
     }
@@ -486,6 +521,7 @@ def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
     provider_coverage = graph.get("provider_coverage") if isinstance(graph.get("provider_coverage"), dict) else {}
     return {
         "graph_available": bool(completeness.get("graph_available")),
+        "graph_freshness": compact_graph_freshness(completeness.get("graph_freshness")),
         "status": str(graph.get("status") or ("unavailable" if not completeness.get("graph_available") else "partial")),
         "capabilities": {str(key): str(value) for key, value in sorted(capabilities.items())},
         "provider_coverage": {
@@ -507,35 +543,99 @@ def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_group_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    for key in ("record_id", "code"):
+    for key in ("record_id", "code", "evidence_role"):
         if item.get(key):
             compact[key] = item[key]
     if item.get("selection_reason"):
-        compact["selection_reason"] = _truncate(str(item["selection_reason"]), 120)
+        compact["selection_reason"] = _truncate(str(item["selection_reason"]), 90)
     if item.get("status") not in {None, "", "current", "recorded"}:
         compact["status"] = item["status"]
     ref = item.get("source_ref")
     if isinstance(ref, dict):
         compact["source_ref"] = ref
+    sections = item.get("sections") if isinstance(item.get("sections"), list) else []
+    if sections:
+        compact["sections"] = [
+            {
+                key: section[key]
+                for key in ("section", "line_start", "line_end")
+                if key in section
+            }
+            for section in sections[:2]
+            if isinstance(section, dict)
+        ]
+        compact["section_count"] = len(sections)
     excerpt = item.get("excerpt")
     if excerpt:
         compact["excerpt"] = _truncate(str(excerpt), excerpt_chars)
-    graph_path = item.get("graph_path")
-    if isinstance(graph_path, list) and graph_path:
-        compact["graph_path_count"] = len(graph_path)
-    continuations = item.get("continuations")
-    if isinstance(continuations, list) and continuations:
-        compact["continuations"] = continuations[:4]
     return compact
 
 
-def _compact_group_items(items: list[dict[str, Any]], *, limit: int, excerpt_chars: int) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    for item in items:
-        selected.append(_compact_group_item(item, excerpt_chars=excerpt_chars))
-        if len(selected) == limit:
-            break
-    return selected
+def _ordered_context_group_names(groups: dict[str, list[dict[str, Any]]]) -> list[str]:
+    canonical = [group for group in CONTEXT_GROUPS if group in groups]
+    return [*canonical, *sorted(group for group in groups if group not in CONTEXT_GROUPS)]
+
+
+def _collect_bundle_continuations(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    for group in _ordered_context_group_names(groups):
+        for item in groups[group]:
+            continuations = item.get("continuations") if isinstance(item.get("continuations"), list) else []
+            values.extend(value for value in continuations if isinstance(value, dict))
+    return _dedupe_continuations(values)
+
+
+def _compact_bundle_projection(
+    all_groups: dict[str, list[dict[str, Any]]],
+    *,
+    group_limits: dict[str, int],
+    max_group_items: int,
+    continuation_limit: int,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, int]]:
+    """Project evidence and its producer-owned primary continuations together."""
+    group_names = _ordered_context_group_names(all_groups)
+    displayed_groups: dict[str, list[dict[str, Any]]] = {group: [] for group in group_names}
+    selected_continuations: list[dict[str, Any]] = []
+    secondary_continuations: list[dict[str, Any]] = []
+
+    for group in group_names:
+        display_limit = min(max_group_items, group_limits.get(group, max_group_items))
+        for item in all_groups[group]:
+            if len(displayed_groups[group]) >= display_limit:
+                break
+            if group == "warnings_and_completeness":
+                displayed_groups[group].append(item)
+                continue
+            raw_values = item.get("continuations")
+            if not isinstance(raw_values, list) or not raw_values or not isinstance(raw_values[0], dict):
+                continue
+            primary_values = _dedupe_continuations([raw_values[0]])
+            if len(primary_values) != 1:
+                continue
+            item_values = _dedupe_continuations(
+                [
+                    primary_values[0],
+                    *(value for value in raw_values[1:] if isinstance(value, dict)),
+                ]
+            )
+            reserved = _dedupe_continuations([*selected_continuations, item_values[0]])
+            if len(reserved) > continuation_limit:
+                continue
+            selected_continuations = reserved
+            displayed_groups[group].append(item)
+            secondary_continuations.extend(item_values[1:])
+
+    for continuation in secondary_continuations:
+        expanded = _dedupe_continuations([*selected_continuations, continuation])
+        if len(expanded) <= continuation_limit:
+            selected_continuations = expanded
+
+    all_values = _collect_bundle_continuations(all_groups)
+    return displayed_groups, selected_continuations, {
+        "total": len(all_values),
+        "displayed": len(selected_continuations),
+        "omitted": max(0, len(all_values) - len(selected_continuations)),
+    }
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -818,12 +918,16 @@ def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandid
 
 def _candidate_sort_key(candidate: ContextCandidate) -> tuple[int, float, str, int]:
     breakdown = candidate.score_breakdown
-    direct_query_evidence = any(
-        float(breakdown.get(key) or 0.0) > 0
-        for key in ("startup_reading", "exact", "fts")
-    )
+    direct_query_evidence = _has_direct_query_evidence(candidate)
     stage = 0 if direct_query_evidence else 1 if float(breakdown.get("graph") or 0.0) > 0 else 2
     return (stage, -candidate.score, candidate.source_ref.path, candidate.source_ref.line_start)
+
+
+def _has_direct_query_evidence(candidate: ContextCandidate) -> bool:
+    return any(
+        float(candidate.score_breakdown.get(key) or 0.0) > 0
+        for key in ("startup_reading", "exact", "fts")
+    )
 
 
 def _context_groups(
@@ -837,9 +941,11 @@ def _context_groups(
 ) -> dict[str, list[dict[str, Any]]]:
     repo_id = target.id
     groups: dict[str, list[dict[str, Any]]] = {group: [] for group in CONTEXT_GROUPS}
+    grouped_candidates: dict[str, list[ContextCandidate]] = {group: [] for group in CONTEXT_GROUPS}
     for candidate in evidence:
-        group = _candidate_group(candidate)
-        groups[group].append(_candidate_group_item(candidate, target=target, status="current"))
+        grouped_candidates[_candidate_group(candidate)].append(candidate)
+    for group, candidates in grouped_candidates.items():
+        groups[group].extend(_path_group_items(candidates, group=group, target=target))
     for result in knowledge_results:
         record = result.get("record") if isinstance(result.get("record"), dict) else {}
         matched_paths = result.get("matched_paths") if isinstance(result.get("matched_paths"), list) else []
@@ -938,6 +1044,15 @@ def _candidate_group(candidate: ContextCandidate) -> str:
             return "tests_and_verification"
         return "likely_change_surface"
     if ref.kind == "graph_relation":
+        paths = {
+            str(relation.get(key) or "").lower()
+            for relation in candidate.graph_path
+            if isinstance(relation, dict)
+            for key in ("from_path", "to_path")
+            if str(relation.get(key) or "")
+        }
+        if any(_looks_like_test_ref(path) for path in paths):
+            return "tests_and_verification"
         return "callers_and_dependents" if candidate.graph_path else "supporting_evidence"
     if _is_product_document_ref(ref):
         return "must_read"
@@ -949,49 +1064,262 @@ def _candidate_group(candidate: ContextCandidate) -> str:
 
 
 def _candidate_group_item(candidate: ContextCandidate, *, target: RepoTarget, status: str) -> dict[str, Any]:
+    source_ref = {
+        "kind": candidate.source_ref.kind,
+        "path": candidate.source_ref.path,
+        "content_sha256": candidate.source_ref.content_sha256,
+    }
+    roles = _candidate_evidence_roles(candidate, target=target)
     return {
         "repo_id": target.id,
         "status": status,
-        "source_ref": candidate.source_ref.to_dict(),
+        "source_ref": source_ref,
+        "sections": [_candidate_section(candidate)],
         "content_sha256": candidate.source_ref.content_sha256,
         "selection_reason": "; ".join(candidate.selection_reasons) or "retrieval match",
+        "selection_reasons": sorted(set(candidate.selection_reasons)) or ["retrieval match"],
+        "score": candidate.score,
         "score_breakdown": candidate.score_breakdown,
         "excerpt": candidate.text,
         "graph_path": candidate.graph_path,
         "continuations": _candidate_continuations(candidate, target=target),
+        "evidence_role": roles[0],
+        "evidence_roles": roles,
     }
 
 
-def _candidate_continuations(candidate: ContextCandidate, *, target: RepoTarget) -> list[dict[str, Any]]:
+def _candidate_section(candidate: ContextCandidate) -> dict[str, Any]:
+    section = {"kind": candidate.source_ref.kind}
+    for key, value in (
+        ("section", candidate.source_ref.section),
+        ("line_start", candidate.source_ref.line_start),
+        ("line_end", candidate.source_ref.line_end),
+    ):
+        if value not in {"", 0}:
+            section[key] = value
+    return section
+
+
+def _path_group_items(
+    candidates: list[ContextCandidate],
+    *,
+    group: str,
+    target: RepoTarget,
+) -> list[dict[str, Any]]:
+    by_path: dict[str, list[ContextCandidate]] = {}
+    for candidate in candidates:
+        by_path.setdefault(candidate.source_ref.path, []).append(candidate)
+    items = [
+        (
+            _merge_path_candidates(path_candidates, target=target),
+            _direct_query_score(path_candidates),
+        )
+        for _path, path_candidates in sorted(by_path.items())
+    ]
+    return [
+        item
+        for item, direct_query_score in sorted(
+            items,
+            key=lambda value: _group_item_sort_key(
+                group,
+                value[0],
+                direct_query_score=value[1],
+            ),
+        )
+    ]
+
+
+def _direct_query_score(candidates: list[ContextCandidate]) -> float:
+    scores = []
+    for candidate in candidates:
+        breakdown = candidate.score_breakdown
+        if not _has_direct_query_evidence(candidate):
+            continue
+        scores.append(max(0.0, candidate.score - float(breakdown.get("graph") or 0.0)))
+    return max(scores, default=0.0)
+
+
+def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTarget) -> dict[str, Any]:
+    ranked = sorted(candidates, key=_candidate_sort_key)
+    primary = ranked[0]
+    item = _candidate_group_item(primary, target=target, status="current")
+    primary_continuations = _candidate_continuations(primary, target=target)
+    sections: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+    reasons: set[str] = set()
+    roles: set[str] = set()
     continuations: list[dict[str, Any]] = []
+    graph_paths: dict[str, dict[str, Any]] = {}
+    breakdown: dict[str, float] = {}
+    for candidate in ranked:
+        section = _candidate_section(candidate)
+        section_key = (
+            str(section.get("kind") or ""),
+            str(section.get("section") or ""),
+            int(section.get("line_start") or 0),
+            int(section.get("line_end") or 0),
+        )
+        sections.setdefault(section_key, section)
+        reasons.update(candidate.selection_reasons or ["retrieval match"])
+        roles.update(_candidate_evidence_roles(candidate, target=target))
+        if primary_continuations:
+            continuations.extend(primary_continuations if candidate is primary else _candidate_continuations(candidate, target=target))
+        for relation in candidate.graph_path:
+            if isinstance(relation, dict):
+                graph_paths.setdefault(digest_data(relation), relation)
+        for key, value in candidate.score_breakdown.items():
+            breakdown[key] = max(breakdown.get(key, 0.0), float(value))
+    ordered_roles = sorted(roles, key=lambda role: (_evidence_role_priority(role), role))
+    item.update(
+        {
+            "sections": [sections[key] for key in sorted(sections)],
+            "selection_reason": "; ".join(sorted(reasons)[:4]),
+            "selection_reasons": sorted(reasons),
+            "score": max(candidate.score for candidate in ranked),
+            "score_breakdown": breakdown,
+            "graph_path": [graph_paths[key] for key in sorted(graph_paths)],
+            "continuations": _dedupe_continuations(continuations),
+            "evidence_role": ordered_roles[0],
+            "evidence_roles": ordered_roles,
+        }
+    )
+    return item
+
+
+def _candidate_evidence_roles(candidate: ContextCandidate, *, target: RepoTarget) -> list[str]:
+    ref = candidate.source_ref
+    path = ref.path
     product_prefix = f"{target.display_path.rstrip('/')}/"
-    path = candidate.source_ref.path
-    if path.startswith(product_prefix):
-        continuations.append(_file_continuation(path.removeprefix(product_prefix)))
-    elif path and not path.startswith("<"):
-        continuations.append(_document_continuation(path))
+    repo_path = path.removeprefix(product_prefix) if path.startswith(product_prefix) else path
+    lowered = repo_path.lower()
+    roles: set[str] = set()
+    if ref.kind == "current_source":
+        is_test = _looks_like_test_ref(lowered)
+        if _has_direct_query_evidence(candidate):
+            roles.add("test_candidate" if is_test else "change_candidate")
+        for relation in candidate.graph_path:
+            if not isinstance(relation, dict):
+                continue
+            edge = str(relation.get("edge") or "")
+            from_path = str(relation.get("from_path") or "")
+            to_path = str(relation.get("to_path") or "")
+            other_path = to_path if from_path == repo_path else from_path if to_path == repo_path else ""
+            if is_test and other_path and not _looks_like_test_ref(other_path.lower()) and edge in {"CALLS", "IMPORTS_FILE"}:
+                roles.add("directly_connected_test")
+            if to_path == repo_path and from_path != repo_path:
+                if edge == "IMPORTS_FILE":
+                    roles.add("imported_dependency")
+                elif edge == "CALLS":
+                    roles.add("called_dependency")
+            elif from_path == repo_path and to_path != repo_path and edge in {"CALLS", "IMPORTS_FILE"}:
+                roles.add("dependent_source")
+        if not roles:
+            roles.add("supporting_evidence")
+    elif ref.kind == "product_manifest":
+        roles.add("product_manifest")
+    elif ref.kind == "verification_hint":
+        roles.add("verification_hint")
+    elif ref.kind == "graph_relation":
+        roles.add("code_relation")
+    elif _is_product_document_ref(ref) or ref.path.lower() in {"agents.md", "docs/prd.md"} or ref.path.lower().startswith(("docs/adr/", "docs/contracts/")):
+        roles.add("authority_document")
+    else:
+        roles.add("supporting_evidence")
+    return sorted(roles, key=lambda role: (_evidence_role_priority(role), role))
+
+
+def _evidence_role_priority(role: str) -> int:
+    priorities = {
+        "change_candidate": 0,
+        "test_candidate": 0,
+        "authority_document": 0,
+        "directly_connected_test": 1,
+        "imported_dependency": 1,
+        "called_dependency": 1,
+        "product_manifest": 1,
+        "dependent_source": 2,
+        "code_relation": 2,
+        "verification_hint": 4,
+        "supporting_evidence": 5,
+    }
+    return priorities.get(role, 9)
+
+
+def _group_item_sort_key(
+    group: str,
+    item: dict[str, Any],
+    *,
+    direct_query_score: float,
+) -> tuple[int, float, int, float, str]:
+    role = str(item.get("evidence_role") or "")
+    role_priority = _evidence_role_priority(role)
+    if group == "callers_and_dependents":
+        role_priority = 0 if role == "code_relation" else role_priority
+    direct_query_stage = 0
+    if group in {"likely_change_surface", "tests_and_verification"}:
+        direct_query_stage = 0 if direct_query_score > 0 else 1
+    return (
+        direct_query_stage,
+        -direct_query_score,
+        role_priority,
+        -float(item.get("score") or 0.0),
+        str((item.get("source_ref") or {}).get("path") or ""),
+    )
+
+
+def _candidate_continuations(candidate: ContextCandidate, *, target: RepoTarget) -> list[dict[str, Any]]:
+    primary = _candidate_primary_continuation(candidate, target=target)
+    if primary is None:
+        return []
+    continuations = [primary]
     for relation in candidate.graph_path:
         if not isinstance(relation, dict):
             continue
+        symbol_first = str(relation.get("edge") or "") == "CALLS"
         for path_key, symbol_key in (("from_path", "from_symbol"), ("to_path", "to_symbol")):
             repo_path = str(relation.get(path_key) or "")
-            if repo_path:
-                continuations.append(_file_continuation(repo_path))
             symbol = relation.get(symbol_key) if isinstance(relation.get(symbol_key), dict) else {}
             qualified_name = str(symbol.get("qualified_name") or symbol.get("name") or "")
-            if qualified_name:
+            if symbol_first and qualified_name:
+                continuations.append(_symbol_continuation(qualified_name, in_file=repo_path))
+            if repo_path:
+                continuations.append(_file_continuation(repo_path))
+            if not symbol_first and qualified_name:
                 continuations.append(_symbol_continuation(qualified_name, in_file=repo_path))
     return _dedupe_continuations(continuations)[:4]
 
 
+def _candidate_primary_continuation(candidate: ContextCandidate, *, target: RepoTarget) -> dict[str, Any] | None:
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    path = candidate.source_ref.path
+    if candidate.source_ref.kind == "current_source":
+        repo_path = path.removeprefix(product_prefix) if path.startswith(product_prefix) else ""
+        return _file_continuation(repo_path) if repo_path else None
+    if candidate.source_ref.kind != "graph_relation":
+        return _document_continuation(path) if path and not path.startswith("<") else None
+    if not candidate.graph_path or not isinstance(candidate.graph_path[0], dict):
+        return None
+    relation = candidate.graph_path[0]
+    edge = str(relation.get("edge") or "")
+    from_path = str(relation.get("from_path") or "")
+    if edge == "IMPORTS_FILE":
+        return _file_continuation(from_path) if from_path else None
+    if edge != "CALLS" or not from_path:
+        return None
+    from_symbol = relation.get("from_symbol") if isinstance(relation.get("from_symbol"), dict) else {}
+    qualified_name = str(from_symbol.get("qualified_name") or from_symbol.get("name") or "")
+    return _symbol_continuation(qualified_name, in_file=from_path) if qualified_name else None
+
+
 def _knowledge_continuations(record: dict[str, Any]) -> list[dict[str, Any]]:
     record_id = str(record.get("id") or "")
+    if not record_id:
+        return []
     continuations = [
         {
             "selector": {"kind": "knowledge_record", "value": record_id},
             "actions": ["knowledge.show"],
         }
-    ] if record_id else []
+    ]
     for ref in record.get("source_refs", []):
         if isinstance(ref, dict) and str(ref.get("path") or ""):
             continuations.append(_document_continuation(str(ref["path"])))
@@ -999,6 +1327,8 @@ def _knowledge_continuations(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _task_history_continuations(*, task_id: str, task_path: str) -> list[dict[str, Any]]:
+    if not task_id:
+        return []
     continuations = [
         {
             "selector": {"kind": "task", "value": task_id},
@@ -1035,6 +1365,7 @@ def _document_continuation(path: str) -> dict[str, Any]:
 
 def _dedupe_continuations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    ordered_keys: list[tuple[str, str, str]] = []
     for item in items:
         selector = item.get("selector") if isinstance(item.get("selector"), dict) else {}
         key = (
@@ -1042,9 +1373,23 @@ def _dedupe_continuations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             str(selector.get("value") or ""),
             str(selector.get("in_file") or ""),
         )
-        if key[0] and key[1]:
-            unique.setdefault(key, item)
-    return [unique[key] for key in sorted(unique)]
+        if not key[0] or not key[1]:
+            continue
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = {**item, "selector": dict(selector)}
+            ordered_keys.append(key)
+            continue
+        for field in ("actions", "query_types"):
+            previous_values = existing.get(field) if isinstance(existing.get(field), list) else []
+            incoming_values = item.get(field) if isinstance(item.get(field), list) else []
+            if incoming_values:
+                merged_values = list(previous_values)
+                for value in incoming_values:
+                    if value not in merged_values:
+                        merged_values.append(value)
+                existing[field] = merged_values
+    return [unique[key] for key in ordered_keys]
 
 
 def _is_product_document_ref(ref: ContextSourceRef) -> bool:

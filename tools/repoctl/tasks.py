@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .io import LOCK_REL, RepoctlError, atomic_write
-from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_diff_evidence, repo_git_head, repo_git_status, repo_path_fingerprints
+from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_git_head, repo_git_status, repo_path_fingerprints
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import RepoTarget, default_repo_target, repo_layout
 from .settings import document_language, validate_document_language
@@ -38,14 +38,6 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "task_canceled": "task canceled with verification evidence.",
         "task_blocked": "task blocked with evidence.",
         "repo_head_at_start": "repo head at start",
-        "verification_empty": "- Verification file was empty.",
-        "gate_summary_title": "Repoctl gate summary:",
-        "repo_git_present": "- repo git: present",
-        "repo_git_unavailable": "- repo git: unavailable ({reason})",
-        "meta_gate_passed": "- meta gate: passed ({changed_files} changed files checked)",
-        "meta_gate_skipped": "- meta gate: skipped ({reason})",
-        "meta_gate_status": "- meta gate: {status}",
-        "repo_change_evidence": "Repo change evidence:",
         "closure_done": "Implementation and verification completed.",
         "closure_canceled": "Task canceled with recorded evidence.",
         "git_delivery_outside": "Not managed by repoctl.",
@@ -88,14 +80,14 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
             "Make only the narrow changes needed for the stated goal.",
             "Keep `repos/.repometa` annotations valid for any changed `repos/` files required by metadata coverage policy.",
             "Keep Execution Log entries meaningful: creation, start, implementation decision, verification, blocker, or finish.",
-            "Use a temporary verification file outside `repos/`; `repoctl task finish` stores the durable evidence in the task.",
+            "Record commands and results in `## Verification`; use an external file only when an existing artifact is the evidence source.",
         ],
         "root_in_scope": [
             "Identify and record the concrete workspace/docs files that define this task.",
             "Make only the narrow changes needed for the stated goal.",
             "Do not touch product files under `repos/` unless the task is intentionally converted into repo-scoped work.",
             "Keep Execution Log entries meaningful: creation, start, implementation decision, verification, blocker, or finish.",
-            "Use a temporary verification file outside `repos/`; `repoctl task finish` stores the durable evidence in the task.",
+            "Record commands and results in `## Verification`; use an external file only when an existing artifact is the evidence source.",
         ],
         "out_of_scope": [
             "Unrelated refactors or cleanup.",
@@ -121,14 +113,6 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "task_canceled": "검증 증거와 함께 작업을 취소함.",
         "task_blocked": "증거와 함께 작업을 blocked로 표시함.",
         "repo_head_at_start": "repo head at start",
-        "verification_empty": "- 검증 파일이 비어 있음.",
-        "gate_summary_title": "Repoctl 게이트 요약:",
-        "repo_git_present": "- repo git: 있음",
-        "repo_git_unavailable": "- repo git: 사용할 수 없음({reason})",
-        "meta_gate_passed": "- meta gate: 통과({changed_files}개 변경 파일 확인)",
-        "meta_gate_skipped": "- meta gate: 건너뜀({reason})",
-        "meta_gate_status": "- meta gate: {status}",
-        "repo_change_evidence": "Repo 변경 증거:",
         "closure_done": "구현과 검증을 완료함.",
         "closure_canceled": "기록된 증거와 함께 작업을 취소함.",
         "git_delivery_outside": "repoctl 관리 범위가 아님.",
@@ -171,14 +155,14 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
             "metadata coverage policy가 요구하는 변경 `repos/` 파일의 `repos/.repometa` annotation을 유효하게 유지한다.",
             "Execution Log에는 생성, 시작, 구현 결정, 검증, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "`repos/` 밖 임시 검증 파일을 사용한다. `repoctl task finish`가 영구 증거를 작업 파일에 저장한다.",
+            "명령과 결과를 `## Verification`에 기록한다. 이미 존재하는 외부 artifact가 증거 원본일 때만 외부 파일을 사용한다.",
         ],
         "root_in_scope": [
             "이 작업을 정의하는 구체적인 workspace/docs 파일을 식별하고 기록한다.",
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
             "작업을 의도적으로 repo-scoped로 전환하지 않는 한 `repos/` 제품 파일은 건드리지 않는다.",
             "Execution Log에는 생성, 시작, 구현 결정, 검증, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "`repos/` 밖 임시 검증 파일을 사용한다. `repoctl task finish`가 영구 증거를 작업 파일에 저장한다.",
+            "명령과 결과를 `## Verification`에 기록한다. 이미 존재하는 외부 artifact가 증거 원본일 때만 외부 파일을 사용한다.",
         ],
         "out_of_scope": [
             "무관한 refactor 또는 cleanup.",
@@ -424,13 +408,17 @@ def update_task_discovery(
     def without_placeholders(values: list[str]) -> list[str]:
         return [value for value in values if _strip_ticks(value).lower() not in placeholders]
 
-    query_values = without_placeholders(fields.get("Candidate query", []))
+    previous_queries = without_placeholders(fields.get("Candidate query", []))
+    previous_reviewed = _dedupe_preserve(without_placeholders(fields.get("Candidate files reviewed", [])))
+    previous_chosen = _dedupe_preserve(without_placeholders(fields.get("Chosen files", [])))
+    previous_notes = _dedupe_preserve(without_placeholders(fields.get("Notes", [])))
+
+    query_values = list(previous_queries)
     if query.strip():
         query_values = _dedupe_preserve([*query_values, _strip_ticks(query)])
-    reviewed_values = _dedupe_preserve([*without_placeholders(fields.get("Candidate files reviewed", [])), *reviewed])
-    previous_chosen = _dedupe_preserve(without_placeholders(fields.get("Chosen files", [])))
+    reviewed_values = _dedupe_preserve([*previous_reviewed, *reviewed])
     chosen_values = _dedupe_preserve(replace_chosen) if replace_chosen else _dedupe_preserve([*previous_chosen, *chosen])
-    note_values = _dedupe_preserve([*without_placeholders(fields.get("Notes", [])), *([note] if note.strip() else [])])
+    note_values = _dedupe_preserve([*previous_notes, *([note] if note.strip() else [])])
     target = _target_for_task(root, task)
     if target is not None:
         for label, values in (("reviewed", reviewed_values), ("chosen", chosen_values)):
@@ -500,6 +488,32 @@ def update_task_discovery(
             "candidate_files_reviewed": reviewed_values,
             "chosen_files": chosen_values,
             "notes": note_values,
+        },
+        "update": {
+            "candidate_queries": {
+                "added": [value for value in query_values if value not in previous_queries],
+                "already_present": [value for value in query_values if value in previous_queries and value == _strip_ticks(query)] if query.strip() else [],
+            },
+            "reviewed_files": {
+                "added": sorted(set(reviewed_values) - set(previous_reviewed)),
+                "already_present": sorted(set(reviewed) & set(previous_reviewed)),
+            },
+            "chosen_files": {
+                "mode": "replace" if replace_chosen else "append" if chosen else "unchanged",
+                "added": sorted(set(chosen_values) - set(previous_chosen)),
+                "removed": sorted(set(previous_chosen) - set(chosen_values)),
+                "already_present": sorted(set(replace_chosen or chosen) & set(previous_chosen)),
+            },
+            "notes": {
+                "added": [value for value in note_values if value not in previous_notes],
+                "already_present": [note] if note.strip() and note in previous_notes else [],
+            },
+        },
+        "totals": {
+            "candidate_query_count": len(query_values),
+            "reviewed_file_count": len(reviewed_values),
+            "chosen_file_count": len(chosen_values),
+            "note_count": len(note_values),
         },
     }
 
@@ -591,11 +605,39 @@ def _valid_receipt_task_path(value: str, *, allow_empty: bool = False) -> bool:
     return bool(TASK_RE.match(filename))
 
 
+def completion_receipt_task_path(receipt: dict[str, Any]) -> str:
+    value = str(receipt.get("task_path_at_completion") or "")
+    return value if _valid_receipt_task_path(value) else ""
+
+
+def _completion_receipt_artifact_candidates(root: Path, task_id: str, task_path: str) -> list[Path]:
+    return [
+        root / task_path,
+        *sorted((root / "docs/tasks").glob(f"{task_id}--*.md")),
+        *sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")),
+    ]
+
+
+def completion_receipt_artifact_path(root: Path, receipt: dict[str, Any]) -> str:
+    task_id = str(receipt.get("task_id") or "")
+    task_path = completion_receipt_task_path(receipt)
+    if not ID_RE.match(task_id) or not task_path:
+        return ""
+    artifact = next(
+        (candidate for candidate in _completion_receipt_artifact_candidates(root, task_id, task_path) if candidate.is_file()),
+        root / task_path,
+    )
+    try:
+        return artifact.relative_to(root).as_posix()
+    except ValueError:
+        return ""
+
+
 def _read_receipt_artifact(root: Path, task_id: str, value: str) -> str:
-    candidates = [root / value]
-    candidates.extend(sorted((root / "docs/tasks").glob(f"{task_id}--*.md")))
-    candidates.extend(sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")))
-    existing = next((candidate for candidate in candidates if candidate.is_file()), None)
+    existing = next(
+        (candidate for candidate in _completion_receipt_artifact_candidates(root, task_id, value) if candidate.is_file()),
+        None,
+    )
     path = existing or (root / value)
     try:
         resolved = path.resolve()
@@ -1196,60 +1238,19 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     return {"task": task, "text": text, "dirty": dirty, "repo_git": git_state, "warnings": warnings}
 
 
-def _verification_gate_summary(meta_gate: dict[str, Any] | None, git_state: RepoGitState, *, copy: dict[str, Any]) -> str:
-    lines = [copy["gate_summary_title"]]
-    if git_state.available:
-        lines.append(copy["repo_git_present"])
-        if git_state.repo_id or git_state.repo_path:
-            lines.append(f"- repository: {git_state.repo_id or 'main'} {git_state.repo_path or ''}".rstrip())
-    else:
-        lines.append(copy["repo_git_unavailable"].format(reason=git_state.reason))
-    if meta_gate:
-        status = str(meta_gate.get("status") or "unknown")
-        if status == "passed":
-            lines.append(copy["meta_gate_passed"].format(changed_files=meta_gate.get("changed_files", 0)))
-        elif status == "skipped":
-            lines.append(copy["meta_gate_skipped"].format(reason=meta_gate.get("reason", "unknown")))
-        else:
-            lines.append(copy["meta_gate_status"].format(status=status))
-        summary = meta_gate.get("summary")
-        if isinstance(summary, dict) and summary:
-            lines.append(
-                "- meta status: "
-                f"total={summary.get('total', 0)} "
-                f"required={summary.get('annotation_required', 0)} "
-                f"annotated={summary.get('annotated', 0)} "
-                f"excluded={summary.get('excluded', 0)} "
-                f"indexed_only={summary.get('indexed_only', 0)}"
-            )
-        if "task_new_changes" in meta_gate:
-            lines.append(
-                "- repo changes: "
-                f"task_new_changes={meta_gate.get('task_new_changes', 0)} "
-                f"preexisting_dirty_files={meta_gate.get('preexisting_dirty_files', 0)}"
-            )
-    return "\n".join(lines) + "\n"
-
-
-def _verification_body(verification: VerificationInput, diff_evidence: str, *, meta_gate: dict[str, Any] | None, git_state: RepoGitState, copy: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _verification_body(verification: VerificationInput) -> tuple[str, dict[str, Any]]:
     if verification.source == "external_file":
         normalized_body = _normalize_verification_artifact(verification.text)
         normalization = "strip_verification_heading_and_normalize_final_newline"
     elif verification.source == "task_section":
-        normalized_body = _strip_generated_verification_suffix(verification.text, copy=copy).strip()
+        normalized_body = verification.text.rstrip()
         normalization = "normalize_final_newline"
     else:
         raise RepoctlError("verification source must be external_file or task_section", code="invalid_verification_source")
+    if not normalized_body.strip():
+        raise RepoctlError("verification evidence must contain commands and results", code="empty_verification_file", path=verification.source_path)
     normalized = normalized_body.rstrip() + "\n"
     stored = normalized
-    truncated = False
-    if len(stored) > 4000:
-        stored = stored[:4000].rstrip() + "\n... truncated\n"
-        truncated = True
-    body = stored.rstrip() or copy["verification_empty"]
-    body += "\n\n" + _verification_gate_summary(meta_gate, git_state, copy=copy).rstrip("\n")
-    if diff_evidence:
-        body += f"\n\n{copy['repo_change_evidence']}\n\n```text\n" + diff_evidence + "\n```"
     metadata = {
         "source": verification.source,
         "source_path": verification.source_path,
@@ -1257,18 +1258,9 @@ def _verification_body(verification: VerificationInput, diff_evidence: str, *, m
         "normalization": normalization,
         "normalized_sha256": _sha256_text(normalized),
         "stored_sha256": _sha256_text(stored),
-        "truncated": truncated,
+        "truncated": False,
     }
-    return body + "\n", metadata
-
-
-def _strip_generated_verification_suffix(text: str, *, copy: dict[str, Any]) -> str:
-    marker = copy["gate_summary_title"]
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if line.strip() == marker:
-            return "\n".join(lines[:index]).rstrip()
-    return text.rstrip()
+    return stored, metadata
 
 
 def _normalize_verification_artifact(verification: str) -> str:
@@ -1391,11 +1383,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         raise RepoctlError("cannot finish parent task while live children remain", code="live_children_block_finish", path=task.rel_path)
 
     text = task.path.read_text(encoding="utf-8")
-    if target is None:
-        diff_evidence, git_state = "", _no_product_repo_state()
-    else:
-        diff_evidence, git_state = repo_diff_evidence(root, target)
-    verification_body, verification_metadata = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
+    verification_body, verification_metadata = _verification_body(verification)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_finished']}")
     text = replace_frontmatter_line(text, "status", "done")
@@ -1476,7 +1464,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     }
 
 
-def cancel_task(root: Path, task_id: str, *, verification: VerificationInput, meta_gate: dict[str, Any] | None = None) -> dict[str, Any]:
+def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -1494,13 +1482,7 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput, me
         raise RepoctlError("cannot cancel parent task while live children remain")
 
     text = task.path.read_text(encoding="utf-8")
-    target = _target_for_task(root, task)
-    if target is None:
-        diff_evidence, git_state = "", _no_product_repo_state()
-    else:
-        diff_evidence, git_state = repo_diff_evidence(root, target)
-    meta_gate = meta_gate or {"status": "skipped", "reason": "task_canceled"}
-    verification_body, verification_metadata = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
+    verification_body, verification_metadata = _verification_body(verification)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_canceled']}")
     text = replace_frontmatter_line(text, "status", "canceled")
@@ -1554,13 +1536,7 @@ def block_task(root: Path, task_id: str, *, verification: VerificationInput) -> 
         raise RepoctlError("verification file must contain the blocker and current evidence")
 
     text = task.path.read_text(encoding="utf-8")
-    target = _target_for_task(root, task)
-    if target is None:
-        diff_evidence, git_state = "", _no_product_repo_state()
-    else:
-        diff_evidence, git_state = repo_diff_evidence(root, target)
-    meta_gate = {"status": "skipped", "reason": "task_blocked"}
-    verification_body, verification_metadata = _verification_body(verification, diff_evidence, meta_gate=meta_gate, git_state=git_state, copy=copy)
+    verification_body, verification_metadata = _verification_body(verification)
     text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {block_timestamp}: {copy['task_blocked']}")
     text = replace_frontmatter_line(text, "status", "blocked")

@@ -210,7 +210,8 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
     assert "status: done" in archived
     assert "Result: pass" in archived
-    assert "- meta gate: skipped (no_repo_directory)" in archived
+    assert "Repoctl gate summary:" not in archived
+    assert "Repo change evidence:" not in archived
     assert "task finished and verified.\n\n## Verification" in archived
     assert "## Last Active Handoff" in archived
     assert "## Closure" in archived
@@ -263,7 +264,8 @@ def test_task_finish_strips_verification_artifact_title(tmp_path: Path, monkeypa
     write_workspace(tmp_path)
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
     verification = tmp_path / "verification.md"
-    verification.write_text("# Verification for T-20260609184046Z\n\n- Command: pytest\n- Result: pass\n", encoding="utf-8")
+    long_result = "verified-output-" + "x" * 5000
+    verification.write_text(f"# Verification for T-20260609184046Z\n\n- Command: pytest\n- Result: pass\n- Output: {long_result}\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
@@ -272,7 +274,11 @@ def test_task_finish_strips_verification_artifact_title(tmp_path: Path, monkeypa
     archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
     assert "# Verification for T-20260609184046Z" not in archived
     assert "- Command: pytest" in archived
+    assert long_result in archived
     assert "status: done" in archived
+    receipt = json.loads((tmp_path / payload["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["verification"]["truncated"] is False
+    assert receipt["verification"]["normalized_sha256"] == receipt["verification"]["stored_sha256"]
 
 
 def test_task_finish_blocks_on_changed_file_meta_errors(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -404,9 +410,8 @@ def test_task_finish_allows_no_repo_changes_only_when_repo_git_available(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     assert payload["meta_gate"] == {"status": "skipped", "reason": "no_repo_changes"}
     archived = (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert "Repoctl gate summary:" in archived
-    assert "- repo git: present" in archived
-    assert "- meta gate: skipped (no_repo_changes)" in archived
+    assert "Repoctl gate summary:" not in archived
+    assert "## Verification\n\nok\n" in archived
 
 
 
@@ -468,8 +473,8 @@ def test_task_finish_ignores_unrelated_full_repo_metadata_errors(tmp_path: Path,
     payload = json.loads(capsys.readouterr().out)
     assert payload["meta_gate"]["status"] == "passed"
     archived = (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert "Repoctl gate summary:" in archived
-    assert "- meta gate: passed" in archived
+    assert "Repoctl gate summary:" not in archived
+    assert "## Verification\n\nok\n" in archived
 
 
 def test_task_finish_missing_verification_file_returns_json_error(tmp_path: Path, monkeypatch, capsys) -> None:

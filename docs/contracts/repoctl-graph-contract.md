@@ -4,7 +4,7 @@
 
 Graph is not authoritative. Source authorities remain repo registry, code index, `.repometa`, and structured task completion receipts.
 
-The first build analyzes all eligible source files and materializes a persistent SQLite evidence index for source symbols, module text, documents, manifests, verification hints, and task artifacts. Later builds compare Git/content identities and update only changed files plus the semantic dependents that can be affected by those changes. `graph query` reads the materialized snapshot and never runs a compiler provider or rescans product sources.
+The first build analyzes all eligible source files and materializes a persistent SQLite evidence index for source symbols, module text, documents, manifests, verification hints, and task artifacts. The manifest, snapshot, semantic-provider results, and evidence-index binding are admitted as one materialization; query and incremental build fail with a typed recovery action when any member is missing, invalid, or bound to another snapshot. Later builds compare Git/content identities and update only changed files plus the semantic dependents that can be affected by those changes. `graph query` reads the materialized snapshot and never runs a compiler provider or rescans product sources.
 
 ## Command
 
@@ -33,7 +33,7 @@ Direct single-repo layout may omit `--repo-id` when `repos/.git` is the only tar
 ./scripts/repoctl graph query --repo-id web --artifact docs/archive/tasks/T-...md --json
 ```
 
-Query never updates Graph state. If no snapshot exists, it returns `graph_snapshot_missing` and tells the caller to run `graph build`. Source changes become visible after the next explicit build; queries remain pinned to the returned `snapshot_digest` until then.
+Query never updates Graph state. If no snapshot exists, it returns `graph_snapshot_missing` and tells the caller to run `graph build`. Existing state that is unreadable, malformed, incomplete, incompatible, or bound to another repository identity is a typed hard failure and requires an explicit rebuild; it is never treated as an absent snapshot. Source changes become visible after the next explicit build; queries remain pinned to the returned `snapshot_digest` until then.
 
 Materialized implementation state lives under `.repoctl-state/graph/<repo-id>/`. It contains one canonical snapshot, one manifest, and one fixed result file per semantic provider. It does not create per-query or per-file ledgers.
 
@@ -45,9 +45,11 @@ Incremental invalidation follows semantic boundaries:
 - Provider configuration or provider input-version changes refresh that provider.
 - Deleted and renamed files remove their old symbols and calls before updated facts are merged.
 
-Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, `--impact-symbol`, `--task`, or `--artifact`. `--in-file` narrows symbol selectors. `--depth` bounds impact traversal.
+Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, `--impact-symbol`, `--task`, or `--artifact`. File selectors and `--in-file` accept exact normalized paths relative to the selected product repository; workspace-qualified aliases are not accepted. `--in-file` narrows symbol selectors. `--depth` bounds impact traversal.
 
-Default query JSON is the compact agent-facing view: direct matches, relation or traversal paths, reusable continuations, node/edge counts, and summarized completeness. Use `--full --json` only when raw nodes, raw edges, or full provider path diagnostics are required.
+Default build JSON contains the snapshot digest, node/edge counts, compact capability/provider status, materialization status, and updated-path counts. Provider path inventories and the raw snapshot are available only with `--full`.
+
+Default query JSON is the compact agent-facing view: direct matches, decision-relevant relation or traversal paths, reusable continuations, node/edge counts by kind, displayed/omitted counts, summarized completeness, and freshness counts. Matches, paths, and continuations share one eight-selector display budget: direct-match selectors are reserved first, and a path is displayed only when every traversable endpoint has its exact typed continuation in the same response. Symbol endpoints include their repository-relative source path so repeated names remain unambiguous. `impact-file` displays cross-file `CALLS` and `IMPORTS_FILE` paths; file-local `DEFINES` and `ANCHORS` remain in the snapshot and are represented by edge counts rather than exhaustive default output. Use `--full --json` when exact stale paths, raw nodes/edges, or full provider diagnostics are required.
 
 ## Snapshot
 
@@ -133,7 +135,7 @@ Identity rules:
 repository = repo_id
 file       = repo_id + normalized repo-relative path
 topic      = repo_id + exact topic name
-import_ref = repo_id + language + raw import string
+import_ref = repo_id + importer path + language + typed import occurrence
 task       = task_id from completion receipt
 symbol     = repo_id + provider + provider_symbol_id
 anchor     = repo_id + provider + source range
@@ -155,13 +157,15 @@ IMPORTS_FILE
 CALLS
 ```
 
-`DECLARES_IMPORT` points to `import_ref`, not to file, module, package, or symbol. Resolvers may add `RESOLVES_TO` without changing this meaning.
+`DECLARES_IMPORT` points to an importer-scoped `import_ref`, not to file, module, package, or symbol. Its typed identity preserves form, relative level, module, imported name, and raw display text. Resolvers may add `RESOLVES_TO` without changing this meaning. `--import <raw>` may return several distinct occurrence nodes when the same text appears in different files or import forms.
 
 `RESOLVES_TO` points from an `import_ref` node to an unambiguous resolved file node. It is provider evidence, not package-manager or runtime inference.
 
 `IMPORTS_FILE` points from the importing file node to the resolved imported file node. It is added only when resolution is unambiguous.
 
 Python absolute imports are resolved against the repository root and structured setuptools roots declared by `pyproject.toml` through `tool.setuptools.package-dir` or `tool.setuptools.packages.find.where`. repoctl does not execute `setup.py`, mutate `sys.path`, or guess source roots from directory names. If one module identity maps to more than one file, resolution fails closed.
+
+Python resolution consumes AST-derived import occurrences with explicit `module`/`from` form, relative level, module name, and imported name; it does not recover those semantics by splitting the raw import string. A relative import resolves only when every possible configured module identity for the importer yields the same target. For `from package import name`, a certain package attribute takes precedence over a same-named submodule, a possible or dynamic package attribute fails closed, and submodule fallback is used only when the package attribute is absent. Callable definitions, aliases, and explicit `from` re-exports are propagated to a fixed point so direct and module-qualified calls share one exported-callable identity.
 
 `CALLS` points from a precise provider symbol node to another precise provider symbol node. String matching alone must not create `CALLS`.
 
@@ -175,6 +179,10 @@ Provider support is compiler/analyzer backed:
 - C# and Unity use Roslyn `SemanticModel` over `.csproj` compilation units.
 
 Python `CALLS` resolution follows lexical scopes. Nested function, class, lambda, and comprehension bindings are not attributed to the wrong scope. Parameters and local assignments/imports shadow outer symbols; module imports and simple module aliases may resolve calls; `global` and `nonlocal` declarations are honored; ambiguous or order-unsafe bindings fail closed.
+
+A Python `CALLS` edge records the lexical target when that call expression executes; it is not a whole-program reachability proof that every enclosing control-flow path initializes the binding before invocation. The bounded provider does not evaluate version-dependent annotation expressions because the product interpreter version and `__future__` policy are not authoritative Graph inputs.
+
+Each semantic provider declares its own capability evidence level and coverage gaps. Python call evidence is conservative because dynamic call targets are not exhaustive, so a successfully analyzed Python repository must not claim complete call coverage.
 
 Impact and caller/callee queries consume `CALLS` and `IMPORTS_FILE` evidence that already exists in the snapshot. They must not create new call edges by name matching query strings.
 
@@ -325,7 +333,7 @@ artifact     -> graph artifact / workspace open
 change_event -> owning graph task
 ```
 
-`--task` returns the recorded task, its completion artifact, change events, and affected current or historical file identities. `--artifact` follows the artifact back through its task and recorded file evidence. These selectors consume structured completion receipts only; they do not parse task Markdown prose.
+`--task` returns the recorded task, its completion artifact, change events, and affected current or historical file identities. Receipt `task_path_at_completion` remains historical evidence; the artifact node and continuation use the task's current canonical path after a parent archive moves it. `--artifact` follows that current artifact back through its task and recorded file evidence. These selectors consume structured completion receipts only; they do not parse task Markdown prose.
 
 Every query payload includes `freshness`. `current` means product file identities and root evidence identities still match the materialized manifest. `stale` includes exact `changed_paths` and `changed_root_paths` and emits `graph_snapshot_stale`; the stored result remains queryable as historical derived evidence but must not be presented as current. Rebuild explicitly before relying on changed relations. Root evidence probes reuse stored content digests when path kind, mode, size, and mtime are unchanged, so freshness checks do not reread every document or receipt body.
 
@@ -334,6 +342,10 @@ Simple symbol names are fail-closed. If a symbol selector matches multiple preci
 Unsupported or incomplete provider coverage is reported through `completeness` and `warnings`; query must not claim a complete call graph when only file-level import impact is available.
 
 Capability coverage values are `complete`, `partial`, `unsupported`, or `unavailable`. They are computed from provider execution over eligible, analyzed, unsupported, and failed paths rather than a language warning allowlist. `evidence_level` separately describes whether emitted evidence is precise or conservative; it does not claim whole-language exhaustiveness.
+
+Repository-level coverage may be `complete` when no path is eligible for that semantic capability. Per-language diagnostics have a different scope: a registered non-semantic language profile such as YAML reports `symbols_status: unsupported` and `calls_status: unsupported`, never `complete`. A semantic language with a defined provider that failed reports `unavailable`; a semantic language with no provider reports `unsupported`.
+
+In `language_capabilities`, `provider_defined` means that the current materialization contains a semantic provider result declaring that language. Static language intent remains in the registered language profile's `semantic_source` and `capability` fields.
 
 Query outcome and evidence completeness are separate axes:
 

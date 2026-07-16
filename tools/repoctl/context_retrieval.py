@@ -90,7 +90,28 @@ def rank_context_chunks(
                 selection_reasons=sorted(reasons[key]),
             )
         )
-    return sorted(candidates, key=lambda item: (-item.score, item.source_ref.path, item.source_ref.line_start))[:limit]
+    ranked = sorted(candidates, key=lambda item: (-item.score, item.source_ref.path, item.source_ref.line_start))
+    if limit < 0 or len(ranked) <= limit:
+        return ranked
+
+    selected: list[ContextCandidate] = []
+    selected_keys: set[tuple[str, str, str, int, int]] = set()
+    seen_paths: set[str] = set()
+    for candidate in ranked:
+        if candidate.source_ref.path in seen_paths:
+            continue
+        selected.append(candidate)
+        selected_keys.add(candidate.source_ref.key())
+        seen_paths.add(candidate.source_ref.path)
+        if len(selected) == limit:
+            return selected
+    for candidate in ranked:
+        if candidate.source_ref.key() in selected_keys:
+            continue
+        selected.append(candidate)
+        if len(selected) == limit:
+            break
+    return selected
 
 
 def context_query_terms(query: str) -> set[str]:

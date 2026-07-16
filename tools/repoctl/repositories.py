@@ -89,6 +89,20 @@ def _safe_rel(value: str) -> str:
     return "/".join(parts)
 
 
+def normalize_repo_selector_path(value: str) -> str:
+    """Return the canonical repo-relative path accepted by Graph selectors."""
+    raw = value.strip()
+    if not raw or "\\" in raw or Path(raw).is_absolute():
+        return ""
+    while raw.startswith("./"):
+        raw = raw[2:]
+    raw = raw.strip("/")
+    parts = [part for part in raw.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
 def _validate_product_repo_rel(rel: str) -> None:
     parts = rel.split("/")
     if rel == "repos":

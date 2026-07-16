@@ -4,14 +4,15 @@ import fnmatch
 import hashlib
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
 
 from .context import build_context_bundle, compact_context_bundle
 from .context_model import ContextBundle
-from .graph import build_graph
 from .graph_model import GraphSnapshot
 from .graph_model import digest_data
+from .graph_store import materialize_graph
 from .language_profiles import default_indexing_excludes
 from .repositories import require_repo_target
 from .tasks import Problem
@@ -51,28 +52,31 @@ def run_context_benchmark(
     if require_fixture_corpus:
         problems.extend(corpus_problems)
     results: list[dict[str, Any]] = []
-    graph_cache: dict[str, tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]] = {}
-    for question in questions:
-        question_id = str(question.get("id") or "")
-        target_repo_id = repo_id or str(question.get("repo_id") or "")
-        target = require_repo_target(root, repo_id=target_repo_id or None)
-        graph_result = graph_cache.get(target.id)
-        if graph_result is None:
-            graph_result = build_graph(root, target=target)
-            graph_cache[target.id] = graph_result
-        bundle, bundle_problems, _meta = build_context_bundle(
-            root,
-            target=target,
-            query=str(question.get("question") or ""),
-            explain=True,
-            mode=str(question.get("mode") or ""),
-            graph_result=graph_result,
-        )
-        _snapshot, graph_problems, _graph_meta = graph_result
-        problems.extend(bundle_problems)
-        problems.extend(graph_problems)
-        spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
-        results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems]))
+    with TemporaryDirectory(prefix="repoctl-context-benchmark-") as temporary_state:
+        graph_state_root = Path(temporary_state)
+        graph_cache: dict[str, tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]] = {}
+        for question in questions:
+            question_id = str(question.get("id") or "")
+            target_repo_id = repo_id or str(question.get("repo_id") or "")
+            target = require_repo_target(root, repo_id=target_repo_id or None)
+            graph_result = graph_cache.get(target.id)
+            if graph_result is None:
+                graph_result = materialize_graph(root, target=target, rebuild=True, state_root=graph_state_root)
+                graph_cache[target.id] = graph_result
+            bundle, bundle_problems, _meta = build_context_bundle(
+                root,
+                target=target,
+                query=str(question.get("question") or ""),
+                explain=True,
+                mode=str(question.get("mode") or ""),
+                graph_result=graph_result,
+                graph_state_root=graph_state_root,
+            )
+            _snapshot, graph_problems, _graph_meta = graph_result
+            problems.extend(bundle_problems)
+            problems.extend(graph_problems)
+            spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
+            results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems]))
 
     summary = _summarize(results)
     problems.extend(

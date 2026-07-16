@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.graph_store import materialize_graph
-from tools.repoctl.graph_model import file_id, import_ref_id, topic_id
+from tools.repoctl.graph_model import digest_data, file_id, import_ref_id, topic_id
 from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
@@ -24,7 +24,9 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     init_repo(repo)
     write_repometa(repo)
     (repo / "src").mkdir()
-    (repo / "src/app.py").write_text("import hashlib\n", encoding="utf-8")
+    (repo / "src/app.py").write_text("import hashlib\n\n\ndef api_error():\n    return 'root'\n", encoding="utf-8")
+    (repo / "repos/src").mkdir(parents=True)
+    (repo / "repos/src/app.py").write_text("def nested_app():\n    return 'nested'\n", encoding="utf-8")
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     monkeypatch.setattr(
@@ -43,6 +45,11 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     assert any(relation["edge"] == "CONTAINS" for relation in compact_result["relations"])
     assert any(item["selector"] == {"kind": "file", "value": "src/app.py"} for item in compact_result["continuations"])
 
+    assert main(["graph", "query", "--file", "repos/src/app.py", "--json"]) == 0
+    nested = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert nested["query"] == {"type": "file", "path": "repos/src/app.py"}
+    assert nested["matches"][0]["path"] == "repos/src/app.py"
+
     assert main(["graph", "query", "--file", "src/app.py", "--full", "--json"]) == 0
 
     result = json.loads(capsys.readouterr().out)["data"]["result"]
@@ -53,6 +60,32 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     assert main(["graph", "query", "--file", "./src\\app.py", "--json"]) == 1
     invalid = json.loads(capsys.readouterr().out)
     assert invalid["problems"][0]["code"] == "graph_query_invalid_path"
+
+    assert main(["graph", "query", "--symbol", "api_error", "--in-file", "../outside.py", "--json"]) == 1
+    invalid_in_file = json.loads(capsys.readouterr().out)
+    assert invalid_in_file["problems"][0]["code"] == "graph_query_invalid_path"
+
+    provider_path = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
+    removed_provider_path = provider_path.with_suffix(".removed")
+    provider_path.rename(removed_provider_path)
+    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 1
+    incomplete = json.loads(capsys.readouterr().out)
+    assert incomplete["data"]["materialization"]["status"] == "incomplete"
+    assert [problem["code"] for problem in incomplete["problems"]] == ["graph_materialization_incomplete"]
+
+    removed_provider_path.rename(provider_path)
+    provider_data = json.loads(provider_path.read_text(encoding="utf-8"))
+    provider_data["symbols"] = None
+    provider_path.write_text(json.dumps(provider_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest_path = tmp_path / ".repoctl-state/graph/main/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["provider_result_digests"]["python_ast"] = digest_data(provider_data)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 1
+    invalid_materialization = json.loads(capsys.readouterr().out)
+    assert invalid_materialization["data"]["materialization"]["status"] == "invalid"
+    assert [problem["code"] for problem in invalid_materialization["problems"]] == ["graph_materialization_invalid"]
 
 
 def test_graph_query_topic_returns_matching_files(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -89,7 +122,7 @@ def test_graph_query_import_returns_declaring_files(tmp_path: Path, monkeypatch,
 
     result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert result["query"] == {"type": "import", "raw_import": "axios"}
-    assert any(node["id"] == import_ref_id("main", "typescript", "axios") for node in result["nodes"])
+    assert any(node["id"] == import_ref_id("main", "frontend/app.ts", "typescript", "axios") for node in result["nodes"])
     assert any(node["id"] == file_id("main", "frontend/app.ts") for node in result["nodes"])
     assert any(edge["kind"] == "DECLARES_IMPORT" for edge in result["edges"])
 
@@ -131,8 +164,13 @@ def test_graph_query_reports_snapshot_freshness(tmp_path: Path, monkeypatch, cap
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["freshness"]["status"] == "stale"
-    assert payload["data"]["freshness"]["changed_paths"] == ["app.py"]
+    assert payload["data"]["freshness"]["changed_path_count"] == 1
+    assert "changed_paths" not in payload["data"]["freshness"]
     assert any(warning["code"] == "graph_snapshot_stale" for warning in payload["warnings"])
+
+    assert main(["graph", "query", "--file", "app.py", "--full", "--json"]) == 0
+    full = json.loads(capsys.readouterr().out)
+    assert full["data"]["freshness"]["changed_paths"] == ["app.py"]
 
 
 def test_graph_call_query_reports_defined_but_missing_provider_as_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:

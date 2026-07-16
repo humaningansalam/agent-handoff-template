@@ -19,7 +19,7 @@ from .context_task_pack import build_task_context_pack, compact_task_context_pac
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import query_graph
 from .graph_model import digest_data
-from .graph_store import graph_materialization_freshness, load_materialized_graph, materialize_graph
+from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph, materialize_graph
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
@@ -234,12 +234,33 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Inspect plan conflicts before applying", path=path or "/tmp/repoctl-upgrade-plan.json")
         elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
             add("Apply the declared benchmark corpus before running this gate", path="tests/fixtures/context-benchmark/corpus.json")
+        elif code in {
+            "graph_materialization_incomplete",
+            "graph_materialization_invalid",
+            "graph_materialization_repository_mismatch",
+            "graph_materialization_schema_mismatch",
+            "graph_materialization_unavailable",
+            "evidence_index_missing",
+            "evidence_index_unavailable",
+            "evidence_index_schema_invalid",
+            "evidence_index_query_failed",
+            "evidence_index_input_mismatch",
+            "evidence_index_snapshot_mismatch",
+        }:
+            repository = data.get("repository") if isinstance(data, dict) and isinstance(data.get("repository"), dict) else {}
+            repo_id = str(repository.get("id") or "<id>")
+            add(
+                "Rebuild the materialized Graph and evidence index",
+                command=f"./scripts/repoctl graph build --repo-id {repo_id} --rebuild --json",
+            )
         elif code == "knowledge_candidate_receipt_invalid":
             add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
-            add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --dry-run --json")
+            add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+        elif code == "knowledge_candidate_claim_required":
+            add("State the reusable decision, invariant, or failure mode explicitly", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
         elif code == "knowledge_records_empty":
             add("Build a reviewable candidate from a source document", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --json")
-            add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --dry-run --json")
+            add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
     return actions
 
 
@@ -1389,7 +1410,9 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         "data": {
             "task_id": args.task_id,
             "path": result["task"].rel_path,
-            "discovery": result["discovery"],
+            "update": result["update"],
+            "totals": result["totals"],
+            **({"discovery": result["discovery"]} if args.full else {}),
         },
         "problems": [],
         "warnings": [],
@@ -2137,7 +2160,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         next_actions.append(
             {
                 "label": "Preview a Knowledge candidate only if this task produced a reusable decision, invariant, or failure mode",
-                "command": f"./scripts/repoctl knowledge candidate suggest --from-task {args.task_id} --repo-id {repo_id} --dry-run --json",
+                "command": f"./scripts/repoctl knowledge candidate suggest --from-task {args.task_id} --repo-id {repo_id} --kind <kind> --claim '<reusable claim>' --dry-run --json",
             }
         )
     payload = {
@@ -2170,7 +2193,7 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
     verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="cancel")
     with repoctl_lock(root):
         cancel_gate = _cancel_dirty_gate(root, args.task_id, allow_dirty_cancel=args.allow_dirty_cancel)
-        result = cancel_task(root, args.task_id, verification=verification, meta_gate=cancel_gate)
+        result = cancel_task(root, args.task_id, verification=verification)
         _write_task_result(root, result)
     data = {
         "task_id": args.task_id,
@@ -2439,9 +2462,14 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
     target = require_repo_target(root, repo_id=args.repo_id)
     with repoctl_lock(root):
         snapshot, problems, meta = materialize_graph(root, target=target, rebuild=args.rebuild)
-    summary = _graph_snapshot_summary(snapshot, meta=meta) if snapshot is not None else None
-    data = {"summary": summary, **meta}
+    summary = _graph_snapshot_summary(snapshot) if snapshot is not None else None
+    data = {
+        "repository": target.to_dict(),
+        "summary": summary,
+        "materialization": _compact_graph_materialization(meta.get("materialization", {})),
+    }
     if args.full:
+        data.update(meta)
         data["snapshot"] = snapshot.to_dict() if snapshot is not None else None
     payload = {
         "ok": snapshot is not None and not _has_errors(problems),
@@ -2457,7 +2485,7 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
         ],
     }
     if args.json:
-        _json(payload)
+        _json(payload, compact=not args.full)
     else:
         if snapshot is not None:
             print(f"graph snapshot {snapshot.snapshot_digest} repository={target.id} nodes={len(snapshot.nodes)} edges={len(snapshot.edges)}")
@@ -2466,7 +2494,7 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def _graph_snapshot_summary(snapshot: Any, *, meta: dict[str, Any]) -> dict[str, Any]:
+def _graph_snapshot_summary(snapshot: Any) -> dict[str, Any]:
     node_counts: dict[str, int] = {}
     edge_counts: dict[str, int] = {}
     for node in snapshot.nodes:
@@ -2482,10 +2510,61 @@ def _graph_snapshot_summary(snapshot: Any, *, meta: dict[str, Any]) -> dict[str,
         "edge_count": len(snapshot.edges),
         "node_counts": dict(sorted(node_counts.items())),
         "edge_counts": dict(sorted(edge_counts.items())),
-        "completeness": snapshot.completeness,
-        "capabilities": snapshot.capabilities,
-        "index": meta.get("index", {}),
-        "semantic_providers": meta.get("semantic_providers", []),
+        "completeness": _compact_graph_completeness(snapshot.completeness),
+        "index": _graph_index_summary(snapshot),
+    }
+
+
+def _graph_index_summary(snapshot: Any) -> dict[str, Any]:
+    entries = [
+        node.facts.get("index")
+        for node in snapshot.nodes
+        if node.kind == "file" and isinstance(node.facts.get("index"), dict)
+    ]
+    languages = {
+        str(entry.get("language") or "")
+        for entry in entries
+        if str(entry.get("language") or "")
+    }
+    return {
+        "total": len(entries),
+        "ok": sum(1 for entry in entries if entry.get("parse_status") == "ok"),
+        "skipped": sum(1 for entry in entries if entry.get("parse_status") == "skipped"),
+        "parse_error": sum(1 for entry in entries if entry.get("parse_status") == "parse_error"),
+        "languages": {
+            language: sum(1 for entry in entries if entry.get("language") == language)
+            for language in sorted(languages)
+        },
+    }
+
+
+def _compact_graph_materialization(materialization: Any) -> dict[str, Any]:
+    if not isinstance(materialization, dict):
+        return {}
+    updated_paths = materialization.get("updated_paths") if isinstance(materialization.get("updated_paths"), dict) else {}
+    semantic_paths = {
+        str(path)
+        for paths in updated_paths.values()
+        if isinstance(paths, list)
+        for path in paths
+        if str(path)
+    }
+    code_index = materialization.get("code_index") if isinstance(materialization.get("code_index"), dict) else {}
+    evidence = materialization.get("evidence") if isinstance(materialization.get("evidence"), dict) else {}
+    return {
+        "status": materialization.get("status", ""),
+        "input_digest": materialization.get("input_digest", ""),
+        "reused_provider_count": len(materialization.get("reused_providers", [])) if isinstance(materialization.get("reused_providers"), list) else 0,
+        "updated_provider_count": len(materialization.get("updated_providers", [])) if isinstance(materialization.get("updated_providers"), list) else 0,
+        "semantic_updated_path_count": len(semantic_paths),
+        "code_index": {
+            "full_reindex": bool(code_index.get("full_reindex")),
+            "changed_path_count": len(code_index.get("changed_paths", [])) if isinstance(code_index.get("changed_paths"), list) else 0,
+        },
+        "evidence": {
+            "status": evidence.get("status", ""),
+            "updated_path_count": len(evidence.get("updated_paths", [])) if isinstance(evidence.get("updated_paths"), list) else 0,
+        },
     }
 
 
@@ -2508,7 +2587,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
                 print(problem.message)
         return 1 if _has_errors(build_problems) else 0
 
-    freshness, freshness_problems = graph_materialization_freshness(root, target=target)
+    freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
 
     result, query_problems = query_graph(
         snapshot,
@@ -2530,6 +2609,16 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     result_data = result if args.full or result is None else _compact_graph_query_result(result)
     completeness = result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness
     result_warnings = result.get("warnings", []) if isinstance(result, dict) and isinstance(result.get("warnings"), list) else []
+    freshness_data = freshness if args.full else compact_graph_freshness(freshness)
+    stale_warning = {
+        "code": "graph_snapshot_stale",
+        "message": "materialized Graph does not match current source or workspace evidence; run repoctl graph build before relying on changed relations",
+        "changed_path_count": int(freshness.get("changed_path_count") or 0),
+        "changed_root_path_count": int(freshness.get("changed_root_path_count") or 0),
+    }
+    if args.full:
+        stale_warning["changed_paths"] = freshness.get("changed_paths", [])
+        stale_warning["changed_root_paths"] = freshness.get("changed_root_paths", [])
     payload = {
         "ok": result is not None and outcome_ok and not _has_errors(query_problems),
         "command": "graph query",
@@ -2539,7 +2628,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             "completeness": completeness if args.full else _compact_graph_completeness(completeness),
             "repository": target.to_dict(),
             "snapshot_digest": snapshot.snapshot_digest,
-            "freshness": freshness,
+            "freshness": freshness_data,
         },
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
@@ -2548,12 +2637,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             *result_warnings,
             *(
                 [
-                    {
-                        "code": "graph_snapshot_stale",
-                        "message": "materialized Graph does not match current source or workspace evidence; run repoctl graph build before relying on changed relations",
-                        "changed_paths": freshness.get("changed_paths", []),
-                        "changed_root_paths": freshness.get("changed_root_paths", []),
-                    }
+                    stale_warning
                 ]
                 if freshness.get("status") == "stale"
                 else []
@@ -2587,36 +2671,199 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
 def _compact_graph_query_result(result: dict[str, Any]) -> dict[str, Any]:
     nodes = result.get("nodes") if isinstance(result.get("nodes"), list) else []
     edges = result.get("edges") if isinstance(result.get("edges"), list) else []
+    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
+    paths = result.get("paths") if isinstance(result.get("paths"), list) else []
+    continuations = result.get("continuations") if isinstance(result.get("continuations"), list) else []
     node_summaries = {
         str(node.get("id") or ""): _compact_graph_node(node, include_id=False)
         for node in nodes
         if isinstance(node, dict) and str(node.get("id") or "")
     }
+    displayed_matches, selected_paths, displayed_continuations = _select_compact_graph_projection(
+        matches,
+        paths,
+        continuations,
+        limit=8,
+    )
+    displayed_paths = [_compact_graph_path(path) for path in selected_paths]
+    relation_edges = [
+        edge
+        for edge in edges
+        if isinstance(edge, dict) and str(edge.get("kind") or "") not in {"DEFINES", "ANCHORS"}
+    ]
+    relation_edges.sort(key=_compact_graph_relation_key)
+    displayed_relations = [
+        _compact_graph_relation(edge, node_summaries)
+        for edge in relation_edges[:24]
+    ]
+    edge_counts: dict[str, int] = {}
+    for edge in edges:
+        if isinstance(edge, dict):
+            kind = str(edge.get("kind") or "")
+            edge_counts[kind] = edge_counts.get(kind, 0) + 1
     compact = {
         "query": result.get("query", {}),
         "query_status": result.get("query_status", "unavailable"),
-        "matches": result.get("matches", []),
-        "paths": [_compact_graph_path(path) for path in result.get("paths", []) if isinstance(path, dict)],
-        "continuations": [
-            {
-                "selector": continuation.get("selector", {}),
-                "query_types": continuation.get("query_types", []),
-                "actions": continuation.get("actions", []),
-            }
-            for continuation in result.get("continuations", [])
-            if isinstance(continuation, dict)
-        ],
+        "matches": displayed_matches,
+        "paths": displayed_paths,
+        "continuations": displayed_continuations,
         "node_count": len(nodes),
         "edge_count": len(edges),
-        "warnings": result.get("warnings", []),
+        "edge_counts": dict(sorted(edge_counts.items())),
+        "display": {
+            "matches": _display_count(len(matches), len(displayed_matches)),
+            "paths": _display_count(len(paths), len(displayed_paths)),
+            "relations": (
+                _display_count(0, 0)
+                if displayed_paths
+                else _display_count(len(relation_edges), len(displayed_relations))
+            ),
+            "continuations": _display_count(len(continuations), len(displayed_continuations)),
+        },
     }
     if not compact["paths"]:
-        compact["relations"] = [
-            _compact_graph_relation(edge, node_summaries)
-            for edge in edges
-            if isinstance(edge, dict)
-        ]
+        compact["relations"] = displayed_relations
     return compact
+
+
+def _display_count(total: int, displayed: int) -> dict[str, int]:
+    return {
+        "total": total,
+        "displayed": displayed,
+        "omitted": max(0, total - displayed),
+    }
+
+
+def _compact_graph_relation_key(edge: dict[str, Any]) -> tuple[int, str, str, str]:
+    priorities = {
+        "CALLS": 0,
+        "IMPORTS_FILE": 1,
+        "CHANGE_AFFECTED_FILE": 2,
+        "TASK_RECORDED_CHANGE": 3,
+        "TASK_VERIFIED_BY": 4,
+        "RESOLVES_TO": 5,
+        "DECLARES_IMPORT": 6,
+        "HAS_TOPIC": 7,
+        "CONTAINS": 8,
+    }
+    kind = str(edge.get("kind") or "")
+    return (
+        priorities.get(kind, 9),
+        kind,
+        str(edge.get("from") or ""),
+        str(edge.get("to") or ""),
+    )
+
+
+def _select_compact_graph_projection(
+    matches: list[Any],
+    paths: list[Any],
+    continuations: list[Any],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_continuations = [item for item in continuations if isinstance(item, dict)]
+    continuation_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    ordered_keys: list[tuple[str, str, str]] = []
+    for continuation in normalized_continuations:
+        key = _graph_selector_key(continuation.get("selector"))
+        if key is None or key in continuation_by_key:
+            continue
+        continuation_by_key[key] = continuation
+        ordered_keys.append(key)
+
+    selected_keys: list[tuple[str, str, str]] = []
+    selected_key_set: set[tuple[str, str, str]] = set()
+
+    def reserve(keys: list[tuple[str, str, str]]) -> bool:
+        new_keys = [key for key in keys if key not in selected_key_set]
+        if len(selected_keys) + len(new_keys) > limit:
+            return False
+        for key in new_keys:
+            selected_keys.append(key)
+            selected_key_set.add(key)
+        return True
+
+    displayed_matches: list[dict[str, Any]] = []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        key = _graph_summary_selector_key(match)
+        if key is None or key not in continuation_by_key or not reserve([key]):
+            continue
+        displayed_matches.append(match)
+
+    displayed_paths: list[dict[str, Any]] = []
+    traversable_kinds = {"file", "symbol", "import_ref", "topic", "task", "artifact", "change_event"}
+    for path in paths:
+        if not isinstance(path, dict):
+            continue
+        path_keys: list[tuple[str, str, str]] = []
+        valid = True
+        for endpoint in (path.get("from"), path.get("to")):
+            if not isinstance(endpoint, dict):
+                continue
+            key = _graph_summary_selector_key(endpoint)
+            if key is None:
+                if str(endpoint.get("kind") or "") in traversable_kinds:
+                    valid = False
+                    break
+                continue
+            if key not in continuation_by_key:
+                valid = False
+                break
+            if key not in path_keys:
+                path_keys.append(key)
+        if valid and reserve(path_keys):
+            displayed_paths.append(path)
+
+    for key in ordered_keys:
+        if len(selected_keys) >= limit:
+            break
+        reserve([key])
+
+    displayed_continuations = [
+        {
+            "selector": continuation_by_key[key].get("selector", {}),
+            "query_types": continuation_by_key[key].get("query_types", []),
+            "actions": continuation_by_key[key].get("actions", []),
+        }
+        for key in selected_keys
+    ]
+    return displayed_matches, displayed_paths, displayed_continuations
+
+
+def _graph_selector_key(selector: Any) -> tuple[str, str, str] | None:
+    if not isinstance(selector, dict):
+        return None
+    kind = str(selector.get("kind") or "")
+    value = str(selector.get("value") or "")
+    if not kind or not value:
+        return None
+    return kind, value, str(selector.get("in_file") or "")
+
+
+def _graph_summary_selector_key(summary: dict[str, Any]) -> tuple[str, str, str] | None:
+    kind = str(summary.get("kind") or "")
+    if kind == "file":
+        selector = {"kind": "file", "value": summary.get("path")}
+    elif kind == "symbol":
+        selector = {
+            "kind": "symbol",
+            "value": summary.get("qualified_name") or summary.get("name"),
+            "in_file": summary.get("path"),
+        }
+    elif kind == "import_ref":
+        selector = {"kind": "import", "value": summary.get("raw_import")}
+    elif kind == "topic":
+        selector = {"kind": "topic", "value": summary.get("topic")}
+    elif kind in {"task", "change_event"}:
+        selector = {"kind": "task", "value": summary.get("task_id")}
+    elif kind == "artifact":
+        selector = {"kind": "document", "value": summary.get("path")}
+    else:
+        return None
+    return _graph_selector_key(selector)
 
 
 def _compact_graph_node(node: dict[str, Any], *, include_id: bool = True) -> dict[str, Any]:
@@ -2691,6 +2938,7 @@ def _compact_graph_completeness(completeness: Any) -> dict[str, Any]:
             "analyzed_path_count": len(value.get("analyzed_paths", [])) if isinstance(value.get("analyzed_paths"), list) else 0,
             "unsupported_path_count": len(value.get("unsupported_paths", [])) if isinstance(value.get("unsupported_paths"), list) else 0,
             "failed_path_count": len(value.get("failed_paths", [])) if isinstance(value.get("failed_paths"), list) else 0,
+            "coverage_gaps": value.get("coverage_gaps", []) if isinstance(value.get("coverage_gaps"), list) else [],
         }
         for name, value in sorted(coverage.items())
         if isinstance(value, dict)
@@ -3113,6 +3361,15 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
                 "message": "knowledge candidates are review inputs only; they are not canonical knowledge records",
             }
         ],
+        "next_actions": (
+            _knowledge_candidate_next_actions(
+                data,
+                repo_id=args.repo_id,
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+            if not _has_errors(problems)
+            else _next_actions_for_problems(problems, data={"task_id": from_task or args.from_receipt or "T-..."})
+        ),
     }
     if args.json:
         _json(payload)
@@ -3122,6 +3379,27 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
+
+
+def _knowledge_candidate_next_actions(data: dict[str, Any], *, repo_id: str, dry_run: bool) -> list[dict[str, str]]:
+    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else {}
+    candidate_id = str(candidate.get("id") or "")
+    if not candidate_id or dry_run:
+        return []
+    return [
+        {
+            "label": "Review the candidate with source-currentness checks",
+            "command": f"./scripts/repoctl knowledge candidate show {candidate_id} --repo-id {repo_id} --format markdown",
+        },
+        {
+            "label": "Run the candidate contract check",
+            "command": f"./scripts/repoctl knowledge candidate check {candidate_id} --repo-id {repo_id} --json",
+        },
+        {
+            "label": "Approve only after reviewing the claim and sources",
+            "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {repo_id} --reviewed-by <label> --note-file <review-note.md> --json",
+        },
+    ]
 
 
 def _knowledge_candidate_claim_input(root: Path, args: argparse.Namespace) -> tuple[str, list[Problem]]:
@@ -3273,6 +3551,20 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
     check_problems: list[Problem] = []
     if not problems:
         check_data, check_problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else {}
+    candidate_id = str(candidate.get("id") or args.candidate_id)
+    review_actions = []
+    if data and not _has_errors([*problems, *check_problems]):
+        review_actions = [
+            {
+                "label": "Approve after reviewing the claim and sources",
+                "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {args.repo_id} --reviewed-by <label> --note-file <review-note.md> --json",
+            },
+            {
+                "label": "Reject if the claim is not reusable or source-grounded",
+                "command": f"./scripts/repoctl knowledge reject {candidate_id} --repo-id {args.repo_id} --reason-file <reason.md> --json",
+            },
+        ]
     payload = {
         "ok": not _has_errors([*problems, *check_problems]),
         "command": "knowledge candidate show",
@@ -3285,6 +3577,7 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
             }
         ]
         + [problem.to_dict() for problem in check_problems if problem.severity == "warning"],
+        "next_actions": review_actions,
     }
     if args.json:
         _json(payload)
@@ -3960,6 +4253,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add.add_argument("--replace-chosen", action="append", default=[], help="replace the active chosen-file set; repeat for multiple files")
     task_discovery_add.add_argument("--reason", help="required rationale when replacing the active chosen-file set")
     task_discovery_add.add_argument("--note", help="short rationale for the chosen scope")
+    task_discovery_add.add_argument("--full", action="store_true", help="include the full cumulative Discovery state")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)
     task_baseline = task_sub.add_parser("baseline")

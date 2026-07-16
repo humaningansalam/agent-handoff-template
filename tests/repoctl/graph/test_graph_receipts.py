@@ -108,6 +108,13 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     artifact_result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(item["selector"] == {"kind": "task", "value": task_id} for item in artifact_result["continuations"])
 
+    artifact = tmp_path / task_path
+    artifact.write_text(artifact.read_text(encoding="utf-8") + "\npost-build change\n", encoding="utf-8")
+    assert main(["graph", "query", "--task", task_id, "--full", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)
+    assert stale["data"]["freshness"]["status"] == "stale"
+    assert stale["data"]["freshness"]["changed_root_paths"] == [task_path]
+
 
 def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -125,7 +132,7 @@ def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, 
     receipt = _receipt(
         "T-20260609184046Z",
         repo_id="main",
-        task_path="docs/archive/tasks/T-20260609184046Z--alpha.md",
+        task_path="docs/tasks/T-20260609184046Z--alpha.md",
         content_sha256=archive_hash,
         changed_entries=[
             {"change": "deleted", "path": "deleted.py"},
@@ -142,6 +149,32 @@ def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, 
     assert any(node["id"] == file_id("main", "old.py") and node["facts"]["receipt"]["present_in_current_inventory"] is False for node in snapshot["nodes"])
     assert any(edge["kind"] == "CHANGE_AFFECTED_FILE" and edge["to"] == file_id("main", "deleted.py") and edge["facts"]["role"] == "path" for edge in snapshot["edges"])
     assert any(edge["kind"] == "CHANGE_AFFECTED_FILE" and edge["to"] == file_id("main", "old.py") and edge["facts"]["role"] == "old_path" for edge in snapshot["edges"])
+    task_node = next(node for node in snapshot["nodes"] if node["id"] == "task:T-20260609184046Z")
+    assert task_node["facts"]["receipt"]["task_path_at_completion"] == "docs/tasks/T-20260609184046Z--alpha.md"
+    assert any(
+        node["kind"] == "artifact"
+        and node["identity"]["path"] == "docs/archive/tasks/T-20260609184046Z--alpha.md"
+        for node in snapshot["nodes"]
+    )
+
+    assert main(["graph", "query", "--task", "T-20260609184046Z", "--json"]) == 0
+    task_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(
+        item["selector"] == {"kind": "document", "value": "docs/archive/tasks/T-20260609184046Z--alpha.md"}
+        for item in task_result["continuations"]
+    )
+
+    assert main(
+        [
+            "graph",
+            "query",
+            "--artifact",
+            "docs/archive/tasks/T-20260609184046Z--alpha.md",
+            "--json",
+        ]
+    ) == 0
+    artifact_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert artifact_result["query_status"] == "found"
 
 
 def test_graph_localizes_invalid_receipt_to_selected_repo_task_history(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -214,7 +247,8 @@ def test_graph_reports_unknown_scope_invalid_receipt_without_losing_current_inve
     assert payload["data"]["completeness"]["capabilities"]["task_history"] == "partial"
     assert payload["data"]["completeness"]["invalid_completion_receipts"] == 1
     assert payload["data"]["completeness"]["provider_failure_count"] == 0
-    assert all(warning["code"] != "graph_provider_failure" for warning in payload["data"]["result"]["warnings"])
+    assert "warnings" not in payload["data"]["result"]
+    assert all(warning["code"] != "graph_provider_failure" for warning in payload["warnings"])
     assert any(
         warning["code"] == "invalid_completion_receipt"
         and warning.get("path") == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"

@@ -19,8 +19,20 @@ def file_id(repo_id: str, path: str) -> str:
     return f"repo:{encode_component(repo_id)}:file:{encode_component(path)}"
 
 
-def import_ref_id(repo_id: str, language: str, raw_import: str) -> str:
-    return f"repo:{encode_component(repo_id)}:import-ref:{encode_component(language)}:{encode_component(raw_import)}"
+def import_ref_id(
+    repo_id: str,
+    importer_path: str,
+    language: str,
+    raw_import: str,
+    *,
+    form: str = "raw",
+    level: int = 0,
+    module: str = "",
+    imported_name: str = "",
+) -> str:
+    resolved_module = raw_import if form == "raw" and not module else module
+    parts = (repo_id, importer_path, language, form, str(level), resolved_module, imported_name, raw_import)
+    return "repo:" + encode_component(parts[0]) + ":import-ref:" + ":".join(encode_component(part) for part in parts[1:])
 
 
 def topic_id(repo_id: str, topic: str) -> str:
@@ -104,6 +116,7 @@ class ProviderCoverage:
     unsupported_paths: tuple[str, ...]
     failed_paths: tuple[str, ...]
     evidence_level: str
+    coverage_gaps: tuple[str, ...] = ()
 
     @property
     def status(self) -> str:
@@ -113,7 +126,7 @@ class ProviderCoverage:
             return "unavailable"
         if self.unsupported_paths and not self.analyzed_paths and not self.failed_paths:
             return "unsupported"
-        if self.failed_paths or self.unsupported_paths:
+        if self.failed_paths or self.unsupported_paths or self.coverage_gaps:
             return "partial"
         return "complete"
 
@@ -126,6 +139,7 @@ class ProviderCoverage:
             "unsupported_paths": list(self.unsupported_paths),
             "failed_paths": list(self.failed_paths),
             "evidence_level": self.evidence_level,
+            "coverage_gaps": list(self.coverage_gaps),
         }
 
 

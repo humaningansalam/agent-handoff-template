@@ -33,7 +33,8 @@ def test_task_cancel_records_verification_and_archives_standalone(tmp_path: Path
     assert "status: canceled" in archived
     assert "opened by mistake" in archived
     assert "task canceled with verification evidence" in archived
-    assert "- meta gate: skipped (task_canceled)" in archived
+    assert "Repoctl gate summary:" not in archived
+    assert payload["data"]["cancel_gate"]["reason"] == "task_canceled"
 
 
 def test_task_cancel_blocks_task_scoped_repo_changes_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -81,7 +82,8 @@ def test_task_cancel_allows_explicit_dirty_cancel_with_evidence(tmp_path: Path, 
     assert payload["data"]["cancel_gate"]["task_new_changes"] == 1
     archived = (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "task canceled with verification evidence" in archived
-    assert "task_new_changes=1" in archived
+    assert "task_new_changes=1" not in archived
+    assert "repos/leftover.py intentionally remains" in archived
     assert "docs/tasks/T-20260609184046Z--alpha.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
 
 
@@ -112,4 +114,3 @@ def test_task_block_records_evidence_and_keeps_board_entry(tmp_path: Path, monke
     assert original_handoff in task_body
     assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     assert "docs/tasks/T-20260609184046Z--alpha.md" in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
-

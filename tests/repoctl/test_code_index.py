@@ -36,6 +36,11 @@ def test_index_code_extracts_python_facts_without_writing_annotations(tmp_path: 
     assert entry["language"] == "python"
     assert entry["symbols"] == ["TokenService", "issue"]
     assert entry["imports"] == ["hashlib", "pathlib.Path"]
+    assert entry["import_occurrences"] == [
+        {"form": "module", "imported_name": "", "level": 0, "module": "hashlib", "raw_import": "hashlib"},
+        {"form": "from", "imported_name": "Path", "level": 0, "module": "pathlib", "raw_import": "pathlib.Path"},
+    ]
+    assert entry["module_certain_bindings"] == ["Path", "TokenService", "hashlib"]
     assert "hashlib.sha256" in entry["calls"]
     assert entry["deps"] == ["hashlib", "pathlib"]
     assert {"crypto", "fs"} <= set(entry["observed_effects"])

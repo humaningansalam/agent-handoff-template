@@ -9,19 +9,35 @@ from .code_index import CodeIndexEntry
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
 from .context_model import ContextCandidate, ContextSourceRef
 from .context_retrieval import context_query_terms, rank_context_chunks
-from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, receipt_artifact_paths
+from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, current_source_eligible
 from .graph_model import GraphSnapshot, digest_data
-from .language_profiles import collect_verification_hints, is_semantic_source_language
+from .language_profiles import collect_verification_hints
 from .repositories import RepoTarget
-from .tasks import Problem, collect_completion_receipts
+from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
 
 
+EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
 EVIDENCE_INDEX_SCHEMA_VERSION = 2
 STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
 
 
-def _database_path(root: Path, target: RepoTarget) -> Path:
-    return root / ".repoctl-state/graph" / target.id / "evidence.sqlite3"
+def _evidence_index_schema_is_current(metadata: dict[str, Any]) -> bool:
+    return (
+        metadata.get("schema") == EVIDENCE_INDEX_SCHEMA
+        and type(metadata.get("schema_version")) is int
+        and metadata["schema_version"] == EVIDENCE_INDEX_SCHEMA_VERSION
+    )
+
+
+def _database_path(root: Path, target: RepoTarget, database_path: Path | None = None) -> Path:
+    return database_path or root / ".repoctl-state/graph" / target.id / "evidence.sqlite3"
+
+
+def _path_label(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
@@ -188,7 +204,8 @@ def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChun
         rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
         text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
         chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=task_id or "completion receipt"))
-        for artifact in receipt_artifact_paths(receipt):
+        artifact = completion_receipt_artifact_path(root, receipt)
+        if artifact:
             path = root / artifact
             if not path.is_file():
                 continue
@@ -317,16 +334,29 @@ def materialize_evidence_index(
     changed_paths: set[str],
     graph_input_digest: str,
     rebuild: bool = False,
+    allow_reset: bool = False,
+    database_path: Path | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
-    path = _database_path(root, target)
+    path = _database_path(root, target, database_path)
     if path.is_file():
         try:
             connection = _connect(path)
             current_meta = _metadata(connection)
             connection.close()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            if not allow_reset:
+                return {}, [Problem("error", "evidence_index_unavailable", str(exc), _path_label(root, path))]
             current_meta = {}
-        if int(current_meta.get("schema_version") or 0) != EVIDENCE_INDEX_SCHEMA_VERSION:
+        if not _evidence_index_schema_is_current(current_meta):
+            if not allow_reset:
+                return {}, [
+                    Problem(
+                        "error",
+                        "evidence_index_schema_invalid",
+                        "materialized evidence index schema is invalid; run repoctl graph build --rebuild",
+                        _path_label(root, path),
+                    )
+                ]
             path.unlink(missing_ok=True)
             rebuild = True
     else:
@@ -353,8 +383,7 @@ def materialize_evidence_index(
                 entry = entries_by_path.get(repo_path)
                 if (
                     entry is None
-                    or entry.classification == "excluded"
-                    or not is_semantic_source_language(entry.language)
+                    or not current_source_eligible(entry.path, entry.classification)
                     or workspace_path in static_paths
                 ):
                     continue
@@ -368,7 +397,7 @@ def materialize_evidence_index(
                 for row in connection.execute("SELECT kind, COUNT(*) AS count FROM chunks GROUP BY kind ORDER BY kind")
             }
             metadata = {
-                "schema": "repoctl.evidence.index",
+                "schema": EVIDENCE_INDEX_SCHEMA,
                 "schema_version": EVIDENCE_INDEX_SCHEMA_VERSION,
                 "repository": target.to_dict(),
                 "graph_input_digest": graph_input_digest,
@@ -385,30 +414,66 @@ def materialize_evidence_index(
             }
             _write_metadata(connection, metadata)
         return {
-            "path": path.relative_to(root).as_posix(),
+            "path": _path_label(root, path),
             "status": "rebuilt" if rebuild else "updated",
             "updated_paths": sorted(changed_paths),
             **metadata,
         }, problems
     except sqlite3.Error as exc:
-        return {}, [*problems, Problem("error", "evidence_index_materialization_failed", str(exc), path.relative_to(root).as_posix())]
+        return {}, [*problems, Problem("error", "evidence_index_materialization_failed", str(exc), _path_label(root, path))]
     finally:
         connection.close()
 
 
-def load_evidence_index_metadata(root: Path, *, target: RepoTarget) -> tuple[dict[str, Any], list[Problem]]:
-    path = _database_path(root, target)
+def load_evidence_index_metadata(
+    root: Path,
+    *,
+    target: RepoTarget,
+    database_path: Path | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
+    path = _database_path(root, target, database_path)
     if not path.is_file():
-        return {}, [Problem("error", "evidence_index_missing", "materialized evidence index is missing; run repoctl graph build", target.display_path)]
+        return {}, [Problem("error", "evidence_index_missing", "materialized evidence index is missing; run repoctl graph build --rebuild", _path_label(root, path))]
     try:
         connection = _connect(path, read_only=True)
         metadata = _metadata(connection)
         connection.close()
     except sqlite3.Error as exc:
-        return {}, [Problem("error", "evidence_index_unavailable", str(exc), path.relative_to(root).as_posix())]
-    if int(metadata.get("schema_version") or 0) != EVIDENCE_INDEX_SCHEMA_VERSION:
-        return {}, [Problem("error", "evidence_index_schema_invalid", "materialized evidence index schema is invalid; run repoctl graph build --rebuild", path.relative_to(root).as_posix())]
+        return {}, [Problem("error", "evidence_index_unavailable", str(exc), _path_label(root, path))]
+    if not _evidence_index_schema_is_current(metadata):
+        return {}, [Problem("error", "evidence_index_schema_invalid", "materialized evidence index schema is invalid; run repoctl graph build --rebuild", _path_label(root, path))]
     return metadata, []
+
+
+def evidence_index_binding_problems(
+    root: Path,
+    *,
+    target: RepoTarget,
+    metadata: dict[str, Any],
+    snapshot_digest: str,
+    graph_input_digest: str,
+    database_path: Path | None = None,
+) -> list[Problem]:
+    path = _database_path(root, target, database_path)
+    if str(metadata.get("snapshot_digest") or "") != snapshot_digest:
+        return [
+            Problem(
+                "error",
+                "evidence_index_snapshot_mismatch",
+                "materialized evidence index and Graph snapshot do not match; run repoctl graph build --rebuild",
+                _path_label(root, path),
+            )
+        ]
+    if str(metadata.get("graph_input_digest") or "") != graph_input_digest:
+        return [
+            Problem(
+                "error",
+                "evidence_index_input_mismatch",
+                "materialized evidence index and Graph input state do not match; run repoctl graph build --rebuild",
+                _path_label(root, path),
+            )
+        ]
+    return []
 
 
 def _row_chunk(row: sqlite3.Row) -> DocumentChunk:
@@ -443,15 +508,29 @@ def query_evidence_index(
     target: RepoTarget,
     query: str,
     mode: str,
+    snapshot_digest: str = "",
+    graph_input_digest: str = "",
     limit: int = 24,
+    database_path: Path | None = None,
 ) -> tuple[list[ContextCandidate], dict[str, Any], list[Problem]]:
-    metadata, problems = load_evidence_index_metadata(root, target=target)
+    metadata, problems = load_evidence_index_metadata(root, target=target, database_path=database_path)
     if problems:
         return [], metadata, problems
+    if snapshot_digest or graph_input_digest:
+        problems = evidence_index_binding_problems(
+            root,
+            target=target,
+            metadata=metadata,
+            snapshot_digest=snapshot_digest,
+            graph_input_digest=graph_input_digest,
+            database_path=database_path,
+        )
+        if problems:
+            return [], metadata, problems
     terms = sorted(context_query_terms(query))
     if not terms:
         return [], metadata, []
-    path = _database_path(root, target)
+    path = _database_path(root, target, database_path)
     connection = _connect(path, read_only=True)
     try:
         filter_sql, filter_params = _retrieval_filter(mode, target)
@@ -484,7 +563,7 @@ def query_evidence_index(
         }
         return rank_context_chunks(query, chunks, fts_scores=fts_scores, limit=limit), metadata, []
     except sqlite3.Error as exc:
-        return [], metadata, [Problem("error", "evidence_index_query_failed", str(exc), path.relative_to(root).as_posix())]
+        return [], metadata, [Problem("error", "evidence_index_query_failed", str(exc), _path_label(root, path))]
     finally:
         connection.close()
 
@@ -495,14 +574,15 @@ def evidence_chunks_for_paths(
     target: RepoTarget,
     workspace_paths: set[str],
     kinds: set[str] | None = None,
+    database_path: Path | None = None,
 ) -> tuple[list[DocumentChunk], list[Problem]]:
     if not workspace_paths:
         return [], []
-    metadata, problems = load_evidence_index_metadata(root, target=target)
+    metadata, problems = load_evidence_index_metadata(root, target=target, database_path=database_path)
     if problems:
         return [], problems
     del metadata
-    path = _database_path(root, target)
+    path = _database_path(root, target, database_path)
     connection = _connect(path, read_only=True)
     try:
         path_placeholders = ",".join("?" for _ in workspace_paths)
@@ -518,6 +598,6 @@ def evidence_chunks_for_paths(
         ).fetchall()
         return [_row_chunk(row) for row in rows], []
     except sqlite3.Error as exc:
-        return [], [Problem("error", "evidence_index_query_failed", str(exc), path.relative_to(root).as_posix())]
+        return [], [Problem("error", "evidence_index_query_failed", str(exc), _path_label(root, path))]
     finally:
         connection.close()

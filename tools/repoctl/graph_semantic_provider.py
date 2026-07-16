@@ -3,9 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from .code_index import CodeIndexEntry
-from .graph_code_provider import PYTHON_PROVIDER_LANGUAGES, build_python_semantics
+from .graph_code_provider import (
+    PYTHON_PROVIDER_INPUT_VERSION,
+    PYTHON_PROVIDER_LANGUAGES,
+    PythonCallableExport,
+    build_python_semantics,
+)
 from .graph_import_resolver import ImportResolution
-from .graph_semantic_model import ProviderFailure, SemanticProviderResult
+from .graph_semantic_model import CapabilityEvidence, ProviderFailure, SemanticProviderResult
 from .repositories import RepoTarget
 
 
@@ -17,7 +22,7 @@ PROVIDER_LANGUAGES = {
     "csharp_roslyn": frozenset({"csharp"}),
 }
 PROVIDER_INPUT_VERSIONS = {
-    "python_ast": 2,
+    "python_ast": PYTHON_PROVIDER_INPUT_VERSION,
     "typescript_compiler": 2,
     "dart_analyzer": 1,
     "csharp_roslyn": 2,
@@ -40,6 +45,18 @@ def _python_result(
         import_resolutions=import_resolutions,
         analysis_paths=analysis_paths,
         known_symbols=previous.symbols if previous is not None else (),
+        known_exported_callables=tuple(
+            PythonCallableExport(
+                path=str(value.get("path") or ""),
+                name=str(value.get("name") or ""),
+                provider_symbol_id=str(value.get("provider_symbol_id") or ""),
+            )
+            for value in (previous.tool.get("exported_callables", []) if previous is not None else [])
+            if isinstance(value, dict)
+            and str(value.get("path") or "")
+            and str(value.get("name") or "")
+            and str(value.get("provider_symbol_id") or "")
+        ),
     )
     analyzed_paths = tuple(sorted(str(path) for path in meta.get("analyzed_paths", [])))
     failed_paths = tuple(sorted(str(path) for path in meta.get("failed_paths", [])))
@@ -64,7 +81,14 @@ def _python_result(
         symbol_failed_paths=failed_paths,
         call_failed_paths=failed_paths,
         failures=failures,
-        tool={"kind": "python_stdlib_ast"},
+        call_coverage=CapabilityEvidence(
+            evidence_level="conservative",
+            coverage_gaps=("python_dynamic_call_targets_are_not_exhaustive",),
+        ),
+        tool={
+            "kind": "python_stdlib_ast",
+            "exported_callables": list(meta.get("exported_callables", [])),
+        },
     )
 
 

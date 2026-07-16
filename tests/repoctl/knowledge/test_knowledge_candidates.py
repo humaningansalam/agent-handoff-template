@@ -177,7 +177,8 @@ Keep token validation centralized.
         encoding="utf-8",
     )
 
-    assert main(["knowledge", "candidate", "suggest", "--from-task", task_id, "--repo-id", "main", "--json"]) == 0
+    claim = "Token validation must remain centralized in the reviewed validation owner."
+    assert main(["knowledge", "candidate", "suggest", "--from-task", task_id, "--repo-id", "main", "--claim", claim, "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -380,11 +381,13 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert finish_payload["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
     assert "knowledge candidate suggest --from-task T-20260609184046Z" in finish_payload["next_actions"][0]["command"]
 
-    assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260609184046Z", "--repo-id", "main", "--kind", "invariant", "--json"]) == 0
+    claim = "Webhook delivery retries must reuse the receipt-backed delivery path."
+    assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260609184046Z", "--repo-id", "main", "--kind", "invariant", "--claim", claim, "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     candidate = payload["data"]["candidate"]
     assert candidate["kind"] == "invariant"
+    assert candidate["claim"] == claim
     assert candidate["title"] == "Task T-20260609184046Z"
     assert candidate["authoritative"] is False
     assert candidate["derived_from"] == {
@@ -402,6 +405,8 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert source_refs[1]["path"] == "docs/archive/tasks/T-20260609184046Z--receipt-backed.md"
     assert source_refs[1]["content_sha256"].startswith("sha256:")
     assert "pytest tests/repoctl/knowledge/test_knowledge_candidates.py" in candidate["summary"]
+    assert any("knowledge candidate show" in action["command"] for action in payload["next_actions"])
+    assert any("knowledge candidate check" in action["command"] for action in payload["next_actions"])
 
     assert main(["knowledge", "candidate", "show", candidate["id"], "--repo-id", "main", "--format", "markdown"]) == 0
     review = capsys.readouterr().out
@@ -448,9 +453,10 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     capsys.readouterr()
 
     assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 1
-    overlong_payload = json.loads(capsys.readouterr().out)
-    assert overlong_payload["problems"][0]["code"] == "knowledge_candidate_claim_too_long"
-    assert "--claim or --claim-file" in overlong_payload["problems"][0]["message"]
+    missing_claim = json.loads(capsys.readouterr().out)
+    assert missing_claim["problems"][0]["code"] == "knowledge_candidate_claim_required"
+    assert "--claim or --claim-file" in missing_claim["problems"][0]["message"]
+    assert any("--claim '<reusable claim>'" in action.get("command", "") for action in missing_claim["next_actions"])
     assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
 
     claim = "Persist retry scheduling as a reviewed invariant without editing machine-owned candidate state."

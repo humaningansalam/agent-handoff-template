@@ -88,6 +88,18 @@ class ProviderFailure:
 
 
 @dataclass(frozen=True)
+class CapabilityEvidence:
+    evidence_level: str = "precise"
+    coverage_gaps: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "evidence_level": self.evidence_level,
+            "coverage_gaps": list(self.coverage_gaps),
+        }
+
+
+@dataclass(frozen=True)
 class SemanticProviderResult:
     provider: str
     languages: tuple[str, ...]
@@ -98,6 +110,8 @@ class SemanticProviderResult:
     symbol_failed_paths: tuple[str, ...] = ()
     call_failed_paths: tuple[str, ...] = ()
     failures: tuple[ProviderFailure, ...] = ()
+    symbol_coverage: CapabilityEvidence = field(default_factory=CapabilityEvidence)
+    call_coverage: CapabilityEvidence = field(default_factory=CapabilityEvidence)
     tool: dict[str, object] = field(default_factory=dict)
 
     def to_meta(self) -> dict[str, object]:
@@ -108,6 +122,8 @@ class SemanticProviderResult:
             "call_analyzed_paths": list(self.call_analyzed_paths),
             "symbol_failed_paths": list(self.symbol_failed_paths),
             "call_failed_paths": list(self.call_failed_paths),
+            "symbol_coverage": self.symbol_coverage.to_dict(),
+            "call_coverage": self.call_coverage.to_dict(),
             "symbol_count": len(self.symbols),
             "call_count": len(self.calls),
             "failures": [failure.to_dict() for failure in self.failures],

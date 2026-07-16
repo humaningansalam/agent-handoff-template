@@ -12,7 +12,7 @@ from .context_chunks import chunk_markdown_file
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write
 from .markdown import find_section, parse_frontmatter
-from .tasks import Problem, collect_completion_receipts, normalize_task_id
+from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path, normalize_task_id
 
 
 ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
@@ -145,19 +145,24 @@ def build_knowledge_candidate_from_receipt(
             return {}, receipt_problems
         return {}, [Problem("error", "knowledge_candidate_receipt_missing", f"completion receipt not found for task: {normalized_task_id}")]
     receipt_rel = f"docs/tasks/.repoctl-state/completions/{normalized_task_id}.json"
-    artifact_at_completion = str(receipt.get("task_path_at_completion") or "")
-    artifact_candidates = [root / artifact_at_completion]
-    artifact_candidates.extend(sorted((root / "docs/tasks").glob(f"{normalized_task_id}--*.md")))
-    artifact_candidates.extend(sorted((root / "docs/archive/tasks").glob(f"{normalized_task_id}--*.md")))
-    artifact_path = next((path for path in artifact_candidates if path.is_file()), None)
-    if artifact_path is None:
-        return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_at_completion)]
-    artifact_rel = artifact_path.relative_to(root).as_posix()
+    artifact_rel = completion_receipt_artifact_path(root, receipt)
+    artifact_path = root / artifact_rel
+    if not artifact_rel or not artifact_path.is_file():
+        return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_rel)]
+    if not claim.strip():
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_candidate_claim_required",
+                "task-derived knowledge requires an explicit reusable claim; pass --claim or --claim-file",
+                normalized_task_id,
+            )
+        ]
     artifact_text = artifact_path.read_text(encoding="utf-8")
     title = _receipt_title(receipt, artifact_text)
     summary = _receipt_summary(receipt, artifact_text)
     candidate_claim, claim_problem = _validated_candidate_claim(
-        summary,
+        "",
         override=claim,
         problem_path=normalized_task_id,
     )
@@ -420,7 +425,13 @@ def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
         task_id = str(derived_from.get("task_id") or "")
         if not task_id:
             return {}, [Problem("error", "knowledge_candidate_refresh_source_missing", "receipt-derived candidate is missing task_id", candidate_id)]
-        refreshed_data, refresh_problems = build_knowledge_candidate_from_receipt(root, task_id=task_id, repo_id=repo_id, kind=kind)
+        refreshed_data, refresh_problems = build_knowledge_candidate_from_receipt(
+            root,
+            task_id=task_id,
+            repo_id=repo_id,
+            kind=kind,
+            claim=str(old_candidate.get("claim") or ""),
+        )
     else:
         source_path = _refresh_source_path(old_candidate)
         if not source_path:

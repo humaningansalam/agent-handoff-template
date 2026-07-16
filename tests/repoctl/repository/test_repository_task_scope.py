@@ -78,7 +78,10 @@ def test_task_finish_uses_configured_repo_id_in_multi_repo(tmp_path: Path, monke
     assert payload["data"]["meta_gate"]["status"] == "passed"
     assert payload["data"]["meta_gate"]["changed_files"] == 1
     archive_path = tmp_path / payload["data"]["new_path"]
-    assert "- repository: web repos/web" in archive_path.read_text(encoding="utf-8")
+    assert "Repoctl gate summary:" not in archive_path.read_text(encoding="utf-8")
+    receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["repo_id"] == "web"
+    assert receipt["repo_evidence"]["fingerprint_manifest"]["repo_path"] == "repos/web"
 
 
 def test_task_doctor_uses_task_repo_id_in_configured_multi_repo(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -255,7 +258,10 @@ def test_single_repos_task_lifecycle_finish_passes(tmp_path: Path, monkeypatch, 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["meta_gate"]["status"] == "passed"
-    assert "- repository: main repos" in (tmp_path / payload["data"]["new_path"]).read_text(encoding="utf-8")
+    assert "Repoctl gate summary:" not in (tmp_path / payload["data"]["new_path"]).read_text(encoding="utf-8")
+    receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["repo_id"] == "main"
+    assert receipt["repo_evidence"]["fingerprint_manifest"]["repo_path"] == "repos"
 
 
 def test_task_finish_blocks_when_repo_registry_target_drifted(tmp_path: Path, monkeypatch, capsys) -> None:

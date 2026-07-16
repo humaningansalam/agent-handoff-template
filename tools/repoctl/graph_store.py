@@ -5,30 +5,37 @@ import json
 import os
 import stat
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from .code_index import CODE_INDEX_INPUT_VERSION, CodeIndexEntry, build_code_index_from_inventory, semantic_provider_entries
-from .context_sources import context_document_paths, receipt_artifact_paths
-from .evidence_store import materialize_evidence_index
+from .code_index import (
+    CODE_INDEX_INPUT_VERSION,
+    CodeIndexEntry,
+    PythonImportOccurrence,
+    build_code_index_from_inventory,
+    semantic_provider_entries,
+)
+from .context_sources import context_document_paths
+from .evidence_store import evidence_index_binding_problems, load_evidence_index_metadata, materialize_evidence_index
 from .graph import build_graph
 from .graph_import_resolver import ImportResolution, resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, digest_data
-from .graph_semantic_model import PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
+from .graph_semantic_model import CapabilityEvidence, PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
 from .graph_semantic_provider import PROVIDER_INPUT_VERSIONS, PROVIDER_LANGUAGES, build_semantic_provider
 from .git import repo_file_state_records
 from .io import atomic_write
 from .language_profiles import language_for_path
 from .meta import meta_inventory
 from .repositories import RepoTarget
-from .tasks import Problem, collect_completion_receipts
+from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
 
 
 GRAPH_STATE_SCHEMA = "repoctl.graph.materialization"
 GRAPH_STATE_SCHEMA_VERSION = 3
 GRAPH_STATE_ROOT = Path(".repoctl-state/graph")
-PROVIDER_RESULT_SCHEMA_VERSION = 2
+PROVIDER_RESULT_SCHEMA_VERSION = 3
 PROVIDER_CONFIG_PATTERNS = {
     "python_ast": ("pyproject.toml",),
     "typescript_compiler": (
@@ -45,6 +52,14 @@ PROVIDER_CONFIG_PATTERNS = {
     "dart_analyzer": ("pubspec.yaml", "pubspec.lock", ".dart_tool/package_config.json"),
     "csharp_roslyn": ("*.csproj", "*.asmdef", "**/*.csproj", "**/*.asmdef"),
 }
+
+
+@dataclass(frozen=True)
+class _MaterializedGraph:
+    manifest: dict[str, Any]
+    snapshot: GraphSnapshot
+    provider_results: dict[str, SemanticProviderResult]
+    evidence_metadata: dict[str, Any]
 
 
 def _file_record_fingerprint(record: dict[str, Any]) -> str:
@@ -92,6 +107,26 @@ def _code_index_entries(snapshot: GraphSnapshot | None) -> list[CodeIndexEntry]:
                 observed_effects=[str(value) for value in index.get("observed_effects", []) if str(value)],
                 parse_status=str(index.get("parse_status") or ""),
                 parse_error=str(index.get("parse_error") or ""),
+                import_occurrences=tuple(
+                    PythonImportOccurrence(
+                        raw_import=str(value.get("raw_import") or ""),
+                        form=str(value.get("form") or ""),
+                        module=str(value.get("module") or ""),
+                        imported_name=str(value.get("imported_name") or ""),
+                        level=int(value.get("level") or 0),
+                    )
+                    for value in index.get("import_occurrences", [])
+                    if isinstance(value, dict)
+                    and str(value.get("form") or "") in {"module", "from"}
+                    and str(value.get("raw_import") or "")
+                ),
+                module_bindings=tuple(str(value) for value in index.get("module_bindings", []) if str(value)),
+                module_certain_bindings=tuple(
+                    str(value)
+                    for value in index.get("module_certain_bindings", [])
+                    if str(value)
+                ),
+                module_wildcard_import=index.get("module_wildcard_import") is True,
             )
         )
     return sorted(entries, key=lambda entry: entry.path)
@@ -217,7 +252,11 @@ def _root_evidence_records(
     }
     if discover_receipt_artifacts:
         receipts, _problems = collect_completion_receipts(root, repo_id=target.id)
-        artifact_paths.update(value for receipt in receipts for value in receipt_artifact_paths(receipt))
+        artifact_paths.update(
+            artifact
+            for receipt in receipts
+            if (artifact := completion_receipt_artifact_path(root, receipt))
+        )
     for artifact in sorted(artifact_paths):
         path = root / artifact
         if path.is_file():
@@ -380,8 +419,15 @@ def collect_graph_inputs(
     }
 
 
-def _state_dir(root: Path, target: RepoTarget) -> Path:
-    return root / GRAPH_STATE_ROOT / target.id
+def _state_dir(root: Path, target: RepoTarget, *, state_root: Path | None = None) -> Path:
+    return (state_root or root / GRAPH_STATE_ROOT) / target.id
+
+
+def _state_path_label(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -390,6 +436,37 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _read_materialization_json(root: Path, path: Path) -> tuple[dict[str, Any] | None, str, Problem | None]:
+    if not path.exists():
+        return None, "missing", None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, "unavailable", Problem(
+            "error",
+            "graph_materialization_unavailable",
+            f"materialized Graph state cannot be read: {exc}",
+            _state_path_label(root, path),
+        )
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, "invalid", Problem(
+            "error",
+            "graph_materialization_invalid",
+            f"materialized Graph state is not valid JSON: {exc}",
+            _state_path_label(root, path),
+        )
+    if not isinstance(data, dict):
+        return None, "invalid", Problem(
+            "error",
+            "graph_materialization_invalid",
+            "materialized Graph state must be a JSON object",
+            _state_path_label(root, path),
+        )
+    return data, "valid", None
 
 
 def _anchor_from_dict(data: Any) -> SourceAnchor | None:
@@ -420,6 +497,8 @@ def _provider_result_to_dict(result: SemanticProviderResult) -> dict[str, object
         "symbol_failed_paths": list(result.symbol_failed_paths),
         "call_failed_paths": list(result.call_failed_paths),
         "failures": [failure.to_dict() for failure in result.failures],
+        "symbol_coverage": result.symbol_coverage.to_dict(),
+        "call_coverage": result.call_coverage.to_dict(),
         "tool": result.tool,
     }
 
@@ -429,8 +508,22 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
         return None
     if str(data.get("provider") or "") != expected_provider:
         return None
+    collection_fields = (
+        "languages",
+        "symbols",
+        "calls",
+        "symbol_analyzed_paths",
+        "call_analyzed_paths",
+        "symbol_failed_paths",
+        "call_failed_paths",
+        "failures",
+    )
+    if any(not isinstance(data.get(field), list) for field in collection_fields):
+        return None
+    if not isinstance(data.get("tool"), dict):
+        return None
     symbols: list[PreciseSymbol] = []
-    for raw in data.get("symbols", []):
+    for raw in data["symbols"]:
         if not isinstance(raw, dict):
             return None
         anchor = _anchor_from_dict(raw.get("anchor"))
@@ -449,7 +542,7 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
             )
         )
     calls: list[PreciseCall] = []
-    for raw in data.get("calls", []):
+    for raw in data["calls"]:
         if not isinstance(raw, dict):
             return None
         anchor = _anchor_from_dict(raw.get("anchor"))
@@ -467,8 +560,8 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
             )
         )
     failures: list[ProviderFailure] = []
-    for raw in data.get("failures", []):
-        if not isinstance(raw, dict):
+    for raw in data["failures"]:
+        if not isinstance(raw, dict) or not isinstance(raw.get("paths"), list):
             return None
         failures.append(
             ProviderFailure(
@@ -479,17 +572,35 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
                 paths=tuple(sorted(str(path) for path in raw.get("paths", []) if str(path))),
             )
         )
+    raw_symbol_coverage = data.get("symbol_coverage")
+    raw_call_coverage = data.get("call_coverage")
+    if not isinstance(raw_symbol_coverage, dict) or not isinstance(raw_call_coverage, dict):
+        return None
+    if not isinstance(raw_symbol_coverage.get("coverage_gaps"), list) or not isinstance(raw_call_coverage.get("coverage_gaps"), list):
+        return None
+    symbol_coverage = CapabilityEvidence(
+        evidence_level=str(raw_symbol_coverage.get("evidence_level") or ""),
+        coverage_gaps=tuple(sorted(str(value) for value in raw_symbol_coverage.get("coverage_gaps", []) if str(value))),
+    )
+    call_coverage = CapabilityEvidence(
+        evidence_level=str(raw_call_coverage.get("evidence_level") or ""),
+        coverage_gaps=tuple(sorted(str(value) for value in raw_call_coverage.get("coverage_gaps", []) if str(value))),
+    )
+    if symbol_coverage.evidence_level not in {"precise", "conservative"} or call_coverage.evidence_level not in {"precise", "conservative"}:
+        return None
     return SemanticProviderResult(
         provider=expected_provider,
-        languages=tuple(sorted(str(value) for value in data.get("languages", []) if str(value))),
+        languages=tuple(sorted(str(value) for value in data["languages"] if str(value))),
         symbols=tuple(symbols),
         calls=tuple(calls),
-        symbol_analyzed_paths=tuple(sorted(str(value) for value in data.get("symbol_analyzed_paths", []) if str(value))),
-        call_analyzed_paths=tuple(sorted(str(value) for value in data.get("call_analyzed_paths", []) if str(value))),
-        symbol_failed_paths=tuple(sorted(str(value) for value in data.get("symbol_failed_paths", []) if str(value))),
-        call_failed_paths=tuple(sorted(str(value) for value in data.get("call_failed_paths", []) if str(value))),
+        symbol_analyzed_paths=tuple(sorted(str(value) for value in data["symbol_analyzed_paths"] if str(value))),
+        call_analyzed_paths=tuple(sorted(str(value) for value in data["call_analyzed_paths"] if str(value))),
+        symbol_failed_paths=tuple(sorted(str(value) for value in data["symbol_failed_paths"] if str(value))),
+        call_failed_paths=tuple(sorted(str(value) for value in data["call_failed_paths"] if str(value))),
         failures=tuple(failures),
-        tool=data.get("tool") if isinstance(data.get("tool"), dict) else {},
+        symbol_coverage=symbol_coverage,
+        call_coverage=call_coverage,
+        tool=data["tool"],
     )
 
 
@@ -544,56 +655,166 @@ def _snapshot_from_dict(data: dict[str, Any]) -> GraphSnapshot | None:
     return snapshot if snapshot.snapshot_digest == str(data.get("snapshot_digest") or "") else None
 
 
-def _load_snapshot(root: Path, target: RepoTarget) -> GraphSnapshot | None:
-    data = _read_json(_state_dir(root, target) / "snapshot.json")
-    return _snapshot_from_dict(data) if data is not None else None
+def _validate_materialization_state(
+    root: Path,
+    *,
+    target: RepoTarget,
+    state_dir: Path,
+    manifest: dict[str, Any],
+    snapshot: GraphSnapshot,
+) -> tuple[Problem | None, str]:
+    if manifest.get("schema") != GRAPH_STATE_SCHEMA or manifest.get("schema_version") != GRAPH_STATE_SCHEMA_VERSION:
+        return Problem(
+            "error",
+            "graph_materialization_schema_mismatch",
+            "materialized Graph schema is incompatible; run repoctl graph build --rebuild",
+            _state_path_label(root, state_dir),
+        ), "incompatible"
+    expected_input_digest = digest_data(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"file_records", "root_evidence_records", "input_digest", "snapshot_digest", "provider_result_digests"}
+        }
+    )
+    if str(manifest.get("input_digest") or "") != expected_input_digest:
+        return Problem(
+            "error",
+            "graph_materialization_invalid",
+            "materialized Graph manifest input digest is invalid; run repoctl graph build --rebuild",
+            _state_path_label(root, state_dir / "manifest.json"),
+        ), "invalid"
+    if str(manifest.get("snapshot_digest") or "") != snapshot.snapshot_digest:
+        return Problem(
+            "error",
+            "graph_materialization_incomplete",
+            "materialized Graph manifest and snapshot do not match; run repoctl graph build --rebuild",
+            _state_path_label(root, state_dir),
+        ), "incomplete"
+    expected_repository = target.to_dict()
+    manifest_repository = manifest.get("repository")
+    if manifest_repository != expected_repository or snapshot.repository != expected_repository or manifest_repository != snapshot.repository:
+        return Problem(
+            "error",
+            "graph_materialization_repository_mismatch",
+            "materialized Graph belongs to a different repository identity; run repoctl graph build --rebuild",
+            _state_path_label(root, state_dir),
+        ), "repository_mismatch"
+    return None, "materialized"
+
+
+def _admit_materialization(
+    root: Path,
+    *,
+    target: RepoTarget,
+    state_root: Path | None = None,
+) -> tuple[_MaterializedGraph | None, list[Problem], str]:
+    state_dir = _state_dir(root, target, state_root=state_root)
+    manifest_data, manifest_status, manifest_problem = _read_materialization_json(root, state_dir / "manifest.json")
+    snapshot_data, snapshot_status, snapshot_problem = _read_materialization_json(root, state_dir / "snapshot.json")
+    read_problems = [problem for problem in (manifest_problem, snapshot_problem) if problem is not None]
+    if read_problems:
+        status = "unavailable" if any(problem.code == "graph_materialization_unavailable" for problem in read_problems) else "invalid"
+        return None, read_problems, status
+    if manifest_status == "missing" and snapshot_status == "missing":
+        if any(path.is_file() or path.is_symlink() for path in state_dir.rglob("*")):
+            return None, [
+                Problem(
+                    "error",
+                    "graph_materialization_incomplete",
+                    "materialized Graph state is incomplete; run repoctl graph build --rebuild",
+                    _state_path_label(root, state_dir),
+                )
+            ], "incomplete"
+        return None, [
+            Problem("error", "graph_snapshot_missing", "materialized Graph is missing; run repoctl graph build", target.display_path)
+        ], "missing"
+    if manifest_status == "missing" or snapshot_status == "missing":
+        return None, [
+            Problem(
+                "error",
+                "graph_materialization_incomplete",
+                "materialized Graph state is incomplete; run repoctl graph build --rebuild",
+                _state_path_label(root, state_dir),
+            )
+        ], "incomplete"
+    assert manifest_data is not None and snapshot_data is not None
+    snapshot = _snapshot_from_dict(snapshot_data)
+    if snapshot is None:
+        return None, [
+            Problem(
+                "error",
+                "graph_materialization_invalid",
+                "materialized Graph snapshot is invalid; run repoctl graph build --rebuild",
+                _state_path_label(root, state_dir / "snapshot.json"),
+            )
+        ], "invalid"
+    problem, status = _validate_materialization_state(
+        root,
+        target=target,
+        state_dir=state_dir,
+        manifest=manifest_data,
+        snapshot=snapshot,
+    )
+    if problem is not None:
+        return None, [problem], status
+
+    provider_results, provider_problems = _load_provider_results_strict(
+        root,
+        state_dir=state_dir,
+        manifest=manifest_data,
+    )
+    if provider_problems:
+        provider_status = (
+            "unavailable"
+            if any(problem.code == "graph_materialization_unavailable" for problem in provider_problems)
+            else "incomplete"
+            if any(problem.code == "graph_materialization_incomplete" for problem in provider_problems)
+            else "invalid"
+        )
+        return None, provider_problems, provider_status
+
+    evidence_metadata, evidence_problems = load_evidence_index_metadata(
+        root,
+        target=target,
+        database_path=state_dir / "evidence.sqlite3",
+    )
+    if not evidence_problems:
+        evidence_problems = evidence_index_binding_problems(
+            root,
+            target=target,
+            metadata=evidence_metadata,
+            snapshot_digest=snapshot.snapshot_digest,
+            graph_input_digest=str(manifest_data.get("input_digest") or ""),
+            database_path=state_dir / "evidence.sqlite3",
+        )
+    if evidence_problems:
+        evidence_status = (
+            "unavailable"
+            if any(problem.code == "evidence_index_unavailable" for problem in evidence_problems)
+            else "incomplete"
+            if any(problem.code == "evidence_index_missing" for problem in evidence_problems)
+            else "invalid"
+        )
+        return None, evidence_problems, evidence_status
+
+    return _MaterializedGraph(manifest_data, snapshot, provider_results, evidence_metadata), [], "materialized"
 
 
 def load_materialized_graph(
     root: Path,
     *,
     target: RepoTarget,
+    state_root: Path | None = None,
 ) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
-    state_dir = _state_dir(root, target)
-    manifest = _read_json(state_dir / "manifest.json")
-    snapshot = _load_snapshot(root, target)
-    if manifest is None or snapshot is None:
-        return (
-            None,
-            [Problem("error", "graph_snapshot_missing", "materialized Graph is missing; run repoctl graph build", target.display_path)],
-            {"repository": target.to_dict(), "materialization": {"status": "missing"}},
-        )
-    if manifest.get("schema") != GRAPH_STATE_SCHEMA or manifest.get("schema_version") != GRAPH_STATE_SCHEMA_VERSION:
-        return (
-            None,
-            [
-                Problem(
-                    "error",
-                    "graph_materialization_schema_mismatch",
-                    "materialized Graph schema is incompatible; run repoctl graph build --rebuild",
-                    state_dir.relative_to(root).as_posix(),
-                )
-            ],
-            {"repository": target.to_dict(), "materialization": {"status": "incompatible"}},
-        )
-    if str(manifest.get("snapshot_digest") or "") != snapshot.snapshot_digest:
-        return (
-            None,
-            [
-                Problem(
-                    "error",
-                    "graph_materialization_incomplete",
-                    "materialized Graph manifest and snapshot do not match; run repoctl graph build",
-                    state_dir.relative_to(root).as_posix(),
-                )
-            ],
-            {"repository": target.to_dict(), "materialization": {"status": "incomplete"}},
-        )
-    return snapshot, [], {
+    materialized, problems, status = _admit_materialization(root, target=target, state_root=state_root)
+    if materialized is None:
+        return None, problems, {"repository": target.to_dict(), "materialization": {"status": status}}
+    return materialized.snapshot, [], {
         "repository": target.to_dict(),
         "materialization": {
             "status": "materialized",
-            "input_digest": str(manifest.get("input_digest") or ""),
+            "input_digest": str(materialized.manifest.get("input_digest") or ""),
         },
     }
 
@@ -602,21 +823,38 @@ def graph_materialization_freshness(
     root: Path,
     *,
     target: RepoTarget,
+    state_root: Path | None = None,
+    snapshot: GraphSnapshot | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
-    manifest = _read_json(_state_dir(root, target) / "manifest.json")
-    if manifest is None:
-        return {"status": "missing", "changed_paths": []}, [
-            Problem("error", "graph_snapshot_missing", "materialized Graph is missing; run repoctl graph build", target.display_path)
-        ]
-    if manifest.get("schema") != GRAPH_STATE_SCHEMA or manifest.get("schema_version") != GRAPH_STATE_SCHEMA_VERSION:
-        return {"status": "incompatible", "changed_paths": []}, [
-            Problem(
-                "error",
-                "graph_materialization_schema_mismatch",
-                "materialized Graph schema is incompatible; run repoctl graph build --rebuild",
-                _state_dir(root, target).relative_to(root).as_posix(),
-            )
-        ]
+    state_dir = _state_dir(root, target, state_root=state_root)
+    if snapshot is None:
+        materialized, admission_problems, status = _admit_materialization(root, target=target, state_root=state_root)
+        if materialized is None:
+            return {"status": status, "changed_paths": []}, admission_problems
+        manifest = materialized.manifest
+        snapshot = materialized.snapshot
+    else:
+        manifest, manifest_status, manifest_problem = _read_materialization_json(root, state_dir / "manifest.json")
+        if manifest_problem is not None:
+            return {"status": manifest_status, "changed_paths": []}, [manifest_problem]
+        if manifest is None:
+            return {"status": "incomplete", "changed_paths": []}, [
+                Problem(
+                    "error",
+                    "graph_materialization_incomplete",
+                    "materialized Graph state is incomplete; run repoctl graph build --rebuild",
+                    _state_path_label(root, state_dir),
+                )
+            ]
+        admission_problem, status = _validate_materialization_state(
+            root,
+            target=target,
+            state_dir=state_dir,
+            manifest=manifest,
+            snapshot=snapshot,
+        )
+        if admission_problem is not None:
+            return {"status": status, "changed_paths": []}, [admission_problem]
     inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
     previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}
     current_records, git_state = repo_file_state_records(
@@ -675,6 +913,23 @@ def graph_materialization_freshness(
     }, problems
 
 
+def compact_graph_freshness(freshness: Any) -> dict[str, Any]:
+    """Project the bounded freshness fields used by default agent-facing views."""
+    if not isinstance(freshness, dict):
+        return {}
+    return {
+        key: freshness[key]
+        for key in (
+            "status",
+            "changed_path_count",
+            "root_evidence_changed",
+            "changed_root_path_count",
+            "materialized_input_digest",
+        )
+        if key in freshness
+    }
+
+
 def _previous_import_pairs(snapshot: GraphSnapshot | None) -> set[tuple[str, str]]:
     if snapshot is None:
         return set()
@@ -726,6 +981,10 @@ def _affected_paths(
 ) -> set[str]:
     current_files = current_state.get("files") if isinstance(current_state.get("files"), dict) else {}
     current_paths = set(str(path) for path in current_files)
+    previous_files = previous_state.get("files") if isinstance(previous_state.get("files"), dict) else {}
+    previous_paths = set(str(path) for path in previous_files)
+    if provider == "python_ast" and current_paths != previous_paths:
+        return current_paths
     current_units = current_state.get("units") if isinstance(current_state.get("units"), dict) else {}
     previous_units = previous_state.get("units") if isinstance(previous_state.get("units"), dict) else {}
     if provider == "csharp_roslyn":
@@ -840,18 +1099,72 @@ def _merge_provider_result(
         symbol_failed_paths=merged_paths(previous.symbol_failed_paths, update.symbol_failed_paths),
         call_failed_paths=merged_paths(previous.call_failed_paths, update.call_failed_paths),
         failures=_merge_failures(previous, update, replace_paths=replace_paths, current_paths=current_paths),
+        symbol_coverage=(
+            update.symbol_coverage
+            if update.symbol_analyzed_paths or update.symbol_failed_paths
+            else previous.symbol_coverage
+        ),
+        call_coverage=(
+            update.call_coverage
+            if update.call_analyzed_paths or update.call_failed_paths
+            else previous.call_coverage
+        ),
         tool=update.tool or previous.tool,
     )
 
 
-def _load_provider_result(state_dir: Path, provider: str, manifest: dict[str, Any]) -> SemanticProviderResult | None:
-    data = _read_json(state_dir / "providers" / f"{provider}.json")
-    if data is None:
-        return None
+def _load_provider_results_strict(
+    root: Path,
+    *,
+    state_dir: Path,
+    manifest: dict[str, Any],
+) -> tuple[dict[str, SemanticProviderResult], list[Problem]]:
     expected = manifest.get("provider_result_digests") if isinstance(manifest.get("provider_result_digests"), dict) else {}
-    if str(expected.get(provider) or "") != digest_data(data):
-        return None
-    return _provider_result_from_dict(data, expected_provider=provider)
+    if set(str(provider) for provider in expected) != set(PROVIDER_LANGUAGES):
+        return {}, [
+            Problem(
+                "error",
+                "graph_materialization_incomplete",
+                "materialized Graph provider cache set is incomplete; run repoctl graph build --rebuild",
+                _state_path_label(root, state_dir / "providers"),
+            )
+        ]
+    results: dict[str, SemanticProviderResult] = {}
+    for provider in PROVIDER_LANGUAGES:
+        path = state_dir / "providers" / f"{provider}.json"
+        data, status, read_problem = _read_materialization_json(root, path)
+        if read_problem is not None:
+            return {}, [read_problem]
+        if data is None or status == "missing":
+            return {}, [
+                Problem(
+                    "error",
+                    "graph_materialization_incomplete",
+                    "materialized Graph provider cache is missing; run repoctl graph build --rebuild",
+                    _state_path_label(root, path),
+                )
+            ]
+        if str(expected.get(provider) or "") != digest_data(data):
+            return {}, [
+                Problem(
+                    "error",
+                    "graph_materialization_invalid",
+                    "materialized Graph provider cache is invalid; run repoctl graph build --rebuild",
+                    _state_path_label(root, path),
+                )
+            ]
+        result = _provider_result_from_dict(data, expected_provider=provider)
+        if result is None:
+            return {}, [
+                Problem(
+                    "error",
+                    "graph_materialization_invalid",
+                    "materialized Graph provider cache is invalid; run repoctl graph build --rebuild",
+                    _state_path_label(root, path),
+                )
+            ]
+        results[provider] = result
+    return results, []
 
 
 def materialize_graph(
@@ -859,10 +1172,27 @@ def materialize_graph(
     *,
     target: RepoTarget,
     rebuild: bool = False,
+    state_root: Path | None = None,
 ) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
-    state_dir = _state_dir(root, target)
-    previous_manifest = _read_json(state_dir / "manifest.json") or {}
-    previous_snapshot = _load_snapshot(root, target)
+    state_dir = _state_dir(root, target, state_root=state_root)
+    previous_manifest: dict[str, Any] = {}
+    previous_snapshot: GraphSnapshot | None = None
+    previous_provider_results: dict[str, SemanticProviderResult] = {}
+    if not rebuild:
+        materialized, admission_problems, admission_status = _admit_materialization(
+            root,
+            target=target,
+            state_root=state_root,
+        )
+        if admission_status != "missing":
+            if admission_problems or materialized is None:
+                return None, admission_problems, {
+                    "repository": target.to_dict(),
+                    "materialization": {"status": admission_status},
+                }
+            previous_manifest = materialized.manifest
+            previous_snapshot = materialized.snapshot
+            previous_provider_results = materialized.provider_results
     index_result, provider_entries, import_result, current, index_update = collect_graph_inputs(
         root,
         target=target,
@@ -882,6 +1212,7 @@ def materialize_graph(
             file_fingerprints=current["file_fingerprints"],
             changed_paths=set(index_update["changed_paths"]),
             graph_input_digest=current["input_digest"],
+            database_path=state_dir / "evidence.sqlite3",
         )
         if any(problem.severity == "error" for problem in evidence_problems):
             return previous_snapshot, evidence_problems, {
@@ -915,7 +1246,7 @@ def materialize_graph(
     for provider in PROVIDER_LANGUAGES:
         current_state = current["providers"][provider]
         previous_state = previous_provider_states.get(provider) if isinstance(previous_provider_states.get(provider), dict) else {}
-        previous_result = None if rebuild else _load_provider_result(state_dir, provider, previous_manifest)
+        previous_result = previous_provider_results.get(provider)
         current_files = current_state.get("files") if isinstance(current_state.get("files"), dict) else {}
         previous_files = previous_state.get("files") if isinstance(previous_state.get("files"), dict) else {}
         current_paths = set(str(path) for path in current_files)
@@ -994,6 +1325,8 @@ def materialize_graph(
         changed_paths=evidence_update_paths,
         graph_input_digest=current["input_digest"],
         rebuild=bool(index_update["full_reindex"]),
+        allow_reset=rebuild,
+        database_path=state_dir / "evidence.sqlite3",
     )
     problems.extend(evidence_problems)
     if any(problem.severity == "error" for problem in evidence_problems):
