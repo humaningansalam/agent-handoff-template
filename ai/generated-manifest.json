@@ -26,7 +26,7 @@
     },
     {
       "path": ".claude/skills/maintenance-workflow/SKILL.md",
-      "sha256": "sha256:ca88cdd0d66c8193daf83a3c8c59edbe484d1344ab5b87506721441d57294dec"
+      "sha256": "sha256:f930c0e90f93b9c8c18ff84adf58c30af45440ddaeb0fa345558c1ca44ce9b90"
     },
     {
       "path": ".codex/agents/maintenance-cartographer.toml",
@@ -63,7 +63,7 @@
   "sources": [
     {
       "path": ".agents/skills/maintenance-workflow/SKILL.md",
-      "sha256": "sha256:ca88cdd0d66c8193daf83a3c8c59edbe484d1344ab5b87506721441d57294dec"
+      "sha256": "sha256:f930c0e90f93b9c8c18ff84adf58c30af45440ddaeb0fa345558c1ca44ce9b90"
     },
     {
       "path": "ai/roles/maintenance-cartographer.yaml",

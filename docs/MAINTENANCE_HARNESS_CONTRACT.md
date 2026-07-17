@@ -60,7 +60,9 @@ Checker code, not an agent, classifies surface class/profile and derives the rou
 | `Stop` | `tools/hooks/maintenance/enforce_final_report.py` | final assistant message and checker state | allow/block final response | block unsupported decision claims or false pass |
 
 ## Scope Authority
-`/maintenance-workflow`는 명시적인 repo maintenance scope에서만 실행된다. Slash command execution은 collaboration mode나 maintenance scope 자체가 아니라 호출된 command 동안만 적용되는 runtime phase다. Implementation worker는 approval freeze에 포함된 approved affected surfaces만 수정한다.
+`/maintenance-workflow`는 현재 사용자 메시지가 literal `/maintenance-workflow` command를 호출한 경우에만 실행된다. `maintenance`, `readiness`, `repo-level`, `audit`, `review`, `cleanup`, `hardening` 같은 설명어는 invocation authority가 아니다. Product 작업과 `repos/**` 변경은 항상 일반 task lifecycle을 사용하며, root workspace나 repoctl 변경도 slash command가 없으면 scope matrix를 직접 따른다. Skill이 explicit command 없이 열렸다면 harness state를 시작하거나 resume하지 않고 `AGENTS.md` routing으로 돌아간다.
+
+Slash command execution은 collaboration mode나 maintenance scope 자체가 아니라 호출된 command 동안만 적용되는 runtime phase다. Implementation worker는 approval freeze에 포함된 approved affected surfaces만 수정한다.
 
 허용되는 repo maintenance surface:
 - root docs 및 repo contracts

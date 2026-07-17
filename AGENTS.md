@@ -58,6 +58,14 @@ Scope matrix:
 | Workspace/control-plane changes outside `repos/` | No | Write directly unless the user explicitly asks for a task |
 | Read-only questions or inspections | No | Report findings without Board mutation |
 
+## Explicit-Only Maintenance Workflow
+
+- Never infer or automatically select `/maintenance-workflow` from words such as maintenance, readiness, repo-level, audit, review, cleanup, or hardening.
+- Enter `/maintenance-workflow` only when the current user message literally invokes `/maintenance-workflow`, optionally followed by its focus arguments.
+- Product development, product readiness, QA, review, and bug fixing under `repos/**` always use the normal repo-scoped task lifecycle, even when the request describes the work as repository maintenance.
+- Workspace or repoctl changes outside `repos/**` follow the scope matrix directly by default; naming repoctl, tooling, tests, docs, or adapters does not implicitly invoke the maintenance harness.
+- If the maintenance skill is opened without the explicit command, do not initialize or resume harness state. Return to this contract and follow the normal scope route.
+
 ## Backlog
 
 - Backlog is for deferred ideas or planned work that should not be executed yet; work requested for now uses a task.

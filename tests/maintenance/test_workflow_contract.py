@@ -4,6 +4,20 @@ import subprocess
 from pathlib import Path
 
 
+def test_maintenance_workflow_requires_literal_user_command() -> None:
+    from tools.hooks.maintenance.scope import is_maintenance_prompt
+
+    assert is_maintenance_prompt("/maintenance-workflow") is True
+    assert is_maintenance_prompt("/maintenance-workflow docs") is True
+    for prompt in (
+        "Run a repo-level readiness and maintenance pass",
+        "Review product readiness under repos/",
+        "Fix the repoctl CLI",
+        "Audit and harden the repository",
+    ):
+        assert is_maintenance_prompt(prompt) is False
+
+
 def test_policy_routes_supported_surfaces_through_structured_profiles() -> None:
     from tools.agent_harness.harness import MaintenanceHarness
     from tools.agent_harness.policy import VerificationMode, WorkflowProfile, policy_for_surfaces

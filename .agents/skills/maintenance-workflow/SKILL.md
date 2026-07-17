@@ -1,6 +1,6 @@
 ---
 name: maintenance-workflow
-description: Repo 수준 maintenance harness 전용 `/maintenance-workflow` 직접 호출 진입점.
+description: Explicit user-command only. Run only when the current user message literally invokes `/maintenance-workflow`; never select it automatically for product development, readiness, audit, review, cleanup, bug fixing, or any `repos/**` work.
 argument-hint: "[focus]"
 disable-model-invocation: true
 allowed-tools:
@@ -21,6 +21,13 @@ disallowed-tools:
 ---
 
 # /maintenance-workflow
+## Invocation Gate
+- REQUIRED: the current user message must literally invoke `/maintenance-workflow`, optionally followed by focus arguments.
+- Never infer this skill from words such as maintenance, readiness, repo-level, audit, review, cleanup, hardening, tooling, docs, or tests.
+- Product work under `repos/**` always follows the normal task lifecycle in `AGENTS.md`; it is never a maintenance-harness run.
+- Root workspace or repoctl work also follows the normal scope matrix unless the user explicitly invokes this command.
+- If this skill was opened without the explicit command, stop before reading or mutating harness state and return to `AGENTS.md` routing.
+
 ## 범위
 이 workflow는 repo 수준 유지보수에만 사용한다. 대상은 문서, rules, skills, agents, hooks, tools, tests, templates, harness contract다.
 
