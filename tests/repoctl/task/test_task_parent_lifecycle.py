@@ -23,9 +23,9 @@ def test_task_finish_child_does_not_move_file(tmp_path: Path, monkeypatch, capsy
     assert main(["task", "finish", "T-20260609184047Z", "--verification-file", str(verification), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["archived"] is False
-    assert payload["new_path"] == "docs/tasks/T-20260609184047Z--child.md"
-    assert (tmp_path / payload["new_path"]).exists()
+    assert payload["data"]["archived"] is False
+    assert payload["data"]["new_path"] == "docs/tasks/T-20260609184047Z--child.md"
+    assert (tmp_path / payload["data"]["new_path"]).exists()
     assert not (tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md").exists()
     assert "docs/tasks/T-20260609184047Z--child.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
 
@@ -84,7 +84,7 @@ def test_task_finish_parent_archives_non_live_child_byte_identically(tmp_path: P
 
     payload = json.loads(capsys.readouterr().out)
     child_archive = tmp_path / "docs/archive/tasks/T-20260609184047Z--child.md"
-    assert payload["archived"] is True
+    assert payload["data"]["archived"] is True
     assert child_archive.exists()
     assert not (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
     assert child_archive.read_bytes() == original_child

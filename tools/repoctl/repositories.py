@@ -5,6 +5,7 @@ import subprocess
 import hashlib
 import json
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,20 @@ class RepoTarget:
             "path": self.display_path,
             "identity_source": self.identity_source,
         }
+
+
+class RepoSelectorStatus(StrEnum):
+    RESOLVED = "resolved"
+    NOT_FOUND = "not_found"
+    INVALID = "invalid"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class RepoSelectorResolution:
+    status: RepoSelectorStatus
+    path: str = ""
+    candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,18 +104,36 @@ def _safe_rel(value: str) -> str:
     return "/".join(parts)
 
 
-def normalize_repo_selector_path(value: str) -> str:
-    """Return the canonical repo-relative path accepted by Graph selectors."""
+def resolve_repo_selector_path(
+    value: str,
+    *,
+    repository_path: str = "",
+    known_paths: set[str] | None = None,
+) -> RepoSelectorResolution:
+    """Resolve repo-relative and selected workspace-relative selectors without guessing."""
     raw = value.strip()
     if not raw or "\\" in raw or Path(raw).is_absolute():
-        return ""
+        return RepoSelectorResolution(RepoSelectorStatus.INVALID)
     while raw.startswith("./"):
         raw = raw[2:]
     raw = raw.strip("/")
     parts = [part for part in raw.split("/") if part not in {"", "."}]
     if not parts or any(part == ".." for part in parts):
-        return ""
-    return "/".join(parts)
+        return RepoSelectorResolution(RepoSelectorStatus.INVALID)
+    normalized = "/".join(parts)
+    prefix = repository_path.strip().replace("\\", "/").strip("/")
+    workspace_candidate = ""
+    if prefix and normalized.startswith(prefix + "/"):
+        workspace_candidate = normalized[len(prefix) + 1 :]
+    candidates = tuple(dict.fromkeys(path for path in (normalized, workspace_candidate) if path))
+    if known_paths is None:
+        return RepoSelectorResolution(RepoSelectorStatus.RESOLVED, workspace_candidate or normalized)
+    existing = tuple(path for path in candidates if path in known_paths)
+    if len(existing) > 1:
+        return RepoSelectorResolution(RepoSelectorStatus.AMBIGUOUS, candidates=existing)
+    if existing:
+        return RepoSelectorResolution(RepoSelectorStatus.RESOLVED, existing[0])
+    return RepoSelectorResolution(RepoSelectorStatus.NOT_FOUND, workspace_candidate or normalized)
 
 
 def _validate_product_repo_rel(rel: str) -> None:

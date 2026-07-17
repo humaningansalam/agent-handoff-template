@@ -21,11 +21,17 @@ def test_task_start_changes_status_to_doing(tmp_path: Path, monkeypatch, capsys)
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "doing"
+    assert payload["data"]["status"] == "doing"
     text = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "status: doing" in text
     assert "task started" in text
     assert "First command to run: `./scripts/repoctl task list --json`" in text
+
+    assert main(["task", "list", "--json"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+    assert list_payload["command"] == "task.list"
+    assert set(list_payload) == {"ok", "command", "data", "warnings", "problems", "next_actions"}
+    assert list_payload["data"]["tasks"][0]["id"] == "T-20260609184046Z"
 
 
 def test_task_show_and_log_append_use_repoctl_lifecycle_boundary(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -35,21 +41,80 @@ def test_task_show_and_log_append_use_repoctl_lifecycle_boundary(tmp_path: Path,
 
     assert main(["task", "log", "append", "T-20260609184046Z", "checked worker output", "--json"]) == 0
     log_payload = json.loads(capsys.readouterr().out)
-    assert log_payload["timestamp"].endswith("Z")
+    assert log_payload["data"]["timestamp"].endswith("Z")
     text = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert f"- {log_payload['timestamp']}: checked worker output" in text
+    assert f"- {log_payload['data']['timestamp']}: checked worker output" in text
 
     assert main(["task", "show", "T-20260609184046Z", "--json"]) == 0
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["ok"] is True
-    assert show_payload["task"]["id"] == "T-20260609184046Z"
-    assert "checked worker output" in show_payload["body"]
+    assert show_payload["data"]["task"]["id"] == "T-20260609184046Z"
+    assert "checked worker output" in show_payload["data"]["body"]
+    assert set(show_payload) == {"ok", "command", "data", "warnings", "problems", "next_actions"}
 
     assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
     summary_payload = json.loads(capsys.readouterr().out)
     assert summary_payload["data"]["task"]["id"] == "T-20260609184046Z"
     assert "body" not in summary_payload["data"]
     assert "frontmatter" not in summary_payload["data"]
+
+
+def test_task_show_accepts_canonical_id_filename_and_path_with_section_projection(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    filename = "T-20260609184046Z--alpha.md"
+    add_board_task(tmp_path, filename, task_text("T-20260609184046Z", status="doing"))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    for selector in ("T-20260609184046Z", filename, f"docs/tasks/{filename}"):
+        assert main(["task", "show", selector, "--section", "Handoff", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["data"]["task"]["id"] == "T-20260609184046Z"
+        assert payload["data"]["section"]["name"] == "Handoff"
+        assert "Next exact step" in payload["data"]["section"]["body"]
+
+
+def test_task_command_aliases_emit_canonical_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    filename = "T-20260609184046Z--alpha.md"
+    task_path = f"docs/tasks/{filename}"
+    add_board_task(tmp_path, filename, task_text("T-20260609184046Z", status="todo"))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", task_path, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["task_id"] == "T-20260609184046Z"
+
+    assert main(["task", "discovery", "add", filename, "--query", "canonical identity", "--json"]) == 0
+    discovery = json.loads(capsys.readouterr().out)
+    assert discovery["data"]["task_id"] == "T-20260609184046Z"
+
+    assert main(["task", "log", "append", task_path, "checked aliases", "--json"]) == 0
+    log = json.loads(capsys.readouterr().out)
+    assert log["data"]["task_id"] == "T-20260609184046Z"
+
+    assert main(["task", "doctor", filename, "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["data"]["task_id"] == "T-20260609184046Z"
+
+
+def test_task_show_reports_current_chosen_scope_drift_as_advisory(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"chosen.py": "x = 1\n", "other.py": "y = 1\n"})
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "chosen behavior", "--reviewed", "repos/chosen.py", "--chosen", "repos/chosen.py", "--json"]) == 0
+    capsys.readouterr()
+    (repo / "other.py").write_text("y = 2\n", encoding="utf-8")
+
+    assert main(["task", "show", "T-20260609184046Z--alpha.md", "--summary", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["repo_changes"]["scope"]["unchosen_actual_paths"] == ["other.py"]
+    assert payload["data"]["repo_changes"]["scope"]["unused_chosen_paths"] == ["chosen.py"]
+    assert payload["warnings"][0]["code"] == "task_chosen_scope_drift"
 
 
 
@@ -195,9 +260,9 @@ def test_task_create_start_returns_started_task(tmp_path: Path, monkeypatch, cap
     assert main(["task", "create", "--slug", "started-task", "--start", "Started Task", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["started"] is True
-    assert payload["status"] == "doing"
-    assert "status: doing" in (tmp_path / payload["path"]).read_text(encoding="utf-8")
+    assert payload["data"]["started"] is True
+    assert payload["data"]["status"] == "doing"
+    assert "status: doing" in (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
 
 
 def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -280,9 +345,9 @@ def test_task_start_records_dirty_repo_for_root_task_without_force(tmp_path: Pat
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "doing"
-    assert payload["repo_changes"]["preexisting_dirty"] == 1
-    assert payload["repo_changes"]["task_new"] == 0
+    assert payload["data"]["status"] == "doing"
+    assert payload["data"]["repo_changes"]["preexisting_dirty"] == 1
+    assert payload["data"]["repo_changes"]["task_new"] == 0
     assert payload["warnings"][0]["code"] == "root_task_repo_dirty_recorded"
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "dirty repo state recorded" in task_body
@@ -318,7 +383,7 @@ def test_task_show_and_doctor_report_task_new_changed_files(tmp_path: Path, monk
 
     assert main(["task", "show", "T-20260609184046Z", "--json"]) == 0
     show_payload = json.loads(capsys.readouterr().out)
-    assert show_payload["repo_changes"]["task_new_files"] == ["changed.py"]
+    assert show_payload["data"]["repo_changes"]["task_new_files"] == ["changed.py"]
 
     assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
     doctor_payload = json.loads(capsys.readouterr().out)
@@ -333,8 +398,8 @@ def test_task_lifecycle_keeps_created_document_language_when_workspace_setting_c
 
     assert main(["task", "create", "--slug", "korean-lifecycle", "Korean Lifecycle", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    task_id = payload["task_id"]
-    task_path = tmp_path / payload["path"]
+    task_id = payload["data"]["task_id"]
+    task_path = tmp_path / payload["data"]["path"]
     assert 'document_language: "ko"' in task_path.read_text(encoding="utf-8")
 
     (tmp_path / "docs/repoctl.json").write_text('{"document_language":"en"}\n', encoding="utf-8")
@@ -350,7 +415,7 @@ def test_task_lifecycle_keeps_created_document_language_when_workspace_setting_c
     verification.write_text("- Command: pytest\n- Result: pass\n", encoding="utf-8")
     assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
-    archived = (tmp_path / finish_payload["new_path"]).read_text(encoding="utf-8")
+    archived = (tmp_path / finish_payload["data"]["new_path"]).read_text(encoding="utf-8")
     assert "작업을 검증하고 완료함" in archived
     assert "Repoctl 게이트 요약" not in archived
     assert "- Command: pytest" in archived

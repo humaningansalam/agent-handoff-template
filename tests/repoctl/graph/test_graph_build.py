@@ -371,6 +371,63 @@ def test_graph_materialization_reuses_unchanged_source_evidence(tmp_path: Path, 
     provider_path.write_text(provider_text, encoding="utf-8")
 
 
+def test_graph_materialization_rebuilds_relations_when_structured_input_version_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "Dockerfile").write_text("COPY app.py /app/app.py\n", encoding="utf-8")
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    first, problems, _meta = materialize_graph(tmp_path, target=target)
+
+    assert first is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    manifest_path = tmp_path / ".repoctl-state/graph/main/manifest.json"
+    first_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    from tools.repoctl import graph_store
+
+    original_build_graph = graph_store.build_graph
+    graph_builds: list[bool] = []
+
+    def recording_build_graph(*args, **kwargs):
+        graph_builds.append(True)
+        return original_build_graph(*args, **kwargs)
+
+    monkeypatch.setattr(
+        graph_store,
+        "STRUCTURED_RELATION_INPUT_VERSION",
+        first_manifest["structured_relation_input_version"] + 1,
+    )
+    monkeypatch.setattr(graph_store, "build_graph", recording_build_graph)
+    monkeypatch.setattr(
+        graph_store,
+        "build_semantic_provider",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("semantic provider rerun")),
+    )
+    monkeypatch.setattr(
+        "tools.repoctl.code_index._index_file",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source reindexed")),
+    )
+
+    second, problems, meta = materialize_graph(tmp_path, target=target)
+
+    assert second is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    assert graph_builds == [True]
+    assert meta["materialization"]["status"] == "updated"
+    assert meta["materialization"]["updated_providers"] == []
+    assert meta["materialization"]["code_index"]["changed_paths"] == []
+    second_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert second_manifest["structured_relation_input_version"] == first_manifest["structured_relation_input_version"] + 1
+    assert second_manifest["input_digest"] != first_manifest["input_digest"]
+
+
 
 def test_graph_index_truncation_fails(tmp_path: Path, monkeypatch) -> None:
     write_workspace(tmp_path)

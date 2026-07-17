@@ -22,14 +22,15 @@ def test_task_cancel_records_verification_and_archives_standalone(tmp_path: Path
     verification.write_text("- Reason: opened by mistake\n- Result: cancel requested\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "cancel", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "cancel", "T-20260609184046Z--alpha.md", "--verification-file", str(verification), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "canceled"
-    assert payload["old_path"] == "docs/tasks/T-20260609184046Z--alpha.md"
-    assert payload["new_path"] == "docs/archive/tasks/T-20260609184046Z--alpha.md"
-    assert not (tmp_path / payload["old_path"]).exists()
-    archived = (tmp_path / payload["new_path"]).read_text(encoding="utf-8")
+    assert payload["data"]["task_id"] == "T-20260609184046Z"
+    assert payload["data"]["status"] == "canceled"
+    assert payload["data"]["old_path"] == "docs/tasks/T-20260609184046Z--alpha.md"
+    assert payload["data"]["new_path"] == "docs/archive/tasks/T-20260609184046Z--alpha.md"
+    assert not (tmp_path / payload["data"]["old_path"]).exists()
+    archived = (tmp_path / payload["data"]["new_path"]).read_text(encoding="utf-8")
     assert "status: canceled" in archived
     assert "opened by mistake" in archived
     assert "task canceled with verification evidence" in archived
@@ -55,6 +56,7 @@ def test_task_cancel_blocks_task_scoped_repo_changes_by_default(tmp_path: Path, 
     assert main(["task", "cancel", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["task_id"] == "T-20260609184046Z"
     assert payload["problems"][0]["code"] == "repo_changes_on_cancel"
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
     assert not (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").exists()
@@ -103,10 +105,11 @@ def test_task_block_records_evidence_and_keeps_board_entry(tmp_path: Path, monke
     verification.write_text("- Blocker: screenshot acceptance failed\n- Evidence: mobile viewport still blank\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "block", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "block", "docs/tasks/T-20260609184046Z--alpha.md", "--verification-file", str(verification), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "blocked"
+    assert payload["data"]["task_id"] == "T-20260609184046Z"
+    assert payload["data"]["status"] == "blocked"
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "status: blocked" in task_body
     assert "screenshot acceptance failed" in task_body

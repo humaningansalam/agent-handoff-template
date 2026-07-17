@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from .context_chunks import DocumentChunk
 from .context_model import ContextCandidate
+from .path_roles import is_test_path
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]+|[가-힣]+")
@@ -51,13 +52,19 @@ def rank_context_chunks(
     limit: int = 20,
 ) -> list[ContextCandidate]:
     terms = context_query_terms(query)
-    scores: dict[tuple[str, str, str, int, int], dict[str, float]] = defaultdict(lambda: {"exact": 0.0, "fts": 0.0, "authority": 0.0})
+    scores: dict[tuple[str, str, str, int, int], dict[str, float]] = defaultdict(
+        lambda: {"identity": 0.0, "exact": 0.0, "fts": 0.0, "authority": 0.0}
+    )
     reasons: dict[tuple[str, str, str, int, int], set[str]] = defaultdict(set)
     by_key = {chunk.source_ref.key(): chunk for chunk in chunks}
 
     for chunk in chunks:
         key = chunk.source_ref.key()
         haystack = f"{chunk.source_ref.path} {chunk.source_ref.section} {chunk.text}".lower()
+        identity_score, identity_reason = _identity_score(query, chunk)
+        if identity_score:
+            scores[key]["identity"] = identity_score
+            reasons[key].add(identity_reason)
         exact_hits = sum(1 for term in terms if term.lower() in haystack)
         if exact_hits:
             scores[key]["exact"] = min(1.0, exact_hits / max(1, len(terms)))
@@ -74,7 +81,8 @@ def rank_context_chunks(
         if breakdown["exact"] <= 0 and breakdown["fts"] <= 0:
             continue
         score = (
-            breakdown["exact"] * 2.0
+            breakdown["identity"] * 4.0
+            + breakdown["exact"] * 2.0
             + breakdown["fts"] * 1.2
             + breakdown["authority"]
             + _current_source_priority(chunk)
@@ -114,6 +122,26 @@ def rank_context_chunks(
     return selected
 
 
+def _identity_score(query: str, chunk: DocumentChunk) -> tuple[float, str]:
+    raw = query.strip().strip("`'\"").casefold().replace("\\", "/")
+    if not raw:
+        return 0.0, ""
+    path = chunk.source_ref.path.casefold()
+    section = chunk.source_ref.section.strip().casefold()
+    name = path.rsplit("/", 1)[-1]
+    normalized_path = path.removeprefix("./")
+    path_parts = [part for part in normalized_path.split("/") if part]
+    path_variants = {"/".join(path_parts[index:]) for index in range(len(path_parts))}
+    query_tokens = {token.casefold().strip("`'\"") for token in TOKEN_RE.findall(query)}
+    if raw in path_variants or any(token in path_variants for token in query_tokens):
+        return 1.5, "exact path match"
+    if raw == section or section in query_tokens:
+        return 1.35, "exact symbol/section match"
+    if raw == name or name in query_tokens:
+        return 1.2, "exact filename match"
+    return 0.0, ""
+
+
 def context_query_terms(query: str) -> set[str]:
     terms: set[str] = set()
     for token in TOKEN_RE.findall(query):
@@ -145,7 +173,7 @@ def _authority_score(chunk: DocumentChunk) -> float:
         return 0.35
     if kind == "task_artifact":
         return 0.3
-    if kind == "current_source":
+    if kind in {"current_source", "config"}:
         return 0.25
     if path in {"AGENTS.md", "docs/PRD.md"}:
         return 0.45
@@ -191,7 +219,7 @@ def _escape_fts(token: str) -> str:
 
 
 def _current_source_priority(chunk: DocumentChunk) -> float:
-    if chunk.source_ref.kind != "current_source":
+    if chunk.source_ref.kind not in {"current_source", "config"}:
         return 0.0
     path = chunk.source_ref.path.lower()
     name = path.rsplit("/", 1)[-1]
@@ -199,27 +227,15 @@ def _current_source_priority(chunk: DocumentChunk) -> float:
         return -0.6
     if path.endswith(("_state.json", "-state.json")) or "/data/" in path and path.endswith(".json"):
         return -1.5
+    if chunk.source_ref.kind == "config":
+        return 0.25
     if name.startswith(".") or path.endswith((".lock", ".log")):
         return -0.6
-    if _looks_like_test_path(path):
+    if is_test_path(path):
         return 0.35
     if path.endswith((".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".dart", ".cs", ".java", ".kt", ".go", ".rs", ".sql", ".sh")):
         return 0.3
     return 0.0
-
-
-def _looks_like_test_path(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    return (
-        "/tests/" in path
-        or "/test/" in path
-        or path.startswith("tests/")
-        or path.startswith("test/")
-        or name.startswith("test_")
-        or name.endswith(("_test.py", ".test.js", ".test.ts", ".test.mjs", ".test.mts", "_test.mjs", "_test.mts", "_test.dart"))
-    )
-
-
 def _is_product_doc_path(path: str) -> bool:
     lowered = path.lower()
     return lowered.startswith("repos/docs/") or lowered.startswith("repos/") and "/docs/" in lowered

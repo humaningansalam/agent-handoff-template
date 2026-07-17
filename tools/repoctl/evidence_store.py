@@ -9,7 +9,7 @@ from .code_index import CodeIndexEntry
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
 from .context_model import ContextCandidate, ContextSourceRef
 from .context_retrieval import context_query_terms, rank_context_chunks
-from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, current_source_eligible
+from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, context_source_kind
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints
 from .repositories import RepoTarget
@@ -17,7 +17,7 @@ from .tasks import Problem, collect_completion_receipts, completion_receipt_arti
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
-EVIDENCE_INDEX_SCHEMA_VERSION = 2
+EVIDENCE_INDEX_SCHEMA_VERSION = 3
 STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
 
 
@@ -264,6 +264,11 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
         return [], Problem("warning", "context_current_source_unreadable", str(exc), entry.workspace_path)
     if not text.strip():
         return [], None
+    kind = context_source_kind(entry.path, entry.classification)
+    if not kind:
+        return [], None
+    if kind == "config":
+        return [chunk_text_source(root, entry.workspace_path, text, kind="config", section=entry.path)], None
     lines = text.splitlines()
     digest = sha256_text(text)
     ranges = _symbol_ranges(snapshot, entry.path)
@@ -379,11 +384,11 @@ def materialize_evidence_index(
             update_paths = set(entries_by_path) if rebuild else set(changed_paths)
             for repo_path in sorted(update_paths):
                 workspace_path = f"{target.display_path.rstrip('/')}/{repo_path}"
-                connection.execute("DELETE FROM chunks WHERE path = ? AND kind = 'current_source'", (workspace_path,))
+                connection.execute("DELETE FROM chunks WHERE path = ? AND kind IN ('current_source', 'config')", (workspace_path,))
                 entry = entries_by_path.get(repo_path)
                 if (
                     entry is None
-                    or not current_source_eligible(entry.path, entry.classification)
+                    or not context_source_kind(entry.path, entry.classification)
                     or workspace_path in static_paths
                 ):
                     continue
@@ -405,7 +410,7 @@ def materialize_evidence_index(
                 "chunk_counts": counts,
                 "document_manifest_digest": _source_manifest(connection, {"document", "product_manifest", "verification_hint"}),
                 "receipt_manifest_digest": _source_manifest(connection, {"completion_receipt", "task_artifact"}),
-                "current_source_manifest_digest": _source_manifest(connection, {"current_source"}),
+                "current_source_manifest_digest": _source_manifest(connection, {"current_source", "config"}),
                 "problems": [
                     problem.to_dict()
                     for problem in problems
@@ -494,9 +499,9 @@ def _row_chunk(row: sqlite3.Row) -> DocumentChunk:
 def _retrieval_filter(mode: str, target: RepoTarget) -> tuple[str, list[Any]]:
     prefix = f"{target.display_path.rstrip('/')}/%"
     if mode == "auto":
-        return "c.path LIKE ? AND c.kind NOT IN ('completion_receipt', 'task_artifact')", [prefix]
+        return "(c.path LIKE ? OR c.kind IN ('completion_receipt', 'task_artifact'))", [prefix]
     if mode in {"code_location", "call_impact", "file_impact"}:
-        return "c.path LIKE ? AND c.kind IN ('current_source', 'product_manifest', 'verification_hint')", [prefix]
+        return "c.path LIKE ? AND c.kind IN ('current_source', 'config', 'product_manifest', 'verification_hint')", [prefix]
     if mode in {"past_decision", "failure_mode"}:
         return "1 = 1", []
     return "c.kind NOT IN ('completion_receipt', 'task_artifact')", []

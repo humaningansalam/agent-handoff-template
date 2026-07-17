@@ -13,7 +13,7 @@ from .repositories import RepoTarget
 from .tasks import Problem
 
 
-CODE_INDEX_INPUT_VERSION = 6
+CODE_INDEX_INPUT_VERSION = 7
 
 
 @dataclass(frozen=True, order=True)

@@ -6,13 +6,16 @@ from typing import Any
 from .code_index import CodeIndexEntry, build_code_index, semantic_provider_entries
 from .git import normalize_repo_path
 from .graph_import_resolver import IMPORT_RESOLVER_LANGUAGES, resolve_code_imports
-from .graph_model import GraphEdge, GraphNode, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, change_event_id, digest_data, file_id, import_ref_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
+from .graph_model import GraphEdge, GraphNode, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, change_event_id, digest_data, document_id, file_id, import_ref_id, knowledge_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .graph_semantic_model import SemanticProviderResult
 from .graph_semantic_provider import build_semantic_providers
+from .graph_structured_relations import STRUCTURED_EDGE_KIND, build_structured_file_relations
 from .language_profiles import graph_language_capabilities, is_semantic_source_language, language_for_path
+from .knowledge_candidates import knowledge_records_for_graph
 from .meta import RepoMetadataFacts, read_metadata_facts
-from .repositories import RepoTarget, normalize_repo_selector_path
-from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path, completion_receipt_task_path
+from .path_roles import is_test_path
+from .repositories import RepoSelectorResolution, RepoSelectorStatus, RepoTarget, resolve_repo_selector_path
+from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path, completion_receipt_task_path, normalize_task_id
 
 
 def _has_errors(problems: list[Problem]) -> bool:
@@ -394,9 +397,101 @@ def build_graph(
             add_edge(GraphEdge("TASK_RECORDED_CHANGE", task_node_id, change_node_id, "recorded", "task_completion", {"attribution": attribution}))
             affected_file_id = ensure_receipt_file_node(path)
             add_edge(GraphEdge("CHANGE_AFFECTED_FILE", change_node_id, affected_file_id, "recorded", "task_completion", {"role": "path"}))
+            add_edge(GraphEdge("TASK_CHANGED_FILE", task_node_id, affected_file_id, "recorded", "task_completion", {"change": change, "role": "path"}))
             if old_path:
                 old_file_id = ensure_receipt_file_node(old_path)
                 add_edge(GraphEdge("CHANGE_AFFECTED_FILE", change_node_id, old_file_id, "recorded", "task_completion", {"role": "old_path"}))
+                add_edge(GraphEdge("TASK_CHANGED_FILE", task_node_id, old_file_id, "recorded", "task_completion", {"change": change, "role": "old_path"}))
+
+    knowledge_records, knowledge_problems = knowledge_records_for_graph(root, repo_id=repo_id)
+    problems.extend(
+        Problem("warning", "graph_knowledge_unavailable", f"{problem.code}: {problem.message}", problem.path)
+        for problem in knowledge_problems
+    )
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    for record in knowledge_records:
+        record_id = str(record.get("id") or "")
+        if not record_id:
+            continue
+        record_node_id = knowledge_id(record_id)
+        nodes[record_node_id] = GraphNode(
+            id=record_node_id,
+            kind="knowledge",
+            identity={"record_id": record_id, "repo_id": repo_id},
+            facts={"record": record},
+        )
+        applies_to = record.get("applies_to") if isinstance(record.get("applies_to"), dict) else {}
+        for raw_path in applies_to.get("paths", []) if isinstance(applies_to.get("paths"), list) else []:
+            path = normalize_repo_path(str(raw_path))
+            if path.startswith(product_prefix):
+                path = normalize_repo_path(path[len(product_prefix) :])
+            target_file_id = file_id(repo_id, path)
+            if path and target_file_id in nodes:
+                add_edge(GraphEdge("KNOWLEDGE_APPLIES_TO", record_node_id, target_file_id, "reviewed", "knowledge_record", {"freshness": record.get("status", "reviewed")}))
+        for ref in record.get("source_refs", []) if isinstance(record.get("source_refs"), list) else []:
+            if not isinstance(ref, dict):
+                continue
+            path = str(ref.get("path") or "")
+            if not path:
+                continue
+            source_node_id = document_id(path)
+            nodes.setdefault(
+                source_node_id,
+                GraphNode(
+                    id=source_node_id,
+                    kind="document",
+                    identity={"path": path},
+                    facts={"source_ref": ref},
+                ),
+            )
+            add_edge(
+                GraphEdge(
+                    "KNOWLEDGE_SOURCED_FROM",
+                    record_node_id,
+                    source_node_id,
+                    "recorded",
+                    "knowledge_record",
+                    {"freshness": record.get("status", "reviewed")},
+                )
+            )
+        provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+        source_task = str(provenance.get("source_task") or "")
+        if source_task:
+            source_task_id = graph_task_id(source_task)
+            if source_task_id in nodes:
+                add_edge(
+                    GraphEdge(
+                        "KNOWLEDGE_DERIVED_FROM_TASK",
+                        record_node_id,
+                        source_task_id,
+                        "recorded",
+                        "knowledge_record",
+                        {"freshness": record.get("status", "reviewed")},
+                    )
+                )
+
+    structured_result = build_structured_file_relations(target.root_path, entries)
+    problems.extend(structured_result.problems)
+    for relation in structured_result.relations:
+        from_node_id = file_id(repo_id, relation.from_path)
+        to_node_id = file_id(repo_id, relation.to_path)
+        if from_node_id not in nodes or to_node_id not in nodes:
+            continue
+        evidence = [item.to_dict() for item in relation.evidence]
+        add_edge(
+            GraphEdge(
+                STRUCTURED_EDGE_KIND,
+                from_node_id,
+                to_node_id,
+                "resolved",
+                "structured_file_relations",
+                {
+                    "evidence_type": "structured_file_relation",
+                    "confidence": "medium" if any(item.get("confidence") == "medium" for item in evidence) else "high",
+                    "relations": evidence,
+                },
+            )
+        )
 
     provider_entries = semantic_provider_entries(entries)
     import_resolutions, import_meta = resolve_code_imports(provider_entries, repo=target.root_path)
@@ -512,6 +607,23 @@ def build_graph(
                 },
             )
         )
+        if is_test_path(resolution.importer_path) and not is_test_path(resolution.target_path):
+            add_edge(
+                GraphEdge(
+                    "TESTS_FILE",
+                    importer_node_id,
+                    target_node_id,
+                    "resolved",
+                    resolution.provider,
+                    {
+                        "evidence_type": "direct_test_import",
+                        "match_kind": resolution.match_kind,
+                        "confidence": "medium",
+                        "import_confidence": "high",
+                        "test_role_evidence": "path_role",
+                    },
+                )
+            )
 
     parse_error_count = int(summary.get("parse_error") or 0)
     provider_coverage = {
@@ -524,6 +636,14 @@ def build_graph(
         ),
         "symbols": _semantic_provider_coverage("symbols", entries, semantic_results),
         "calls": _semantic_provider_coverage("calls", entries, semantic_results),
+        "structured_relations": ProviderCoverage(
+            capability="structured_relations",
+            eligible_paths=structured_result.eligible_paths,
+            analyzed_paths=structured_result.analyzed_paths,
+            unsupported_paths=(),
+            failed_paths=structured_result.failed_paths,
+            evidence_level="syntax_resolved",
+        ),
     }
     source_payloads = {
         "code_index": [entry.to_dict() for entry in entries],
@@ -537,6 +657,8 @@ def build_graph(
             for fact in metadata_facts
         ],
         "task_completion": task_receipts,
+        "knowledge_records": knowledge_records,
+        "structured_file_relations": [relation.to_dict() for relation in structured_result.relations],
         "python_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "python_import_resolver"],
         "js_ts_relative_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "js_ts_relative_import_resolver"],
         "dart_import_resolver": [resolution.to_dict() for resolution in import_resolutions if resolution.provider == "dart_import_resolver"],
@@ -553,7 +675,9 @@ def build_graph(
         "imports": provider_coverage["imports"].status,
         "symbols": provider_coverage["symbols"].status,
         "calls": provider_coverage["calls"].status,
+        "structured_relations": provider_coverage["structured_relations"].status,
         "task_history": "partial" if receipt_problems else "complete",
+        "knowledge": "partial" if knowledge_problems else "complete",
     }
     overall_completeness = "complete" if all(value == "complete" for value in capability_completeness.values()) else "partial"
     snapshot = GraphSnapshot(
@@ -563,6 +687,8 @@ def build_graph(
             {"kind": "repometa_annotation", "assertion": "declared", "digest": digest_data(source_payloads["repometa_annotation"])},
             {"kind": "repometa_policy", "assertion": "default", "digest": digest_data(source_payloads["repometa_policy"])},
             {"kind": "task_completion", "assertion": "recorded", "digest": digest_data(source_payloads["task_completion"])},
+            {"kind": "knowledge_records", "assertion": "reviewed", "digest": digest_data(source_payloads["knowledge_records"])},
+            {"kind": "structured_file_relations", "assertion": "resolved", "digest": digest_data(source_payloads["structured_file_relations"])},
             *[
                 {"kind": kind, "assertion": "resolved", "digest": digest_data(payload)}
                 for kind, payload in sorted(semantic_source_payloads.items())
@@ -593,7 +719,7 @@ def build_graph(
         },
         nodes=list(nodes.values()),
         edges=list(edges.values()),
-        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "symbol", "anchor", "import_resolution", "same_file_calls", "cross_file_import_calls", "language_capabilities"],
+        capabilities=["repository", "file", "import_ref", "topic", "task", "change_event", "artifact", "document", "knowledge", "symbol", "anchor", "import_resolution", "same_file_calls", "cross_file_import_calls", "direct_tests", "structured_file_relations", "language_capabilities"],
     ).with_digest()
     return snapshot, problems, {
         "repository": target.to_dict(),
@@ -601,6 +727,7 @@ def build_graph(
         "metadata": metadata_meta.get("summary", {}),
         "semantic_providers": [result.to_meta() for result in semantic_results],
         "import_resolvers": import_meta,
+        "structured_relations": structured_result.to_meta(),
         "provider_coverage": {name: coverage.to_dict() for name, coverage in sorted(provider_coverage.items())},
         "language_capabilities": language_capabilities,
     }
@@ -640,6 +767,14 @@ def _node_summary(node: GraphNode | None, *, symbol_paths: dict[str, str] | None
     elif node.kind == "artifact":
         summary["task_id"] = node.identity.get("task_id")
         summary["path"] = node.identity.get("path")
+    elif node.kind == "document":
+        summary["path"] = node.identity.get("path")
+    elif node.kind == "knowledge":
+        record = node.facts.get("record") if isinstance(node.facts.get("record"), dict) else {}
+        summary["record_id"] = node.identity.get("record_id")
+        summary["knowledge_kind"] = record.get("kind")
+        summary["status"] = record.get("status")
+        summary["title"] = record.get("title")
     elif node.kind == "change_event":
         summary["task_id"] = node.identity.get("task_id")
         summary["change_index"] = node.identity.get("index")
@@ -782,6 +917,49 @@ def _definition_edges(snapshot: GraphSnapshot, node_ids: set[str]) -> list[Graph
     return edges
 
 
+def _file_neighborhood_edges(snapshot: GraphSnapshot, file_node_id: str) -> list[GraphEdge]:
+    direct = [edge for edge in snapshot.edges if edge.from_id == file_node_id or edge.to_id == file_node_id]
+    symbol_ids = {
+        edge.to_id
+        for edge in snapshot.edges
+        if edge.kind == "DEFINES" and edge.from_id == file_node_id
+    }
+    call_edges = [
+        edge
+        for edge in snapshot.edges
+        if edge.kind == "CALLS" and (edge.from_id in symbol_ids or edge.to_id in symbol_ids)
+    ]
+    related_entity_ids = {
+        edge.from_id if edge.to_id == file_node_id else edge.to_id
+        for edge in direct
+        if edge.kind in {"TASK_CHANGED_FILE", "KNOWLEDGE_APPLIES_TO"}
+    }
+    second_hop = [
+        edge
+        for edge in snapshot.edges
+        if edge.from_id in related_entity_ids or edge.to_id in related_entity_ids
+    ]
+    definition_ids = {file_node_id, *symbol_ids, *(edge.from_id for edge in call_edges), *(edge.to_id for edge in call_edges)}
+    definitions = _definition_edges(snapshot, definition_ids)
+    return list({_edge_key(edge): edge for edge in [*direct, *call_edges, *second_hop, *definitions]}.values())
+
+
+def _file_query_path_edges(snapshot: GraphSnapshot, edges: list[GraphEdge], file_node_id: str) -> list[tuple[GraphEdge, str]]:
+    symbol_ids = {
+        edge.to_id
+        for edge in snapshot.edges
+        if edge.kind == "DEFINES" and edge.from_id == file_node_id
+    }
+    direct_kinds = {"IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND, "TASK_CHANGED_FILE", "KNOWLEDGE_APPLIES_TO"}
+    selected: list[tuple[GraphEdge, str]] = []
+    for edge in edges:
+        if edge.kind in direct_kinds and file_node_id in {edge.from_id, edge.to_id}:
+            selected.append((edge, "direct relation to selected file"))
+        elif edge.kind == "CALLS" and (edge.from_id in symbol_ids or edge.to_id in symbol_ids):
+            selected.append((edge, "call relation involving a symbol defined by selected file"))
+    return selected
+
+
 def project_context_neighborhood(
     snapshot: GraphSnapshot,
     *,
@@ -866,7 +1044,7 @@ def project_context_neighborhood(
 
     file_relations: list[tuple[GraphEdge, str, str, str, str]] = []
     for edge in sorted(snapshot.edges, key=_edge_key):
-        if edge.kind == "IMPORTS_FILE":
+        if edge.kind in {"IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}:
             file_relations.append((edge, edge.from_id, edge.to_id, "", ""))
             continue
         if edge.kind == "CALLS":
@@ -878,7 +1056,7 @@ def project_context_neighborhood(
     visited = set(seed_ids)
     frontier = set(seed_ids)
     origins_by_file: dict[str, set[str]] = {seed_id: {seed_id} for seed_id in seed_ids}
-    relation_priority = {"IMPORTS_FILE": 0, "CALLS": 1}
+    relation_priority = {"TESTS_FILE": 0, "IMPORTS_FILE": 1, STRUCTURED_EDGE_KIND: 2, "CALLS": 3}
     for distance in range(1, max_depth + 1):
         eligible = [
             relation
@@ -1020,6 +1198,7 @@ def _query_payload(
     matches: list[dict[str, Any]] | None = None,
     paths: list[dict[str, Any]] | None = None,
     warnings: list[dict[str, str]] | None = None,
+    candidates: list[dict[str, str]] | None = None,
     query_status: str = "found",
 ) -> dict[str, Any]:
     nodes = _node_by_id(snapshot)
@@ -1033,6 +1212,7 @@ def _query_payload(
         "query": query,
         "query_status": query_status,
         "matches": matches or [],
+        "candidates": candidates or [],
         "nodes": [nodes[node_id].to_dict() for node_id in sorted(node_ids) if node_id in nodes],
         "edges": [edge.to_dict() for edge in sorted_edges],
         "paths": paths or [],
@@ -1108,6 +1288,22 @@ def _query_continuations(snapshot: GraphSnapshot, node_ids: set[str]) -> list[di
             query_types = ["artifact"]
             actions = ["graph.artifact", "workspace.open"]
             label = value
+        elif node.kind == "document":
+            value = str(node.identity.get("path") or "")
+            if not value:
+                continue
+            selector = {"kind": "document", "value": value}
+            query_types = ["document"]
+            actions = ["workspace.open"]
+            label = value
+        elif node.kind == "knowledge":
+            value = str(node.identity.get("record_id") or "")
+            if not value:
+                continue
+            selector = {"kind": "knowledge_record", "value": value}
+            query_types = ["knowledge_record"]
+            actions = ["knowledge.show"]
+            label = value
         elif node.kind == "change_event":
             value = str(node.identity.get("task_id") or "")
             if not value:
@@ -1144,11 +1340,96 @@ def _query_continuations(snapshot: GraphSnapshot, node_ids: set[str]) -> list[di
     return [unique[key] for key in sorted(unique)]
 
 
-def _empty_query_payload(snapshot: GraphSnapshot, *, query: dict[str, Any], query_status: str, warning: dict[str, str] | None = None) -> dict[str, Any]:
+def _empty_query_payload(
+    snapshot: GraphSnapshot,
+    *,
+    query: dict[str, Any],
+    query_status: str,
+    warning: dict[str, str] | None = None,
+    candidates: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     warnings = _query_warnings(snapshot)
     if warning is not None:
         warnings.append(warning)
-    return _query_payload(snapshot, query=query, node_ids=set(), edges=[], warnings=warnings, query_status=query_status)
+    return _query_payload(snapshot, query=query, node_ids=set(), edges=[], warnings=warnings, candidates=candidates, query_status=query_status)
+
+
+def _selector_candidates(resolution: RepoSelectorResolution, *, repository_path: str) -> list[dict[str, str]]:
+    return [
+        {
+            "path": path,
+            "workspace_path": f"{repository_path}/{path}" if repository_path else path,
+            "reason": "selector matches both repo-relative and workspace-relative identities",
+        }
+        for path in resolution.candidates
+    ]
+
+
+def _canonical_path_candidates(snapshot: GraphSnapshot, requested: str, *, limit: int = 3) -> list[dict[str, str]]:
+    requested_name = requested.casefold().rsplit("/", 1)[-1]
+    requested_lower = requested.casefold()
+    repository_path = str(snapshot.repository.get("path") or "").rstrip("/")
+    ranked: list[tuple[tuple[int, int, str], str]] = []
+    for node in snapshot.nodes:
+        if node.kind != "file":
+            continue
+        path = str(node.identity.get("path") or "")
+        if not path:
+            continue
+        lowered = path.casefold()
+        name = lowered.rsplit("/", 1)[-1]
+        same_name = name == requested_name
+        suffix_related = lowered.endswith("/" + requested_lower) or requested_lower.endswith("/" + lowered)
+        if not same_name and not suffix_related:
+            continue
+        score = (
+            0 if same_name else 1,
+            abs(len(path) - len(requested)),
+            path,
+        )
+        ranked.append((score, path))
+    return [
+        {
+            "path": path,
+            "workspace_path": f"{repository_path}/{path}" if repository_path else path,
+            "reason": "canonical indexed path candidate",
+        }
+        for _score, path in sorted(ranked)[:limit]
+    ]
+
+
+def _resolve_graph_query_path(
+    snapshot: GraphSnapshot,
+    *,
+    value: str,
+    repository_path: str,
+    known_paths: set[str],
+    query_base: dict[str, Any],
+    query_path_field: str,
+    invalid_message: str,
+    ambiguous_message: str,
+) -> tuple[str, dict[str, Any] | None, list[Problem]]:
+    resolution = resolve_repo_selector_path(value, repository_path=repository_path, known_paths=known_paths)
+    if resolution.status == RepoSelectorStatus.INVALID:
+        return "", None, [Problem("error", "graph_query_invalid_path", invalid_message)]
+
+    query = dict(query_base)
+    query[query_path_field] = resolution.path if resolution.status == RepoSelectorStatus.NOT_FOUND else value
+    if resolution.status == RepoSelectorStatus.AMBIGUOUS:
+        return "", _empty_query_payload(
+            snapshot,
+            query=query,
+            query_status="ambiguous",
+            candidates=_selector_candidates(resolution, repository_path=repository_path),
+        ), [Problem("error", "graph_query_ambiguous_path", ambiguous_message)]
+    if resolution.status == RepoSelectorStatus.NOT_FOUND:
+        return "", _empty_query_payload(
+            snapshot,
+            query=query,
+            query_status="not_found",
+            candidates=_canonical_path_candidates(snapshot, resolution.path),
+        ), []
+    return resolution.path, None, []
 
 
 def _semantic_query_status(snapshot: GraphSnapshot, *, capability_name: str, in_file: str) -> tuple[str, dict[str, str] | None]:
@@ -1246,12 +1527,14 @@ def query_graph(
         return None, [Problem("error", "graph_query_invalid_depth", "graph query depth must be at least 1")]
 
     repo_id = str(snapshot.repository.get("id") or "")
+    repository_path = str(snapshot.repository.get("path") or "")
     selector, value = selectors[0]
+    known_file_paths = {
+        str(node.identity.get("path") or "")
+        for node in snapshot.nodes
+        if node.kind == "file" and str(node.identity.get("path") or "")
+    }
     normalized_in_file = ""
-    if in_file:
-        normalized_in_file = normalize_repo_selector_path(in_file)
-        if not normalized_in_file:
-            return None, [Problem("error", "graph_query_invalid_path", "graph --in-file must be a normalized repo-relative path")]
     nodes = _node_by_id(snapshot)
     symbol_paths = {
         edge.to_id: str(nodes[edge.from_id].identity.get("path") or "")
@@ -1261,14 +1544,25 @@ def query_graph(
         and str(nodes[edge.from_id].identity.get("path") or "")
     }
     if selector == "file":
-        normalized = normalize_repo_selector_path(value)
-        if not normalized:
-            return None, [Problem("error", "graph_query_invalid_path", "graph file query must be a normalized repo-relative path")]
+        normalized, resolution_result, resolution_problems = _resolve_graph_query_path(
+            snapshot,
+            value=value,
+            repository_path=repository_path,
+            known_paths=known_file_paths,
+            query_base={"type": "file"},
+            query_path_field="path",
+            invalid_message="graph file query must be a normalized repo-relative path",
+            ambiguous_message="graph file query matches both repo-relative and workspace-relative paths",
+        )
+        if resolution_result is not None or resolution_problems:
+            return resolution_result, resolution_problems
         wanted = file_id(repo_id, normalized)
-        if wanted not in nodes:
-            return _empty_query_payload(snapshot, query={"type": "file", "path": normalized}, query_status="not_found"), []
-        matched_edges = [edge for edge in snapshot.edges if edge.from_id == wanted or edge.to_id == wanted]
-        return _query_payload(snapshot, query={"type": "file", "path": normalized}, node_ids={wanted}, edges=matched_edges, matches=[_node_summary(nodes[wanted], symbol_paths=symbol_paths)]), []
+        matched_edges = _file_neighborhood_edges(snapshot, wanted)
+        paths = [
+            _path_from_edge(nodes, edge, reason=reason, symbol_paths=symbol_paths)
+            for edge, reason in _file_query_path_edges(snapshot, sorted(matched_edges, key=_edge_key), wanted)
+        ]
+        return _query_payload(snapshot, query={"type": "file", "path": normalized}, node_ids={wanted}, edges=matched_edges, matches=[_node_summary(nodes[wanted], symbol_paths=symbol_paths)], paths=paths), []
 
     if selector == "topic":
         wanted = topic_id(repo_id, value)
@@ -1308,14 +1602,15 @@ def query_graph(
         return [*direct, *affected]
 
     if selector == "task":
-        wanted = graph_task_id(value)
+        normalized_task = normalize_task_id(value)
+        wanted = graph_task_id(normalized_task)
         if wanted not in nodes:
-            return _empty_query_payload(snapshot, query={"type": "task", "task_id": value}, query_status="not_found"), []
+            return _empty_query_payload(snapshot, query={"type": "task", "task_id": normalized_task}, query_status="not_found"), []
         matched_edges = task_evidence_edges({wanted})
         paths = [_path_from_edge(nodes, edge, reason="recorded task evidence", symbol_paths=symbol_paths) for edge in sorted(matched_edges, key=_edge_key)]
         return _query_payload(
             snapshot,
-            query={"type": "task", "task_id": value},
+            query={"type": "task", "task_id": normalized_task},
             node_ids={wanted},
             edges=matched_edges,
             matches=[_node_summary(nodes[wanted], symbol_paths=symbol_paths)],
@@ -1354,6 +1649,23 @@ def query_graph(
             paths=paths,
         ), []
 
+    if selector in {"symbol", "callers_of", "callees_of", "impact_symbol"} and in_file:
+        query_base: dict[str, Any] = {"type": selector, "symbol": value}
+        if selector == "impact_symbol":
+            query_base["depth"] = depth
+        normalized_in_file, resolution_result, resolution_problems = _resolve_graph_query_path(
+            snapshot,
+            value=in_file,
+            repository_path=repository_path,
+            known_paths=known_file_paths,
+            query_base=query_base,
+            query_path_field="in_file",
+            invalid_message="graph --in-file must be a normalized repo-relative path",
+            ambiguous_message="graph --in-file matches both repo-relative and workspace-relative paths",
+        )
+        if resolution_result is not None or resolution_problems:
+            return resolution_result, resolution_problems
+
     def resolve_one_symbol(query_type: str, raw_symbol: str) -> tuple[GraphNode | None, dict[str, Any] | None, list[Problem]]:
         matches = _match_symbols(snapshot, raw_symbol, in_file=normalized_in_file)
         query = {"type": query_type, "symbol": raw_symbol}
@@ -1377,8 +1689,29 @@ def query_graph(
             return _empty_query_payload(snapshot, query=query, query_status=semantic_status, warning=semantic_warning), []
 
     if selector == "symbol":
-        _symbol_node, result, problems = resolve_one_symbol("symbol", value)
-        return result, problems
+        symbol_node, base_result, problems = resolve_one_symbol("symbol", value)
+        if symbol_node is None:
+            return base_result, problems
+        call_edges = [edge for edge in snapshot.edges if edge.kind == "CALLS" and (edge.from_id == symbol_node.id or edge.to_id == symbol_node.id)]
+        owner_file_id = _symbol_file_id(snapshot, symbol_node.id)
+        file_edges = _file_neighborhood_edges(snapshot, owner_file_id) if owner_file_id else []
+        edges = list({_edge_key(edge): edge for edge in [*call_edges, *file_edges]}.values())
+        path_edges = [(edge, "incoming or outgoing relation for selected symbol") for edge in sorted(call_edges, key=_edge_key)]
+        if owner_file_id:
+            path_edges.extend(
+                (edge, reason)
+                for edge, reason in _file_query_path_edges(snapshot, sorted(file_edges, key=_edge_key), owner_file_id)
+                if edge.kind != "CALLS"
+            )
+        paths = [_path_from_edge(nodes, edge, reason=reason, symbol_paths=symbol_paths) for edge, reason in path_edges]
+        return _query_payload(
+            snapshot,
+            query=base_result["query"] if base_result else {"type": "symbol", "symbol": value},
+            node_ids={symbol_node.id},
+            edges=edges,
+            matches=base_result["matches"] if base_result else [],
+            paths=paths,
+        ), problems
 
     if selector in {"callers_of", "callees_of"}:
         symbol_node, base_result, problems = resolve_one_symbol(selector, value)
@@ -1423,6 +1756,8 @@ def query_graph(
         def visible_path(edge: GraphEdge) -> bool:
             if edge.kind == "IMPORTS_FILE":
                 return True
+            if edge.kind == STRUCTURED_EDGE_KIND:
+                return True
             if edge.kind != "CALLS":
                 return False
             if include_same_file_calls:
@@ -1436,8 +1771,9 @@ def query_graph(
                 if edge.kind == "CALLS" and edge.to_id in frontier:
                     reason = f"depth {distance}: caller depends on changed symbol"
                     next_id = edge.from_id
-                elif edge.kind == "IMPORTS_FILE" and edge.to_id in frontier:
-                    reason = f"depth {distance}: file imports changed file"
+                elif edge.kind in {"IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND} and edge.to_id in frontier:
+                    relation = "tests" if edge.kind == "TESTS_FILE" else "uses" if edge.kind == STRUCTURED_EDGE_KIND else "imports"
+                    reason = f"depth {distance}: file {relation} changed file"
                     next_id = edge.from_id
                 elif edge.kind == "DEFINES" and edge.from_id in frontier:
                     reason = f"depth {distance}: file defines potentially changed symbol"
@@ -1462,12 +1798,19 @@ def query_graph(
         return visited, collected_edges, paths
 
     if selector == "impact_file":
-        normalized = normalize_repo_selector_path(value)
-        if not normalized:
-            return None, [Problem("error", "graph_query_invalid_path", "graph impact-file query must be a normalized repo-relative path")]
+        normalized, resolution_result, resolution_problems = _resolve_graph_query_path(
+            snapshot,
+            value=value,
+            repository_path=repository_path,
+            known_paths=known_file_paths,
+            query_base={"type": "impact_file", "depth": depth},
+            query_path_field="path",
+            invalid_message="graph impact-file query must be a normalized repo-relative path",
+            ambiguous_message="graph impact-file query matches both repo-relative and workspace-relative paths",
+        )
+        if resolution_result is not None or resolution_problems:
+            return resolution_result, resolution_problems
         wanted = file_id(repo_id, normalized)
-        if wanted not in nodes:
-            return _empty_query_payload(snapshot, query={"type": "impact_file", "path": normalized, "depth": depth}, query_status="not_found"), []
         node_ids, edges, paths = impact_walk(
             {wanted},
             max_depth=depth,

@@ -36,6 +36,16 @@
       "id": "cross-file-imported-call-impact",
       "kind": "cross_file_call_impact_resolution",
       "description": "cross-file imported function calls should be measured only after import resolution and stable symbol identity exist"
+    },
+    {
+      "id": "structured-runtime-file-impact",
+      "kind": "structured_file_relation_resolution",
+      "description": "Docker, Compose, workflow, and shell references should resolve only through explicit file syntax"
+    },
+    {
+      "id": "sql-owner-impact",
+      "kind": "sql_owner_relation_resolution",
+      "description": "seed and client RPC references should resolve to the unique SQL owner definition"
     }
   ]
 }

@@ -88,6 +88,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
     LanguageProfile(id="java", display_name="Java/Kotlin", suffixes=(".java", ".kt", ".kts"), manifest_patterns=("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"), exclude_patterns=(".gradle/**", "build/**", "target/**", "out/**"), capability="inventory evidence", semantic_source=True),
     LanguageProfile(id="swift", display_name="Swift", suffixes=(".swift",), manifest_patterns=("Package.swift", "*.xcodeproj/project.pbxproj", "*.xcworkspace/contents.xcworkspacedata"), exclude_patterns=(".build/**", "DerivedData/**"), capability="inventory evidence", semantic_source=True),
     LanguageProfile(id="shell", display_name="Shell", suffixes=(".sh", ".bash", ".zsh"), capability="inventory evidence", semantic_source=True),
+    LanguageProfile(id="sql", display_name="SQL", suffixes=(".sql",), capability="structured SQL relation provider", semantic_source=True),
     LanguageProfile(id="markdown", display_name="Markdown", suffixes=(".md", ".markdown"), capability="document evidence"),
     LanguageProfile(id="json", display_name="JSON", suffixes=(".json",), capability="manifest/config evidence"),
     LanguageProfile(id="toml", display_name="TOML", suffixes=(".toml",), capability="manifest/config evidence"),
@@ -134,7 +135,8 @@ def product_manifest_patterns() -> list[str]:
 
 def language_for_path(path: str) -> str:
     name = Path(path).name
-    if name == "Dockerfile":
+    lowered_name = name.casefold()
+    if lowered_name == "dockerfile" or lowered_name.startswith("dockerfile."):
         return "dockerfile"
     if name in LANGUAGE_BY_FILENAME:
         return LANGUAGE_BY_FILENAME[name]

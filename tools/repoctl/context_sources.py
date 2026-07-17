@@ -30,16 +30,50 @@ PRODUCT_DOCUMENT_PATTERNS = (
 )
 EXCLUDED_PARTS = {".repoctl-state", "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".firebase", ".dart_tool", "Library", "Temp", "Obj", "obj", "Build", "Builds", "Logs", "UserSettings", "node_modules", "dist", "build", "target"}
 MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024
+CONFIG_SUFFIXES = {
+    ".cfg",
+    ".conf",
+    ".env",
+    ".ini",
+    ".json",
+    ".jsonc",
+    ".properties",
+    ".toml",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+CONFIG_NAMES = {
+    "dockerfile",
+    "makefile",
+    "procfile",
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+}
+CONFIG_DOTFILE_EXCLUDES = {".ds_store", ".git", ".gitkeep"}
 
 
-def current_source_eligible(repo_path: str, classification: str) -> bool:
-    return (
-        bool(repo_path)
-        and "\\" not in repo_path
-        and normalize_repo_path(repo_path) == repo_path
-        and classification != "excluded"
-        and is_semantic_source_language(language_for_path(repo_path))
-    )
+def context_source_kind(repo_path: str, classification: str) -> str:
+    if (
+        not repo_path
+        or "\\" in repo_path
+        or normalize_repo_path(repo_path) != repo_path
+        or classification == "excluded"
+    ):
+        return ""
+    if is_semantic_source_language(language_for_path(repo_path)):
+        return "current_source"
+    path = Path(repo_path)
+    name = path.name.casefold()
+    suffix = path.suffix.casefold()
+    is_workflow = len(path.parts) >= 3 and tuple(part.casefold() for part in path.parts[:2]) == (".github", "workflows")
+    is_dockerfile = name == "dockerfile" or name.startswith("dockerfile.")
+    is_config_dotfile = name.startswith(".") and name not in CONFIG_DOTFILE_EXCLUDES
+    if name in CONFIG_NAMES or suffix in CONFIG_SUFFIXES or is_workflow or is_dockerfile or is_config_dotfile:
+        return "config"
+    return ""
 
 
 def collect_context_sources(
@@ -202,7 +236,8 @@ def _current_source_chunks_from_records(
     chunks: list[DocumentChunk] = []
     problems: list[Problem] = []
     for workspace_path, repo_path, classification in records:
-        if not current_source_eligible(repo_path, classification):
+        kind = context_source_kind(repo_path, classification)
+        if not kind:
             continue
         if not workspace_path or workspace_path in existing_paths:
             continue
@@ -228,7 +263,7 @@ def _current_source_chunks_from_records(
             continue
         if not text.strip():
             continue
-        chunks.append(chunk_text_source(root, workspace_path, text, kind="current_source", section=repo_path or path.name))
+        chunks.append(chunk_text_source(root, workspace_path, text, kind=kind, section=repo_path or path.name))
     return chunks, problems
 
 
@@ -252,7 +287,7 @@ def current_source_chunks_for_paths(
                 )
             )
             continue
-        if not current_source_eligible(repo_path, ""):
+        if not context_source_kind(repo_path, ""):
             continue
         workspace_path = f"{target.display_path.rstrip('/')}/{repo_path}"
         records.append((workspace_path, repo_path, ""))
@@ -362,6 +397,15 @@ def context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:
                     "warning",
                     "context_graph_completion_receipt_invalid",
                     f"{problem.message}; graph task receipt evidence is incomplete for this Context bundle",
+                    problem.path,
+                )
+            )
+        else:
+            mapped.append(
+                Problem(
+                    "warning",
+                    "context_graph_unavailable",
+                    f"{problem.code}: {problem.message}; source, document, task, and Knowledge evidence remain available",
                     problem.path,
                 )
             )

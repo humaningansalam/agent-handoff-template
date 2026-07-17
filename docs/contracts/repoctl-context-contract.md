@@ -2,7 +2,7 @@
 
 `repoctl context query` returns a read-only evidence bundle for one explicit product repository.
 
-Context is not authoritative. Source authorities remain the repo registry, source documents, Graph, `.repometa`, task completion receipts, and reviewed knowledge records.
+Context is not authoritative. Source authorities remain the repo registry, source documents, `.repometa`, task completion receipts, and reviewed knowledge records. Graph contributes derived relationship evidence only.
 
 ## Command
 
@@ -11,13 +11,13 @@ Context is not authoritative. Source authorities remain the repo registry, sourc
 ./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --mode authority --format markdown
 ```
 
-`--mode` is optional. When omitted, `auto` uses the persistent FTS/source-symbol index to choose current source and test anchors. It then projects at most two levels of provider-confirmed import/call relations, preserving both source and test anchors so a high-degree file cannot starve another seed. Related reviewed Knowledge and completion history are included only when their explicit source paths, changed files, or explicit file targets overlap the selected paths. It does not infer relationships from query wording.
+`--mode` is optional. When omitted, `auto` uses the persistent FTS/source-symbol index to choose owner source, exact config/dotfile matches, and direct test anchors. It projects at most two levels of provider-confirmed import/call/test relations while keeping source, test, authority, history, and reviewed-Knowledge lanes separate. Reviewed Knowledge qualifies through either an exact query match or an explicit source/path relation; reviewed status alone is never sufficient.
 
-Context never triggers a hidden Graph build. With a materialized Graph, queries read the persistent SQLite evidence index and do not reread unchanged product sources. Product paths or root evidence changed after materialization are removed from stored results and read directly as a small query-time overlay; deleted paths contribute no overlay. The overlay never mutates the index. When no materialized Graph exists, lexical document/current-source retrieval still succeeds through the explicit fallback and `warnings_and_completeness` reports that Graph relations are unavailable. When a Graph snapshot exists but its evidence index is missing, unreadable, incompatible, or bound to another snapshot digest, Context fails with a typed evidence-index problem and an explicit `graph build --rebuild` action; it does not hide index corruption behind a repository-wide scan. Run `repoctl graph build` explicitly when import/call traversal or completion-history projection is needed.
+Context never triggers a hidden Graph build. With a healthy materialization, queries read the persistent SQLite evidence index and overlay only changed paths. If the Graph snapshot or evidence index is missing, unreadable, incompatible, or digest-mismatched, Context returns a typed partial result from live source, config, document, task, and Knowledge evidence instead of hard-failing. Graph relations are marked unavailable and an explicit rebuild remains recovery guidance. The fallback is read-only and never repairs materialized state.
 
-Current-source text indexing is limited to registered `semantic_source` language profiles and files up to 1 MiB. Larger files remain Graph inventory nodes but are omitted from Context text retrieval with a persistent `context_current_source_too_large` warning and path in evidence-index completeness. JSON, manifests, and documents enter through their typed evidence sources rather than being treated as arbitrary source code.
+Text indexing is limited to files up to 1 MiB. Registered semantic languages and SQL use `current_source`; JSON/YAML/TOML/INI/env-style configuration, Dockerfile variants, Compose files, workflow files, and repository dotfiles use the separate `config` kind; manifests and documents keep their own typed kinds. Exact full path, selected-repo suffix, filename, symbol/section, config, and dotfile identity matches outrank ordinary body-term matches.
 
-Direct query anchors remain ahead of Graph-only dependencies in source and test groups. Graph expansion may enrich an anchor and rank related files within the expansion stage, but a shared dependency must not displace a file selected directly by exact lexical or FTS evidence merely because several anchors import it.
+Direct query anchors remain ahead of Graph-only dependencies in source and test groups. After an exact path/symbol identity anchor, its immediate imported, called, tested, or structured owner dependency is reserved ahead of weaker sibling body matches. Graph expansion may enrich an anchor and rank related files within the expansion stage, but a shared dependency must not displace the exact anchor merely because several consumers reference it.
 
 Supported modes are:
 
@@ -45,8 +45,7 @@ Default `--json` output is the compact agent-facing view. It includes:
 query.mode
 completeness
 groups
-selection
-knowledge_result_count
+continuations
 bundle_digest
 ```
 
@@ -62,7 +61,7 @@ source_snapshots
 
 `evidence` contains raw query-matching source/document chunks plus provider-confirmed Graph relations projected from lexical source and test anchors. Retrieval selects the strongest matching chunk from distinct paths before allowing additional sections from the same path, so one large file cannot consume the candidate set. Token cost never participates in retrieval or evidence selection.
 
-Compact groups merge chunks with the same path into one file-level item and preserve their locations in a `sections` list. Structured `evidence_role` values distinguish lexical change candidates from provider-confirmed imported/called dependencies, directly connected tests, authority documents, and supporting evidence. These roles come from source kind or Graph relations; Context does not call a file an owner based on a filename or natural-language guess. Compact output shortens excerpts and applies role-specific display limits; `selection` reports total, displayed, and omitted counts so an agent can refine the query or inspect `--full` without losing raw evidence.
+Compact groups merge chunks with the same path into one file-level item and preserve their locations in a `sections` list. A global budget returns at most eight actionable items, normally three to eight when enough evidence exists, with small per-lane limits so authority, source, test, history, and Knowledge do not compete in one ranking. Each item carries its reason and typed continuation. Selection counts, score diagnostics, provider coverage, and omitted-item statistics are available only with `--full` or `--explain`.
 
 When one path has both direct query evidence and Graph relations, its compact primary role remains `change_candidate` or `test_candidate`; provider-confirmed relationships remain available through relation evidence and typed continuations. A path reached only through Graph keeps its dependency role.
 
@@ -79,13 +78,13 @@ supporting_evidence
 warnings_and_completeness
 ```
 
-In `auto`, `reviewed_knowledge` and `related_history` contain only evidence structurally linked to current-source paths in the query evidence. Explicit `authority_or_contract`, `invariant`, `past_decision`, and `failure_mode` modes may perform broader reviewed-Knowledge retrieval.
+In `auto`, `reviewed_knowledge` accepts exact record matches as well as records structurally linked to selected paths. `related_history` is retrieved in its own lane and never displaces owner source or direct tests. Explicit historical modes may retrieve a broader set.
 
-The repository identity is stored once at bundle level. Compact group items keep a file-level source ref, section locations, a primary evidence role, a bounded selection reason, and a bounded excerpt. Compact completeness includes the bounded Graph freshness status, changed-path counts, root-evidence status, and materialized input digest so default output never presents a stale snapshot as current. Typed continuations are deduplicated once at bundle level instead of repeated per item. Full item continuations are primary-first: current source/test items own their file selector, documents own their document selector, reviewed Knowledge owns its `knowledge_record` selector, completion history owns its task selector, and a pure `CALLS` relation owns its exact symbol selector with `in_file`. A producer that cannot construct that typed primary returns no continuations; normalization must not promote a secondary selector into the first slot. Compact projection walks `CONTEXT_GROUPS` in contract order and validates the raw primary before lossless deduplication, then reserves it before displaying the non-warning item. If the eight-selector continuation budget cannot admit that primary selector, or the item has no valid primary, the item is omitted with it; remaining capacity may include secondary symbol, source-document, or artifact continuations. Warning/completeness items do not consume the continuation budget. Shared selectors count once and merge their action enums. Repeated per-item repo IDs, current-status markers, score breakdowns, and raw relation paths are omitted. Full output retains raw chunk evidence, deterministic scoring, item-level continuations, and relation evidence.
+The repository identity is stored once at bundle level. Compact completeness contains only operational Graph availability, freshness state, and the root-evidence drift indicator; freshness counts and materialization digests are diagnostic-only. Typed continuations are deduplicated once at bundle level: current source, config, and test items own their file selector; documents own their document selector; reviewed Knowledge owns its `knowledge_record` selector; completion history owns its task selector; and a pure call relation owns its exact symbol selector with `in_file`. Repeated repo IDs, score breakdowns, provider inventories, and raw relation paths are omitted. Full output retains deterministic scoring, item-level continuations, and relation evidence.
 
 ## Graph Evidence
 
-Context consumes the materialized Graph through internal Python objects; it must not parse `graph query` stdout or invoke compiler providers. `auto`, `code_location`, `call_impact`, and `file_impact` all use the same query-centered file projection seeded only by lexical current-source results. The projection includes exact `IMPORTS_FILE` edges and provider-confirmed same-file or cross-file `CALLS` edges. Lexical anchor relevance propagates over those edges with distance decay; generic graph connectivity alone is not relevance.
+Context consumes the materialized Graph through internal Python objects; it must not parse `graph query` stdout or invoke compiler providers. `auto`, `code_location`, `call_impact`, and `file_impact` use the same query-centered file projection. The projection includes exact `IMPORTS_FILE`, provider-confirmed `CALLS`, direct or explicitly inferred `TESTS_FILE`, and syntax-resolved `USES_FILE` edges for SQL/Docker/Compose/workflow/shell dependencies. Exact owner definitions rank before surrounding consumers; lexical relevance propagates with distance decay.
 
 Context never converts free-form query tokens into Graph file or symbol selectors. Graph-derived Context items use `source_ref.kind: graph_relation`, preserve the exact provider relation and endpoint identities, and remain current-query evidence rather than durable knowledge records. Explicit `repoctl graph query` selectors remain a separate iterative exploration interface.
 
@@ -141,7 +140,7 @@ Markdown output is a view. It must not be ingested as a future Context, Knowledg
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ```
 
-The normal repo-scoped flow is: record a Candidate query, run compact `context query`, inspect the suggested product files, refine and repeat the query when needed, then record Reviewed and Chosen files before editing. Default retrieval does not infer intent from Goal or Handoff prose: it ranks current source lexically, then expands only the bounded Graph relations of the top source results. A scoped Context Pack is optional durable handoff evidence, not an edit gate. The pack is non-authoritative. Default `--json` output is compact and contains:
+There is no mandatory Context -> Graph -> `rg` order. Start from Context for ambiguous intent, Graph or direct read for a known file, `rg` for a known symbol, and task/Knowledge for past decisions. Create or start the task before the first product mutation, then record Candidate, Reviewed, and Chosen evidence as scope becomes concrete. A scoped Context Pack is optional durable handoff evidence, not an exploration gate. The pack is non-authoritative. Default `--json` output is compact and contains:
 
 ```text
 stage
@@ -161,7 +160,7 @@ Use `--full --json` to include the raw nested Context bundle and full evidence d
 
 When `--output` is supplied, the full requested artifact is written to that path. Markdown stdout reports only the artifact path instead of duplicating the complete pack; omit `--output` when the rendered Markdown itself is required on stdout.
 
-`stage: bootstrap` is available before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, and capability warnings; it must not add task history or raw Graph data and is not required before initial file inspection. `stage: scoped` is used after Discovery has an active Chosen set. Chosen/current source and directly connected tests remain the focus.
+`stage: bootstrap` is available before active Chosen files exist. It contains AGENTS, canonical `docs/PRD.md`, the task, explicit Context Docs, product identity/manifests, and capability warnings. Task Context Docs and canonical PRD are required authority evidence and never compete with lexical search results. The pack is not required before initial file inspection. `stage: scoped` is used after Discovery has an active Chosen set.
 
 `edit_candidates` contains exactly the active Chosen set. `supporting_evidence` contains Reviewed minus Chosen, so the two sets are disjoint. Context does not infer edit scope from task prose, receipt history, basenames, or generated/ignored files.
 
@@ -182,7 +181,7 @@ required_evidence_exceeds_budget
 
 `final_render_estimated_tokens` must not exceed `maximum_estimated_tokens` unless the required evidence alone exceeds the budget, in which case the stop reason is `required_evidence_exceeds_budget`.
 
-Each Task Pack group item records `requirement: required | optional`. Required evidence is AGENTS, the task source ref, explicit Context Docs, and scoped Chosen refs. Budget trimming may shorten excerpts and remove optional evidence, but it must never remove required source refs. Compact output also preserves every required item even when a normal display limit would be exceeded.
+Each Task Pack group item records `requirement: required | optional`. Required evidence is AGENTS, canonical PRD, the task source ref, explicit Context Docs, and scoped Chosen refs. Budget trimming may shorten excerpts and remove optional evidence, but it must never remove required source refs.
 
 ## Benchmark Labels
 

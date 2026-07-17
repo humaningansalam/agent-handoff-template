@@ -19,6 +19,7 @@ ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
 ALLOWED_SOURCE_PREFIXES = ("docs/adr/", "docs/contracts/", "docs/workflows/")
 EXCLUDED_SOURCE_PARTS = {".repoctl-state", "generated", "plans"}
 MAX_KNOWLEDGE_CLAIM_LENGTH = 300
+CLAIM_ORIGINS = {"explicit", "source_section"}
 
 
 def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: str, claim: str = "") -> tuple[dict[str, Any], list[Problem]]:
@@ -104,6 +105,7 @@ def _write_candidate_from_chunk(
         "authoritative": False,
         "title": primary.title,
         "claim": candidate_claim,
+        "claim_origin": "explicit" if claim_override.strip() else "source_section",
         "summary": _summary(primary.text),
         "source_refs": [primary.source_ref.to_dict()],
         "review": {
@@ -195,6 +197,7 @@ def build_knowledge_candidate_from_receipt(
         "authoritative": False,
         "title": title,
         "claim": candidate_claim,
+        "claim_origin": "explicit",
         "summary": summary,
         "source_refs": source_refs,
         "review": {
@@ -918,7 +921,7 @@ def query_knowledge_records(
             continue
         if status not in {"reviewed", "stale", "superseded", "deprecated"}:
             continue
-        matched_paths = sorted(wanted_paths & _record_target_paths(record))
+        matched_paths = sorted(wanted_paths & _record_related_paths(record))
         if require_related and not matched_paths:
             continue
         score, breakdown, reasons = _record_score(
@@ -983,6 +986,23 @@ def query_knowledge_records(
         "result_count": len(returned),
         "available_record_count": len(records),
     }, problems, warnings
+
+
+def knowledge_records_for_graph(root: Path, *, repo_id: str) -> tuple[list[dict[str, Any]], list[Problem]]:
+    records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
+    events = _load_events(root, repo_id=repo_id)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
+    if any(problem.severity == "error" for problem in event_problems):
+        return [], event_problems
+    superseded_ids = _superseded_ids(records)
+    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
+    projected: list[dict[str, Any]] = []
+    for record in records:
+        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        if status not in {"reviewed", "stale"}:
+            continue
+        projected.append(_public_record(record, status=status, lifecycle_relations=_record_lifecycle_relations(record, events)))
+    return sorted(projected, key=lambda item: str(item.get("id") or "")), event_problems
 
 
 def _source_rel(root: Path, source: Path) -> str:
@@ -1495,6 +1515,12 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
         problems.append(Problem("error", "knowledge_candidate_claim_missing", "candidate claim is missing", candidate_id))
     if len(claim) > MAX_KNOWLEDGE_CLAIM_LENGTH:
         problems.append(Problem("error", "knowledge_candidate_claim_too_long", "candidate claim is too long", candidate_id))
+    claim_origin = str(candidate.get("claim_origin") or "")
+    if claim_origin not in CLAIM_ORIGINS:
+        problems.append(Problem("error", "knowledge_candidate_claim_origin_invalid", "candidate claim origin is invalid", candidate_id))
+    derived = candidate.get("derived_from") if isinstance(candidate.get("derived_from"), dict) else {}
+    if str(derived.get("kind") or "") == "completion_receipt" and claim_origin != "explicit":
+        problems.append(Problem("error", "knowledge_candidate_task_claim_not_explicit", "task-derived knowledge must use an explicit reusable claim", candidate_id))
     review = candidate.get("review")
     if not isinstance(review, dict) or review.get("required") is not True:
         problems.append(Problem("error", "knowledge_candidate_review_not_required", "candidate must require explicit review", candidate_id))
@@ -1642,6 +1668,10 @@ def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[di
 
 
 def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: dict[str, Any] | None = None) -> dict[str, Any]:
+    review = record.get("review") if isinstance(record.get("review"), dict) else {}
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
+    source_digest_set = review.get("source_digest_set") if isinstance(review.get("source_digest_set"), list) else []
     public = {
         "id": record.get("id", ""),
         "repo_id": record.get("repo_id", ""),
@@ -1652,7 +1682,12 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
         "summary": record.get("summary", ""),
         "source_refs": record.get("source_refs", []),
         "record_digest": record.get("record_digest", ""),
-        "applies_to": {"paths": sorted(_record_target_paths(record))},
+        "applies_to": {"paths": sorted(_record_applicability_paths(record))},
+        "provenance": {
+            "source_task": str(derived.get("task_id") or ""),
+            "source_digest_set": sorted(str(value) for value in source_digest_set if str(value)),
+            "freshness": status,
+        },
     }
     if lifecycle_relations:
         public["lifecycle_relations"] = lifecycle_relations
@@ -1662,12 +1697,17 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
     return public
 
 
-def _record_target_paths(record: dict[str, Any]) -> set[str]:
-    paths: set[str] = set()
+def _record_related_paths(record: dict[str, Any]) -> set[str]:
+    paths = _record_applicability_paths(record)
     source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
     for ref in source_refs:
         if isinstance(ref, dict) and str(ref.get("path") or "").strip():
             paths.add(str(ref.get("path") or "").strip())
+    return paths
+
+
+def _record_applicability_paths(record: dict[str, Any]) -> set[str]:
+    paths: set[str] = set()
     for container_name, field_name in (("scope", "paths"), ("applies_to", "files"), ("applies_to", "paths")):
         container = record.get(container_name) if isinstance(record.get(container_name), dict) else {}
         values = container.get(field_name) if isinstance(container.get(field_name), list) else []

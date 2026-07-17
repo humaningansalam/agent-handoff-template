@@ -51,6 +51,14 @@ def artifact_id(value: str, artifact_path: str) -> str:
     return f"task:{encode_component(value)}:artifact:{encode_component(artifact_path)}"
 
 
+def document_id(path: str) -> str:
+    return f"document:{encode_component(path)}"
+
+
+def knowledge_id(value: str) -> str:
+    return f"knowledge:{encode_component(value)}"
+
+
 def symbol_id(repo_id: str, provider: str, provider_symbol_id: str) -> str:
     return f"repo:{encode_component(repo_id)}:symbol:{encode_component(provider)}:{encode_component(provider_symbol_id)}"
 

@@ -2,7 +2,7 @@
 
 `repoctl graph build --json` materializes a derived snapshot for one explicit product repository.
 
-Graph is not authoritative. Source authorities remain repo registry, code index, `.repometa`, and structured task completion receipts.
+Graph is not authoritative. Source authorities remain repo registry, source files, `.repometa`, structured task completion receipts, and explicitly reviewed Knowledge records.
 
 The first build analyzes all eligible source files and materializes a persistent SQLite evidence index for source symbols, module text, documents, manifests, verification hints, and task artifacts. The manifest, snapshot, semantic-provider results, and evidence-index binding are admitted as one materialization; query and incremental build fail with a typed recovery action when any member is missing, invalid, or bound to another snapshot. Later builds compare Git/content identities and update only changed files plus the semantic dependents that can be affected by those changes. `graph query` reads the materialized snapshot and never runs a compiler provider or rescans product sources.
 
@@ -45,11 +45,11 @@ Incremental invalidation follows semantic boundaries:
 - Provider configuration or provider input-version changes refresh that provider.
 - Deleted and renamed files remove their old symbols and calls before updated facts are merged.
 
-Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, `--impact-symbol`, `--task`, or `--artifact`. File selectors and `--in-file` accept exact normalized paths relative to the selected product repository; workspace-qualified aliases are not accepted. `--in-file` narrows symbol selectors. `--depth` bounds impact traversal.
+Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, `--impact-symbol`, `--task`, or `--artifact`. File selectors and `--in-file` accept either canonical repo-relative paths or workspace-relative paths prefixed by the selected repository path; one resolver normalizes both forms against indexed file identities. If both interpretations exist and differ, the selector fails with `graph_query_ambiguous_path` and returns both canonical candidates. A not-found path returns at most three exact basename/suffix candidates and returns none when no canonical identity is related; it never dumps provider inventories or arbitrary fuzzy suggestions.
 
 Default build JSON contains the snapshot digest, node/edge counts, compact capability/provider status, materialization status, and updated-path counts. Provider path inventories and the raw snapshot are available only with `--full`.
 
-Default query JSON is the compact agent-facing view: direct matches, decision-relevant relation or traversal paths, reusable continuations, node/edge counts by kind, displayed/omitted counts, summarized completeness, and freshness counts. Matches, paths, and continuations share one eight-selector display budget: direct-match selectors are reserved first, and a path is displayed only when every traversable endpoint has its exact typed continuation in the same response. Symbol endpoints include their repository-relative source path so repeated names remain unambiguous. `impact-file` displays cross-file `CALLS` and `IMPORTS_FILE` paths; file-local `DEFINES` and `ANCHORS` remain in the snapshot and are represented by edge counts rather than exhaustive default output. Use `--full --json` when exact stale paths, raw nodes/edges, or full provider diagnostics are required.
+Default query JSON contains direct matches, at most three decision-relevant relations, and at most three reusable continuations. Query-specific traversals are returned under `paths`; queries without a traversal projection return their compact edges under `relations`. It omits node/edge counts, displayed/omitted statistics, provider coverage, analyzed-path inventories, freshness counts, and materialization digests. Compact freshness contains only state and the root-evidence drift indicator. File and symbol queries traverse importers/imports, callers/callees, direct tests, related tasks/artifacts/documents, and reviewed Knowledge in both directions. Every compact relation preserves evidence type, assertion/provider, confidence, capability completeness, and per-relation freshness. Use `--full --json` for raw nodes/edges and provider diagnostics.
 
 ## Snapshot
 
@@ -123,6 +123,8 @@ topic
 task
 change_event
 artifact
+document
+knowledge
 symbol
 anchor
 ```
@@ -150,11 +152,17 @@ HAS_TOPIC
 TASK_RECORDED_CHANGE
 CHANGE_AFFECTED_FILE
 TASK_VERIFIED_BY
+TASK_CHANGED_FILE
 DEFINES
 ANCHORS
 RESOLVES_TO
 IMPORTS_FILE
 CALLS
+TESTS_FILE
+USES_FILE
+KNOWLEDGE_APPLIES_TO
+KNOWLEDGE_SOURCED_FROM
+KNOWLEDGE_DERIVED_FROM_TASK
 ```
 
 `DECLARES_IMPORT` points to an importer-scoped `import_ref`, not to file, module, package, or symbol. Its typed identity preserves form, relative level, module, imported name, and raw display text. Resolvers may add `RESOLVES_TO` without changing this meaning. `--import <raw>` may return several distinct occurrence nodes when the same text appears in different files or import forms.
@@ -169,6 +177,10 @@ Python resolution consumes AST-derived import occurrences with explicit `module`
 
 `CALLS` points from a precise provider symbol node to another precise provider symbol node. String matching alone must not create `CALLS`.
 
+`TESTS_FILE` points from a typed test-role file to a provider-resolved imported file. The import resolution and the test-role classification remain separate facts: an exact import may be high-confidence while a convention-derived test role is explicitly recorded as such. Compact output must not duplicate the same endpoints as both `TESTS_FILE` and `IMPORTS_FILE`. Graph does not infer tests by matching source/test basenames. `TASK_CHANGED_FILE` is recorded receipt evidence. Knowledge edges are created only from approved records; pending candidates never enter Graph. Reviewed and stale records preserve source task, source digest set, and freshness.
+
+`USES_FILE` is the single file-to-file edge for syntax-resolved structured dependencies. Its `facts.relations[]` entries use a closed relation enum and preserve the exact reference, source line, operation, and confidence. The provider recognizes Docker `COPY`/`ADD` sources, Compose `build.dockerfile`/`env_file`/config files, local workflow actions and files executed by `run`, shell `source` and explicit file commands, SQL schema/seed dependencies, and client or SQL RPC calls resolved to a unique SQL routine definition. It parses exact format syntax and fails closed on dynamic variables, ambiguous paths, or ambiguous unqualified SQL objects; it does not infer dependencies from prose, filenames alone, or arbitrary command arguments. File and Context traversal consume the same edge in both directions, while impact traversal follows its dependency direction.
+
 All semantic providers consume the same policy-eligible Code Index entry set. `classification: excluded` files may remain inventory nodes, but they do not produce source parsing, `DEFINES`, `ANCHORS`, `CALLS`, `RESOLVES_TO`, or `IMPORTS_FILE` evidence. `excluded_override` is an annotation-policy exemption and remains eligible for semantic analysis.
 
 Provider support is compiler/analyzer backed:
@@ -178,17 +190,19 @@ Provider support is compiler/analyzer backed:
 - Dart uses `package:analyzer` resolved ASTs through an AOT helper and restricts package resolution to the selected product repository.
 - C# and Unity use Roslyn `SemanticModel` over `.csproj` compilation units.
 
+Structured file relations are a separate bounded provider and do not claim compiler-level language semantics. SQL is indexed as actionable source text, while Dockerfile variants, Compose/workflow YAML, env/config files, and repository dotfiles remain typed config evidence. Kotlin and other inventory-only languages are not promoted to new semantic providers by this change.
+
 Python `CALLS` resolution follows lexical scopes. Nested function, class, lambda, and comprehension bindings are not attributed to the wrong scope. Parameters and local assignments/imports shadow outer symbols; module imports and simple module aliases may resolve calls; `global` and `nonlocal` declarations are honored; ambiguous or order-unsafe bindings fail closed.
 
 A Python `CALLS` edge records the lexical target when that call expression executes; it is not a whole-program reachability proof that every enclosing control-flow path initializes the binding before invocation. The bounded provider does not evaluate version-dependent annotation expressions because the product interpreter version and `__future__` policy are not authoritative Graph inputs.
 
 Each semantic provider declares its own capability evidence level and coverage gaps. Python call evidence is conservative because dynamic call targets are not exhaustive, so a successfully analyzed Python repository must not claim complete call coverage.
 
-Impact and caller/callee queries consume `CALLS` and `IMPORTS_FILE` evidence that already exists in the snapshot. They must not create new call edges by name matching query strings.
+Impact and caller/callee queries consume `CALLS`, `IMPORTS_FILE`, and `USES_FILE` evidence that already exists in the snapshot. They must not create new call or dependency edges by matching query strings.
 
 `HAS_TOPIC` uses repo-local topic nodes. Same topic text in two repositories is not the same graph entity.
 
-Task edges are produced only from structured task completion receipts under `docs/tasks/.repoctl-state/completions/`. Graph must not parse task Markdown, verification prose, or diff summaries to infer task/file relations.
+Task edges are produced only from structured task completion receipts under `docs/tasks/.repoctl-state/completions/`. Graph must not parse task Markdown, verification prose, or diff summaries to infer task/file relations. Generic completion claims are not eligible Knowledge candidates; only reusable decisions, invariants, and failure modes may proceed to explicit review.
 
 `working_tree_diff` evidence has `attribution: task_working_tree`. `committed_range` evidence has `attribution: range_observed`; Graph and Context must describe those paths as files observed in the completion range, not as task-owned commits or task-owned changes. One invalid receipt makes only `task_history` partial and does not remove current file/import evidence or other valid receipts.
 
@@ -305,10 +319,9 @@ Rules:
   },
   "query_status": "not_found",
   "matches": [],
+  "candidates": [],
   "paths": [],
   "continuations": [],
-  "node_count": 0,
-  "edge_count": 0,
   "relations": [],
   "completeness": {},
   "warnings": []
@@ -317,9 +330,9 @@ Rules:
 
 Query selectors are exact typed selectors. Clients must not pass an `id` string and expect repoctl to split it.
 
-`matches` contains the selector's direct node candidates. `paths` contains ordered evidence for caller, callee, and impact traversal; each path includes `from`, `edge`, `to`, `reason`, and `source`.
+`matches` contains the selector's direct node candidates. `candidates` contains at most three exact canonical path corrections or ambiguity choices. `paths` contains ordered traversal evidence; every compact path includes an `evidence` object with type, assertion, provider, confidence, completeness, and freshness. Missing confidence is `unknown`; it is never synthesized from assertion prose. Stored lifecycle freshness and root-evidence drift take precedence over materialization-level currentness.
 
-`continuations` makes the subgraph traversable without parsing node IDs or provider-specific symbol IDs. Compact results contain a typed selector with normalized `value` and optional `in_file`, the supported follow-up `query_types`, and stable action enums such as `graph.file`, `graph.callers_of`, `task.show`, or `workspace.open`. The selector supplies identity and the bundle supplies `repo_id`, so actions do not repeat command arguments. `--full` also preserves the source node ID, kind, and label. Clients may repeatedly feed selectors into `graph query`; a continuation remains evidence for the returned `snapshot_digest`, not a durable locator after source changes.
+`continuations` makes the displayed compact subgraph traversable without parsing node IDs or provider-specific symbol IDs. Relation/path selection and continuation selection share one budget, so every displayed non-current neighbor has a typed continuation. The current match may be omitted when neighbor actions consume the three-item budget because its selector is already present in `query`. Compact results contain a typed selector with normalized `value` and optional `in_file`, the supported follow-up `query_types`, and stable action enums such as `graph.file`, `graph.callers_of`, `task.show`, or `workspace.open`. The selector supplies identity and the bundle supplies `repo_id`, so actions do not repeat command arguments. `--full` also preserves the source node ID, kind, and label. Clients may repeatedly feed selectors into `graph query`; a continuation remains evidence for the returned `snapshot_digest`, not a durable locator after source changes.
 
 Continuation coverage is:
 
@@ -330,6 +343,8 @@ import_ref   -> graph import
 topic        -> graph topic
 task         -> graph task / task show
 artifact     -> graph artifact / workspace open
+document     -> workspace open
+knowledge    -> knowledge show
 change_event -> owning graph task
 ```
 
@@ -356,4 +371,4 @@ Query outcome and evidence completeness are separate axes:
 | `unsupported` | `false` | 1 | No provider/capability exists for this query. |
 | `unavailable` | `false` | 1 | A defined provider could not produce evidence for this run. |
 
-Invalid selectors, invalid paths, and ambiguous symbols are ordinary problems, not `query_status` values. `not_found` with `completeness.status: partial` means only "not found in currently available evidence"; it does not prove absence.
+Invalid selectors and invalid paths are ordinary problems. Ambiguous symbols return candidate matches, and path-form collisions return `query_status: ambiguous` plus canonical candidates; both exit nonzero with a typed problem. `not_found` with `completeness.status: partial` means only "not found in currently available evidence"; it does not prove absence.

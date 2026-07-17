@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -20,18 +21,26 @@ from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_
 from .graph import query_graph
 from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph, materialize_graph
+from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
 from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
-from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownership, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
+from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
 class RepoctlArgparseError(RuntimeError):
     pass
+
+
+class GraphQueryIntent(StrEnum):
+    FILE = "file"
+    SYMBOL = "symbol"
+    TASK = "task"
+    GENERIC = "generic"
 
 
 class RepoctlArgumentParser(argparse.ArgumentParser):
@@ -54,7 +63,17 @@ def _json(data: Any, *, compact: bool = False) -> None:
 
 def _complete_json_envelope(data: Any) -> None:
     if isinstance(data, dict) and "ok" in data:
-        data.setdefault("data", {})
+        envelope_keys = {"ok", "command", "data", "warnings", "problems", "next_actions"}
+        unknown_keys = sorted(set(data) - envelope_keys)
+        if unknown_keys:
+            raise RepoctlError(
+                f"JSON envelope contains command-specific top-level fields: {', '.join(unknown_keys)}",
+                code="invalid_json_envelope",
+            )
+        if not str(data.get("command") or ""):
+            raise RepoctlError("JSON envelope is missing command identity", code="invalid_json_envelope")
+        if not isinstance(data.get("data"), dict):
+            raise RepoctlError("JSON envelope data must be an object", code="invalid_json_envelope")
         data.setdefault("warnings", [])
         data.setdefault("problems", [])
         data.setdefault("next_actions", _next_actions_for_problems([*data.get("problems", []), *data.get("warnings", [])], data=data.get("data", data)))
@@ -548,7 +567,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
             data=check_payload,
             problems=check_problems,
             warnings=check_payload.get("warnings", []) if isinstance(check_payload.get("warnings"), list) else [],
-            summary={"board_stale": bool(check_payload.get("board", {}).get("stale")) if isinstance(check_payload.get("board"), dict) else False},
+            summary={"board_stale": bool(check_payload.get("data", {}).get("board", {}).get("stale")) if isinstance(check_payload.get("data"), dict) else False},
         )
     )
     if _has_errors(check_problems):
@@ -1069,18 +1088,19 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False, full:
     }
     payload = {
         "ok": not _has_errors(problems),
+        "command": "check",
         "data": {
             "field_gates": {
                 "release_candidate": release_gate_data,
             },
+            "board": {
+                "stale": set(board_paths) != set(live_paths),
+                "missing": sorted(set(live_paths) - set(board_paths)),
+                "extra": sorted(set(board_paths) - set(live_paths)),
+            },
         },
         "problems": [problem.to_dict() for problem in problems],
         "warnings": _warnings(problems),
-        "board": {
-            "stale": set(board_paths) != set(live_paths),
-            "missing": sorted(set(live_paths) - set(board_paths)),
-            "extra": sorted(set(board_paths) - set(live_paths)),
-        },
     }
     return payload, problems, live_paths
 
@@ -1163,7 +1183,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             for problem in problems:
                 location = f" {problem.path}" if problem.path else ""
                 print(f"[{problem.severity}] {problem.code}{location}: {problem.message}")
-        if payload["board"]["stale"]:
+        if payload["data"]["board"]["stale"]:
             print("BOARD is stale. Run: repoctl check --fix-board")
     return 1 if _has_errors(problems) else 0
 
@@ -1308,11 +1328,14 @@ def cmd_task_list(args: argparse.Namespace) -> int:
     problems = validate_tasks(tasks) + check_board(root, board_paths, tasks, board_text)
     payload = {
         "ok": not _has_errors(problems),
-        "tasks": [task.to_list_dict() for task in sorted(live_tasks(tasks), key=lambda task: task.rel_path)],
-        "board": {
-            "stale": set(board_paths) != set(live_paths),
-            "missing": sorted(set(live_paths) - set(board_paths)),
-            "extra": sorted(set(board_paths) - set(live_paths)),
+        "command": "task.list",
+        "data": {
+            "tasks": [task.to_list_dict() for task in sorted(live_tasks(tasks), key=lambda task: task.rel_path)],
+            "board": {
+                "stale": set(board_paths) != set(live_paths),
+                "missing": sorted(set(live_paths) - set(board_paths)),
+                "extra": sorted(set(board_paths) - set(live_paths)),
+            },
         },
         "problems": [problem.to_dict() for problem in problems],
         "warnings": _warnings(problems),
@@ -1320,36 +1343,70 @@ def cmd_task_list(args: argparse.Namespace) -> int:
     if args.json:
         _json(payload)
     else:
-        for task in payload["tasks"]:
+        for task in payload["data"]["tasks"]:
             print(f"{task['id']} {task['status']} {task['path']}")
-        if payload["board"]["stale"]:
+        if payload["data"]["board"]["stale"]:
             print("BOARD is stale. Run: repoctl check --fix-board")
     return 0
+
+
+def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        target = _repo_target_for_task_command(root, task)
+    except RepoctlError:
+        return None
+    if target is None or not _repo_scoped_frontmatter(task) or not discovery_recorded(task, target):
+        return None
+    scope = discovery_scope_delta(task, target, list(delta.get("changes") or []))
+    delta["scope"] = scope
+    if not scope["unchosen_actual_paths"] and not scope["unused_chosen_paths"]:
+        return None
+    return {
+        "severity": "warning",
+        "code": "task_chosen_scope_drift",
+        "message": "current repository changes and active Chosen files differ; this is advisory until task finish",
+        "path": task.rel_path,
+        "unchosen_actual_paths": scope["unchosen_actual_paths"],
+        "unused_chosen_paths": scope["unused_chosen_paths"],
+    }
 
 
 def cmd_task_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task = resolve_task(root, args.task_id)
-    delta = repo_changes_since_task_start(root, args.task_id) if task.status in {"todo", "doing", "blocked"} else None
+    delta = repo_changes_since_task_start(root, task.id) if task.status in {"todo", "doing", "blocked"} else None
+    warnings: list[dict[str, Any]] = []
+    if delta:
+        scope_warning = _task_scope_drift_warning(root, task, delta)
+        if scope_warning is not None:
+            warnings.append(scope_warning)
     repo_changes = _repo_change_summary(delta) if delta else None
     summary = {"task": task.to_list_dict(), "path": task.rel_path, "repo_changes": repo_changes}
-    if args.summary:
-        payload = {"ok": True, "command": "task.show", "data": summary, "problems": [], "warnings": []}
+    if args.section:
+        text = task.path.read_text(encoding="utf-8")
+        section = find_section(text, args.section)
+        body = text[section.body_start : section.end].strip()
+        payload = {
+            "ok": True,
+            "command": "task.show",
+            "data": {**summary, "section": {"name": args.section, "body": body}},
+            "problems": [],
+            "warnings": warnings,
+        }
+    elif args.summary:
+        payload = {"ok": True, "command": "task.show", "data": summary, "problems": [], "warnings": warnings}
     else:
         payload = {
             "ok": True,
             "command": "task.show",
             "data": {**summary, "frontmatter": task.frontmatter, "body": task.body},
-            "task": task.to_list_dict(),
-            "path": task.rel_path,
-            "frontmatter": task.frontmatter,
-            "body": task.body,
-            "repo_changes": repo_changes,
             "problems": [],
-            "warnings": [],
+            "warnings": warnings,
         }
     if args.json:
         _json(payload)
+    elif args.section:
+        print(f"## {args.section}\n\n{payload['data']['section']['body']}".rstrip())
     elif args.summary:
         print(f"{task.id} {task.status} {task.rel_path}")
     else:
@@ -1362,11 +1419,18 @@ def cmd_task_log_append(args: argparse.Namespace) -> int:
     with repoctl_lock(root):
         result = append_task_log(root, args.task_id, args.message)
         atomic_write(result["task"].path, result["text"])
-    payload = {"ok": True, "command": "task log append", "task_id": args.task_id, "timestamp": result["timestamp"], "problems": [], "warnings": []}
+    task_id = result["task"].id
+    payload = {
+        "ok": True,
+        "command": "task.log.append",
+        "data": {"task_id": task_id, "timestamp": result["timestamp"]},
+        "problems": [],
+        "warnings": [],
+    }
     if args.json:
         _json(payload)
     else:
-        print(f"Logged: {args.task_id} {result['timestamp']}")
+        print(f"Logged: {task_id} {result['timestamp']}")
     return 0
 
 
@@ -1385,6 +1449,7 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         )
         atomic_write(result["task"].path, result["text"])
     next_actions: list[dict[str, str]] = []
+    task_id = result["task"].id
     chosen_files = result["discovery"]["chosen_files"]
     try:
         target = _repo_target_for_task_command(root, result["task"])
@@ -1401,14 +1466,14 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         next_actions.append(
             {
                 "label": "Check finish readiness",
-                "command": f"./scripts/repoctl task doctor {args.task_id} --json",
+                "command": f"./scripts/repoctl task doctor {task_id} --json",
             }
         )
     payload = {
         "ok": True,
         "command": "task.discovery.add",
         "data": {
-            "task_id": args.task_id,
+            "task_id": task_id,
             "path": result["task"].rel_path,
             "update": result["update"],
             "totals": result["totals"],
@@ -1421,26 +1486,49 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
     if args.json:
         _json(payload)
     else:
-        print(f"Updated Discovery: {args.task_id}")
+        print(f"Updated Discovery: {task_id}")
     return 0
 
 
 def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    resolutions: list[tuple[str, str]] = []
+    if args.path:
+        if not args.ownership:
+            raise RepoctlError("--ownership is required with --path", code="missing_baseline_ownership")
+        resolutions.extend((path, args.ownership) for path in args.path)
+    for raw in args.resolution or []:
+        path, separator, ownership = raw.rpartition("=")
+        if not separator or not path.strip() or ownership not in {"task", "preexisting"}:
+            raise RepoctlError(
+                "--resolution must use PATH=task or PATH=preexisting",
+                code="invalid_baseline_resolution",
+                path=raw,
+            )
+        resolutions.append((path, ownership))
+    if not resolutions:
+        raise RepoctlError(
+            "baseline resolve requires --path with --ownership or one or more --resolution PATH=OWNERSHIP values",
+            code="missing_baseline_resolution",
+        )
     with repoctl_lock(root):
-        result = resolve_task_baseline_ownership(root, args.task_id, path=args.path, ownership=args.ownership)
+        result = resolve_task_baseline_ownerships(
+            root,
+            args.task_id,
+            resolutions=resolutions,
+            apply=not args.preview,
+        )
     data = {
         "task_id": result["task"].id,
-        "path": result["path"],
-        "ownership": result["ownership"],
-        "baseline_fingerprint": result["baseline_fingerprint"],
-        "final_fingerprint": result["final_fingerprint"],
+        "applied": result["applied"],
+        "resolutions": result["resolutions"],
     }
-    payload = {"ok": True, "command": "task.baseline.resolve", "data": data, **data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "task.baseline.resolve", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
-        print(f"Resolved baseline ownership: {result['path']} -> {result['ownership']}")
+        action = "Previewed" if args.preview else "Resolved"
+        print(f"{action} baseline ownership for {len(result['resolutions'])} path(s)")
     return 0
 
 
@@ -1457,7 +1545,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         verification_ready = False
         doctor_problems.append(Problem("warning", exc.code or "missing_verification_file", str(exc), exc.path or task.rel_path))
     try:
-        delta = repo_changes_since_task_start(root, task_id)
+        delta = repo_changes_since_task_start(root, task.id)
     except RepoctlError:
         delta = {
             "changes": [],
@@ -1465,13 +1553,14 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             "preexisting_count": 0,
             "baseline_conflicts": [],
         }
+    scope_warning = _task_scope_drift_warning(root, task, delta)
     try:
         if verification is None:
-            _meta_gate, delta = _finish_meta_gate(root, task_id, use_committed_diff=use_committed_diff)
+            _meta_gate, delta = _finish_meta_gate(root, task.id, use_committed_diff=use_committed_diff)
         else:
             _meta_gate, delta, _result = _prepare_task_finish(
                 root,
-                task_id,
+                task.id,
                 verification=verification,
                 use_committed_diff=use_committed_diff,
             )
@@ -1479,11 +1568,15 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         discovery_is_already_advisory = verification is None and exc.code == "placeholder_discovery" and any(
             problem.code == "missing_discovery_evidence" for problem in task_problems
         )
-        if not discovery_is_already_advisory:
+        scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
+        if not discovery_is_already_advisory and not scope_is_already_advisory:
             doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
     combined = [*task_problems, *doctor_problems]
     blockers = [problem.code for problem in combined if problem.severity == "error"]
-    advisory = [problem.code for problem in combined if problem.severity == "warning"]
+    advisory = [
+        *[problem.code for problem in combined if problem.severity == "warning"],
+        *([str(scope_warning["code"])] if scope_warning is not None else []),
+    ]
     finish_ready = task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers
     try:
         target = _repo_target_for_task_command(root, task)
@@ -1512,14 +1605,17 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "command": "task.doctor",
         "data": data,
         "problems": [problem.to_dict() for problem in combined if problem.severity == "error"],
-        "warnings": [problem.to_dict() for problem in combined if problem.severity == "warning"],
+        "warnings": [
+            *[problem.to_dict() for problem in combined if problem.severity == "warning"],
+            *([scope_warning] if scope_warning is not None else []),
+        ],
     }
     return payload
 
 
 def _repo_change_summary(delta: dict[str, Any]) -> dict[str, Any]:
     task_new_files = [entry[1] for entry in delta.get("changes", [])]
-    return {
+    summary = {
         "task_new": len(task_new_files),
         "task_new_files": task_new_files[:20],
         "task_new_files_truncated": len(task_new_files) > 20,
@@ -1529,6 +1625,9 @@ def _repo_change_summary(delta: dict[str, Any]) -> dict[str, Any]:
         "repo_git_available": bool(delta.get("repo_git") and delta["repo_git"].available),
         "repo_git_reason": str(delta.get("repo_git").reason) if delta.get("repo_git") and not delta["repo_git"].available else "",
     }
+    if isinstance(delta.get("scope"), dict):
+        summary["scope"] = delta["scope"]
+    return summary
 
 
 def _metadata_coverage_warnings(meta: dict[str, Any]) -> list[dict[str, str]]:
@@ -1636,12 +1735,6 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             "started": bool(start_result),
             "repo_changes": _repo_change_summary(repo_changes_since_task_start(root, task.id)) if start_result else None,
         },
-        "task_id": task.id,
-        "path": task.rel_path,
-        "status": status,
-        "backlog_id": args.backlog_id or "",
-        "backlog_removed": bool(args.backlog_id),
-        "started": bool(start_result),
         "problems": [],
         "warnings": [problem.to_dict() for problem in (start_result or {}).get("warnings", [])],
         "next_actions": next_actions,
@@ -1734,11 +1827,12 @@ def cmd_backlog_remove(args: argparse.Namespace) -> int:
 
 def cmd_task_start(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    task_id = resolve_task(root, args.task_id).id
     with repoctl_lock(root):
-        result = start_task(root, args.task_id, force_dirty=args.force_dirty)
+        result = start_task(root, task_id, force_dirty=args.force_dirty)
         atomic_write(result["task"].path, result["text"])
-    delta = repo_changes_since_task_start(root, args.task_id)
-    data = {"task_id": args.task_id, "status": "doing", "dirty": result["dirty"], "repo_changes": _repo_change_summary(delta)}
+    delta = repo_changes_since_task_start(root, task_id)
+    data = {"task_id": task_id, "status": "doing", "dirty": result["dirty"], "repo_changes": _repo_change_summary(delta)}
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(result["task"]):
         repo_path = "repos"
@@ -1750,12 +1844,12 @@ def cmd_task_start(args: argparse.Namespace) -> int:
                 repo_id = target.id
         except RepoctlError:
             pass
-        next_actions = _discovery_guidance_actions(args.task_id, repo_id=repo_id, repo_path=repo_path)
-    payload = {"ok": True, "command": "task.start", "data": data, **data, "problems": [], "warnings": [problem.to_dict() for problem in result.get("warnings", [])], "next_actions": next_actions}
+        next_actions = _discovery_guidance_actions(task_id, repo_id=repo_id, repo_path=repo_path)
+    payload = {"ok": True, "command": "task.start", "data": data, "problems": [], "warnings": [problem.to_dict() for problem in result.get("warnings", [])], "next_actions": next_actions}
     if args.json:
         _json(payload)
     else:
-        print(f"Started: {args.task_id}")
+        print(f"Started: {task_id}")
         if next_actions:
             print(f"Next: {next_actions[0]['command']}")
     return 0
@@ -2132,18 +2226,19 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
 
 def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="finish")
+    task_id = resolve_task(root, args.task_id).id
+    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="finish")
     with repoctl_lock(root):
         meta_gate, delta, result = _prepare_task_finish(
             root,
-            args.task_id,
+            task_id,
             verification=verification,
             use_committed_diff=args.use_committed_diff,
         )
         _write_task_result(root, result)
     finish_summary = _finish_summary(meta_gate, delta)
     data = {
-        "task_id": args.task_id,
+        "task_id": task_id,
         "status": "done",
         "old_path": result["old_path"],
         "new_path": result["new_path"],
@@ -2160,14 +2255,13 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         next_actions.append(
             {
                 "label": "Preview a Knowledge candidate only if this task produced a reusable decision, invariant, or failure mode",
-                "command": f"./scripts/repoctl knowledge candidate suggest --from-task {args.task_id} --repo-id {repo_id} --kind <kind> --claim '<reusable claim>' --dry-run --json",
+                "command": f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id {repo_id} --kind <kind> --claim '<reusable claim>' --dry-run --json",
             }
         )
     payload = {
         "ok": True,
         "command": "task.finish",
         "data": data,
-        **data,
         "problems": [],
         "warnings": [],
         "next_actions": next_actions,
@@ -2175,7 +2269,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     if args.json:
         _json(payload)
     else:
-        print(f"Finished: {args.task_id}")
+        print(f"Finished: {task_id}")
         print(
             "Repo changes: "
             f"task_new={finish_summary['task_new_changes']} "
@@ -2190,13 +2284,14 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
 
 def cmd_task_cancel(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="cancel")
+    task_id = resolve_task(root, args.task_id).id
+    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="cancel")
     with repoctl_lock(root):
-        cancel_gate = _cancel_dirty_gate(root, args.task_id, allow_dirty_cancel=args.allow_dirty_cancel)
-        result = cancel_task(root, args.task_id, verification=verification)
+        cancel_gate = _cancel_dirty_gate(root, task_id, allow_dirty_cancel=args.allow_dirty_cancel)
+        result = cancel_task(root, task_id, verification=verification)
         _write_task_result(root, result)
     data = {
-        "task_id": args.task_id,
+        "task_id": task_id,
         "status": "canceled",
         "old_path": result["old_path"],
         "new_path": result["new_path"],
@@ -2208,14 +2303,13 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
         "ok": True,
         "command": "task.cancel",
         "data": data,
-        **data,
         "problems": [],
         "warnings": [],
     }
     if args.json:
         _json(payload)
     else:
-        print(f"Canceled: {args.task_id}")
+        print(f"Canceled: {task_id}")
         if result["archived"]:
             print(f"Archived: {result['new_path']}")
     return 0
@@ -2223,36 +2317,33 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
 
 def cmd_task_block(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    verification = _verification_input_arg(root, args.task_id, verification_file=args.verification_file, command="block")
+    task_id = resolve_task(root, args.task_id).id
+    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="block")
     with repoctl_lock(root):
-        result = block_task(root, args.task_id, verification=verification)
+        result = block_task(root, task_id, verification=verification)
         _write_task_result(root, result)
     payload = {
         "ok": True,
         "command": "task.block",
         "data": {
-            "task_id": args.task_id,
+            "task_id": task_id,
             "status": "blocked",
             "path": result["new_path"],
             "truncated": result["truncated"],
         },
-        "task_id": args.task_id,
-        "status": "blocked",
-        "path": result["new_path"],
-        "truncated": result["truncated"],
         "problems": [],
         "warnings": [],
         "next_actions": [
             {
                 "label": "Check task readiness after resolving the blocker",
-                "command": f"./scripts/repoctl task doctor {args.task_id} --json",
+                "command": f"./scripts/repoctl task doctor {task_id} --json",
             }
         ],
     }
     if args.json:
         _json(payload)
     else:
-        print(f"Blocked: {args.task_id}")
+        print(f"Blocked: {task_id}")
     return 0
 
 
@@ -2606,17 +2697,17 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     )
     query_status = str((result or {}).get("query_status") or "unavailable")
     outcome_ok = query_status in {"found", "not_found"}
-    result_data = result if args.full or result is None else _compact_graph_query_result(result)
+    result_data = result if args.full or result is None else _compact_graph_query_result(result, freshness=freshness)
     completeness = result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness
     result_warnings = result.get("warnings", []) if isinstance(result, dict) and isinstance(result.get("warnings"), list) else []
     freshness_data = freshness if args.full else compact_graph_freshness(freshness)
-    stale_warning = {
+    stale_warning: dict[str, Any] = {
         "code": "graph_snapshot_stale",
         "message": "materialized Graph does not match current source or workspace evidence; run repoctl graph build before relying on changed relations",
-        "changed_path_count": int(freshness.get("changed_path_count") or 0),
-        "changed_root_path_count": int(freshness.get("changed_root_path_count") or 0),
     }
     if args.full:
+        stale_warning["changed_path_count"] = int(freshness.get("changed_path_count") or 0)
+        stale_warning["changed_root_path_count"] = int(freshness.get("changed_root_path_count") or 0)
         stale_warning["changed_paths"] = freshness.get("changed_paths", [])
         stale_warning["changed_root_paths"] = freshness.get("changed_root_paths", [])
     payload = {
@@ -2634,7 +2725,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         "warnings": [
             *[problem.to_dict() for problem in build_problems if problem.severity == "warning"],
             *[problem.to_dict() for problem in freshness_problems],
-            *result_warnings,
+            *(result_warnings if args.full else _compact_graph_query_warnings(completeness)),
             *(
                 [
                     stale_warning
@@ -2668,169 +2759,357 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(query_problems) or query_status in {"unsupported", "unavailable"} else 0
 
 
-def _compact_graph_query_result(result: dict[str, Any]) -> dict[str, Any]:
+def _compact_graph_query_result(result: dict[str, Any], *, freshness: dict[str, Any] | None = None) -> dict[str, Any]:
     nodes = result.get("nodes") if isinstance(result.get("nodes"), list) else []
     edges = result.get("edges") if isinstance(result.get("edges"), list) else []
     matches = result.get("matches") if isinstance(result.get("matches"), list) else []
     paths = result.get("paths") if isinstance(result.get("paths"), list) else []
+    candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
     continuations = result.get("continuations") if isinstance(result.get("continuations"), list) else []
     node_summaries = {
         str(node.get("id") or ""): _compact_graph_node(node, include_id=False)
         for node in nodes
         if isinstance(node, dict) and str(node.get("id") or "")
     }
-    displayed_matches, selected_paths, displayed_continuations = _select_compact_graph_projection(
-        matches,
-        paths,
-        continuations,
-        limit=8,
+    query_intent = _graph_query_intent(result.get("query"))
+    displayed_matches = [match for match in matches[:3] if isinstance(match, dict)]
+    match_keys = {
+        key
+        for match in displayed_matches
+        if (key := _graph_summary_selector_key(match)) is not None
+    }
+    continuation_by_key = _compact_graph_continuation_index(continuations)
+    ordered_paths = _dedupe_compact_graph_paths(
+        sorted(
+            [path for path in paths if isinstance(path, dict)],
+            key=lambda path: _compact_graph_path_key(path, query_intent=query_intent),
+        )
     )
-    displayed_paths = [_compact_graph_path(path) for path in selected_paths]
+    selected_paths, selected_continuation_keys = _select_compact_graph_paths(
+        ordered_paths,
+        continuation_by_key=continuation_by_key,
+        match_keys=match_keys,
+        path_limit=3,
+        continuation_limit=3,
+    )
+    completeness = result.get("completeness") if isinstance(result.get("completeness"), dict) else {}
+    displayed_paths = [_compact_graph_path(path, completeness=completeness, freshness=freshness or {}) for path in selected_paths]
     relation_edges = [
         edge
         for edge in edges
         if isinstance(edge, dict) and str(edge.get("kind") or "") not in {"DEFINES", "ANCHORS"}
     ]
-    relation_edges.sort(key=_compact_graph_relation_key)
+    relation_edges.sort(key=lambda edge: _compact_graph_relation_key(edge, query_intent=query_intent))
+    relation_edges = _dedupe_compact_graph_edges(relation_edges)
+    selected_relations: list[dict[str, Any]] = []
+    if not displayed_paths:
+        selected_relations, selected_continuation_keys = _select_compact_graph_relations(
+            relation_edges,
+            node_summaries=node_summaries,
+            continuation_by_key=continuation_by_key,
+            match_keys=match_keys,
+            relation_limit=3,
+            continuation_limit=3,
+        )
+    for key in sorted(match_keys):
+        if len(selected_continuation_keys) >= 3:
+            break
+        if key in continuation_by_key and key not in selected_continuation_keys:
+            selected_continuation_keys.append(key)
+    displayed_continuations = _compact_graph_continuations(
+        selected_continuation_keys,
+        continuation_by_key=continuation_by_key,
+    )
     displayed_relations = [
-        _compact_graph_relation(edge, node_summaries)
-        for edge in relation_edges[:24]
+        _compact_graph_relation(edge, node_summaries, completeness=completeness, freshness=freshness or {})
+        for edge in selected_relations
     ]
-    edge_counts: dict[str, int] = {}
-    for edge in edges:
-        if isinstance(edge, dict):
-            kind = str(edge.get("kind") or "")
-            edge_counts[kind] = edge_counts.get(kind, 0) + 1
     compact = {
         "query": result.get("query", {}),
         "query_status": result.get("query_status", "unavailable"),
-        "matches": displayed_matches,
+        "matches": displayed_matches[:3],
+        "candidates": [candidate for candidate in candidates[:3] if isinstance(candidate, dict)],
         "paths": displayed_paths,
         "continuations": displayed_continuations,
-        "node_count": len(nodes),
-        "edge_count": len(edges),
-        "edge_counts": dict(sorted(edge_counts.items())),
-        "display": {
-            "matches": _display_count(len(matches), len(displayed_matches)),
-            "paths": _display_count(len(paths), len(displayed_paths)),
-            "relations": (
-                _display_count(0, 0)
-                if displayed_paths
-                else _display_count(len(relation_edges), len(displayed_relations))
-            ),
-            "continuations": _display_count(len(continuations), len(displayed_continuations)),
-        },
     }
     if not compact["paths"]:
         compact["relations"] = displayed_relations
     return compact
 
 
-def _display_count(total: int, displayed: int) -> dict[str, int]:
-    return {
-        "total": total,
-        "displayed": displayed,
-        "omitted": max(0, total - displayed),
-    }
+_GRAPH_QUERY_INTENT_BY_TYPE = {
+    "file": GraphQueryIntent.FILE,
+    "impact_file": GraphQueryIntent.FILE,
+    "symbol": GraphQueryIntent.SYMBOL,
+    "callers_of": GraphQueryIntent.SYMBOL,
+    "callees_of": GraphQueryIntent.SYMBOL,
+    "impact_symbol": GraphQueryIntent.SYMBOL,
+    "task": GraphQueryIntent.TASK,
+    "artifact": GraphQueryIntent.TASK,
+}
+
+_GRAPH_RELATION_ORDER = {
+    GraphQueryIntent.FILE: (
+        "TESTS_FILE",
+        "IMPORTS_FILE",
+        STRUCTURED_EDGE_KIND,
+        "KNOWLEDGE_APPLIES_TO",
+        "TASK_CHANGED_FILE",
+        "TASK_VERIFIED_BY",
+        "KNOWLEDGE_SOURCED_FROM",
+        "KNOWLEDGE_DERIVED_FROM_TASK",
+        "CALLS",
+        "TASK_RECORDED_CHANGE",
+        "CHANGE_AFFECTED_FILE",
+        "RESOLVES_TO",
+        "DECLARES_IMPORT",
+        "HAS_TOPIC",
+        "CONTAINS",
+    ),
+    GraphQueryIntent.SYMBOL: (
+        "CALLS",
+        "TESTS_FILE",
+        "IMPORTS_FILE",
+        STRUCTURED_EDGE_KIND,
+        "KNOWLEDGE_APPLIES_TO",
+        "TASK_CHANGED_FILE",
+        "TASK_VERIFIED_BY",
+        "KNOWLEDGE_SOURCED_FROM",
+        "KNOWLEDGE_DERIVED_FROM_TASK",
+        "TASK_RECORDED_CHANGE",
+        "CHANGE_AFFECTED_FILE",
+        "RESOLVES_TO",
+        "DECLARES_IMPORT",
+        "HAS_TOPIC",
+        "CONTAINS",
+    ),
+    GraphQueryIntent.TASK: (
+        "TASK_VERIFIED_BY",
+        "TASK_CHANGED_FILE",
+        "TASK_RECORDED_CHANGE",
+        "CHANGE_AFFECTED_FILE",
+        "KNOWLEDGE_DERIVED_FROM_TASK",
+        "KNOWLEDGE_SOURCED_FROM",
+        "KNOWLEDGE_APPLIES_TO",
+        "TESTS_FILE",
+        "IMPORTS_FILE",
+        STRUCTURED_EDGE_KIND,
+        "CALLS",
+        "RESOLVES_TO",
+        "DECLARES_IMPORT",
+        "HAS_TOPIC",
+        "CONTAINS",
+    ),
+    GraphQueryIntent.GENERIC: (
+        "RESOLVES_TO",
+        "DECLARES_IMPORT",
+        STRUCTURED_EDGE_KIND,
+        "HAS_TOPIC",
+        "CONTAINS",
+        "TESTS_FILE",
+        "IMPORTS_FILE",
+        "CALLS",
+        "KNOWLEDGE_APPLIES_TO",
+        "TASK_VERIFIED_BY",
+        "TASK_CHANGED_FILE",
+        "KNOWLEDGE_SOURCED_FROM",
+        "KNOWLEDGE_DERIVED_FROM_TASK",
+        "TASK_RECORDED_CHANGE",
+        "CHANGE_AFFECTED_FILE",
+    ),
+}
 
 
-def _compact_graph_relation_key(edge: dict[str, Any]) -> tuple[int, str, str, str]:
-    priorities = {
-        "CALLS": 0,
-        "IMPORTS_FILE": 1,
-        "CHANGE_AFFECTED_FILE": 2,
-        "TASK_RECORDED_CHANGE": 3,
-        "TASK_VERIFIED_BY": 4,
-        "RESOLVES_TO": 5,
-        "DECLARES_IMPORT": 6,
-        "HAS_TOPIC": 7,
-        "CONTAINS": 8,
-    }
-    kind = str(edge.get("kind") or "")
+def _graph_query_intent(query: Any) -> GraphQueryIntent:
+    if not isinstance(query, dict):
+        return GraphQueryIntent.GENERIC
+    return _GRAPH_QUERY_INTENT_BY_TYPE.get(str(query.get("type") or ""), GraphQueryIntent.GENERIC)
+
+
+def _graph_relation_priority(kind: str, *, query_intent: GraphQueryIntent) -> int:
+    order = _GRAPH_RELATION_ORDER[query_intent]
+    try:
+        return order.index(kind)
+    except ValueError:
+        return len(order)
+
+
+def _compact_graph_path_key(path: dict[str, Any], *, query_intent: GraphQueryIntent) -> tuple[int, str, str, str]:
+    edge = str(path.get("edge") or "")
     return (
-        priorities.get(kind, 9),
-        kind,
-        str(edge.get("from") or ""),
-        str(edge.get("to") or ""),
+        _graph_relation_priority(edge, query_intent=query_intent),
+        edge,
+        str(path.get("from") or ""),
+        str(path.get("to") or ""),
     )
 
 
-def _select_compact_graph_projection(
-    matches: list[Any],
-    paths: list[Any],
-    continuations: list[Any],
-    *,
-    limit: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    normalized_continuations = [item for item in continuations if isinstance(item, dict)]
-    continuation_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    ordered_keys: list[tuple[str, str, str]] = []
-    for continuation in normalized_continuations:
-        key = _graph_selector_key(continuation.get("selector"))
-        if key is None or key in continuation_by_key:
+def _compact_graph_continuation_index(continuations: list[Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in continuations:
+        if not isinstance(item, dict):
             continue
-        continuation_by_key[key] = continuation
-        ordered_keys.append(key)
+        key = _graph_selector_key(item.get("selector"))
+        if key is not None and key not in by_key:
+            by_key[key] = item
+    return by_key
 
-    selected_keys: list[tuple[str, str, str]] = []
-    selected_key_set: set[tuple[str, str, str]] = set()
 
-    def reserve(keys: list[tuple[str, str, str]]) -> bool:
-        new_keys = [key for key in keys if key not in selected_key_set]
-        if len(selected_keys) + len(new_keys) > limit:
-            return False
-        for key in new_keys:
-            selected_keys.append(key)
-            selected_key_set.add(key)
-        return True
+def _graph_relation_endpoints(item: dict[str, Any]) -> tuple[str, str]:
+    def identity(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("id") or _graph_summary_selector_key(value) or "")
+        return str(value or "")
 
-    displayed_matches: list[dict[str, Any]] = []
-    for match in matches:
-        if not isinstance(match, dict):
-            continue
-        key = _graph_summary_selector_key(match)
-        if key is None or key not in continuation_by_key or not reserve([key]):
-            continue
-        displayed_matches.append(match)
+    return identity(item.get("from")), identity(item.get("to"))
 
-    displayed_paths: list[dict[str, Any]] = []
-    traversable_kinds = {"file", "symbol", "import_ref", "topic", "task", "artifact", "change_event"}
+
+def _dedupe_compact_graph_paths(paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    direct_test_endpoints = {
+        _graph_relation_endpoints(path)
+        for path in paths
+        if str(path.get("edge") or "") == "TESTS_FILE"
+    }
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
     for path in paths:
-        if not isinstance(path, dict):
+        edge = str(path.get("edge") or "")
+        endpoints = _graph_relation_endpoints(path)
+        if edge == "IMPORTS_FILE" and endpoints in direct_test_endpoints:
             continue
-        path_keys: list[tuple[str, str, str]] = []
-        valid = True
-        for endpoint in (path.get("from"), path.get("to")):
-            if not isinstance(endpoint, dict):
-                continue
-            key = _graph_summary_selector_key(endpoint)
-            if key is None:
-                if str(endpoint.get("kind") or "") in traversable_kinds:
-                    valid = False
-                    break
-                continue
-            if key not in continuation_by_key:
-                valid = False
-                break
-            if key not in path_keys:
-                path_keys.append(key)
-        if valid and reserve(path_keys):
-            displayed_paths.append(path)
+        key = (edge, *endpoints)
+        if key not in seen:
+            seen.add(key)
+            selected.append(path)
+    return selected
 
-    for key in ordered_keys:
-        if len(selected_keys) >= limit:
+
+def _dedupe_compact_graph_edges(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    direct_test_endpoints = {
+        (str(edge.get("from") or ""), str(edge.get("to") or ""))
+        for edge in edges
+        if str(edge.get("kind") or "") == "TESTS_FILE"
+    }
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for edge in edges:
+        kind = str(edge.get("kind") or "")
+        endpoints = (str(edge.get("from") or ""), str(edge.get("to") or ""))
+        if kind == "IMPORTS_FILE" and endpoints in direct_test_endpoints:
+            continue
+        key = (kind, *endpoints)
+        if key not in seen:
+            seen.add(key)
+            selected.append(edge)
+    return selected
+
+
+def _relation_continuation_keys(
+    endpoints: list[Any],
+    *,
+    continuation_by_key: dict[tuple[str, str, str], dict[str, Any]],
+    match_keys: set[tuple[str, str, str]],
+) -> list[tuple[str, str, str]] | None:
+    keys: list[tuple[str, str, str]] = []
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        key = _graph_summary_selector_key(endpoint)
+        if key is None:
+            return None
+        if key in match_keys:
+            continue
+        if key not in continuation_by_key:
+            return None
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _select_compact_graph_paths(
+    paths: list[dict[str, Any]],
+    *,
+    continuation_by_key: dict[tuple[str, str, str], dict[str, Any]],
+    match_keys: set[tuple[str, str, str]],
+    path_limit: int,
+    continuation_limit: int,
+) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]]]:
+    selected_paths: list[dict[str, Any]] = []
+    selected_keys: list[tuple[str, str, str]] = []
+    for path in paths:
+        keys = _relation_continuation_keys(
+            [path.get("from"), path.get("to")],
+            continuation_by_key=continuation_by_key,
+            match_keys=match_keys,
+        )
+        if keys is None:
+            continue
+        new_keys = [key for key in keys if key not in selected_keys]
+        if len(selected_keys) + len(new_keys) > continuation_limit:
+            continue
+        selected_paths.append(path)
+        selected_keys.extend(new_keys)
+        if len(selected_paths) >= path_limit:
             break
-        reserve([key])
+    return selected_paths, selected_keys
 
-    displayed_continuations = [
+
+def _select_compact_graph_relations(
+    edges: list[dict[str, Any]],
+    *,
+    node_summaries: dict[str, dict[str, Any]],
+    continuation_by_key: dict[tuple[str, str, str], dict[str, Any]],
+    match_keys: set[tuple[str, str, str]],
+    relation_limit: int,
+    continuation_limit: int,
+) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]]]:
+    selected_edges: list[dict[str, Any]] = []
+    selected_keys: list[tuple[str, str, str]] = []
+    for edge in edges:
+        endpoints = [
+            node_summaries.get(str(edge.get("from") or ""), {}),
+            node_summaries.get(str(edge.get("to") or ""), {}),
+        ]
+        keys = _relation_continuation_keys(
+            endpoints,
+            continuation_by_key=continuation_by_key,
+            match_keys=match_keys,
+        )
+        if keys is None:
+            continue
+        new_keys = [key for key in keys if key not in selected_keys]
+        if len(selected_keys) + len(new_keys) > continuation_limit:
+            continue
+        selected_edges.append(edge)
+        selected_keys.extend(new_keys)
+        if len(selected_edges) >= relation_limit:
+            break
+    return selected_edges, selected_keys
+
+
+def _compact_graph_continuations(
+    keys: list[tuple[str, str, str]],
+    *,
+    continuation_by_key: dict[tuple[str, str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
         {
             "selector": continuation_by_key[key].get("selector", {}),
             "query_types": continuation_by_key[key].get("query_types", []),
             "actions": continuation_by_key[key].get("actions", []),
         }
-        for key in selected_keys
+        for key in keys
     ]
-    return displayed_matches, displayed_paths, displayed_continuations
+
+
+def _compact_graph_relation_key(edge: dict[str, Any], *, query_intent: GraphQueryIntent) -> tuple[int, str, str, str]:
+    kind = str(edge.get("kind") or "")
+    return (
+        _graph_relation_priority(kind, query_intent=query_intent),
+        kind,
+        str(edge.get("from") or ""),
+        str(edge.get("to") or ""),
+    )
 
 
 def _graph_selector_key(selector: Any) -> tuple[str, str, str] | None:
@@ -2861,6 +3140,10 @@ def _graph_summary_selector_key(summary: dict[str, Any]) -> tuple[str, str, str]
         selector = {"kind": "task", "value": summary.get("task_id")}
     elif kind == "artifact":
         selector = {"kind": "document", "value": summary.get("path")}
+    elif kind == "document":
+        selector = {"kind": "document", "value": summary.get("path")}
+    elif kind == "knowledge":
+        selector = {"kind": "knowledge_record", "value": summary.get("record_id")}
     else:
         return None
     return _graph_selector_key(selector)
@@ -2881,69 +3164,149 @@ def _compact_graph_node(node: dict[str, Any], *, include_id: bool = True) -> dic
         ("name", provider.get("name")),
         ("qualified_name", provider.get("qualified_name")),
         ("symbol_kind", provider.get("kind")),
+        ("record_id", identity.get("record_id")),
+        ("status", (facts.get("record") or {}).get("status") if isinstance(facts.get("record"), dict) else None),
+        ("knowledge_kind", (facts.get("record") or {}).get("kind") if isinstance(facts.get("record"), dict) else None),
     ):
         if value not in (None, ""):
             summary[key] = value
     return summary
 
 
-def _compact_graph_path(path: dict[str, Any]) -> dict[str, Any]:
+def _compact_graph_path(path: dict[str, Any], *, completeness: dict[str, Any], freshness: dict[str, Any]) -> dict[str, Any]:
     compact = dict(path)
     for key in ("from", "to"):
         endpoint = compact.get(key)
         if isinstance(endpoint, dict):
             compact[key] = {name: value for name, value in endpoint.items() if name != "id"}
+    source = compact.get("source") if isinstance(compact.get("source"), dict) else {}
+    compact["evidence"] = _compact_relation_evidence(
+        edge=str(compact.get("edge") or ""),
+        assertion=str(source.get("assertion") or ""),
+        provider=str(source.get("provider") or ""),
+        facts=source.get("facts") if isinstance(source.get("facts"), dict) else {},
+        endpoints=[compact.get("from"), compact.get("to")],
+        completeness=completeness,
+        freshness=freshness,
+    )
+    compact.pop("source", None)
     return compact
 
 
-def _compact_graph_relation(edge: dict[str, Any], nodes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _compact_graph_relation(
+    edge: dict[str, Any],
+    nodes: dict[str, dict[str, Any]],
+    *,
+    completeness: dict[str, Any],
+    freshness: dict[str, Any],
+) -> dict[str, Any]:
+    source_node = nodes.get(str(edge.get("from") or ""), {"id": edge.get("from", "")})
+    target_node = nodes.get(str(edge.get("to") or ""), {"id": edge.get("to", "")})
     relation: dict[str, Any] = {
-        "from": nodes.get(str(edge.get("from") or ""), {"id": edge.get("from", "")}),
+        "from": source_node,
         "edge": edge.get("kind", ""),
-        "to": nodes.get(str(edge.get("to") or ""), {"id": edge.get("to", "")}),
-        "assertion": edge.get("assertion", ""),
-        "source": edge.get("source", ""),
+        "to": target_node,
+        "evidence": _compact_relation_evidence(
+            edge=str(edge.get("kind") or ""),
+            assertion=str(edge.get("assertion") or ""),
+            provider=str(edge.get("source") or ""),
+            facts=edge.get("facts") if isinstance(edge.get("facts"), dict) else {},
+            endpoints=[source_node, target_node],
+            completeness=completeness,
+            freshness=freshness,
+        ),
     }
     if isinstance(edge.get("facts"), dict) and edge["facts"]:
         relation["facts"] = edge["facts"]
     return relation
 
 
+def _compact_relation_evidence(
+    *,
+    edge: str,
+    assertion: str,
+    provider: str,
+    facts: dict[str, Any],
+    endpoints: list[Any],
+    completeness: dict[str, Any],
+    freshness: dict[str, Any],
+) -> dict[str, Any]:
+    capability_by_edge = {
+        "CALLS": "calls",
+        "DECLARES_IMPORT": "imports",
+        "IMPORTS_FILE": "imports",
+        "RESOLVES_TO": "imports",
+        "TESTS_FILE": "imports",
+        STRUCTURED_EDGE_KIND: "structured_relations",
+        "TASK_RECORDED_CHANGE": "task_history",
+        "CHANGE_AFFECTED_FILE": "task_history",
+        "TASK_CHANGED_FILE": "task_history",
+        "TASK_VERIFIED_BY": "task_history",
+        "KNOWLEDGE_APPLIES_TO": "knowledge",
+        "KNOWLEDGE_SOURCED_FROM": "knowledge",
+        "KNOWLEDGE_DERIVED_FROM_TASK": "knowledge",
+    }
+    capabilities = completeness.get("capabilities") if isinstance(completeness.get("capabilities"), dict) else {}
+    confidence = str(facts.get("confidence") or "unknown")
+    changed_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
+    changed_root_paths = {str(path) for path in freshness.get("changed_root_paths", []) if str(path)}
+    endpoint_paths = {
+        str(endpoint.get("path") or "")
+        for endpoint in endpoints
+        if isinstance(endpoint, dict) and str(endpoint.get("path") or "")
+    }
+    freshness_status = "stale" if endpoint_paths & changed_paths else "current"
+    root_evidence_edges = {
+        "HAS_TOPIC",
+        "TASK_RECORDED_CHANGE",
+        "CHANGE_AFFECTED_FILE",
+        "TASK_CHANGED_FILE",
+        "TASK_VERIFIED_BY",
+        "KNOWLEDGE_APPLIES_TO",
+        "KNOWLEDGE_SOURCED_FROM",
+        "KNOWLEDGE_DERIVED_FROM_TASK",
+    }
+    if endpoint_paths & changed_root_paths or (freshness.get("root_evidence_changed") and edge in root_evidence_edges):
+        freshness_status = "stale"
+    recorded_freshness = str(facts.get("freshness") or "")
+    if recorded_freshness == "stale":
+        freshness_status = "stale"
+    elif recorded_freshness in {"current", "reviewed"} and freshness_status != "stale":
+        freshness_status = "current"
+    if str(freshness.get("status") or "") not in {"current", "stale"}:
+        freshness_status = "stale" if recorded_freshness == "stale" else "unknown"
+    return {
+        "type": str(facts.get("evidence_type") or edge.casefold()),
+        "assertion": assertion,
+        "provider": provider,
+        "confidence": confidence,
+        "completeness": str(capabilities.get(capability_by_edge.get(edge, "file_inventory")) or completeness.get("status") or "partial"),
+        "freshness": freshness_status,
+    }
+
+
 def _compact_graph_completeness(completeness: Any) -> dict[str, Any]:
     if not isinstance(completeness, dict):
         return {}
-    compact = {
-        key: completeness[key]
-        for key in (
-            "status",
-            "capabilities",
-            "inventory_complete",
-            "metadata_store_valid",
-            "receipt_set_complete",
-            "invalid_completion_receipts",
-            "index_truncated",
-            "code_facts_complete",
-            "parse_error_count",
-        )
-        if key in completeness
-    }
-    failures = completeness.get("provider_failures") if isinstance(completeness.get("provider_failures"), list) else []
-    compact["provider_failure_count"] = len(failures)
-    coverage = completeness.get("provider_coverage") if isinstance(completeness.get("provider_coverage"), dict) else {}
-    compact["provider_coverage"] = {
-        name: {
-            "status": value.get("status", ""),
-            "evidence_level": value.get("evidence_level", ""),
-            "eligible_path_count": len(value.get("eligible_paths", [])) if isinstance(value.get("eligible_paths"), list) else 0,
-            "analyzed_path_count": len(value.get("analyzed_paths", [])) if isinstance(value.get("analyzed_paths"), list) else 0,
-            "unsupported_path_count": len(value.get("unsupported_paths", [])) if isinstance(value.get("unsupported_paths"), list) else 0,
-            "failed_path_count": len(value.get("failed_paths", [])) if isinstance(value.get("failed_paths"), list) else 0,
-            "coverage_gaps": value.get("coverage_gaps", []) if isinstance(value.get("coverage_gaps"), list) else [],
-        }
-        for name, value in sorted(coverage.items())
-        if isinstance(value, dict)
-    }
-    return compact
+    return {"status": str(completeness.get("status") or "partial")}
+
+
+def _compact_graph_query_warnings(completeness: Any) -> list[dict[str, str]]:
+    if not isinstance(completeness, dict):
+        return []
+    warnings: list[dict[str, str]] = []
+    capabilities = completeness.get("capabilities") if isinstance(completeness.get("capabilities"), dict) else {}
+    if not completeness.get("code_facts_complete", True):
+        warnings.append({"code": "graph_code_relations_partial", "message": "some code relations are unavailable from the current materialization"})
+    if str(capabilities.get("task_history") or "complete") != "complete":
+        warnings.append({"code": "graph_task_history_partial", "message": "some task-history relations are unavailable from the current materialization"})
+    if any(str(capabilities.get(name) or "complete") != "complete" for name in ("imports", "symbols", "calls")):
+        warnings.append({"code": "graph_semantic_relations_partial", "message": "some semantic relations are unavailable from the current materialization"})
+    if str(capabilities.get("structured_relations") or "complete") != "complete":
+        warnings.append({"code": "graph_structured_relations_partial", "message": "some structured file relations are unavailable from the current materialization"})
+    if str(capabilities.get("knowledge") or "complete") != "complete":
+        warnings.append({"code": "graph_knowledge_partial", "message": "some reviewed-Knowledge relations are unavailable from the current materialization"})
+    return warnings
 
 
 def cmd_context_query(args: argparse.Namespace) -> int:
@@ -2964,7 +3327,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
         "warnings": [
             {
                 "code": "context_not_authoritative",
-                "message": "context query returns a read-only evidence bundle; source authorities remain repo registry, source documents, Graph, .repometa, and task receipts",
+                "message": "context query returns a read-only evidence bundle; source authorities remain repo registry, source documents, .repometa, task receipts, and reviewed Knowledge records",
             }
         ],
     }
@@ -4229,6 +4592,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_show = task_sub.add_parser("show")
     task_show.add_argument("task_id")
     task_show.add_argument("--summary", action="store_true", help="omit task body and frontmatter from output")
+    task_show.add_argument("--section", choices=["Discovery", "Verification", "Handoff", "Closure"], help="return only one canonical task section")
     task_show.add_argument("--json", action="store_true")
     task_show.set_defaults(func=cmd_task_show)
     task_doctor = task_sub.add_parser("doctor")
@@ -4260,8 +4624,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_baseline_sub = task_baseline.add_subparsers(dest="task_baseline_command", required=True, parser_class=RepoctlArgumentParser)
     task_baseline_resolve = task_baseline_sub.add_parser("resolve")
     task_baseline_resolve.add_argument("task_id")
-    task_baseline_resolve.add_argument("--path", required=True)
-    task_baseline_resolve.add_argument("--ownership", choices=["task", "preexisting"], required=True)
+    task_baseline_resolve.add_argument("--path", action="append", default=[], help="baseline path to resolve; repeat for paths sharing --ownership")
+    task_baseline_resolve.add_argument("--ownership", choices=["task", "preexisting"])
+    task_baseline_resolve.add_argument("--resolution", action="append", default=[], help="mixed atomic resolution in PATH=task or PATH=preexisting form; repeat as needed")
+    task_baseline_resolve.add_argument("--preview", action="store_true", help="validate and show every resolution without writing task state")
     task_baseline_resolve.add_argument("--json", action="store_true")
     task_baseline_resolve.set_defaults(func=cmd_task_baseline_resolve)
     task_start = task_sub.add_parser("start")

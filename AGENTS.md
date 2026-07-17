@@ -23,12 +23,13 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 
 For repo-scoped implementation tasks, use this order before editing product files:
 
-1. Start the task.
-2. Record the explicit Candidate query in `## Discovery`.
-3. Run compact `repoctl context query` to find likely product files and tests.
-4. Inspect those files read-only; use `repoctl graph query --file/--impact-file` and returned typed continuation actions to follow imports, callers, callees, adjacent files, completion tasks/artifacts, and linked source documents when needed. Refine the Context query when evidence is still insufficient.
-5. Record Reviewed files and the active Chosen files.
-6. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
+1. Explore read-only using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query`; known file -> Graph or direct read; known symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
+2. Follow typed Graph continuations when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
+3. Create or resume the task and start it before the first product mutation. Exploration is not gated on task creation or task start.
+4. Record the explicit Candidate query and the files actually reviewed/chosen in `## Discovery` once task scope becomes concrete.
+5. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
+
+Do not require agents to log which discovery features they used or justify why a feature was skipped.
 
 ```bash
 ./scripts/repoctl task discovery add T-... --query "<query>" --json
@@ -40,7 +41,7 @@ For repo-scoped implementation tasks, use this order before editing product file
 
 Context Pack is optional read-only evidence and never defines task scope. If generated before Chosen files exist, refresh it after Discovery before relying on its scoped view.
 
-`graph query` reads the last materialized snapshot and never rebuilds automatically. Its default response reports freshness counts; use `--full` when exact stale paths or raw relations are required. Run `graph build` explicitly when no snapshot exists or after changes that must be reflected in Graph traversal. With a snapshot, `context query` uses the persistent evidence index and reads only stale path overlays. Without a snapshot, it still returns lexical source/document evidence and marks Graph relations unavailable.
+`graph query` reads the last materialized snapshot and never rebuilds automatically. Its default response reports bounded freshness state only; use `--full` for freshness counts, exact stale paths, or raw relations. Run `graph build` explicitly when no snapshot exists or after changes that must be reflected in Graph traversal. With a snapshot, `context query` uses the persistent evidence index and reads only stale path overlays. Without a snapshot, it still returns lexical source/document/task/Knowledge evidence and marks Graph relations unavailable.
 
 If no active task is assigned:
 
@@ -93,6 +94,7 @@ Scope matrix:
 - When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`. Use `--verification-file` only for an external artifact.
 - Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `--use-committed-diff`. This mode is allowed only when the recorded start HEAD is an ancestor of the current HEAD and no task-new working-tree changes remain.
 - Use `./scripts/repoctl task doctor T-... --use-committed-diff --json` to preflight that same committed-range path before finish.
+- While a task is live, `task doctor` reports current Chosen-vs-diff drift as an advisory; `task finish` remains the hard closure gate for unchosen changes.
 - A committed range is observed Git evidence, not proof that its commits belong to the task. repoctl does not manage commit, push, PR, deploy, or delivery ownership.
 - Use `./scripts/repoctl task block T-... --json` after recording the blocker in `## Verification`, or pass `--verification-file` for an external blocker artifact.
 

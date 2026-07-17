@@ -589,24 +589,26 @@ def test_graph_query_symbol_callers_and_callees(tmp_path: Path, monkeypatch, cap
     assert symbol_result["query"] == {"type": "symbol", "symbol": "validate_token"}
     assert symbol_result["matches"][0]["qualified_name"] == "validate_token"
     assert symbol_result["matches"][0]["path"] == "auth/flow.py"
+    assert symbol_result["paths"][0]["edge"] == "CALLS"
+    assert any(path["edge"] == "CALLS" for path in symbol_result["paths"])
     direct_selector = {"kind": "symbol", "value": "validate_token", "in_file": "auth/flow.py"}
-    direct_continuation = next(item for item in symbol_result["continuations"] if item["selector"] == direct_selector)
-    assert direct_continuation["query_types"] == ["symbol", "callers_of", "callees_of", "impact_symbol"]
+    assert all(item["selector"] != direct_selector for item in symbol_result["continuations"])
 
     assert main(["graph", "query", "--callers-of", direct_selector["value"], "--in-file", direct_selector["in_file"], "--json"]) == 0
     callers_result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert callers_result["query"] == {"type": "callers_of", "symbol": "validate_token", "in_file": "auth/flow.py"}
-    assert callers_result["display"]["paths"] == {"total": 10, "displayed": 7, "omitted": 3}
+    assert 1 <= len(callers_result["paths"]) <= 3
+    assert len(callers_result["continuations"]) <= 3
     continuation_selectors = {
         (item["selector"]["kind"], item["selector"]["value"], item["selector"].get("in_file", ""))
         for item in callers_result["continuations"]
     }
-    assert ("symbol", "validate_token", "auth/flow.py") in continuation_selectors
+    assert ("symbol", "validate_token", "auth/flow.py") not in continuation_selectors
     for path in callers_result["paths"]:
         assert path["edge"] == "CALLS"
         for endpoint in (path["from"], path["to"]):
             assert endpoint["path"] == "auth/flow.py"
-            assert ("symbol", endpoint["qualified_name"], endpoint["path"]) in continuation_selectors
+        assert set(path["evidence"]) == {"type", "assertion", "provider", "confidence", "completeness", "freshness"}
 
     caller_selector = next(
         item["selector"]
@@ -669,9 +671,11 @@ def test_graph_query_impact_file_uses_import_and_call_edges(tmp_path: Path, monk
     assert any(path["edge"] == "IMPORTS_FILE" and path["from"]["path"] == "handlers/login.py" for path in result["paths"])
     assert any(path["edge"] == "CALLS" and path["from"]["qualified_name"] == "login" and path["to"]["qualified_name"] == "issue_token" for path in result["paths"])
     assert not any(path["edge"] in {"DEFINES", "ANCHORS"} for path in result["paths"])
-    assert result["edge_counts"]["DEFINES"] >= 1
-    assert result["display"]["relations"] == {"total": 0, "displayed": 0, "omitted": 0}
-    assert result["display"]["continuations"]["displayed"] <= 8
+    assert "edge_counts" not in result
+    assert "display" not in result
+    assert len(result["paths"]) <= 3
+    assert len(result["continuations"]) <= 3
+    assert all(set(path["evidence"]) == {"type", "assertion", "provider", "confidence", "completeness", "freshness"} for path in result["paths"])
     path_edges = [
         (path["edge"], json.dumps(path["from"], sort_keys=True), json.dumps(path["to"], sort_keys=True))
         for path in result["paths"]
@@ -695,3 +699,73 @@ def test_graph_query_js_ts_impact_is_file_level(tmp_path: Path, monkeypatch, cap
     result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(path["edge"] == "IMPORTS_FILE" and path["from"]["path"] == "frontend/src/client.ts" for path in result["paths"])
     assert not any(path["edge"] == "CALLS" for path in result["paths"])
+
+
+def test_graph_and_context_prioritize_owner_source_and_direct_test(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "tests").mkdir()
+    (repo / "auth.py").write_text(
+        "def validate_token(token: str) -> bool:\n    return token == 'ok'\n",
+        encoding="utf-8",
+    )
+    (repo / "tests/test_auth.py").write_text(
+        "from auth import validate_token\n\n\ndef test_validate_token() -> None:\n    assert validate_token('ok')\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--file", "repos/auth.py", "--json"]) == 0
+    graph_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    direct_test = next(path for path in graph_result["paths"] if path["edge"] == "TESTS_FILE")
+    assert direct_test["from"]["path"] == "tests/test_auth.py"
+    assert direct_test["to"]["path"] == "auth.py"
+    assert direct_test["evidence"]["type"] == "direct_test_import"
+    assert direct_test["evidence"]["confidence"] == "medium"
+    assert not any(
+        path["edge"] == "IMPORTS_FILE"
+        and path["from"] == direct_test["from"]
+        and path["to"] == direct_test["to"]
+        for path in graph_result["paths"]
+    )
+    assert any(item["selector"] == {"kind": "file", "value": "tests/test_auth.py"} for item in graph_result["continuations"])
+
+    assert main(["context", "query", "validate_token", "--repo-id", "main", "--json"]) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == "repos/auth.py"
+    assert bundle["groups"]["tests_and_verification"][0]["source_ref"]["path"] == "repos/tests/test_auth.py"
+    assert sum(len(items) for group, items in bundle["groups"].items() if group != "warnings_and_completeness") <= 8
+    assert "selection" not in bundle
+    assert "provider_coverage" not in bundle["completeness"]
+
+
+def test_compact_graph_paths_and_continuations_share_one_budget(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "target.py").write_text("def run() -> int:\n    return 1\n", encoding="utf-8")
+    for name in ("alpha", "beta", "gamma"):
+        (repo / f"{name}.py").write_text("from target import run\n", encoding="utf-8")
+    _materialize(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--file", "target.py", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert len(result["paths"]) == 3
+    continuation_files = {
+        item["selector"]["value"]
+        for item in result["continuations"]
+        if item["selector"].get("kind") == "file"
+    }
+    related_files = {
+        endpoint["path"]
+        for path in result["paths"]
+        for endpoint in (path["from"], path["to"])
+        if endpoint.get("path") != "target.py"
+    }
+    assert continuation_files == related_files == {"alpha.py", "beta.py", "gamma.py"}

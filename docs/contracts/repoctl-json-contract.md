@@ -51,6 +51,9 @@ This contract freezes the common envelope, not every command's full payload.
 - `problems`: error or warning objects with stable `code` values.
 - `next_actions`: advisory recovery hints. They must not imply that repoctl changed state.
 
+Command-specific values exist only under `data`. Commands must not mirror `task`, `result`, `repository`, counters, paths, or any other payload field at the top level for compatibility.
+Serialization validates this boundary and rejects missing `command`, non-object `data`, or unknown top-level fields instead of silently relocating producer mistakes.
+
 ## Problem object
 
 ```json

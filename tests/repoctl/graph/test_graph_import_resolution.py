@@ -125,10 +125,10 @@ def test_graph_resolves_python_imports_from_manifest_declared_src_root(tmp_path:
 
     result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
-        relation["edge"] == "IMPORTS_FILE"
-        and relation["from"].get("path") == "tests/test_retry_worker.py"
-        and relation["to"].get("path") == "src/relayboard/retry_worker.py"
-        for relation in result["relations"]
+        path["edge"] == "TESTS_FILE"
+        and path["from"].get("path") == "tests/test_retry_worker.py"
+        and path["to"].get("path") == "src/relayboard/retry_worker.py"
+        for path in result["paths"]
     )
 
 

@@ -67,6 +67,25 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert status_payload["data"]["record_checks"]["error_count"] == 0
 
 
+def test_knowledge_source_provenance_is_not_product_applicability(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_knowledge_workspace(tmp_path, monkeypatch)
+    product_doc = repo / "docs/contracts/repoctl-context-contract.md"
+    product_doc.parent.mkdir(parents=True)
+    product_doc.write_text("# Product-local file with the same relative path\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+
+    snapshot = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    knowledge_node = next(node["id"] for node in snapshot["nodes"] if node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id)
+    assert any(edge["kind"] == "KNOWLEDGE_SOURCED_FROM" and edge["from"] == knowledge_node for edge in snapshot["edges"])
+    assert not any(edge["kind"] == "KNOWLEDGE_APPLIES_TO" and edge["from"] == knowledge_node for edge in snapshot["edges"])
+
+
 def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
@@ -378,7 +397,7 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     )
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", verification.as_posix(), "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
-    assert finish_payload["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
+    assert finish_payload["data"]["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
     assert "knowledge candidate suggest --from-task T-20260609184046Z" in finish_payload["next_actions"][0]["command"]
 
     claim = "Webhook delivery retries must reuse the receipt-backed delivery path."
@@ -388,6 +407,7 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     candidate = payload["data"]["candidate"]
     assert candidate["kind"] == "invariant"
     assert candidate["claim"] == claim
+    assert candidate["claim_origin"] == "explicit"
     assert candidate["title"] == "Task T-20260609184046Z"
     assert candidate["authoritative"] is False
     assert candidate["derived_from"] == {
@@ -416,13 +436,83 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert "kind `completion_receipt`" in review
     assert "kind `task_artifact`" in review
 
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+    pending_snapshot = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    assert all(node["kind"] != "knowledge" for node in pending_snapshot["nodes"])
+
     assert main(["knowledge", "approve", candidate["id"], "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    approved = json.loads(capsys.readouterr().out)["data"]["record"]
+    assert approved["review"]["source_digest_set"]
+    record_id = approved["id"]
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+    reviewed_snapshot = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    assert any(node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id for node in reviewed_snapshot["nodes"])
+    assert any(edge["kind"] == "KNOWLEDGE_APPLIES_TO" and edge["to"].endswith("service.py") for edge in reviewed_snapshot["edges"])
+    assert any(edge["kind"] == "KNOWLEDGE_SOURCED_FROM" for edge in reviewed_snapshot["edges"])
+    assert any(edge["kind"] == "KNOWLEDGE_DERIVED_FROM_TASK" for edge in reviewed_snapshot["edges"])
+
+    assert main(["graph", "query", "--repo-id", "main", "--file", "repos/service.py", "--json"]) == 0
+    graph_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert graph_result["paths"][0]["edge"] == "KNOWLEDGE_APPLIES_TO"
+    knowledge_path = next(path for path in graph_result["paths"] if path["edge"] == "KNOWLEDGE_APPLIES_TO")
+    assert knowledge_path["evidence"]["freshness"] == "current"
+    assert any(item["selector"] == {"kind": "knowledge_record", "value": record_id} for item in graph_result["continuations"]), graph_result["continuations"]
+
+    assert main(["context", "query", claim, "--repo-id", "main", "--json"]) == 0
+    knowledge_item = json.loads(capsys.readouterr().out)["data"]["bundle"]["groups"]["reviewed_knowledge"][0]
+    assert knowledge_item["record_id"] == record_id
+    assert knowledge_item["provenance"]["source_task"] == "T-20260609184046Z"
+    assert knowledge_item["provenance"]["source_digest_set"]
+    assert knowledge_item["provenance"]["freshness"] == "reviewed"
+
     assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
     rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
     assert "docs/knowledge/generated/targets/files/service.py.md" in rendered_paths
     assert not any("/targets/symbols/" in path for path in rendered_paths)
+
+    reviewed_graph_record = next(
+        node["facts"]["record"]
+        for node in reviewed_snapshot["nodes"]
+        if node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id
+    )
+    stale_record = {**reviewed_graph_record, "status": "stale"}
+    with monkeypatch.context() as lifecycle_patch:
+        lifecycle_patch.setattr(
+            "tools.repoctl.graph.knowledge_records_for_graph",
+            lambda _root, *, repo_id: ([stale_record], []),
+        )
+        assert main(["graph", "build", "--repo-id", "main", "--rebuild", "--full", "--json"]) == 0
+        lifecycle_snapshot = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    lifecycle_knowledge_node = next(
+        node["id"]
+        for node in lifecycle_snapshot["nodes"]
+        if node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id
+    )
+    lifecycle_edges = [
+        edge
+        for edge in lifecycle_snapshot["edges"]
+        if edge["from"] == lifecycle_knowledge_node
+        and edge["kind"] in {"KNOWLEDGE_APPLIES_TO", "KNOWLEDGE_SOURCED_FROM", "KNOWLEDGE_DERIVED_FROM_TASK"}
+    ]
+    assert {edge["kind"] for edge in lifecycle_edges} == {
+        "KNOWLEDGE_APPLIES_TO",
+        "KNOWLEDGE_SOURCED_FROM",
+        "KNOWLEDGE_DERIVED_FROM_TASK",
+    }
+    assert all(edge["facts"]["freshness"] == "stale" for edge in lifecycle_edges)
+    assert main(["graph", "build", "--repo-id", "main", "--rebuild", "--full", "--json"]) == 0
+    capsys.readouterr()
+
+    task_artifact = tmp_path / source_refs[1]["path"]
+    task_artifact.write_text(task_artifact.read_text(encoding="utf-8") + "\nsource drift\n", encoding="utf-8")
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["graph", "query", "--repo-id", "main", "--file", "service.py", "--json"]) == 0
+    stale_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    stale_path = next(path for path in stale_result["paths"] if path["edge"] == "KNOWLEDGE_APPLIES_TO")
+    assert stale_path["evidence"]["freshness"] == "stale"
 
 
 def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypatch, capsys) -> None:

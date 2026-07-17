@@ -10,10 +10,12 @@ from .evidence_store import evidence_chunks_for_paths, query_evidence_index
 from .graph import project_context_neighborhood
 from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph
+from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError
 from .knowledge_candidates import query_knowledge_records
+from .path_roles import is_test_path
 from .repositories import RepoTarget
-from .tasks import Problem
+from .tasks import Problem, normalize_task_id
 
 
 CONTEXT_GROUPS = (
@@ -38,7 +40,9 @@ CONTEXT_MODES = {
     "failure_mode",
 }
 GRAPH_EXPANSION_MODES = {"auto", "code_location", "call_impact", "file_impact"}
+COMPACT_ITEM_LIMIT = 8
 COMPACT_CONTINUATION_LIMIT = 8
+ACTIONABLE_PRODUCT_KINDS = {"current_source", "config"}
 
 
 def build_context_bundle(
@@ -55,8 +59,6 @@ def build_context_bundle(
     query_mode = normalize_context_mode(mode)
     snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else load_materialized_graph(root, target=target)
     materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
-    if snapshot is None and str(materialization.get("status") or "") != "missing":
-        return None, graph_problems, {"repository": target.to_dict(), "graph": graph_meta}
     if snapshot is not None:
         freshness, freshness_problems = graph_materialization_freshness(
             root,
@@ -66,7 +68,7 @@ def build_context_bundle(
         )
     else:
         freshness, freshness_problems = {"status": "missing", "changed_paths": []}, []
-    include_history = query_mode in {"past_decision", "failure_mode"}
+    include_history = query_mode in {"auto", "past_decision", "failure_mode"}
     indexed_candidates: list[ContextCandidate] = []
     index_meta: dict[str, Any] = {}
     index_problems: list[Problem] = []
@@ -83,13 +85,7 @@ def build_context_bundle(
             limit=24,
             database_path=evidence_index_path,
         )
-        if any(problem.severity == "error" for problem in index_problems):
-            return None, [*index_problems, *context_graph_problems(graph_problems)], {
-                "repository": target.to_dict(),
-                "graph": graph_meta,
-                "evidence_index": index_meta,
-            }
-        index_available = True
+        index_available = not any(problem.severity == "error" for problem in index_problems)
     if index_available:
         chunks: list[Any] = []
         indexed_chunk_counts = index_meta.get("chunk_counts") if isinstance(index_meta.get("chunk_counts"), dict) else {}
@@ -104,7 +100,8 @@ def build_context_bundle(
             "documents_checked": int((index_meta.get("chunk_counts") or {}).get("document") or 0),
             "manifests_checked": int((index_meta.get("chunk_counts") or {}).get("product_manifest") or 0),
             "receipts_checked": int((index_meta.get("chunk_counts") or {}).get("completion_receipt") or 0),
-            "current_sources_checked": int((index_meta.get("chunk_counts") or {}).get("current_source") or 0),
+            "current_sources_checked": int((index_meta.get("chunk_counts") or {}).get("current_source") or 0)
+            + int((index_meta.get("chunk_counts") or {}).get("config") or 0),
             "history_loaded": include_history,
             "receipt_problem_count": len(receipt_problems),
             "receipt_problem_paths": sorted(str(problem.get("path") or "") for problem in receipt_problems if isinstance(problem, dict) and problem.get("path")),
@@ -186,6 +183,7 @@ def build_context_bundle(
             include_history=include_history,
         )
         problems = [*source_problems]
+        problems.extend(_context_index_warnings(index_problems))
         source_count = len(chunks)
         retrieval_chunks = _retrieval_chunks(chunks, mode=query_mode, target=target)
         retrieved_candidates = retrieve_context(query, retrieval_chunks, limit=24)
@@ -218,7 +216,7 @@ def build_context_bundle(
                     root,
                     target=target,
                     workspace_paths=projected_paths,
-                    kinds={"current_source"},
+                    kinds={"current_source", "config"},
                     database_path=evidence_index_path,
                 )
                 problems.extend(chunk_problems)
@@ -281,7 +279,7 @@ def build_context_bundle(
             limit=3,
             explain=explain,
             related_paths=related_paths,
-            require_related=True,
+            require_related=False,
         )
         problems.extend(
             Problem(
@@ -335,11 +333,6 @@ def normalize_context_mode(explicit_mode: str = "") -> str:
     aliases = {
         "authority": "authority_or_contract",
         "contract": "authority_or_contract",
-        "call-impact": "call_impact",
-        "file-impact": "file_impact",
-        "code-location": "code_location",
-        "past-decision": "past_decision",
-        "failure-mode": "failure_mode",
     }
     normalized = aliases.get(normalized, normalized)
     if not normalized:
@@ -347,6 +340,18 @@ def normalize_context_mode(explicit_mode: str = "") -> str:
     if normalized not in CONTEXT_MODES:
         raise RepoctlError(f"unsupported context mode: {explicit_mode}", code="invalid_context_mode", path=explicit_mode)
     return normalized
+
+
+def _context_index_warnings(index_problems: list[Problem]) -> list[Problem]:
+    return [
+        Problem(
+            "warning",
+            "context_evidence_index_unavailable",
+            f"{problem.code}: {problem.message}; live source and document fallback was used",
+            problem.path,
+        )
+        for problem in index_problems
+    ]
 
 
 def _changed_source_candidates(
@@ -406,12 +411,12 @@ def _retrieval_chunks(chunks: list[Any], *, mode: str, target: RepoTarget) -> li
             chunk
             for chunk in chunks
             if chunk.source_ref.path.startswith(product_prefix)
-            and chunk.source_ref.kind not in {"completion_receipt", "task_artifact"}
+            or chunk.source_ref.kind in {"completion_receipt", "task_artifact"}
         ]
     if mode not in {"code_location", "call_impact", "file_impact"}:
         return chunks
     product_prefix = f"{target.display_path.rstrip('/')}/"
-    allowed_kinds = {"current_source", "product_manifest", "verification_hint"}
+    allowed_kinds = {"current_source", "config", "product_manifest", "verification_hint"}
     return [
         chunk
         for chunk in chunks
@@ -469,35 +474,31 @@ def render_context_markdown(bundle: ContextBundle) -> str:
 def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 120) -> dict[str, Any]:
     """Return the default agent-facing view without full evidence diagnostics."""
     group_limits = {
-        "must_read": 5,
-        "likely_change_surface": 3,
-        "callers_and_dependents": 2,
-        "tests_and_verification": 2,
-        "reviewed_knowledge": 2,
-        "related_history": 3,
+        "must_read": 2,
+        "likely_change_surface": 2,
+        "callers_and_dependents": 1,
+        "tests_and_verification": 1,
+        "reviewed_knowledge": 1,
+        "related_history": 1,
         "supporting_evidence": 1,
-        "warnings_and_completeness": 3,
+        "warnings_and_completeness": 1,
     }
-    displayed_items, continuations, continuation_counts = _compact_bundle_projection(
+    mode = str(bundle.query.get("mode") or "auto")
+    if mode == "startup_reading":
+        group_limits["must_read"] = 5
+    elif mode in {"authority_or_contract", "invariant"}:
+        group_limits["must_read"] = 3
+    displayed_items, continuations, _continuation_counts = _compact_bundle_projection(
         bundle.groups,
         group_limits=group_limits,
         max_group_items=max_group_items,
+        item_limit=COMPACT_ITEM_LIMIT,
         continuation_limit=COMPACT_CONTINUATION_LIMIT,
+        mode=mode,
     )
     groups = {
         group: [_compact_group_item(item, excerpt_chars=excerpt_chars) for item in items]
         for group, items in displayed_items.items()
-    }
-    group_names = _ordered_context_group_names(bundle.groups)
-    group_counts = {group: len(bundle.groups[group]) for group in group_names}
-    displayed_group_counts = {group: len(groups[group]) for group in group_names}
-    omitted = {
-        "group_counts": group_counts,
-        "displayed_group_counts": displayed_group_counts,
-        "omitted_group_items": {
-            group: max(0, group_counts.get(group, 0) - displayed_group_counts.get(group, 0))
-            for group in sorted(group_counts)
-        },
     }
     return {
         "schema": bundle.schema,
@@ -509,35 +510,16 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "completeness": _compact_completeness(bundle.completeness),
         "groups": groups,
         "continuations": continuations,
-        "selection": {**bundle.selection, **omitted, "continuations": continuation_counts},
-        "knowledge_result_count": len(bundle.knowledge_results),
         "bundle_digest": bundle.bundle_digest,
     }
 
 
 def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
     graph = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
-    capabilities = graph.get("capabilities") if isinstance(graph.get("capabilities"), dict) else {}
-    provider_coverage = graph.get("provider_coverage") if isinstance(graph.get("provider_coverage"), dict) else {}
     return {
         "graph_available": bool(completeness.get("graph_available")),
         "graph_freshness": compact_graph_freshness(completeness.get("graph_freshness")),
         "status": str(graph.get("status") or ("unavailable" if not completeness.get("graph_available") else "partial")),
-        "capabilities": {str(key): str(value) for key, value in sorted(capabilities.items())},
-        "provider_coverage": {
-            str(name): {
-                "status": str(value.get("status") or ""),
-                "evidence_level": str(value.get("evidence_level") or ""),
-            }
-            for name, value in sorted(provider_coverage.items())
-            if isinstance(value, dict)
-        },
-        "code_facts_complete": bool(graph.get("code_facts_complete", False)),
-        "receipt_set_complete": bool(graph.get("receipt_set_complete", False)),
-        "receipt_problem_count": int(completeness.get("receipt_problem_count") or 0),
-        "evidence_problem_count": int(completeness.get("evidence_problem_count") or 0),
-        "knowledge_available_record_count": int(completeness.get("knowledge_available_record_count") or 0),
-        "knowledge_result_count": int(completeness.get("knowledge_result_count") or 0),
     }
 
 
@@ -568,6 +550,9 @@ def _compact_group_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str
     excerpt = item.get("excerpt")
     if excerpt:
         compact["excerpt"] = _truncate(str(excerpt), excerpt_chars)
+    provenance = item.get("provenance")
+    if isinstance(provenance, dict) and provenance:
+        compact["provenance"] = provenance
     return compact
 
 
@@ -590,7 +575,9 @@ def _compact_bundle_projection(
     *,
     group_limits: dict[str, int],
     max_group_items: int,
+    item_limit: int,
     continuation_limit: int,
+    mode: str,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, int]]:
     """Project evidence and its producer-owned primary continuations together."""
     group_names = _ordered_context_group_names(all_groups)
@@ -598,32 +585,52 @@ def _compact_bundle_projection(
     selected_continuations: list[dict[str, Any]] = []
     secondary_continuations: list[dict[str, Any]] = []
 
-    for group in group_names:
-        display_limit = min(max_group_items, group_limits.get(group, max_group_items))
-        for item in all_groups[group]:
-            if len(displayed_groups[group]) >= display_limit:
+    warning_codes = {"context_graph_stale", "context_graph_unavailable", "context_task_history_stale", "context_graph_freshness_unavailable"}
+    displayed_groups["warnings_and_completeness"] = [
+        item
+        for item in all_groups.get("warnings_and_completeness", [])
+        if isinstance(item, dict) and str(item.get("code") or "") in warning_codes
+    ][:1]
+
+    code_first = ["likely_change_surface", "tests_and_verification", "callers_and_dependents", "must_read", "reviewed_knowledge", "related_history", "supporting_evidence"]
+    authority_first = ["must_read", "reviewed_knowledge", "related_history", "likely_change_surface", "tests_and_verification", "callers_and_dependents", "supporting_evidence"]
+    lane_order = authority_first if mode in {"startup_reading", "authority_or_contract", "past_decision", "invariant", "failure_mode"} else code_first
+    selected_item_count = 0
+
+    def try_add(group: str, item: dict[str, Any]) -> bool:
+        nonlocal selected_continuations, selected_item_count
+        raw_values = item.get("continuations")
+        if not isinstance(raw_values, list) or not raw_values or not isinstance(raw_values[0], dict):
+            return False
+        primary_values = _dedupe_continuations([raw_values[0]])
+        if len(primary_values) != 1:
+            return False
+        item_values = _dedupe_continuations([primary_values[0], *[value for value in raw_values[1:] if isinstance(value, dict)]])
+        reserved = _dedupe_continuations([*selected_continuations, item_values[0]])
+        if len(reserved) > continuation_limit or selected_item_count >= item_limit:
+            return False
+        selected_continuations = reserved
+        displayed_groups[group].append(item)
+        secondary_continuations.extend(item_values[1:])
+        selected_item_count += 1
+        return True
+
+    positions = {group: 0 for group in lane_order}
+    for group in lane_order:
+        limit = min(max_group_items, group_limits.get(group, max_group_items))
+        while positions[group] < len(all_groups.get(group, [])) and len(displayed_groups[group]) < min(1, limit):
+            item = all_groups[group][positions[group]]
+            positions[group] += 1
+            if isinstance(item, dict) and try_add(group, item):
                 break
-            if group == "warnings_and_completeness":
-                displayed_groups[group].append(item)
-                continue
-            raw_values = item.get("continuations")
-            if not isinstance(raw_values, list) or not raw_values or not isinstance(raw_values[0], dict):
-                continue
-            primary_values = _dedupe_continuations([raw_values[0]])
-            if len(primary_values) != 1:
-                continue
-            item_values = _dedupe_continuations(
-                [
-                    primary_values[0],
-                    *(value for value in raw_values[1:] if isinstance(value, dict)),
-                ]
-            )
-            reserved = _dedupe_continuations([*selected_continuations, item_values[0]])
-            if len(reserved) > continuation_limit:
-                continue
-            selected_continuations = reserved
-            displayed_groups[group].append(item)
-            secondary_continuations.extend(item_values[1:])
+
+    for group in lane_order:
+        limit = min(max_group_items, group_limits.get(group, max_group_items))
+        while selected_item_count < item_limit and positions[group] < len(all_groups.get(group, [])) and len(displayed_groups[group]) < limit:
+            item = all_groups[group][positions[group]]
+            positions[group] += 1
+            if isinstance(item, dict):
+                try_add(group, item)
 
     for continuation in secondary_continuations:
         expanded = _dedupe_continuations([*selected_continuations, continuation])
@@ -662,7 +669,7 @@ def _related_path_history(*, target: RepoTarget, evidence: list[ContextCandidate
     selected_paths = {
         candidate.source_ref.path.removeprefix(product_prefix)
         for candidate in evidence
-        if candidate.source_ref.kind == "current_source" and candidate.source_ref.path.startswith(product_prefix)
+        if candidate.source_ref.kind in ACTIONABLE_PRODUCT_KINDS and candidate.source_ref.path.startswith(product_prefix)
     }
     return [item for item in history if isinstance(item, dict) and str(item.get("path") or "") in selected_paths]
 
@@ -740,13 +747,13 @@ def _graph_context_candidates(
     product_prefix = f"{target.display_path.rstrip('/')}/"
     source_chunks: dict[str, list[Any]] = {}
     for chunk in chunks:
-        if chunk.source_ref.kind != "current_source" or not chunk.source_ref.path.startswith(product_prefix):
+        if chunk.source_ref.kind not in ACTIONABLE_PRODUCT_KINDS or not chunk.source_ref.path.startswith(product_prefix):
             continue
         source_chunks.setdefault(chunk.source_ref.path.removeprefix(product_prefix), []).append(chunk)
     retrieval_by_path: dict[str, ContextCandidate] = {}
     for candidate in source_candidates:
         path = candidate.source_ref.path
-        if candidate.source_ref.kind != "current_source" or not path.startswith(product_prefix):
+        if candidate.source_ref.kind not in ACTIONABLE_PRODUCT_KINDS or not path.startswith(product_prefix):
             continue
         repo_path = path.removeprefix(product_prefix)
         retrieval_by_path.setdefault(repo_path, candidate)
@@ -785,6 +792,15 @@ def _graph_context_candidates(
 
     projected_paths = list(dict.fromkeys([*seed_paths, *[str(path) for path in projection.get("related_paths", [])]]))
     seed_path_set = set(seed_paths)
+
+    def has_exact_identity_origin(relation: dict[str, Any]) -> bool:
+        origins = relation.get("origin_paths") if isinstance(relation.get("origin_paths"), list) else []
+        return any(
+            candidate is not None and float(candidate.score_breakdown.get("identity") or 0.0) > 0
+            for origin in origins
+            for candidate in [retrieval_by_path.get(str(origin or ""))]
+        )
+
     for path in projected_paths:
         path_chunks = source_chunks.get(str(path), [])
         chunk = _graph_source_chunk(path_chunks, query=query, retrieved=retrieval_by_path.get(str(path)))
@@ -792,6 +808,12 @@ def _graph_context_candidates(
             continue
         path_relations = relations_by_path.get(str(path), [])
         scoring_relations = path_relations
+        exact_anchor_dependency = any(
+            str(relation.get("to_path") or "") == str(path)
+            and str(relation.get("edge") or "") in {"CALLS", "IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}
+            and has_exact_identity_origin(relation)
+            for relation in path_relations
+        )
         propagated_score = 0.0
         for relation in scoring_relations:
             distance = max(1, int(relation.get("distance") or 1))
@@ -814,10 +836,12 @@ def _graph_context_candidates(
                 text=excerpt_for_query(chunk.text, query, limit=700),
                 score=propagated_score + lexical_score,
                 score_breakdown={
+                    "identity": float(retrieved.score_breakdown.get("identity", 0.0)) if retrieved is not None else 0.0,
                     "exact": float(retrieved.score_breakdown.get("exact", 0.0)) if retrieved is not None else 0.0,
                     "fts": float(retrieved.score_breakdown.get("fts", 0.0)) if retrieved is not None else 0.0,
                     "authority": float(retrieved.score_breakdown.get("authority", 0.0)) if retrieved is not None else 0.0,
                     "graph": propagated_score,
+                    "exact_anchor_dependency": 1.0 if exact_anchor_dependency else 0.0,
                 },
                 selection_reasons=reasons or ["Graph direct file relation"],
                 graph_path=scoring_relations[:3],
@@ -832,10 +856,10 @@ def _graph_seed_paths(source_candidates: list[ContextCandidate], *, target: Repo
     test_paths: list[str] = []
     for candidate in source_candidates:
         path = candidate.source_ref.path
-        if candidate.source_ref.kind != "current_source" or not path.startswith(product_prefix):
+        if candidate.source_ref.kind not in ACTIONABLE_PRODUCT_KINDS or not path.startswith(product_prefix):
             continue
         repo_path = path.removeprefix(product_prefix)
-        selected = test_paths if _looks_like_test_ref(repo_path.lower()) else source_paths
+        selected = test_paths if is_test_path(repo_path) else source_paths
         if repo_path not in selected:
             selected.append(repo_path)
     return [*source_paths, *test_paths]
@@ -926,7 +950,7 @@ def _candidate_sort_key(candidate: ContextCandidate) -> tuple[int, float, str, i
 def _has_direct_query_evidence(candidate: ContextCandidate) -> bool:
     return any(
         float(candidate.score_breakdown.get(key) or 0.0) > 0
-        for key in ("startup_reading", "exact", "fts")
+        for key in ("startup_reading", "identity", "exact", "fts")
     )
 
 
@@ -945,6 +969,8 @@ def _context_groups(
     for candidate in evidence:
         grouped_candidates[_candidate_group(candidate)].append(candidate)
     for group, candidates in grouped_candidates.items():
+        if group == "related_history":
+            continue
         groups[group].extend(_path_group_items(candidates, group=group, target=target))
     for result in knowledge_results:
         record = result.get("record") if isinstance(result.get("record"), dict) else {}
@@ -957,6 +983,7 @@ def _context_groups(
                 "selection_reason": f"reviewed knowledge linked to {', '.join(str(path) for path in matched_paths)}" if matched_paths else "reviewed knowledge match",
                 "score_breakdown": result.get("score_breakdown", {}),
                 "excerpt": record.get("claim") or record.get("summary") or "",
+                "provenance": record.get("provenance", {}) if isinstance(record.get("provenance"), dict) else {},
                 "source_ref": {"kind": "knowledge_record", "path": f"docs/knowledge/records/{record.get('id', '')}.json", "content_sha256": record.get("record_digest", "")},
                 "continuations": _knowledge_continuations(record),
             }
@@ -1001,6 +1028,18 @@ def _context_groups(
                 "continuations": _task_history_continuations(task_id=task_id, task_path=task_path),
             }
         )
+    recorded_task_ids = {str(item.get("record_id") or "") for item in groups["related_history"]}
+    for item in _path_group_items(grouped_candidates["related_history"], group="related_history", target=target):
+        ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        path = str(ref.get("path") or "")
+        task_id = _task_id_from_history_item(item)
+        if task_id and task_id in recorded_task_ids:
+            continue
+        item["record_id"] = task_id or path
+        item["status"] = "recorded"
+        item["selection_reason"] = "task history query match"
+        item["continuations"] = _task_history_continuations(task_id=task_id, task_path=path) if task_id else item.get("continuations", [])
+        groups["related_history"].append(item)
     for warning in graph_warnings:
         groups["warnings_and_completeness"].append({"repo_id": repo_id, "status": "warning", "selection_reason": warning.get("message", ""), **warning})
     if completeness.get("graph_completeness"):
@@ -1033,14 +1072,33 @@ def _context_groups(
     return groups
 
 
+def _task_id_from_history_item(item: dict[str, Any]) -> str:
+    sections = item.get("sections") if isinstance(item.get("sections"), list) else []
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    selectors = [
+        *(
+            str(section.get("section") or "")
+            for section in sections
+            if isinstance(section, dict)
+        ),
+        str(source_ref.get("path") or ""),
+    ]
+    for selector in selectors:
+        try:
+            return normalize_task_id(selector)
+        except RepoctlError:
+            continue
+    return ""
+
+
 def _candidate_group(candidate: ContextCandidate) -> str:
     ref = candidate.source_ref
     path = ref.path.lower()
     section = ref.section.lower()
     if candidate.score_breakdown.get("startup_reading"):
         return "must_read"
-    if ref.kind == "current_source":
-        if _looks_like_test_ref(path):
+    if ref.kind in ACTIONABLE_PRODUCT_KINDS:
+        if is_test_path(path):
             return "tests_and_verification"
         return "likely_change_surface"
     if ref.kind == "graph_relation":
@@ -1051,14 +1109,16 @@ def _candidate_group(candidate: ContextCandidate) -> str:
             for key in ("from_path", "to_path")
             if str(relation.get(key) or "")
         }
-        if any(_looks_like_test_ref(path) for path in paths):
+        if any(is_test_path(path) for path in paths):
             return "tests_and_verification"
         return "callers_and_dependents" if candidate.graph_path else "supporting_evidence"
     if _is_product_document_ref(ref):
         return "must_read"
     if path.startswith("docs/adr/") or path.startswith("docs/contracts/") or path in {"agents.md", "docs/prd.md"} or section in {"decision", "authority rules", "future layer rules"}:
         return "must_read"
-    if ref.kind in {"completion_receipt", "verification_hint"} or _looks_like_test_ref(path):
+    if ref.kind in {"completion_receipt", "task_artifact"}:
+        return "related_history"
+    if ref.kind == "verification_hint" or is_test_path(path):
         return "tests_and_verification"
     return "supporting_evidence"
 
@@ -1192,8 +1252,10 @@ def _candidate_evidence_roles(candidate: ContextCandidate, *, target: RepoTarget
     repo_path = path.removeprefix(product_prefix) if path.startswith(product_prefix) else path
     lowered = repo_path.lower()
     roles: set[str] = set()
-    if ref.kind == "current_source":
-        is_test = _looks_like_test_ref(lowered)
+    if ref.kind in ACTIONABLE_PRODUCT_KINDS:
+        is_test = is_test_path(lowered)
+        if ref.kind == "config":
+            roles.add("configuration")
         if _has_direct_query_evidence(candidate):
             roles.add("test_candidate" if is_test else "change_candidate")
         for relation in candidate.graph_path:
@@ -1203,14 +1265,16 @@ def _candidate_evidence_roles(candidate: ContextCandidate, *, target: RepoTarget
             from_path = str(relation.get("from_path") or "")
             to_path = str(relation.get("to_path") or "")
             other_path = to_path if from_path == repo_path else from_path if to_path == repo_path else ""
-            if is_test and other_path and not _looks_like_test_ref(other_path.lower()) and edge in {"CALLS", "IMPORTS_FILE"}:
+            if is_test and other_path and not is_test_path(other_path) and edge in {"CALLS", "IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}:
                 roles.add("directly_connected_test")
             if to_path == repo_path and from_path != repo_path:
-                if edge == "IMPORTS_FILE":
+                if edge in {"IMPORTS_FILE", "TESTS_FILE"}:
                     roles.add("imported_dependency")
                 elif edge == "CALLS":
                     roles.add("called_dependency")
-            elif from_path == repo_path and to_path != repo_path and edge in {"CALLS", "IMPORTS_FILE"}:
+                elif edge == STRUCTURED_EDGE_KIND:
+                    roles.add("structured_dependency")
+            elif from_path == repo_path and to_path != repo_path and edge in {"CALLS", "IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}:
                 roles.add("dependent_source")
         if not roles:
             roles.add("supporting_evidence")
@@ -1235,7 +1299,9 @@ def _evidence_role_priority(role: str) -> int:
         "directly_connected_test": 1,
         "imported_dependency": 1,
         "called_dependency": 1,
+        "structured_dependency": 1,
         "product_manifest": 1,
+        "configuration": 1,
         "dependent_source": 2,
         "code_relation": 2,
         "verification_hint": 4,
@@ -1249,18 +1315,35 @@ def _group_item_sort_key(
     item: dict[str, Any],
     *,
     direct_query_score: float,
-) -> tuple[int, float, int, float, str]:
+) -> tuple[int, int, float, float, str]:
     role = str(item.get("evidence_role") or "")
+    roles = {str(value) for value in item.get("evidence_roles", []) if str(value)} if isinstance(item.get("evidence_roles"), list) else {role}
+    breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
     role_priority = _evidence_role_priority(role)
     if group == "callers_and_dependents":
         role_priority = 0 if role == "code_relation" else role_priority
     direct_query_stage = 0
     if group in {"likely_change_surface", "tests_and_verification"}:
-        direct_query_stage = 0 if direct_query_score > 0 else 1
+        graph_score = float(breakdown.get("graph") or 0.0)
+        if (
+            float(breakdown.get("identity") or 0.0) > 0
+            or float(breakdown.get("startup_reading") or 0.0) > 0
+        ):
+            direct_query_stage = 0
+        elif float(breakdown.get("exact_anchor_dependency") or 0.0) > 0:
+            direct_query_stage = 1
+        elif direct_query_score > 0 and graph_score <= 0:
+            direct_query_stage = 2
+        elif direct_query_score > 0:
+            direct_query_stage = 3
+        elif roles & {"imported_dependency", "called_dependency", "structured_dependency", "directly_connected_test"}:
+            direct_query_stage = 4
+        else:
+            direct_query_stage = 5
     return (
         direct_query_stage,
-        -direct_query_score,
         role_priority,
+        -direct_query_score,
         -float(item.get("score") or 0.0),
         str((item.get("source_ref") or {}).get("path") or ""),
     )
@@ -1291,7 +1374,7 @@ def _candidate_continuations(candidate: ContextCandidate, *, target: RepoTarget)
 def _candidate_primary_continuation(candidate: ContextCandidate, *, target: RepoTarget) -> dict[str, Any] | None:
     product_prefix = f"{target.display_path.rstrip('/')}/"
     path = candidate.source_ref.path
-    if candidate.source_ref.kind == "current_source":
+    if candidate.source_ref.kind in ACTIONABLE_PRODUCT_KINDS:
         repo_path = path.removeprefix(product_prefix) if path.startswith(product_prefix) else ""
         return _file_continuation(repo_path) if repo_path else None
     if candidate.source_ref.kind != "graph_relation":
@@ -1301,7 +1384,7 @@ def _candidate_primary_continuation(candidate: ContextCandidate, *, target: Repo
     relation = candidate.graph_path[0]
     edge = str(relation.get("edge") or "")
     from_path = str(relation.get("from_path") or "")
-    if edge == "IMPORTS_FILE":
+    if edge in {"IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}:
         return _file_continuation(from_path) if from_path else None
     if edge != "CALLS" or not from_path:
         return None
@@ -1396,15 +1479,3 @@ def _is_product_document_ref(ref: ContextSourceRef) -> bool:
     path = ref.path.lower()
     name = path.rsplit("/", 1)[-1]
     return ref.kind == "document" and path.startswith("repos/") and ("/docs/" in path or name.startswith("readme"))
-
-
-def _looks_like_test_ref(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    return (
-        "/tests/" in path
-        or "/test/" in path
-        or path.startswith("tests/")
-        or path.startswith("test/")
-        or name.startswith("test_")
-        or name.endswith(("_test.py", ".test.js", ".test.ts", ".test.mjs", ".test.mts", "_test.mjs", "_test.mts", "_test.dart"))
-    )

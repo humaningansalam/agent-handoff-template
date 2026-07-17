@@ -15,6 +15,7 @@ from .graph_store import load_materialized_graph
 from .git import normalize_repo_path, repo_git_head
 from .language_profiles import collect_verification_hints
 from .markdown import find_section
+from .path_roles import PathRole, classify_path_role
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task, task_discovery_values
 
@@ -124,7 +125,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     problems.extend(fallback_problems)
     verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
     problems.extend(verification_problems)
-    allowed_bundle_kinds = {"current_source", "product_manifest", "verification_hint", "graph_relation"}
+    allowed_bundle_kinds = {"current_source", "config", "product_manifest", "verification_hint", "graph_relation"}
     bundle_candidates = [
         candidate
         for candidate in (bundle.evidence if bundle is not None else [])
@@ -135,7 +136,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     context_candidates = _dedupe_candidates(
         [*required_candidates, *mandatory_candidates, *discovery_candidates, *fallback_candidates, *verification_candidates, *bundle_candidates]
     )
-    groups = _group_candidates(context_candidates)
+    groups = _group_candidates(context_candidates, repository_path=target.display_path)
     groups["task_graph_evidence"] = task_graph_evidence
     groups.update(_agent_pack_groups(groups, bundle))
     groups["edit_candidates"] = _candidate_items(
@@ -152,6 +153,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         groups,
         required_paths={
             "AGENTS.md",
+            "docs/PRD.md",
             task.rel_path,
             *(_context_doc_paths(task)),
             *chosen_paths,
@@ -578,7 +580,7 @@ def _without_discovery_placeholders(values: list[str]) -> list[str]:
 def _required_task_candidates(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
     candidates: list[ContextCandidate] = []
     problems: list[Problem] = []
-    for rel_path in ("AGENTS.md", task.rel_path):
+    for rel_path in ("AGENTS.md", "docs/PRD.md", task.rel_path):
         path = root / rel_path
         if not path.is_file():
             problems.append(Problem("warning", "context_pack_required_source_missing", "required context source is missing", rel_path))
@@ -1255,7 +1257,7 @@ def _section(task: Task, heading: str) -> str:
     return task.body[section.body_start : section.end].strip()
 
 
-def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict[str, Any]]]:
+def _group_candidates(candidates: list[ContextCandidate], *, repository_path: str) -> dict[str, list[dict[str, Any]]]:
     groups: dict[str, list[dict[str, Any]]] = {"must_read": [], "maybe_relevant": [], "verification_hints": []}
     for candidate in candidates:
         ref = candidate.source_ref
@@ -1264,7 +1266,7 @@ def _group_candidates(candidates: list[ContextCandidate]) -> dict[str, list[dict
             groups["must_read"].append(item)
         elif candidate.score_breakdown.get("structured_discovery"):
             continue
-        elif ref.kind == "verification_hint" or "Verification" in ref.section or _looks_like_test_or_workflow_ref(ref.path):
+        elif ref.kind == "verification_hint" or "Verification" in ref.section or classify_path_role(ref.path, repository_path=repository_path) in {PathRole.TEST, PathRole.WORKFLOW}:
             groups["verification_hints"].append(item)
         elif _must_read_ref_path(ref.path):
             groups["must_read"].append(item)
@@ -1286,19 +1288,6 @@ def _must_read_ref_path(path: str) -> bool:
         or lowered.startswith("repos/docs/")
         or lowered.startswith("repos/") and lowered.endswith("/readme.md")
     )
-
-
-def _looks_like_test_or_workflow_ref(path: str) -> bool:
-    lowered = path.lower()
-    return (
-        "/test" in lowered
-        or "tests/" in lowered
-        or lowered.startswith("test")
-        or lowered.startswith(".github/workflows/")
-        or lowered.startswith("docs/workflows/")
-    )
-
-
 def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextBundle | None) -> dict[str, list[dict[str, Any]]]:
     likely_change = _copy_items(groups.get("maybe_relevant"))
     impact = [

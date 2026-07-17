@@ -148,7 +148,7 @@ def test_repo_task_allows_other_product_repo_preexisting_dirty_at_start(tmp_path
     assert main(["task", "start", task_id, "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "doing"
+    assert payload["data"]["status"] == "doing"
 
 
 def test_root_task_blocks_task_new_uncommitted_product_change_in_configured_multi(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -51,6 +51,50 @@
         {
           "path": "handlers/cross_login.py",
           "content": "from services.token_service import issue_token\n\n\ndef login(user_id: str) -> str:\n    return issue_token(user_id)\n"
+        },
+        {
+          "path": "supabase/migrations/20240101000000_jobs.sql",
+          "content": "CREATE TABLE public.jobs (id bigint primary key);\nCREATE FUNCTION public.claim_job() RETURNS void LANGUAGE sql AS $$ SELECT 1; $$;\n"
+        },
+        {
+          "path": "supabase/migrations/20240201000000_claim_job.sql",
+          "content": "CREATE OR REPLACE FUNCTION public.claim_job() RETURNS void LANGUAGE sql AS $$ INSERT INTO public.jobs (id) VALUES (1); $$;\n"
+        },
+        {
+          "path": "supabase/seed.sql",
+          "content": "INSERT INTO public.jobs (id) VALUES (2);\n"
+        },
+        {
+          "path": "app/lib/jobs.dart",
+          "content": "import 'package:supabase/supabase.dart';\nfinal SupabaseClient client = SupabaseClient('url', 'key');\nFuture<void> claimJob() => client.rpc('claim_job');\n"
+        },
+        {
+          "path": "frontend/src/jobs.ts",
+          "content": "import { createClient } from '@supabase/supabase-js';\nconst client = createClient(url, key);\nexport const claimJob = () => client.rpc('claim_job');\n"
+        },
+        {
+          "path": "Dockerfile",
+          "content": "FROM alpine:3.21\nCOPY scripts/start.sh /app/start.sh\n"
+        },
+        {
+          "path": "compose.yml",
+          "content": "services:\n  api:\n    build:\n      context: .\n      dockerfile: Dockerfile\n    env_file:\n      - config/runtime.env\n"
+        },
+        {
+          "path": "config/runtime.env",
+          "content": "APP_ENV=benchmark\n"
+        },
+        {
+          "path": "scripts/start.sh",
+          "content": "#!/bin/sh\nsource ./scripts/common.sh\n"
+        },
+        {
+          "path": "scripts/common.sh",
+          "content": "#!/bin/sh\nexport APP_READY=1\n"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "content": "jobs:\n  release:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./scripts/start.sh\n"
         }
       ]
     }

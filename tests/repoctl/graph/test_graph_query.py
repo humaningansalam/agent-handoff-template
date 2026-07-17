@@ -27,6 +27,7 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     (repo / "src/app.py").write_text("import hashlib\n\n\ndef api_error():\n    return 'root'\n", encoding="utf-8")
     (repo / "repos/src").mkdir(parents=True)
     (repo / "repos/src/app.py").write_text("def nested_app():\n    return 'nested'\n", encoding="utf-8")
+    (repo / "repos/only.py").write_text("def only_nested():\n    return 'nested'\n", encoding="utf-8")
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     monkeypatch.setattr(
@@ -40,15 +41,19 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     compact_result = compact_payload["data"]["result"]
     assert "nodes" not in compact_result
     assert "edges" not in compact_result
-    assert compact_result["node_count"] >= 1
-    assert compact_result["edge_count"] >= 1
-    assert any(relation["edge"] == "CONTAINS" for relation in compact_result["relations"])
+    assert "node_count" not in compact_result
+    assert "edge_count" not in compact_result
+    assert not any(relation["edge"] == "CONTAINS" for relation in compact_result["relations"])
     assert any(item["selector"] == {"kind": "file", "value": "src/app.py"} for item in compact_result["continuations"])
 
-    assert main(["graph", "query", "--file", "repos/src/app.py", "--json"]) == 0
-    nested = json.loads(capsys.readouterr().out)["data"]["result"]
-    assert nested["query"] == {"type": "file", "path": "repos/src/app.py"}
-    assert nested["matches"][0]["path"] == "repos/src/app.py"
+    assert main(["graph", "query", "--file", "repos/src/app.py", "--json"]) == 1
+    ambiguous_path = json.loads(capsys.readouterr().out)
+    assert ambiguous_path["problems"][0]["code"] == "graph_query_ambiguous_path"
+    assert [item["path"] for item in ambiguous_path["data"]["result"]["candidates"]] == ["repos/src/app.py", "src/app.py"]
+
+    assert main(["graph", "query", "--file", "repos/only.py", "--json"]) == 0
+    exact_repo_path = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert exact_repo_path["query"] == {"type": "file", "path": "repos/only.py"}
 
     assert main(["graph", "query", "--file", "src/app.py", "--full", "--json"]) == 0
 
@@ -64,6 +69,16 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     assert main(["graph", "query", "--symbol", "api_error", "--in-file", "../outside.py", "--json"]) == 1
     invalid_in_file = json.loads(capsys.readouterr().out)
     assert invalid_in_file["problems"][0]["code"] == "graph_query_invalid_path"
+
+    assert main(["graph", "query", "--symbol", "api_error", "--in-file", "repos/src/app.py", "--json"]) == 1
+    ambiguous_in_file = json.loads(capsys.readouterr().out)
+    assert ambiguous_in_file["data"]["query_status"] == "ambiguous"
+    assert [item["path"] for item in ambiguous_in_file["data"]["result"]["candidates"]] == ["repos/src/app.py", "src/app.py"]
+
+    assert main(["graph", "query", "--symbol", "api_error", "--in-file", "missing/app.py", "--json"]) == 0
+    missing_in_file = json.loads(capsys.readouterr().out)
+    assert missing_in_file["data"]["query_status"] == "not_found"
+    assert {item["path"] for item in missing_in_file["data"]["result"]["candidates"]} == {"repos/src/app.py", "src/app.py"}
 
     provider_path = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
     removed_provider_path = provider_path.with_suffix(".removed")
@@ -118,6 +133,15 @@ def test_graph_query_import_returns_declaring_files(tmp_path: Path, monkeypatch,
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
+    assert main(["graph", "query", "--import", "axios", "--json"]) == 0
+    compact_relation = next(
+        relation
+        for relation in json.loads(capsys.readouterr().out)["data"]["result"]["relations"]
+        if relation["edge"] == "DECLARES_IMPORT"
+    )
+    assert set(compact_relation["evidence"]) == {"type", "assertion", "provider", "confidence", "completeness", "freshness"}
+    assert compact_relation["evidence"]["confidence"] == "unknown"
+
     assert main(["graph", "query", "--import", "axios", "--full", "--json"]) == 0
 
     result = json.loads(capsys.readouterr().out)["data"]["result"]
@@ -125,6 +149,7 @@ def test_graph_query_import_returns_declaring_files(tmp_path: Path, monkeypatch,
     assert any(node["id"] == import_ref_id("main", "frontend/app.ts", "typescript", "axios") for node in result["nodes"])
     assert any(node["id"] == file_id("main", "frontend/app.ts") for node in result["nodes"])
     assert any(edge["kind"] == "DECLARES_IMPORT" for edge in result["edges"])
+    assert compact_relation["evidence"]["completeness"] == result["completeness"]["capabilities"]["imports"]
 
 
 def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -132,6 +157,7 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -147,7 +173,12 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     missing = json.loads(capsys.readouterr().out)
     assert missing["ok"] is True
     assert missing["data"]["query_status"] == "not_found"
-    assert missing["data"]["completeness"]["status"] == "complete"
+    assert missing["data"]["completeness"]["status"] in {"complete", "partial"}
+    assert missing["data"]["result"]["candidates"] == []
+
+    assert main(["graph", "query", "--file", "missing/app.py", "--json"]) == 0
+    same_name = json.loads(capsys.readouterr().out)
+    assert same_name["data"]["result"]["candidates"][0]["path"] == "app.py"
 
 
 def test_graph_query_reports_snapshot_freshness(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -164,13 +195,15 @@ def test_graph_query_reports_snapshot_freshness(tmp_path: Path, monkeypatch, cap
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["freshness"]["status"] == "stale"
-    assert payload["data"]["freshness"]["changed_path_count"] == 1
-    assert "changed_paths" not in payload["data"]["freshness"]
-    assert any(warning["code"] == "graph_snapshot_stale" for warning in payload["warnings"])
+    assert payload["data"]["freshness"] == {"status": "stale", "root_evidence_changed": False}
+    stale_warning = next(warning for warning in payload["warnings"] if warning["code"] == "graph_snapshot_stale")
+    assert "changed_path_count" not in stale_warning
+    assert "changed_root_path_count" not in stale_warning
 
     assert main(["graph", "query", "--file", "app.py", "--full", "--json"]) == 0
     full = json.loads(capsys.readouterr().out)
     assert full["data"]["freshness"]["changed_paths"] == ["app.py"]
+    assert full["data"]["freshness"]["changed_path_count"] == 1
 
 
 def test_graph_call_query_reports_defined_but_missing_provider_as_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -190,7 +223,8 @@ def test_graph_call_query_reports_defined_but_missing_provider_as_unavailable(tm
     assert payload["ok"] is False
     assert payload["data"]["query_status"] == "unavailable"
     assert payload["data"]["result"]["query_status"] == "unavailable"
-    assert payload["data"]["completeness"]["capabilities"]["calls"] == "unavailable"
+    assert payload["data"]["completeness"] == {"status": "partial"}
+    assert any(warning["code"] == "graph_semantic_relations_partial" for warning in payload["warnings"])
 
 
 def test_graph_shell_only_repo_reports_provider_coverage_as_unsupported(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -201,6 +235,11 @@ def test_graph_shell_only_repo_reports_provider_coverage_as_unsupported(tmp_path
     (repo / "run.sh").write_text("#!/bin/sh\nrun_task() { echo ok; }\n", encoding="utf-8")
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--symbol", "run_task", "--json"]) == 1
+
+    compact = json.loads(capsys.readouterr().out)
+    assert "provider_coverage" not in compact["data"]["completeness"]
 
     assert main(["graph", "query", "--symbol", "run_task", "--full", "--json"]) == 1
 

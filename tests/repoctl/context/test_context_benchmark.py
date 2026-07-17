@@ -55,11 +55,17 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
 
     payload = json.loads(capsys.readouterr().out)
     summary = payload["data"]["summary"]
-    assert payload["data"]["question_count"] == 24
+    assert payload["data"]["question_count"] == 32
     assert summary["source_ref_integrity"] is True
     assert summary["mean_recall_at_5"] >= 0.85
     assert summary["by_category"]["method-impact"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["cross-file-call-impact"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["structured-compose"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["structured-workflow"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["structured-shell"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["structured-sql-seed"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["structured-sql-rpc-dart"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["structured-sql-rpc-typescript"]["mean_graph_edge_recall"] == 1.0
     assert summary["generated_or_ignored_noise"] == 0
     assert payload["problems"] == []
 

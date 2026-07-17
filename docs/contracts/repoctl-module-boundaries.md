@@ -7,7 +7,7 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 - `task lifecycle` owns task frontmatter, Board membership, archive transitions, start baselines, finish gates, Handoff, Execution Log, and Verification updates.
 - `backlog` owns opaque raw block CRUD only.
 - `meta` owns `.repometa` policy, annotations, exclusions, move repair, and metadata validation.
-- `index` owns read-only technical facts such as language, imports, symbols, calls, dependencies, and observed effect hints.
+- `index` owns read-only technical facts such as language, imports, symbols, calls, syntax-resolved structured file dependencies, and observed effect hints.
 - `cli` owns argparse, JSON envelopes, human presentation, and command wiring only.
 
 ## Derived layer rules

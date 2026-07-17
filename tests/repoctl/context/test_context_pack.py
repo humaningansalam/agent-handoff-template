@@ -218,7 +218,7 @@ Use project context without structured discovery yet.
     warning_codes = {warning["code"] for warning in payload["warnings"]}
     assert "repos/README.md" in must_read_paths
     assert "repos/pyproject.toml" in must_read_paths
-    assert "docs/PRD.md" not in must_read_paths
+    assert "docs/PRD.md" in must_read_paths
     assert payload["data"]["stage"] == "bootstrap"
     assert "context_pack_no_structured_discovery" in warning_codes
 

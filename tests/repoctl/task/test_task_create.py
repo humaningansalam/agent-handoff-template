@@ -19,12 +19,12 @@ def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypa
     assert main(["task", "create", "--area", "backend", "--repo-ref", "repos", "--json", "Example Task"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["path"].startswith("docs/tasks/T-")
-    assert payload["path"].endswith("--example-task.md")
-    created = tmp_path / payload["path"]
+    assert payload["data"]["path"].startswith("docs/tasks/T-")
+    assert payload["data"]["path"].endswith("--example-task.md")
+    created = tmp_path / payload["data"]["path"]
     assert created.is_file()
     text = created.read_text(encoding="utf-8")
-    assert f"id: {payload['task_id']}" in text
+    assert f"id: {payload['data']['task_id']}" in text
     assert "YYYYMMDDTHHMMSSZ" not in text
     assert "## Work Area" in text
     assert "## Discovery" in text
@@ -43,7 +43,7 @@ def test_task_create_uses_configured_korean_document_language(tmp_path: Path, mo
     assert main(["task", "create", "--slug", "korean-doc", "한국어 문서", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    text = (tmp_path / payload["path"]).read_text(encoding="utf-8")
+    text = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
     assert 'document_language: "ko"' in text
     assert "## Work Area" in text
     assert "## Discovery" in text
@@ -109,12 +109,12 @@ def test_task_create_with_backlog_id_removes_raw_block_without_parsing_it(tmp_pa
     assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "--repo-id", "main", "Add discount support", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    task = (tmp_path / payload["path"]).read_text(encoding="utf-8")
+    task = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
     board = (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
-    assert payload["backlog_removed"] is True
-    assert payload["backlog_id"] == backlog_id
+    assert payload["data"]["backlog_removed"] is True
+    assert payload["data"]["backlog_id"] == backlog_id
     assert "Add discount support" not in board.split("## Backlog", 1)[1]
-    assert f"- {payload['path']}" in board.split("## Board", 1)[1].split("## Backlog", 1)[0]
+    assert f"- {payload['data']['path']}" in board.split("## Board", 1)[1].split("## Backlog", 1)[0]
     assert "area: \"backend\"" in task
     assert f"- Backlog origin: `{backlog_id}`" in task
 
@@ -138,7 +138,7 @@ def test_task_create_with_backlog_id_requires_explicit_promotion_fields(tmp_path
 
     assert main(["task", "create", "--backlog-id", backlog_id, "--slug", "discount-support", "--area", "backend", "Add discount support", "--json"]) == 0
     promoted = json.loads(capsys.readouterr().out)
-    task = (tmp_path / promoted["path"]).read_text(encoding="utf-8")
+    task = (tmp_path / promoted["data"]["path"]).read_text(encoding="utf-8")
     assert 'repo_id: "main"' in task
     assert 'repo_ref: ""' in task
     assert "Add discount support" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
@@ -210,7 +210,7 @@ def test_task_create_parent_uses_parent_template(tmp_path: Path, monkeypatch, ca
     assert main(["task", "create", "--type", "parent", "--slug", "parent-task", "Parent Task", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    text = (tmp_path / payload["path"]).read_text(encoding="utf-8")
+    text = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
     assert "## Live Child Tasks" in text
     assert 'parent: ""' in text
     assert "T-YYYYMMDDHHMMSSZ--child-task.md" not in text
@@ -247,8 +247,8 @@ def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, mo
     assert main(["task", "create", "--follow-up-of", previous_id, "--slug", "completed-follow-up", "Completed follow-up", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    created = (tmp_path / payload["path"]).read_text(encoding="utf-8")
-    assert payload["task_id"] != previous_id
+    created = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
+    assert payload["data"]["task_id"] != previous_id
     assert f'follow_up_of: "{previous_id}"' in created
     assert f"- Follow-up of: `{previous_id}`" in created
     assert previous_path.read_text(encoding="utf-8") == previous_text

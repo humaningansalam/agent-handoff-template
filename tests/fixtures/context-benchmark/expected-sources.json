@@ -354,5 +354,149 @@
         "path": "repos/utils/tokens.py"
       }
     ]
+  },
+  "Q-025": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:compose.yml",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:Dockerfile"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/compose.yml"},
+      {"path": "repos/Dockerfile"}
+    ]
+  },
+  "Q-026": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:.github%2Fworkflows%2Frelease.yml",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:scripts%2Fstart.sh"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/.github/workflows/release.yml"},
+      {"path": "repos/scripts/start.sh"}
+    ]
+  },
+  "Q-027": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:scripts%2Fstart.sh",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:scripts%2Fcommon.sh"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/scripts/start.sh"},
+      {"path": "repos/scripts/common.sh"}
+    ]
+  },
+  "Q-028": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:supabase%2Fseed.sql",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:supabase%2Fmigrations%2F20240101000000_jobs.sql"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/supabase/seed.sql"},
+      {"path": "repos/supabase/migrations/20240101000000_jobs.sql"}
+    ]
+  },
+  "Q-029": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:app%2Flib%2Fjobs.dart",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:supabase%2Fmigrations%2F20240201000000_claim_job.sql"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/app/lib/jobs.dart"},
+      {"path": "repos/supabase/migrations/20240201000000_claim_job.sql"}
+    ]
+  },
+  "Q-030": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:frontend%2Fsrc%2Fjobs.ts",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:supabase%2Fmigrations%2F20240201000000_claim_job.sql"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/frontend/src/jobs.ts"},
+      {"path": "repos/supabase/migrations/20240201000000_claim_job.sql"}
+    ]
+  },
+  "Q-031": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:Dockerfile",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:scripts%2Fstart.sh"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/Dockerfile"},
+      {"path": "repos/scripts/start.sh"}
+    ]
+  },
+  "Q-032": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:compose.yml",
+        "kind": "USES_FILE",
+        "source": "structured_file_relations",
+        "to": "repo:main:file:config%2Fruntime.env"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/compose.yml"},
+      {"path": "repos/config/runtime.env"}
+    ]
   }
 }

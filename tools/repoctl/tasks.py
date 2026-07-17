@@ -12,7 +12,7 @@ from typing import Any
 from .io import LOCK_REL, RepoctlError, atomic_write
 from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_git_head, repo_git_status, repo_path_fingerprints
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
-from .repositories import RepoTarget, default_repo_target, repo_layout
+from .repositories import RepoSelectorStatus, RepoTarget, default_repo_target, repo_layout, resolve_repo_selector_path
 from .settings import document_language, validate_document_language
 
 LIVE = {"todo", "doing", "blocked"}
@@ -283,9 +283,15 @@ def utc_stamp() -> str:
 
 
 def normalize_task_id(task_id: str) -> str:
-    candidate = str(task_id)
-    if ID_RE.match(candidate):
-        return candidate
+    candidate = str(task_id).strip().replace("\\", "/")
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    name = candidate.rsplit("/", 1)[-1]
+    if name.endswith(".md"):
+        name = name[:-3]
+    match = re.fullmatch(r"(T-[0-9]{14}Z)(?:--[a-z0-9]+(?:-[a-z0-9]+)*)?", name)
+    if match:
+        return match.group(1)
     raise RepoctlError("invalid task id format; expected T-YYYYMMDDHHMMSSZ", code="invalid_task_id")
 
 
@@ -957,52 +963,92 @@ def _parse_baseline_entries(raw_entries: Any, state_path: Path, root: Path) -> l
     return entries
 
 
-def resolve_task_baseline_ownership(root: Path, task_id: str, *, path: str, ownership: str) -> dict[str, Any]:
+def resolve_task_baseline_ownerships(
+    root: Path,
+    task_id: str,
+    *,
+    resolutions: list[tuple[str, str]],
+    apply: bool = True,
+) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     if task.status not in LIVE:
         raise RepoctlError("baseline ownership can only be resolved for a live task", code="task_not_live", path=task.rel_path)
-    if ownership not in {"task", "preexisting"}:
-        raise RepoctlError("baseline ownership must be task or preexisting", code="invalid_baseline_ownership", path=task.rel_path)
     target = _target_for_task(root, task)
     if target is None:
         raise RepoctlError("baseline ownership requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
-    normalized = normalize_repo_path(path)
-    prefix = f"{target.display_path.rstrip('/')}/"
-    if normalized.startswith(prefix):
-        normalized = normalize_repo_path(normalized[len(prefix) :])
-    if not normalized:
-        raise RepoctlError("baseline ownership path must be repo-relative", code="invalid_baseline_path", path=path)
     state = _read_task_state(root, task.id)
     baseline = _read_repo_baseline(root, task.id)
     if state is None or baseline is None:
         raise RepoctlError("task has no initial repo baseline", code="repo_head_missing_at_start", path=task.rel_path)
-    baseline_fingerprint = str(baseline.get("path_fingerprints", {}).get(normalized) or "")
-    if not baseline_fingerprint:
-        raise RepoctlError("baseline ownership path was not dirty at task start", code="baseline_path_not_initially_dirty", path=normalized)
-    current_fingerprints, git_state = repo_path_fingerprints(root, [normalized], target)
+    baseline_fingerprints = baseline.get("path_fingerprints") if isinstance(baseline.get("path_fingerprints"), dict) else {}
+    known_paths = {str(path) for path in baseline_fingerprints}
+    normalized_resolutions: dict[str, str] = {}
+    for path, ownership in resolutions:
+        if ownership not in {"task", "preexisting"}:
+            raise RepoctlError("baseline ownership must be task or preexisting", code="invalid_baseline_ownership", path=path)
+        resolution = resolve_repo_selector_path(
+            path,
+            repository_path=target.display_path,
+            known_paths=known_paths,
+        )
+        if resolution.status == RepoSelectorStatus.INVALID:
+            raise RepoctlError("baseline ownership path must be repo-relative", code="invalid_baseline_path", path=path)
+        if resolution.status == RepoSelectorStatus.NOT_FOUND:
+            raise RepoctlError(
+                "baseline ownership path was not dirty at task start",
+                code="baseline_path_not_initially_dirty",
+                path=resolution.path or path,
+            )
+        if resolution.status == RepoSelectorStatus.AMBIGUOUS:
+            raise RepoctlError(
+                "baseline ownership path matches both repo-relative and workspace-relative identities",
+                code="ambiguous_baseline_path",
+                path=path,
+            )
+        normalized = resolution.path
+        previous = normalized_resolutions.get(normalized)
+        if previous and previous != ownership:
+            raise RepoctlError("one baseline path cannot receive conflicting ownership decisions", code="conflicting_baseline_resolution", path=normalized)
+        normalized_resolutions[normalized] = ownership
+    if not normalized_resolutions:
+        raise RepoctlError("at least one baseline ownership resolution is required", code="missing_baseline_resolution", path=task.rel_path)
+    current_fingerprints, git_state = repo_path_fingerprints(root, list(normalized_resolutions), target)
     if not git_state.available:
         raise RepoctlError(f"cannot inspect baseline ownership path: {git_state.reason}", code="repo_git_unavailable", path=git_state.repo_path or target.display_path)
-    final_fingerprint = str(current_fingerprints.get(normalized) or "")
-    if ownership == "preexisting" and final_fingerprint != baseline_fingerprint:
-        raise RepoctlError(
-            "preexisting ownership requires the path to be restored exactly to its initial dirty state",
-            code="baseline_not_restored",
-            path=normalized,
+    decided_at = utc_stamp()
+    resolved: list[dict[str, str]] = []
+    for normalized, ownership in sorted(normalized_resolutions.items()):
+        baseline_fingerprint = str(baseline_fingerprints.get(normalized) or "")
+        final_fingerprint = str(current_fingerprints.get(normalized) or "")
+        if ownership == "preexisting" and final_fingerprint != baseline_fingerprint:
+            raise RepoctlError(
+                "preexisting ownership requires the path to be restored exactly to its initial dirty state",
+                code="baseline_not_restored",
+                path=normalized,
+            )
+        resolved.append(
+            {
+                "path": normalized,
+                "ownership": ownership,
+                "baseline_fingerprint": baseline_fingerprint,
+                "final_fingerprint": final_fingerprint,
+            }
         )
-    updated = json.loads(json.dumps(state))
-    updated.setdefault("ownership", {})[normalized] = {
-        "ownership": ownership,
-        "decided_at": utc_stamp(),
-        "baseline_fingerprint": baseline_fingerprint,
-        "final_fingerprint": final_fingerprint,
-    }
-    _write_task_state(root, task.id, updated)
+    if apply:
+        updated = json.loads(json.dumps(state))
+        ownership_state = updated.setdefault("ownership", {})
+        for item in resolved:
+            ownership_state[item["path"]] = {
+                "ownership": item["ownership"],
+                "decided_at": decided_at,
+                "baseline_fingerprint": item["baseline_fingerprint"],
+                "final_fingerprint": item["final_fingerprint"],
+            }
+        _write_task_state(root, task.id, updated)
     return {
         "task": task,
-        "path": normalized,
-        "ownership": ownership,
-        "baseline_fingerprint": baseline_fingerprint,
-        "final_fingerprint": final_fingerprint,
+        "applied": apply,
+        "resolutions": resolved,
     }
 
 

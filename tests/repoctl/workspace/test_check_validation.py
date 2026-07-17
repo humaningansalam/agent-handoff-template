@@ -19,7 +19,9 @@ def test_check_reports_board_missing_live_task(tmp_path: Path, monkeypatch, caps
 
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
-    assert payload["board"]["missing"] == ["docs/tasks/T-20260609184046Z--alpha.md"]
+    assert payload["command"] == "check"
+    assert set(payload) == {"ok", "command", "data", "warnings", "problems", "next_actions"}
+    assert payload["data"]["board"]["missing"] == ["docs/tasks/T-20260609184046Z--alpha.md"]
     assert any(problem["code"] == "board_missing_live_task" for problem in payload["problems"])
 
 
@@ -242,9 +244,9 @@ def test_task_list_json_reports_board_stale(tmp_path: Path, monkeypatch, capsys)
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tasks"][0]["id"] == "T-20260609184046Z"
-    assert payload["board"]["stale"] is True
-    assert payload["board"]["missing"] == ["docs/tasks/T-20260609184046Z--alpha.md"]
+    assert payload["data"]["tasks"][0]["id"] == "T-20260609184046Z"
+    assert payload["data"]["board"]["stale"] is True
+    assert payload["data"]["board"]["missing"] == ["docs/tasks/T-20260609184046Z--alpha.md"]
 
 
 def test_task_list_json_reports_validation_problems(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -5,12 +5,14 @@ import json
 import sqlite3
 from pathlib import Path
 
+from tools.repoctl import context as context_module
 from tools.repoctl.cli import main
 from tools.repoctl.context import _candidate_continuations, _knowledge_continuations, compact_context_bundle
 from tools.repoctl.context_chunks import chunk_text_source
 from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
-from tools.repoctl.context_retrieval import retrieve_context
+from tools.repoctl.context_retrieval import _identity_score, retrieve_context
 from tools.repoctl.graph_store import materialize_graph
+from tools.repoctl.path_roles import PathRole, classify_path_role
 from tools.repoctl.repositories import RepoTarget, require_repo_target
 from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
 from tests.repoctl.context_test_helpers import (
@@ -38,6 +40,20 @@ def _compact_evidence_item(kind: str, path: str, selector_kind: str, selector_va
         ],
         **extra,
     }
+
+
+def test_context_identity_and_path_roles_are_representation_stable(tmp_path: Path) -> None:
+    chunk = chunk_text_source(tmp_path, "repos/web/src/auth.py", "def authenticate(): pass\n", kind="current_source", section="authenticate")
+
+    assert _identity_score("src/auth.py", chunk) == (1.5, "exact path match")
+    assert _identity_score("src/auth.py.old", chunk) == (0.0, "")
+    assert classify_path_role("parser_test.mjs") == PathRole.TEST
+    assert classify_path_role("parser_test.mts") == PathRole.TEST
+    assert classify_path_role(".github/workflows/release.yml") == PathRole.WORKFLOW
+    assert classify_path_role("repos/.github/workflows/release.yml", repository_path="repos") == PathRole.WORKFLOW
+    assert classify_path_role("repos/web/docs/workflows/release.md", repository_path="repos/web") == PathRole.WORKFLOW
+    assert classify_path_role("src/docs/workflows/release.md") == PathRole.SOURCE
+    assert classify_path_role("repos/lib/.github/workflows/ci.yml", repository_path="repos") == PathRole.SOURCE
 
 
 def test_compact_context_bounds_groups_and_omits_repository_wide_diagnostics() -> None:
@@ -113,9 +129,8 @@ def test_compact_context_bounds_groups_and_omits_repository_wide_diagnostics() -
 
     assert len(compact["groups"]["must_read"]) == 2
     assert [item["sections"][0]["section"] for item in compact["groups"]["must_read"]] == ["Decision 0", "Decision 1"]
-    assert compact["selection"]["group_counts"]["must_read"] == 10
-    assert compact["selection"]["displayed_group_counts"]["must_read"] == 2
-    assert compact["selection"]["omitted_group_items"]["must_read"] == 8
+    assert "selection" not in compact
+    assert "provider_coverage" not in compact["completeness"]
     assert "selected_source_refs" not in compact
     assert "source_snapshots" not in compact
     assert "analyzed_paths" not in json.dumps(compact)
@@ -167,8 +182,6 @@ def test_compact_context_projects_items_with_their_primary_continuations() -> No
     compact = compact_context_bundle(bundle)
 
     assert [item["record_id"] for item in compact["groups"]["reviewed_knowledge"]] == ["K-1"]
-    assert compact["selection"]["displayed_group_counts"]["reviewed_knowledge"] == 1
-    assert compact["selection"]["continuations"] == {"total": 10, "displayed": 8, "omitted": 2}
     continuations = {
         (item["selector"]["kind"], item["selector"]["value"]): item["actions"]
         for item in compact["continuations"]
@@ -178,7 +191,8 @@ def test_compact_context_projects_items_with_their_primary_continuations() -> No
         assert continuations[("file", path)] == ["workspace.open", "graph.file"]
     assert ("document", "docs/sources/source-0.md") in continuations
     assert ("document", "docs/sources/source-1.md") in continuations
-    assert ("document", "docs/sources/source-2.md") not in continuations
+    assert ("document", "docs/sources/source-2.md") in continuations
+    assert ("document", "docs/sources/source-3.md") not in continuations
     assert ("document", "docs/sources/invalid.md") not in continuations
 
 
@@ -262,20 +276,18 @@ def test_compact_context_scans_until_group_limits_and_keeps_warnings() -> None:
     compact = compact_context_bundle(bundle)
 
     assert compact == compact_context_bundle(bundle)
-    assert [item["source_ref"]["path"] for item in compact["groups"]["callers_and_dependents"]] == ["<shared-file-0>", "<shared-file-1>"]
-    assert compact["groups"]["reviewed_knowledge"] == []
+    assert [item["source_ref"]["path"] for item in compact["groups"]["callers_and_dependents"]] == ["<new-symbol-0>"]
+    assert [item["record_id"] for item in compact["groups"]["reviewed_knowledge"]] == ["K-2"]
     assert compact["groups"]["supporting_evidence"] == []
-    assert compact["groups"]["warnings_and_completeness"] == [{"code": "graph_partial", "status": "warning"}]
-    assert compact["selection"]["displayed_group_counts"]["callers_and_dependents"] == 2
-    assert compact["selection"]["continuations"] == {"total": 11, "displayed": 8, "omitted": 3}
+    assert compact["groups"]["warnings_and_completeness"] == []
+    assert sum(len(items) for group, items in compact["groups"].items() if group != "warnings_and_completeness") <= 8
     continuations = {
         (item["selector"]["kind"], item["selector"]["value"]): item["actions"]
         for item in compact["continuations"]
     }
-    assert continuations[("file", "src/module-0.py")] == ["workspace.open", "graph.file", "graph.impact_file"]
-    assert continuations[("file", "src/module-1.py")] == ["workspace.open", "graph.file", "graph.impact_file"]
-    assert ("symbol", "new_symbol_0") not in continuations
-    assert ("knowledge_record", "K-2") not in continuations
+    assert continuations[("file", "src/module-0.py")] == ["workspace.open", "graph.file"]
+    assert continuations[("file", "src/module-1.py")] == ["workspace.open", "graph.file"]
+    assert ("symbol", "new_symbol_0") in continuations
 
 
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -344,7 +356,43 @@ def test_context_query_does_not_inject_unmatched_project_files(tmp_path: Path, m
         for item in items
         if isinstance(item.get("source_ref"), dict)
     }
-    assert "repos/config.json" not in fallback_paths
+    assert "repos/config.json" in fallback_paths
+    config_item = next(
+        item
+        for items in fallback_bundle["groups"].values()
+        for item in items
+        if item.get("source_ref", {}).get("path") == "repos/config.json"
+    )
+    assert config_item["source_ref"]["kind"] == "config"
+
+
+def test_context_query_exactly_matches_workflow_and_dotfile_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    workflow = repo / ".github/workflows/release.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: release\non: push\n", encoding="utf-8")
+    (repo / ".tool-versions").write_text("python 3.13.0\n", encoding="utf-8")
+    (repo / "Dockerfile.dev").write_text("FROM python:3.13-slim\n", encoding="utf-8")
+    (repo / "supabase").mkdir()
+    (repo / "supabase/seed.sql").write_text("INSERT INTO public.jobs (id) VALUES (1);\n", encoding="utf-8")
+    _materialize(tmp_path)
+
+    for query, expected, kind in (
+        (".github/workflows/release.yml", "repos/.github/workflows/release.yml", "config"),
+        (".tool-versions", "repos/.tool-versions", "config"),
+        ("Dockerfile.dev", "repos/Dockerfile.dev", "config"),
+        ("supabase/seed.sql", "repos/supabase/seed.sql", "current_source"),
+    ):
+        assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+        bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+        item = bundle["groups"]["likely_change_surface"][0]
+        assert item["source_ref"] == {
+            "kind": kind,
+            "path": expected,
+            "content_sha256": item["source_ref"]["content_sha256"],
+        }
+        assert item["evidence_role"] in {"change_candidate", "configuration"}
+        assert "exact" in item["selection_reason"]
 
 
 def test_context_query_rejects_unknown_mode(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -469,7 +517,7 @@ def test_context_query_indexes_semantic_source_without_precise_provider(tmp_path
     payload = json.loads(capsys.readouterr().out)
     bundle = payload["data"]["bundle"]
     assert any(item["source_ref"]["path"] == "repos/worker.go" for item in bundle["groups"]["likely_change_surface"])
-    assert bundle["completeness"]["evidence_problem_count"] == 1
+    assert "evidence_problem_count" not in bundle["completeness"]
     assert any(problem["code"] == "context_current_source_too_large" for problem in payload["problems"])
 
 
@@ -479,6 +527,7 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     _materialize(tmp_path)
     (repo / "app.py").write_text("def brand_new_overlay_token():\n    return 'new'\n", encoding="utf-8")
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- active task changed after Graph build\n", encoding="utf-8")
+    original_collect_context_sources = context_module.collect_context_sources
     monkeypatch.setattr(
         "tools.repoctl.context.collect_context_sources",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("context performed a full source scan")),
@@ -490,12 +539,8 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     freshness = payload["data"]["bundle"]["completeness"]["graph_freshness"]
     assert freshness == {
         "status": "stale",
-        "changed_path_count": 1,
         "root_evidence_changed": True,
-        "changed_root_path_count": 1,
-        "materialized_input_digest": freshness["materialized_input_digest"],
     }
-    assert freshness["materialized_input_digest"].startswith("sha256:")
     paths = {
         item["source_ref"]["path"]
         for item in payload["data"]["bundle"]["groups"]["likely_change_surface"]
@@ -509,32 +554,31 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     current_board = (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     assert board["source_ref"]["content_sha256"] == "sha256:" + hashlib.sha256(current_board.encode("utf-8")).hexdigest()
     assert "active task changed after Graph build" in board["excerpt"]
+    monkeypatch.setattr("tools.repoctl.context.collect_context_sources", original_collect_context_sources)
+
+    def assert_partial_fallback(payload: dict, dependency_code: str) -> None:
+        assert payload["ok"] is True
+        assert payload["data"]["bundle"] is not None
+        assert payload["data"]["bundle"]["completeness"]["graph_available"] is False
+        assert any(
+            problem["code"] == "context_graph_unavailable" and dependency_code in problem["message"]
+            for problem in payload["problems"]
+        )
+        assert any(
+            item.get("source_ref", {}).get("path") == "repos/app.py"
+            for items in payload["data"]["bundle"]["groups"].values()
+            for item in items
+        )
 
     index_path = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
     saved_index = index_path.with_suffix(".sqlite3.saved")
     index_path.rename(saved_index)
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     missing = json.loads(capsys.readouterr().out)
-    assert missing["ok"] is False
-    assert missing["data"]["bundle"] is None
-    assert missing["problems"] == [
-        {
-            "severity": "error",
-            "code": "evidence_index_missing",
-            "message": "materialized evidence index is missing; run repoctl graph build --rebuild",
-            "path": ".repoctl-state/graph/main/evidence.sqlite3",
-        }
-    ]
-    assert missing["next_actions"] == [
-        {
-            "label": "Rebuild the materialized Graph and evidence index",
-            "command": "./scripts/repoctl graph build --repo-id main --rebuild --json",
-        }
-    ]
+    assert_partial_fallback(missing, "evidence_index_missing")
     assert main(["graph", "build", "--repo-id", "main", "--json"]) == 1
     missing_build = json.loads(capsys.readouterr().out)
     assert [problem["code"] for problem in missing_build["problems"]] == ["evidence_index_missing"]
-    assert missing_build["next_actions"] == missing["next_actions"]
     saved_index.rename(index_path)
 
     for key, invalid_value in (
@@ -547,13 +591,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
                 "UPDATE metadata SET value = ? WHERE key = ?",
                 (json.dumps(invalid_value), key),
             )
-        assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+        assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
         invalid_schema = json.loads(capsys.readouterr().out)
-        assert invalid_schema["ok"] is False
-        assert invalid_schema["data"]["bundle"] is None
-        assert [problem["code"] for problem in invalid_schema["problems"]] == ["evidence_index_schema_invalid"]
-        assert invalid_schema["problems"][0]["path"] == ".repoctl-state/graph/main/evidence.sqlite3"
-        assert invalid_schema["next_actions"] == missing["next_actions"]
+        assert_partial_fallback(invalid_schema, "evidence_index_schema_invalid")
         with sqlite3.connect(index_path) as connection:
             connection.execute("UPDATE metadata SET value = ? WHERE key = ?", (original_value, key))
 
@@ -563,13 +603,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "UPDATE metadata SET value = ? WHERE key = 'snapshot_digest'",
             (json.dumps("sha256:mismatched-snapshot"),),
         )
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     mismatched = json.loads(capsys.readouterr().out)
-    assert mismatched["ok"] is False
-    assert mismatched["data"]["bundle"] is None
-    assert [problem["code"] for problem in mismatched["problems"]] == ["evidence_index_snapshot_mismatch"]
-    assert mismatched["problems"][0]["path"] == ".repoctl-state/graph/main/evidence.sqlite3"
-    assert mismatched["next_actions"] == missing["next_actions"]
+    assert_partial_fallback(mismatched, "evidence_index_snapshot_mismatch")
     with sqlite3.connect(index_path) as connection:
         connection.execute(
             "UPDATE metadata SET value = ? WHERE key = 'snapshot_digest'",
@@ -582,12 +618,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "UPDATE metadata SET value = ? WHERE key = 'graph_input_digest'",
             (json.dumps("sha256:mismatched-input"),),
         )
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     mismatched_input = json.loads(capsys.readouterr().out)
-    assert mismatched_input["ok"] is False
-    assert mismatched_input["data"]["bundle"] is None
-    assert [problem["code"] for problem in mismatched_input["problems"]] == ["evidence_index_input_mismatch"]
-    assert mismatched_input["next_actions"] == missing["next_actions"]
+    assert_partial_fallback(mismatched_input, "evidence_index_input_mismatch")
     with sqlite3.connect(index_path) as connection:
         connection.execute(
             "UPDATE metadata SET value = ? WHERE key = 'graph_input_digest'",
@@ -600,15 +633,48 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     assert main(["graph", "build", "--repo-id", "main", "--json"]) == 1
     corrupt_build = json.loads(capsys.readouterr().out)
     assert [problem["code"] for problem in corrupt_build["problems"]] == ["graph_materialization_invalid"]
-    assert corrupt_build["next_actions"] == missing["next_actions"]
+    assert corrupt_build["next_actions"] == missing_build["next_actions"]
     assert snapshot_path.read_text(encoding="utf-8") == "{not-json\n"
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     corrupt_snapshot = json.loads(capsys.readouterr().out)
-    assert corrupt_snapshot["ok"] is False
-    assert corrupt_snapshot["data"]["bundle"] is None
-    assert [problem["code"] for problem in corrupt_snapshot["problems"]] == ["graph_materialization_invalid"]
-    assert corrupt_snapshot["next_actions"] == missing["next_actions"]
+    assert_partial_fallback(corrupt_snapshot, "graph_materialization_invalid")
     snapshot_path.write_text(original_snapshot, encoding="utf-8")
+
+
+def test_context_partial_fallback_keeps_source_history_and_reviewed_knowledge(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    token = "partial_fallback_contract_token"
+    (repo / "auth.py").write_text(
+        f"def validate_token(token: str) -> bool:\n    # {token}\n    return bool(token)\n",
+        encoding="utf-8",
+    )
+    _write_completion_receipt(tmp_path, changed_paths=["auth.py"])
+    artifact = tmp_path / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
+    artifact.write_text(artifact.read_text(encoding="utf-8") + f"\n{token}\n", encoding="utf-8")
+    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["content_sha256"] = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    contract = tmp_path / "docs/contracts/repoctl-context-contract.md"
+    contract.write_text(contract.read_text(encoding="utf-8") + f"\n## Decision\n\n{token} remains reusable across tasks.\n", encoding="utf-8")
+
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    _materialize(tmp_path)
+    snapshot_path = tmp_path / ".repoctl-state/graph/main/snapshot.json"
+    snapshot_path.write_text("{broken\n", encoding="utf-8")
+
+    assert main(["context", "query", token, "--repo-id", "main", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    bundle = payload["data"]["bundle"]
+    assert bundle["completeness"]["graph_available"] is False
+    assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == "repos/auth.py"
+    assert bundle["groups"]["reviewed_knowledge"][0]["record_id"] == record_id
+    assert bundle["groups"]["related_history"][0]["record_id"] == "T-20260625010101Z"
+    assert any(problem["code"] == "context_graph_unavailable" for problem in payload["problems"])
 
 
 def test_context_query_markdown_uses_same_grouped_sources(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -669,7 +735,7 @@ def test_context_query_isolates_invalid_completion_receipts(tmp_path: Path, monk
     )
     _materialize(tmp_path)
 
-    assert main(["context", "query", "What should I read first for this project?", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "What should I read first for this project?", "--repo-id", "main", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -677,7 +743,7 @@ def test_context_query_isolates_invalid_completion_receipts(tmp_path: Path, monk
     assert "context_graph_completion_receipt_invalid" in warning_codes
     bundle = payload["data"]["bundle"]
     assert bundle["completeness"]["receipt_problem_count"] == 1
-    assert bundle["completeness"]["receipt_set_complete"] is False
+    assert bundle["completeness"]["graph_completeness"]["receipt_set_complete"] is False
 
 
 def test_default_context_query_keeps_related_completion_history_separate(tmp_path: Path, monkeypatch, capsys) -> None:

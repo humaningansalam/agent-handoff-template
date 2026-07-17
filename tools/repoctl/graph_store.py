@@ -24,6 +24,7 @@ from .graph_import_resolver import ImportResolution, resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, digest_data
 from .graph_semantic_model import CapabilityEvidence, PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
 from .graph_semantic_provider import PROVIDER_INPUT_VERSIONS, PROVIDER_LANGUAGES, build_semantic_provider
+from .graph_structured_relations import STRUCTURED_RELATION_INPUT_VERSION
 from .git import repo_file_state_records
 from .io import atomic_write
 from .language_profiles import language_for_path
@@ -237,6 +238,8 @@ def _root_evidence_records(
     records = [
         *_tree_records(target.root_path / ".repometa", prefix=f"{target.display_path}/.repometa", previous=previous),
         *_tree_records(root / "docs/tasks/.repoctl-state/completions", prefix="docs/tasks/.repoctl-state/completions", previous=previous),
+        *_tree_records(root / "docs/knowledge/records", prefix="docs/knowledge/records", previous=previous),
+        *_tree_records(root / "docs/knowledge/events", prefix="docs/knowledge/events", previous=previous),
     ]
     product_root = target.root_path.resolve()
     for path in context_document_paths(root, target=target):
@@ -398,6 +401,7 @@ def collect_graph_inputs(
         "schema_version": GRAPH_STATE_SCHEMA_VERSION,
         "repository": target.to_dict(),
         "code_index_input_version": CODE_INDEX_INPUT_VERSION,
+        "structured_relation_input_version": STRUCTURED_RELATION_INPUT_VERSION,
         "file_records": file_records,
         "file_fingerprints": file_fingerprints,
         "inventory_digest": digest_data(inventory_records),
@@ -921,10 +925,7 @@ def compact_graph_freshness(freshness: Any) -> dict[str, Any]:
         key: freshness[key]
         for key in (
             "status",
-            "changed_path_count",
             "root_evidence_changed",
-            "changed_root_path_count",
-            "materialized_input_digest",
         )
         if key in freshness
     }
