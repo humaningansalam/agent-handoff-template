@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from tools.repoctl.cli import main
@@ -115,6 +116,100 @@ def test_task_show_reports_current_chosen_scope_drift_as_advisory(tmp_path: Path
     assert payload["data"]["repo_changes"]["scope"]["unchosen_actual_paths"] == ["other.py"]
     assert payload["data"]["repo_changes"]["scope"]["unused_chosen_paths"] == ["chosen.py"]
     assert payload["warnings"][0]["code"] == "task_chosen_scope_drift"
+    assert set(payload["warnings"][0]) == {"severity", "code", "message", "path"}
+    scope_action = next(action for action in payload["next_actions"] if action.get("kind") == "task_scope_review")
+    assert scope_action["source"] == "data.repo_changes.scope.unchosen_actual_paths"
+    assert scope_action["choices"] == ["add_to_chosen", "revert_change", "move_to_follow_up"]
+    assert scope_action["targets"] == ["other.py"]
+
+
+def test_task_start_and_summary_bound_large_path_collections(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    files = {f"file_{index:02d}.py": "value = 1\n" for index in range(25)}
+    init_committed_product_repo(repo, files)
+    for path in files:
+        (repo / path).write_text("value = 2\n", encoding="utf-8")
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    start_payload = json.loads(capsys.readouterr().out)
+    assert start_payload["data"]["dirty_count"] == 25
+    assert len(start_payload["data"]["dirty"]) == 20
+    assert start_payload["data"]["dirty_truncated"] is True
+
+    for path in files:
+        (repo / path).write_text("value = 3\n", encoding="utf-8")
+
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["data"]["repo_changes"]
+    assert summary["task_new"] == 25
+    assert len(summary["task_new_files"]) == 20
+    assert summary["task_new_files_truncated"] is True
+    assert summary["baseline_conflict_count"] == 25
+    assert len(summary["baseline_conflicts"]) == 20
+    assert summary["baseline_conflicts_truncated"] is True
+
+    assert main(["task", "show", "T-20260609184046Z", "--json"]) == 0
+    full_summary = json.loads(capsys.readouterr().out)["data"]["repo_changes"]
+    assert full_summary["baseline_conflict_count"] == 25
+    assert len(full_summary["baseline_conflicts"]) == 25
+    assert full_summary["baseline_conflicts_truncated"] is False
+
+
+def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"a.py": "a = 1\n", "b.py": "b = 1\n"})
+    (repo / "a.py").write_text("a = 2\n", encoding="utf-8")
+    (repo / "b.py").write_text("b = 2\n", encoding="utf-8")
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("- pending", "- Command: pytest\n- Result: pass")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            "T-20260609184046Z",
+            "--query",
+            "two file change",
+            "--reviewed",
+            "repos/a.py",
+            "--reviewed",
+            "repos/b.py",
+            "--chosen",
+            "repos/a.py",
+            "--chosen",
+            "repos/b.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    (repo / "a.py").write_text("a = 3\n", encoding="utf-8")
+    (repo / "b.py").write_text("b = 3\n", encoding="utf-8")
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    action = next(action for action in payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution")
+    assert action["source"] == "data.repo_changes.baseline_conflicts"
+    assert action["choices"] == ["task", "preexisting"]
+    assert action["targets"] == ["a.py", "b.py"]
+    command = shlex.split(action["command"])
+    resolutions = [command[index + 1] for index, token in enumerate(command) if token == "--resolution"]
+    assert resolutions == ["a.py=<task|preexisting>", "b.py=<task|preexisting>"]
+    assert "--preview" in command
+    assert "--ownership" not in command
 
 
 

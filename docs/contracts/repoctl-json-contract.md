@@ -87,6 +87,14 @@ Repo-aware payloads should include repository context instead of overloading `pa
 
 `path` inside file entries remains repo-relative. `workspace_path` is workspace-root-relative when a caller needs a clickable location.
 
+Command results that could be mistaken for broader readiness carry an explicit scope. `task.finish` reports `closure_scope: "task"` and `product_readiness: "not_evaluated"`. The release-candidate field gate reports `scope: "workspace_control_plane"`, `applicability: "repoctl_release_candidate"`, and `product_readiness: "not_evaluated"`.
+
+## Compact projections
+
+Compact task responses retain authoritative counts while bounding path arrays. Each bounded array has a matching count and truncation field, such as `baseline_conflicts`, `baseline_conflict_count`, and `baseline_conflicts_truncated`. Full task state remains available from the non-summary task view and machine-owned task evidence.
+
+`field-gate run release-candidate --json` returns the compact gate view by default: gate status, scalar summary values, problem/warning counts and codes, and the run digest. `--full --json` exposes child commands and nested diagnostic summaries. `--output` always writes the full digest-verifiable artifact even when stdout uses the compact view.
+
 Repository diagnostics separate stable targets from unbound candidates:
 
 ```json
@@ -113,7 +121,10 @@ Repository diagnostics separate stable targets from unbound candidates:
 - They never perform recovery automatically.
 - They must not infer task scope from natural language.
 - They may include `command` or `path` for the user's next explicit action.
+- Actions that require a user-owned decision may include a stable `kind`, a `source` path into the response data, complete `targets`, and enum `choices`. Commands use placeholders for those choices rather than guessing ownership or scope.
 - They are allowed to be incomplete; `problems` remain authoritative.
+
+For example, a baseline conflict action uses `kind: "baseline_ownership_resolution"`, sources paths from `data.repo_changes.baseline_conflicts`, preserves every affected path in `targets`, and offers `task` or `preexisting`. A Chosen-scope action uses `kind: "task_scope_review"`, sources paths from `data.repo_changes.scope.unchosen_actual_paths`, preserves every affected path in `targets`, and offers `add_to_chosen`, `revert_change`, or `move_to_follow_up`.
 
 ## MCP implication
 

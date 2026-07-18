@@ -43,6 +43,38 @@ class GraphQueryIntent(StrEnum):
     GENERIC = "generic"
 
 
+class ResultScope(StrEnum):
+    TASK = "task"
+    WORKSPACE_CONTROL_PLANE = "workspace_control_plane"
+
+
+class ProductReadiness(StrEnum):
+    NOT_EVALUATED = "not_evaluated"
+
+
+class FieldGateApplicability(StrEnum):
+    REPOCTL_RELEASE_CANDIDATE = "repoctl_release_candidate"
+
+
+class NextActionKind(StrEnum):
+    BASELINE_OWNERSHIP_RESOLUTION = "baseline_ownership_resolution"
+    TASK_SCOPE_REVIEW = "task_scope_review"
+
+
+class BaselineOwnership(StrEnum):
+    TASK = "task"
+    PREEXISTING = "preexisting"
+
+
+class TaskScopeResolution(StrEnum):
+    ADD_TO_CHOSEN = "add_to_chosen"
+    REVERT_CHANGE = "revert_change"
+    MOVE_TO_FOLLOW_UP = "move_to_follow_up"
+
+
+COMPACT_PATH_LIMIT = 20
+
+
 class RepoctlArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise RepoctlArgparseError(message)
@@ -156,18 +188,50 @@ def _problem_path(problem: Any) -> str:
     return ""
 
 
-def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | None = None) -> list[dict[str, str]]:
-    actions: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+def _mapping_at(data: dict[str, Any] | None, *keys: str) -> dict[str, Any]:
+    current: Any = data or {}
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item]
+
+
+def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
     task_id = str((data or {}).get("task_id") or "T-...")
 
-    def add(label: str, *, command: str = "", path: str = "") -> None:
-        action = {"label": label}
+    def add(
+        label: str,
+        *,
+        command: str = "",
+        path: str = "",
+        kind: NextActionKind | None = None,
+        source: str = "",
+        choices: list[StrEnum] | None = None,
+        targets: list[str] | None = None,
+    ) -> None:
+        action: dict[str, Any] = {"label": label}
         if command:
             action["command"] = command
         if path:
             action["path"] = path
-        key = (action.get("label", ""), action.get("command", ""), action.get("path", ""))
+        if kind is not None:
+            action["kind"] = kind
+        if source:
+            action["source"] = source
+        if choices:
+            action["choices"] = list(choices)
+        if targets:
+            action["targets"] = list(targets)
+        key = json.dumps(action, ensure_ascii=False, sort_keys=True)
         if key not in seen:
             seen.add(key)
             actions.append(action)
@@ -184,8 +248,22 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
             add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
-        elif code == "actual_changes_outside_chosen":
-            add("Replace active Chosen files", command=f"./scripts/repoctl task discovery add {task_id} --replace-chosen repos/<path> --reason '<reason>' --json")
+        elif code in {"actual_changes_outside_chosen", "task_chosen_scope_drift"}:
+            scope = _mapping_at(data, "repo_changes", "scope")
+            unchosen = _string_list(scope.get("unchosen_actual_paths"))
+            source = "data.repo_changes.scope.unchosen_actual_paths" if unchosen else ""
+            add(
+                "Review repository changes outside the active Chosen scope",
+                command=f"./scripts/repoctl task discovery add {task_id} --reviewed <approved-task-path> --chosen <approved-task-path> --json",
+                kind=NextActionKind.TASK_SCOPE_REVIEW,
+                source=source,
+                choices=[
+                    TaskScopeResolution.ADD_TO_CHOSEN,
+                    TaskScopeResolution.REVERT_CHANGE,
+                    TaskScopeResolution.MOVE_TO_FOLLOW_UP,
+                ],
+                targets=unchosen,
+            )
             add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
             add("Initialize repos/ as an independent git repository", command="git -C repos init")
@@ -193,7 +271,23 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Preflight committed range", command=f"./scripts/repoctl task doctor {task_id} --use-committed-diff --json")
             add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --json")
         elif code == "baseline_conflict":
-            add("Resolve baseline ownership", command=f"./scripts/repoctl task baseline resolve {task_id} --path {path or 'repos/<path>'} --ownership task --json")
+            repo_changes = _mapping_at(data, "repo_changes")
+            structured_conflicts = _string_list(repo_changes.get("baseline_conflicts"))
+            conflicts = list(structured_conflicts)
+            if not conflicts and path:
+                conflicts = [path]
+            resolution_args = " ".join(
+                f"--resolution {shlex.quote(f'{conflict}=<task|preexisting>')}"
+                for conflict in conflicts
+            ) or "--resolution '<path>=<task|preexisting>'"
+            add(
+                "Preview baseline ownership resolutions",
+                command=f"./scripts/repoctl task baseline resolve {task_id} {resolution_args} --preview --json",
+                kind=NextActionKind.BASELINE_OWNERSHIP_RESOLUTION,
+                source="data.repo_changes.baseline_conflicts" if structured_conflicts else "",
+                choices=[BaselineOwnership.TASK, BaselineOwnership.PREEXISTING],
+                targets=conflicts,
+            )
             add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code == "repo_history_rewritten":
             add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
@@ -389,6 +483,17 @@ def _problem_code_counts(problems: list[Problem]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _item_code_counts(items: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(items, list):
+        return counts
+    for item in items:
+        code = _problem_code(item)
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _problems_from_dicts(items: list[dict[str, str]]) -> list[Problem]:
     return [
         Problem(
@@ -523,6 +628,66 @@ def _release_candidate_gate_result(
         "problems": _problem_dicts(problems),
         "warnings": warnings or [],
     }
+
+
+def _is_json_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _compact_field_gate_summary(summary: Any) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, value in summary.items():
+        if _is_json_scalar(value):
+            compact[str(key)] = value
+        elif isinstance(value, dict) and all(_is_json_scalar(child) for child in value.values()):
+            compact[str(key)] = value
+    return compact
+
+
+def _compact_release_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: data[key]
+        for key in (
+            "schema",
+            "schema_version",
+            "repo_id",
+            "scope",
+            "applicability",
+            "product_readiness",
+            "gate_count",
+            "passed_count",
+            "failed_count",
+            "run_digest",
+            "artifact",
+        )
+        if key in data
+    }
+    compact_gates: list[dict[str, Any]] = []
+    for gate in data.get("gates", []):
+        if not isinstance(gate, dict):
+            continue
+        problems = gate.get("problems") if isinstance(gate.get("problems"), list) else []
+        warnings = gate.get("warnings") if isinstance(gate.get("warnings"), list) else []
+        summary = gate.get("summary") if isinstance(gate.get("summary"), dict) else {}
+        compact_summary = _compact_field_gate_summary(summary)
+        compact_gates.append(
+            {
+                "name": str(gate.get("name") or ""),
+                "ok": bool(gate.get("ok")),
+                "mutates_workspace": bool(gate.get("mutates_workspace")),
+                "summary": compact_summary,
+                "problem_count": len(problems),
+                "warning_count": len(warnings),
+                "problem_codes": _item_code_counts(problems),
+                "warning_codes": _item_code_counts(warnings),
+                "details_omitted": compact_summary != summary
+                or any(key in gate for key in ("command", "data_digest")),
+            }
+        )
+    compact["gates"] = compact_gates
+    return compact
 
 
 def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
@@ -839,6 +1004,9 @@ def _release_candidate_payload(*, repo_id: str, gates: list[dict[str, Any]]) -> 
         "schema": "repoctl.field_gate.release_candidate",
         "schema_version": 1,
         "repo_id": repo_id,
+        "scope": ResultScope.WORKSPACE_CONTROL_PLANE,
+        "applicability": FieldGateApplicability.REPOCTL_RELEASE_CANDIDATE,
+        "product_readiness": ProductReadiness.NOT_EVALUATED,
         "gate_count": len(gates),
         "passed_count": len(gates) - error_count,
         "failed_count": error_count,
@@ -1080,12 +1248,17 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False, full:
     problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + validate_live_task_states(root, tasks) + check_board(root, board_paths, tasks, board_text) + receipt_problems + _generated_adapter_problems(root)
     live_paths = [task.rel_path for task in live_tasks(tasks)]
     release_gates = _release_candidate_field_gates(root)
-    release_gate_data: Any = release_gates if full else {
-        "details_included": False,
+    release_gate_data: dict[str, Any] = {
+        "scope": ResultScope.WORKSPACE_CONTROL_PLANE,
+        "applicability": FieldGateApplicability.REPOCTL_RELEASE_CANDIDATE,
+        "product_readiness": ProductReadiness.NOT_EVALUATED,
+        "details_included": full,
         "gate_count": len(release_gates),
         "mutating_gate_count": sum(1 for gate in release_gates if gate.get("mutates_workspace")),
         "run_command": "./scripts/repoctl field-gate run release-candidate --repo-id main --json",
     }
+    if full:
+        release_gate_data["gates"] = release_gates
     payload = {
         "ok": not _has_errors(problems),
         "command": "check",
@@ -1214,25 +1387,33 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
         for gate in data.get("gates", [])
         if not gate.get("ok")
     ]
-    payload = {
+    warnings = [
+        {
+            "code": "field_gate_benchmarks_isolated",
+            "message": "release-candidate benchmarks run in an isolated temporary workspace and do not materialize fixtures in product repositories",
+        }
+    ]
+    full_payload = {
         "ok": not problems,
         "command": "field-gate run",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "field_gate_benchmarks_isolated",
-                "message": "release-candidate benchmarks run in an isolated temporary workspace and do not materialize fixtures in product repositories",
-            }
-        ],
+        "warnings": warnings,
     }
     if output is not None:
         data["artifact"] = {
             "path": output.relative_to(root).as_posix(),
             "run_digest": data.get("run_digest", ""),
         }
-        _complete_json_envelope(payload)
-        atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        _complete_json_envelope(full_payload)
+        atomic_write(output, json.dumps(full_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    payload = {
+        "ok": not problems,
+        "command": "field-gate run",
+        "data": data if args.full else _compact_release_candidate_data(data),
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": warnings,
+    }
     if args.json:
         _json(payload)
     else:
@@ -1366,8 +1547,18 @@ def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> d
         "code": "task_chosen_scope_drift",
         "message": "current repository changes and active Chosen files differ; this is advisory until task finish",
         "path": task.rel_path,
-        "unchosen_actual_paths": scope["unchosen_actual_paths"],
-        "unused_chosen_paths": scope["unused_chosen_paths"],
+    }
+
+
+def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[str, Any] | None:
+    conflicts = _string_list(delta.get("baseline_conflicts"))
+    if not conflicts:
+        return None
+    return {
+        "severity": "warning",
+        "code": "baseline_conflict",
+        "message": "task changes overlap paths that were dirty at task start; resolve ownership before finish",
+        "path": conflicts[0],
     }
 
 
@@ -1377,10 +1568,14 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     delta = repo_changes_since_task_start(root, task.id) if task.status in {"todo", "doing", "blocked"} else None
     warnings: list[dict[str, Any]] = []
     if delta:
+        baseline_warning = _task_baseline_conflict_warning(task, delta)
+        if baseline_warning is not None:
+            warnings.append(baseline_warning)
         scope_warning = _task_scope_drift_warning(root, task, delta)
         if scope_warning is not None:
             warnings.append(scope_warning)
-    repo_changes = _repo_change_summary(delta) if delta else None
+    full_repo_changes = _repo_change_summary(delta, compact=False) if delta else None
+    repo_changes = _repo_change_summary(delta, compact=bool(args.summary or args.section)) if delta else None
     summary = {"task": task.to_list_dict(), "path": task.rel_path, "repo_changes": repo_changes}
     if args.section:
         text = task.path.read_text(encoding="utf-8")
@@ -1403,6 +1598,8 @@ def cmd_task_show(args: argparse.Namespace) -> int:
             "problems": [],
             "warnings": warnings,
         }
+    action_data = {**summary, "task_id": task.id, "repo_changes": full_repo_changes}
+    payload["next_actions"] = _next_actions_for_problems(warnings, data=action_data)
     if args.json:
         _json(payload)
     elif args.section:
@@ -1544,33 +1741,51 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
     except RepoctlError as exc:
         verification_ready = False
         doctor_problems.append(Problem("warning", exc.code or "missing_verification_file", str(exc), exc.path or task.rel_path))
+    target: RepoTarget | None = None
+    repository: dict[str, Any] = {}
+    delta_preparation_failed = False
     try:
-        delta = repo_changes_since_task_start(root, task.id)
-    except RepoctlError:
+        target = _repo_target_for_task_command(root, task)
+        repository = target.to_dict() if target is not None else {}
+        delta = (
+            _task_finish_repo_delta(root, task, target, use_committed_diff=use_committed_diff)
+            if target is not None
+            else repo_changes_since_task_start(root, task.id)
+        )
+    except RepoctlError as exc:
+        delta_preparation_failed = True
+        doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
         delta = {
             "changes": [],
             "baseline_available": False,
             "preexisting_count": 0,
             "baseline_conflicts": [],
         }
-    scope_warning = _task_scope_drift_warning(root, task, delta)
-    try:
-        if verification is None:
-            _meta_gate, delta = _finish_meta_gate(root, task.id, use_committed_diff=use_committed_diff)
-        else:
-            _meta_gate, delta, _result = _prepare_task_finish(
-                root,
-                task.id,
-                verification=verification,
-                use_committed_diff=use_committed_diff,
+    scope_warning = None if delta_preparation_failed else _task_scope_drift_warning(root, task, delta)
+    if not delta_preparation_failed:
+        try:
+            if verification is None:
+                _meta_gate, delta = _finish_meta_gate(
+                    root,
+                    task.id,
+                    use_committed_diff=use_committed_diff,
+                    prepared_delta=delta,
+                )
+            else:
+                _meta_gate, delta, _result = _prepare_task_finish(
+                    root,
+                    task.id,
+                    verification=verification,
+                    use_committed_diff=use_committed_diff,
+                    prepared_delta=delta,
+                )
+        except RepoctlError as exc:
+            discovery_is_already_advisory = verification is None and exc.code == "placeholder_discovery" and any(
+                problem.code == "missing_discovery_evidence" for problem in task_problems
             )
-    except RepoctlError as exc:
-        discovery_is_already_advisory = verification is None and exc.code == "placeholder_discovery" and any(
-            problem.code == "missing_discovery_evidence" for problem in task_problems
-        )
-        scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
-        if not discovery_is_already_advisory and not scope_is_already_advisory:
-            doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
+            scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
+            if not discovery_is_already_advisory and not scope_is_already_advisory:
+                doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
     combined = [*task_problems, *doctor_problems]
     blockers = [problem.code for problem in combined if problem.severity == "error"]
     advisory = [
@@ -1578,11 +1793,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         *([str(scope_warning["code"])] if scope_warning is not None else []),
     ]
     finish_ready = task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers
-    try:
-        target = _repo_target_for_task_command(root, task)
-        repository = target.to_dict() if target is not None else {}
-    except RepoctlError:
-        repository = {}
+    full_repo_changes = _repo_change_summary(delta, compact=False)
     data = {
         "task_id": task.id,
         "status": task.status,
@@ -1590,9 +1801,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "finish_ready": finish_ready,
         "blocked_by": blockers,
         "advisory": advisory,
-        "repo_changes": {
-            **_repo_change_summary(delta),
-        },
+        "repo_changes": _repo_change_summary(delta),
         "repository": repository,
         "evidence_mode": "committed_range" if use_committed_diff else "working_tree_diff",
         "verification": {
@@ -1610,23 +1819,50 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             *([scope_warning] if scope_warning is not None else []),
         ],
     }
+    action_data = {**data, "repo_changes": full_repo_changes}
+    payload["next_actions"] = _next_actions_for_problems(
+        [*payload["problems"], *payload["warnings"]],
+        data=action_data,
+    )
     return payload
 
 
-def _repo_change_summary(delta: dict[str, Any]) -> dict[str, Any]:
+def _project_string_collection(values: Any, *, compact: bool) -> tuple[list[str], int, bool]:
+    items = _string_list(values)
+    visible = items[:COMPACT_PATH_LIMIT] if compact else items
+    return visible, len(items), compact and len(items) > COMPACT_PATH_LIMIT
+
+
+def _scope_summary(scope: Any, *, compact: bool) -> dict[str, Any]:
+    if not isinstance(scope, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("actual_paths", "chosen_paths", "unchosen_actual_paths", "unused_chosen_paths"):
+        visible, count, truncated = _project_string_collection(scope.get(key), compact=compact)
+        summary[key] = visible
+        summary[f"{key}_count"] = count
+        summary[f"{key}_truncated"] = truncated
+    return summary
+
+
+def _repo_change_summary(delta: dict[str, Any], *, compact: bool = True) -> dict[str, Any]:
     task_new_files = [entry[1] for entry in delta.get("changes", [])]
+    visible_task_new, _task_new_count, task_new_truncated = _project_string_collection(task_new_files, compact=compact)
+    visible_conflicts, conflict_count, conflicts_truncated = _project_string_collection(delta.get("baseline_conflicts"), compact=compact)
     summary = {
         "task_new": len(task_new_files),
-        "task_new_files": task_new_files[:20],
-        "task_new_files_truncated": len(task_new_files) > 20,
+        "task_new_files": visible_task_new,
+        "task_new_files_truncated": task_new_truncated,
         "preexisting_dirty": delta.get("preexisting_count", 0),
         "baseline_available": bool(delta.get("baseline_available")),
-        "baseline_conflicts": delta.get("baseline_conflicts", []),
+        "baseline_conflicts": visible_conflicts,
+        "baseline_conflict_count": conflict_count,
+        "baseline_conflicts_truncated": conflicts_truncated,
         "repo_git_available": bool(delta.get("repo_git") and delta["repo_git"].available),
         "repo_git_reason": str(delta.get("repo_git").reason) if delta.get("repo_git") and not delta["repo_git"].available else "",
     }
     if isinstance(delta.get("scope"), dict):
-        summary["scope"] = delta["scope"]
+        summary["scope"] = _scope_summary(delta["scope"], compact=compact)
     return summary
 
 
@@ -1832,7 +2068,15 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         result = start_task(root, task_id, force_dirty=args.force_dirty)
         atomic_write(result["task"].path, result["text"])
     delta = repo_changes_since_task_start(root, task_id)
-    data = {"task_id": task_id, "status": "doing", "dirty": result["dirty"], "repo_changes": _repo_change_summary(delta)}
+    visible_dirty, dirty_count, dirty_truncated = _project_string_collection(result["dirty"], compact=True)
+    data = {
+        "task_id": task_id,
+        "status": "doing",
+        "dirty": visible_dirty,
+        "dirty_count": dirty_count,
+        "dirty_truncated": dirty_truncated,
+        "repo_changes": _repo_change_summary(delta),
+    }
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(result["task"]):
         repo_path = "repos"
@@ -1911,7 +2155,76 @@ def _repo_target_for_task_command(root: Path, task: Any) -> RepoTarget | None:
     return layout.targets[0] if len(layout.targets) == 1 else None
 
 
-def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+def _task_finish_repo_delta(
+    root: Path,
+    task: Any,
+    target: RepoTarget,
+    *,
+    use_committed_diff: bool,
+) -> dict[str, Any]:
+    if _repo_scoped_frontmatter(task) and not use_committed_diff:
+        start_head = task_repo_head_at_start(root, task.id)
+        current_head, head_state = repo_git_head(root, target)
+        if start_head and head_state.available and current_head != start_head:
+            raise RepoctlError(
+                "repo HEAD changed since task start; use --use-committed-diff only when the recorded start HEAD is an ancestor of the current HEAD",
+                code="repo_head_changed_since_start",
+                path=task.rel_path,
+            )
+    delta = repo_changes_since_task_start(root, task.id)
+    if not use_committed_diff:
+        delta["ownership"] = task_baseline_ownership_evidence(root, task.id)
+        return delta
+
+    pending_task_changes = delta.get("changes") or []
+    if pending_task_changes:
+        changed = ", ".join(str(entry[1]) for entry in pending_task_changes[:8])
+        suffix = "" if len(pending_task_changes) <= 8 else f", ... +{len(pending_task_changes) - 8} more"
+        raise RepoctlError(
+            f"committed diff finish requires no uncommitted task changes after the commit: {changed}{suffix}",
+            code="repo_dirty_after_committed_diff",
+            path=str(pending_task_changes[0][1]),
+        )
+    start_head = task_repo_head_at_start(root, task.id)
+    if not start_head:
+        raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
+    current_head, head_state = repo_git_head(root, target)
+    if not head_state.available:
+        raise RepoctlError(f"committed diff finish cannot read repository HEAD: {head_state.reason}", code="repo_git_unavailable", path=head_state.repo_path or target.display_path)
+    is_ancestor, ancestry_state = repo_is_ancestor(root, ancestor=start_head, descendant=current_head, target=target)
+    if not ancestry_state.available:
+        raise RepoctlError(f"committed diff finish cannot compare repository history: {ancestry_state.reason}", code="repo_commit_range_unavailable", path=ancestry_state.repo_path or target.display_path)
+    if not is_ancestor:
+        raise RepoctlError(
+            "committed diff finish requires the recorded start HEAD to be an ancestor of the observed HEAD",
+            code="repo_history_rewritten",
+            path=target.display_path,
+        )
+    committed_changes, range_state = repo_commit_range_entries(root, base=start_head, target=target)
+    if not range_state.available:
+        raise RepoctlError(f"committed diff finish cannot read task commit range: {range_state.reason}", code="repo_commit_range_unavailable", path=range_state.repo_path or target.display_path)
+    committed_conflicts, ownership_evidence = committed_range_baseline_conflicts(root, task.id, committed_changes)
+    return {
+        "changes": committed_changes,
+        "baseline_available": True,
+        "baseline_count": int(delta.get("baseline_count") or 0),
+        "current_count": int(delta.get("current_count") or 0),
+        "preexisting_count": int(delta.get("preexisting_count") or 0),
+        "baseline_conflicts": sorted(set([*list(delta.get("baseline_conflicts") or []), *committed_conflicts])),
+        "initial_dirty_paths": list(delta.get("initial_dirty_paths") or []),
+        "ownership": ownership_evidence or task_baseline_ownership_evidence(root, task.id),
+        "repo_git": range_state,
+        "committed_range": {"base": start_head, "head": current_head},
+    }
+
+
+def _finish_meta_gate(
+    root: Path,
+    task_id: str,
+    *,
+    use_committed_diff: bool = False,
+    prepared_delta: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     task = resolve_task(root, task_id)
     target = _repo_target_for_task_command(root, task)
     if use_committed_diff and target is None:
@@ -1943,59 +2256,12 @@ def _finish_meta_gate(root: Path, task_id: str, *, use_committed_diff: bool = Fa
             "preexisting_count": 0,
             "baseline_conflicts": [],
         }
-    if _repo_scoped_frontmatter(task) and not use_committed_diff:
-        start_head = task_repo_head_at_start(root, task_id)
-        current_head, head_state = repo_git_head(root, target)
-        if start_head and head_state.available and current_head != start_head:
-            raise RepoctlError(
-                "repo HEAD changed since task start; use --use-committed-diff only when the recorded start HEAD is an ancestor of the current HEAD",
-                code="repo_head_changed_since_start",
-                path=task.rel_path,
-            )
-    delta = repo_changes_since_task_start(root, task_id)
-    if use_committed_diff:
-        pending_task_changes = delta.get("changes") or []
-        if pending_task_changes:
-            changed = ", ".join(str(entry[1]) for entry in pending_task_changes[:8])
-            suffix = "" if len(pending_task_changes) <= 8 else f", ... +{len(pending_task_changes) - 8} more"
-            raise RepoctlError(
-                f"committed diff finish requires no uncommitted task changes after the commit: {changed}{suffix}",
-                code="repo_dirty_after_committed_diff",
-                path=str(pending_task_changes[0][1]),
-            )
-        start_head = task_repo_head_at_start(root, task_id)
-        if not start_head:
-            raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
-        current_head, head_state = repo_git_head(root, target)
-        if not head_state.available:
-            raise RepoctlError(f"committed diff finish cannot read repository HEAD: {head_state.reason}", code="repo_git_unavailable", path=head_state.repo_path or target.display_path)
-        is_ancestor, ancestry_state = repo_is_ancestor(root, ancestor=start_head, descendant=current_head, target=target)
-        if not ancestry_state.available:
-            raise RepoctlError(f"committed diff finish cannot compare repository history: {ancestry_state.reason}", code="repo_commit_range_unavailable", path=ancestry_state.repo_path or target.display_path)
-        if not is_ancestor:
-            raise RepoctlError(
-                "committed diff finish requires the recorded start HEAD to be an ancestor of the observed HEAD",
-                code="repo_history_rewritten",
-                path=target.display_path,
-            )
-        committed_changes, range_state = repo_commit_range_entries(root, base=start_head, target=target)
-        if not range_state.available:
-            raise RepoctlError(f"committed diff finish cannot read task commit range: {range_state.reason}", code="repo_commit_range_unavailable", path=range_state.repo_path or target.display_path)
-        committed_conflicts, ownership_evidence = committed_range_baseline_conflicts(root, task_id, committed_changes)
-        delta = {
-            "changes": committed_changes,
-            "baseline_available": True,
-            "baseline_count": int(delta.get("baseline_count") or 0),
-            "current_count": int(delta.get("current_count") or 0),
-            "preexisting_count": int(delta.get("preexisting_count") or 0),
-            "baseline_conflicts": sorted(set([*list(delta.get("baseline_conflicts") or []), *committed_conflicts])),
-            "initial_dirty_paths": list(delta.get("initial_dirty_paths") or []),
-            "ownership": ownership_evidence or task_baseline_ownership_evidence(root, task_id),
-            "repo_git": range_state,
-            "committed_range": {"base": start_head, "head": current_head},
-        }
-    else:
-        delta["ownership"] = task_baseline_ownership_evidence(root, task_id)
+    delta = prepared_delta if prepared_delta is not None else _task_finish_repo_delta(
+        root,
+        task,
+        target,
+        use_committed_diff=use_committed_diff,
+    )
     if delta.get("baseline_conflicts"):
         conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
         suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
@@ -2079,8 +2345,14 @@ def _prepare_task_finish(
     *,
     verification: VerificationInput,
     use_committed_diff: bool = False,
+    prepared_delta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    meta_gate, delta = _finish_meta_gate(root, task_id, use_committed_diff=use_committed_diff)
+    meta_gate, delta = _finish_meta_gate(
+        root,
+        task_id,
+        use_committed_diff=use_committed_diff,
+        prepared_delta=prepared_delta,
+    )
     result = finish_task(
         root,
         task_id,
@@ -2095,17 +2367,25 @@ def _prepare_task_finish(
 def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     repo_git = delta.get("repo_git")
     task_new_files = [str(entry[1]) for entry in delta.get("changes", [])]
+    visible_task_new, _task_new_count, task_new_truncated = _project_string_collection(task_new_files, compact=True)
+    visible_conflicts, conflict_count, conflicts_truncated = _project_string_collection(delta.get("baseline_conflicts"), compact=True)
+    unused_chosen = (delta.get("scope") or {}).get("unused_chosen_paths") if isinstance(delta.get("scope"), dict) else []
+    visible_unused, unused_count, unused_truncated = _project_string_collection(unused_chosen, compact=True)
     summary = {
         "meta_gate_status": str(meta_gate.get("status") or "unknown"),
         "meta_gate_reason": str(meta_gate.get("reason") or ""),
         "task_new_changes": len(task_new_files),
-        "task_new_files": task_new_files[:20],
-        "task_new_files_truncated": len(task_new_files) > 20,
+        "task_new_files": visible_task_new,
+        "task_new_files_truncated": task_new_truncated,
         "current_dirty_files": int(delta.get("current_count") or 0),
         "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
         "baseline_available": bool(delta.get("baseline_available")),
-        "baseline_conflicts": list(delta.get("baseline_conflicts") or []),
-        "unused_chosen_paths": list((delta.get("scope") or {}).get("unused_chosen_paths") or []),
+        "baseline_conflicts": visible_conflicts,
+        "baseline_conflict_count": conflict_count,
+        "baseline_conflicts_truncated": conflicts_truncated,
+        "unused_chosen_paths": visible_unused,
+        "unused_chosen_path_count": unused_count,
+        "unused_chosen_paths_truncated": unused_truncated,
         "repo_git_available": bool(repo_git and repo_git.available),
         "repo_git_reason": str(repo_git.reason) if repo_git and not repo_git.available else "",
         "attention_required": bool(delta.get("baseline_conflicts")) or str(meta_gate.get("status") or "") not in {"passed", "skipped"},
@@ -2240,6 +2520,8 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     data = {
         "task_id": task_id,
         "status": "done",
+        "closure_scope": ResultScope.TASK,
+        "product_readiness": ProductReadiness.NOT_EVALUATED,
         "old_path": result["old_path"],
         "new_path": result["new_path"],
         "archived": result["archived"],
@@ -4539,6 +4821,7 @@ def build_parser() -> argparse.ArgumentParser:
     field_gate_run.add_argument("gate", choices=["release-candidate"])
     field_gate_run.add_argument("--repo-id", default="main")
     field_gate_run.add_argument("--output")
+    field_gate_run.add_argument("--full", action="store_true", help="include child gate commands and full diagnostic summaries")
     field_gate_run.add_argument("--json", action="store_true")
     field_gate_run.set_defaults(func=cmd_field_gate_run)
     field_gate_compare = field_gate_sub.add_parser("compare")

@@ -583,9 +583,18 @@ def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_pa
     subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "change"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
 
+    assert main(["task", "doctor", "T-20260609184046Z", "--use-committed-diff", "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["data"]["evidence_mode"] == "committed_range"
+    assert doctor["data"]["repo_changes"]["scope"]["actual_paths"] == ["app.py"]
+    assert doctor["data"]["repo_changes"]["scope"]["chosen_paths"] == ["app.py"]
+    assert not any(warning["code"] == "task_chosen_scope_drift" for warning in doctor["warnings"])
+
     assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["closure_scope"] == "task"
+    assert payload["data"]["product_readiness"] == "not_evaluated"
     assert payload["data"]["meta_gate"]["status"] == "passed"
     assert payload["data"]["finish_summary"]["task_new_changes"] == 1
     assert payload["data"]["finish_summary"]["committed_range"]["base"]
