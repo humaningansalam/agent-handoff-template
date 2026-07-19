@@ -7,8 +7,8 @@ from typing import Any
 
 from .code_index import CodeIndexEntry
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
-from .context_model import ContextCandidate, ContextSourceRef
-from .context_retrieval import context_query_terms, rank_context_chunks
+from .context_model import ContextSectionKind, ContextSourceRef
+from .context_retrieval import FTS_FIELD_WEIGHTS, context_identity_evidence, context_identity_selectors, context_query_terms
 from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, context_source_kind
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints
@@ -17,7 +17,7 @@ from .tasks import Problem, collect_completion_receipts, completion_receipt_arti
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
-EVIDENCE_INDEX_SCHEMA_VERSION = 3
+EVIDENCE_INDEX_SCHEMA_VERSION = 4
 STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
 
 
@@ -65,6 +65,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
             kind TEXT NOT NULL,
             path TEXT NOT NULL,
             section TEXT NOT NULL,
+            section_kind TEXT NOT NULL,
             line_start INTEGER NOT NULL,
             line_end INTEGER NOT NULL,
             content_sha256 TEXT NOT NULL,
@@ -130,6 +131,7 @@ def _source_key(chunk: DocumentChunk) -> str:
             "kind": chunk.source_ref.kind,
             "path": chunk.source_ref.path,
             "section": chunk.source_ref.section,
+            "section_kind": chunk.source_ref.section_kind.value,
             "line_start": chunk.source_ref.line_start,
             "line_end": chunk.source_ref.line_end,
         }
@@ -140,13 +142,14 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
     connection.executemany(
         """
         INSERT INTO chunks(
-            source_key, kind, path, section, line_start, line_end,
+            source_key, kind, path, section, section_kind, line_start, line_end,
             content_sha256, body, title, file_fingerprint
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_key) DO UPDATE SET
             kind=excluded.kind,
             path=excluded.path,
             section=excluded.section,
+            section_kind=excluded.section_kind,
             line_start=excluded.line_start,
             line_end=excluded.line_end,
             content_sha256=excluded.content_sha256,
@@ -160,6 +163,7 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
                 chunk.source_ref.kind,
                 chunk.source_ref.path,
                 chunk.source_ref.section,
+                chunk.source_ref.section_kind.value,
                 chunk.source_ref.line_start,
                 chunk.source_ref.line_end,
                 chunk.source_ref.content_sha256,
@@ -187,7 +191,16 @@ def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChun
         rel = path.relative_to(root).as_posix()
         static_paths.add(rel)
         try:
-            chunks.append(chunk_text_source(root, rel, path.read_text(encoding="utf-8"), kind="product_manifest", section=path.name))
+            chunks.append(
+                chunk_text_source(
+                    root,
+                    rel,
+                    path.read_text(encoding="utf-8"),
+                    kind="product_manifest",
+                    section=path.name,
+                    section_kind=ContextSectionKind.CONFIG,
+                )
+            )
         except (OSError, UnicodeDecodeError) as exc:
             problems.append(Problem("warning", "context_manifest_unreadable", str(exc), rel))
     for hint in collect_verification_hints(target.root_path):
@@ -196,14 +209,32 @@ def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChun
             continue
         rel = path.relative_to(root).as_posix()
         text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
-        chunks.append(chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}"))
+        chunks.append(
+            chunk_text_source(
+                root,
+                rel,
+                text,
+                kind="verification_hint",
+                section=f"verification: {hint.command}",
+                section_kind=ContextSectionKind.VERIFICATION,
+            )
+        )
     receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
     problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
     for receipt in receipts:
         task_id = str(receipt.get("task_id") or "")
         rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
         text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
-        chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=task_id or "completion receipt"))
+        chunks.append(
+            chunk_text_source(
+                root,
+                rel,
+                text,
+                kind="completion_receipt",
+                section=task_id or "completion receipt",
+                section_kind=ContextSectionKind.TASK,
+            )
+        )
         artifact = completion_receipt_artifact_path(root, receipt)
         if artifact:
             path = root / artifact
@@ -268,12 +299,30 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
     if not kind:
         return [], None
     if kind == "config":
-        return [chunk_text_source(root, entry.workspace_path, text, kind="config", section=entry.path)], None
+        return [
+            chunk_text_source(
+                root,
+                entry.workspace_path,
+                text,
+                kind="config",
+                section=entry.path,
+                section_kind=ContextSectionKind.CONFIG,
+            )
+        ], None
     lines = text.splitlines()
     digest = sha256_text(text)
     ranges = _symbol_ranges(snapshot, entry.path)
     if not ranges:
-        return [chunk_text_source(root, entry.workspace_path, text, kind="current_source", section=entry.path)], None
+        return [
+            chunk_text_source(
+                root,
+                entry.workspace_path,
+                text,
+                kind="current_source",
+                section=entry.path,
+                section_kind=ContextSectionKind.FILE,
+            )
+        ], None
 
     chunks: list[DocumentChunk] = []
     covered = [False] * len(lines)
@@ -293,6 +342,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
                     kind="current_source",
                     path=entry.workspace_path,
                     section=section,
+                    section_kind=ContextSectionKind.PROVIDER_SYMBOL,
                     line_start=bounded_start,
                     line_end=bounded_end,
                     content_sha256=digest,
@@ -309,6 +359,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
                     kind="current_source",
                     path=entry.workspace_path,
                     section=f"{entry.path} module",
+                    section_kind=ContextSectionKind.FILE,
                     line_start=1,
                     line_end=max(1, len(lines)),
                     content_sha256=digest,
@@ -323,7 +374,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
 def _source_manifest(connection: sqlite3.Connection, kinds: set[str]) -> str:
     placeholders = ",".join("?" for _ in kinds)
     rows = connection.execute(
-        f"SELECT kind, path, section, line_start, line_end, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, line_start, line_end",
+        f"SELECT kind, path, section, section_kind, line_start, line_end, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end",
         tuple(sorted(kinds)),
     ).fetchall()
     return digest_data([dict(row) for row in rows])
@@ -487,6 +538,7 @@ def _row_chunk(row: sqlite3.Row) -> DocumentChunk:
             kind=str(row["kind"]),
             path=str(row["path"]),
             section=str(row["section"]),
+            section_kind=ContextSectionKind(str(row["section_kind"])),
             line_start=int(row["line_start"]),
             line_end=int(row["line_end"]),
             content_sha256=str(row["content_sha256"]),
@@ -517,7 +569,7 @@ def query_evidence_index(
     graph_input_digest: str = "",
     limit: int = 24,
     database_path: Path | None = None,
-) -> tuple[list[ContextCandidate], dict[str, Any], list[Problem]]:
+) -> tuple[list[DocumentChunk], dict[str, Any], list[Problem]]:
     metadata, problems = load_evidence_index_metadata(root, target=target, database_path=database_path)
     if problems:
         return [], metadata, problems
@@ -533,44 +585,106 @@ def query_evidence_index(
         if problems:
             return [], metadata, problems
     terms = sorted(context_query_terms(query))
-    if not terms:
+    selectors = context_identity_selectors(query)
+    if not terms and not selectors:
         return [], metadata, []
     path = _database_path(root, target, database_path)
     connection = _connect(path, read_only=True)
     try:
         filter_sql, filter_params = _retrieval_filter(mode, target)
-        phrase = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-        fts_rows = connection.execute(
-            f"""
-            SELECT c.*, bm25(chunks_fts) AS rank
-            FROM chunks_fts
-            JOIN chunks AS c ON c.id = chunks_fts.rowid
-            WHERE chunks_fts MATCH ? AND {filter_sql}
-            ORDER BY rank, c.path, c.line_start
-            LIMIT 80
-            """,
-            [phrase, *filter_params],
-        ).fetchall()
-        exact_clauses: list[str] = []
-        exact_params: list[Any] = []
-        for term in terms[:12]:
-            exact_clauses.append("(instr(lower(c.path), ?) > 0 OR instr(lower(c.section), ?) > 0 OR instr(lower(c.body), ?) > 0)")
-            exact_params.extend([term.casefold(), term.casefold(), term.casefold()])
-        exact_rows = connection.execute(
-            f"SELECT c.* FROM chunks AS c WHERE {filter_sql} AND ({' OR '.join(exact_clauses)}) ORDER BY c.path, c.line_start LIMIT 160",
-            [*filter_params, *exact_params],
-        ).fetchall()
+        fts_rows = _path_diverse_fts_rows(
+            connection,
+            terms=terms,
+            filter_sql=filter_sql,
+            filter_params=filter_params,
+            limit=limit,
+        )
+        exact_rows = _exact_identity_rows(
+            connection,
+            selectors=selectors,
+            filter_sql=filter_sql,
+            filter_params=filter_params,
+            limit=limit,
+        )
         rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in [*fts_rows, *exact_rows]}
-        chunks = [_row_chunk(row) for _row_id, row in sorted(rows.items())]
-        fts_scores = {
-            _row_chunk(row).source_ref.key(): 1.0 / position
-            for position, row in enumerate(fts_rows, start=1)
-        }
-        return rank_context_chunks(query, chunks, fts_scores=fts_scores, limit=limit), metadata, []
-    except sqlite3.Error as exc:
+        return [_row_chunk(row) for _row_id, row in sorted(rows.items())], metadata, []
+    except (sqlite3.Error, ValueError) as exc:
         return [], metadata, [Problem("error", "evidence_index_query_failed", str(exc), _path_label(root, path))]
     finally:
         connection.close()
+
+
+def _path_diverse_fts_rows(
+    connection: sqlite3.Connection,
+    *,
+    terms: list[str],
+    filter_sql: str,
+    filter_params: list[Any],
+    limit: int,
+) -> list[sqlite3.Row]:
+    if not terms:
+        return []
+    phrase = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+    weights = ", ".join(str(weight) for weight in FTS_FIELD_WEIGHTS)
+    cursor = connection.execute(
+        f"""
+        SELECT c.*, bm25(chunks_fts, {weights}) AS rank
+        FROM chunks_fts
+        JOIN chunks AS c ON c.id = chunks_fts.rowid
+        WHERE chunks_fts MATCH ? AND {filter_sql}
+        ORDER BY rank, c.path, c.line_start, c.id
+        """,
+        [phrase, *filter_params],
+    )
+    path_limit = max(24, max(1, limit) * 2)
+    chunks_per_path = 4
+    path_counts: dict[str, int] = {}
+    rows: list[sqlite3.Row] = []
+    for row in cursor:
+        row_path = str(row["path"])
+        path_counts.setdefault(row_path, 0)
+        if path_counts[row_path] < chunks_per_path:
+            rows.append(row)
+            path_counts[row_path] += 1
+        if len(path_counts) >= path_limit:
+            break
+    return rows
+
+
+def _exact_identity_rows(
+    connection: sqlite3.Connection,
+    *,
+    selectors: tuple[tuple[str, ...], ...],
+    filter_sql: str,
+    filter_params: list[Any],
+    limit: int,
+) -> list[sqlite3.Row]:
+    if not selectors:
+        return []
+    identity_limit = max(64, max(1, limit) * 4)
+    matching_ids: list[int] = []
+    cursor = connection.execute(
+        f"SELECT c.id, c.path, c.section, c.section_kind FROM chunks AS c WHERE {filter_sql} ORDER BY c.path, c.line_start, c.id",
+        filter_params,
+    )
+    for row in cursor:
+        section_kind = ContextSectionKind(str(row["section_kind"]))
+        if context_identity_evidence(
+            selectors,
+            path=str(row["path"]),
+            section=str(row["section"]),
+            section_kind=section_kind,
+        ):
+            matching_ids.append(int(row["id"]))
+            if len(matching_ids) >= identity_limit:
+                break
+    if not matching_ids:
+        return []
+    placeholders = ",".join("?" for _ in matching_ids)
+    return connection.execute(
+        f"SELECT c.* FROM chunks AS c WHERE c.id IN ({placeholders}) ORDER BY c.path, c.line_start, c.id",
+        matching_ids,
+    ).fetchall()
 
 
 def evidence_chunks_for_paths(

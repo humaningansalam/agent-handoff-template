@@ -1,20 +1,38 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
-from .context_retrieval import excerpt_for_query, rank_context_chunks, retrieve_context
+from .context_model import (
+    CONTEXT_ANCHOR_STRENGTH_PRIORITY,
+    ContextAnchorResolution,
+    ContextAnchorResolutionCode,
+    ContextAnchorStatus,
+    ContextAnchorStrength,
+    ContextBundle,
+    ContextCandidate,
+    ContextEvidenceKind,
+    ContextGraphAnchorCandidate,
+    ContextSectionKind,
+    ContextSourceRef,
+)
+from .context_retrieval import excerpt_for_query, retrieve_context
 from .context_sources import collect_context_sources, context_graph_problems, context_overlay_chunks, current_source_chunks_for_paths
 from .evidence_store import evidence_chunks_for_paths, query_evidence_index
 from .graph import project_context_neighborhood
-from .graph_model import digest_data
+from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError
-from .knowledge_candidates import query_knowledge_records
+from .knowledge_candidates import (
+    KnowledgeExplicitPathKind,
+    KnowledgeExplicitPathRole,
+    KnowledgeQueryMatchStrength,
+    query_knowledge_records,
+)
 from .path_roles import is_test_path
-from .repositories import RepoTarget
+from .repositories import RepoSelectorStatus, RepoTarget, resolve_repo_selector_path
 from .tasks import Problem, normalize_task_id
 
 
@@ -69,13 +87,15 @@ def build_context_bundle(
     else:
         freshness, freshness_problems = {"status": "missing", "changed_paths": []}, []
     include_history = query_mode in {"auto", "past_decision", "failure_mode"}
-    indexed_candidates: list[ContextCandidate] = []
+    indexed_chunks: list[Any] = []
     index_meta: dict[str, Any] = {}
     index_problems: list[Problem] = []
     index_available = False
+    stale_workspace_paths: set[str] = set()
+    overlay_chunks: list[Any] = []
     evidence_index_path = graph_state_root / target.id / "evidence.sqlite3" if graph_state_root is not None else None
     if snapshot is not None:
-        indexed_candidates, index_meta, index_problems = query_evidence_index(
+        indexed_chunks, index_meta, index_problems = query_evidence_index(
             root,
             target=target,
             query=query,
@@ -145,12 +165,10 @@ def build_context_bundle(
             *{f"{target.display_path.rstrip('/')}/{path}" for path in changed_repo_paths},
             *{str(path) for path in freshness.get("changed_root_paths", []) if str(path)},
         }
-        indexed_candidates = [candidate for candidate in indexed_candidates if candidate.source_ref.path not in stale_workspace_paths]
         classifications = freshness.get("changed_path_classifications") if isinstance(freshness.get("changed_path_classifications"), dict) else {}
-        overlay_candidates, overlay_chunks, overlay_problems = _changed_source_candidates(
+        overlay_chunks, overlay_problems = current_source_chunks_for_paths(
             root,
             target=target,
-            query=query,
             repo_paths={path for path in changed_repo_paths if str(classifications.get(path) or "") != "excluded"},
         )
         problems.extend(overlay_problems)
@@ -161,19 +179,22 @@ def build_context_bundle(
             include_history=include_history,
         )
         problems.extend(static_overlay_problems)
-        static_overlay_candidates = retrieve_context(
-            query,
-            _retrieval_chunks(static_overlay_chunks, mode=query_mode, target=target),
-            limit=24,
-        )
         overlay_chunks.extend(static_overlay_chunks)
         if overlay_chunks:
             source_snapshots["overlay_manifest_digest"] = digest_data(
                 [chunk.source_ref.to_dict() for chunk in sorted(overlay_chunks, key=lambda item: item.source_ref.key())]
             )
-        retrieved_candidates = _dedupe_candidates([*indexed_candidates, *overlay_candidates, *static_overlay_candidates])[:24]
+        retrieval_chunks = _retrieval_chunks(
+            _merge_retrieval_chunks(
+                indexed_chunks,
+                overlay_chunks,
+                replaced_paths=stale_workspace_paths,
+            ),
+            mode=query_mode,
+            target=target,
+        )
+        retrieved_candidates = retrieve_context(query, retrieval_chunks, limit=24)
     else:
-        overlay_chunks = []
         chunks, source_snapshots, completeness, source_problems = collect_context_sources(
             root,
             target=target,
@@ -195,18 +216,91 @@ def build_context_bundle(
         graph_completeness["status"] = "partial"
         graph_completeness["task_history_fresh"] = False
         completeness["graph_completeness"] = graph_completeness
+    knowledge_data: dict[str, Any] = {}
+    knowledge_queried = False
+    if query_mode in GRAPH_EXPANSION_MODES and include_linked_records:
+        related_paths = _knowledge_related_paths(target=target, evidence=retrieved_candidates)
+        knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(
+            root,
+            repo_id=target.id,
+            query=query,
+            include_stale=False,
+            limit=3,
+            explain=explain,
+            related_paths=related_paths,
+            require_related=False,
+        )
+        knowledge_queried = True
+        problems.extend(
+            Problem(
+                "warning",
+                "context_linked_knowledge_unavailable",
+                f"{problem.code}: {problem.message}; current source and Graph results remain available",
+                problem.path,
+            )
+            for problem in knowledge_problems
+        )
+        problems.extend(knowledge_warnings)
+        knowledge_path_candidates, knowledge_path_problems = _reviewed_knowledge_path_candidates(
+            root,
+            target=target,
+            query=query,
+            knowledge_results=knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else [],
+            snapshot=snapshot,
+            chunks=chunks,
+            overlay_chunks=overlay_chunks,
+            stale_workspace_paths=stale_workspace_paths,
+            index_available=index_available,
+            evidence_index_path=evidence_index_path,
+        )
+        problems.extend(knowledge_path_problems)
+        retrieved_candidates = _dedupe_candidates([*knowledge_path_candidates, *retrieved_candidates])
     graph_projection: dict[str, Any] = {}
+    graph_anchor_resolution: ContextAnchorResolution | None = None
     if query_mode in GRAPH_EXPANSION_MODES:
-        if snapshot is not None:
+        graph_anchor_resolution = _resolve_graph_anchors(retrieved_candidates, target=target)
+        completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
+        if snapshot is not None and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
             stale_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
-            seed_paths = [path for path in _graph_seed_paths(retrieved_candidates, target=target) if path not in stale_paths]
-            graph_projection = project_context_neighborhood(snapshot, seed_paths=seed_paths) if seed_paths else {}
+            graph_anchors = [
+                candidate.anchor
+                for candidate in graph_anchor_resolution.anchors
+                if candidate.anchor.path not in stale_paths
+            ]
+            if len(graph_anchors) != len(graph_anchor_resolution.anchors):
+                graph_anchor_resolution = ContextAnchorResolution(
+                    status=ContextAnchorStatus.UNRESOLVED,
+                    code=ContextAnchorResolutionCode.UNRESOLVED,
+                    candidates=graph_anchor_resolution.candidates,
+                )
+                completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
+            seed_paths = list(dict.fromkeys(anchor.path for anchor in graph_anchors))
+            if graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
+                graph_projection = project_context_neighborhood(
+                    snapshot,
+                    anchors=graph_anchors,
+                    mode=query_mode,
+                )
+            if graph_projection.get("ambiguous_anchors"):
+                graph_anchor_resolution = ContextAnchorResolution(
+                    status=ContextAnchorStatus.AMBIGUOUS,
+                    code=ContextAnchorResolutionCode.AMBIGUOUS,
+                    candidates=graph_anchor_resolution.candidates,
+                )
+                completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
+            elif graph_projection.get("unresolved_anchors"):
+                graph_anchor_resolution = ContextAnchorResolution(
+                    status=ContextAnchorStatus.UNRESOLVED,
+                    code=ContextAnchorResolutionCode.UNRESOLVED,
+                    candidates=graph_anchor_resolution.candidates,
+                )
+                completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
             graph_projection = _fresh_graph_projection(
                 graph_projection,
                 stale_paths=stale_paths,
                 task_history_stale=_task_history_stale(freshness),
             )
-            if index_available:
+            if index_available and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
                 projected_paths = {
                     f"{target.display_path.rstrip('/')}/{path}"
                     for path in [*seed_paths, *[str(path) for path in graph_projection.get("related_paths", [])]]
@@ -220,14 +314,23 @@ def build_context_bundle(
                     database_path=evidence_index_path,
                 )
                 problems.extend(chunk_problems)
-        graph_candidates, graph_warnings, graph_projection = _graph_context_candidates(
-            snapshot,
-            chunks=chunks,
-            target=target,
-            source_candidates=retrieved_candidates,
-            query=query,
-            projection=graph_projection or None,
-        )
+        if graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
+            graph_candidates, graph_warnings, graph_projection = _graph_context_candidates(
+                snapshot,
+                chunks=chunks,
+                target=target,
+                source_candidates=retrieved_candidates,
+                query=query,
+                anchor_resolution=graph_anchor_resolution,
+                projection=graph_projection,
+            )
+        else:
+            graph_candidates = []
+            graph_warnings = (
+                [_graph_anchor_warning(graph_anchor_resolution)]
+                if graph_anchor_resolution.status == ContextAnchorStatus.AMBIGUOUS
+                else []
+            )
     else:
         graph_candidates, graph_warnings = [], []
     if freshness.get("status") == "stale":
@@ -268,30 +371,9 @@ def build_context_bundle(
     startup_candidates = _startup_query_candidates(startup_chunks, target=target, mode=query_mode)
     evidence = _dedupe_candidates([*startup_candidates, *graph_candidates, *retrieved_candidates])
     selection = {"evidence_count": len(evidence)}
-    knowledge_data: dict[str, Any] = {}
-    if query_mode == "auto" and include_linked_records:
-        related_paths = _knowledge_related_paths(target=target, evidence=evidence)
-        knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(
-            root,
-            repo_id=target.id,
-            query=query,
-            include_stale=False,
-            limit=3,
-            explain=explain,
-            related_paths=related_paths,
-            require_related=False,
-        )
-        problems.extend(
-            Problem(
-                "warning",
-                "context_linked_knowledge_unavailable",
-                f"{problem.code}: {problem.message}; current source and Graph results remain available",
-                problem.path,
-            )
-            for problem in knowledge_problems
-        )
-        problems.extend(knowledge_warnings)
-    elif query_mode in {"authority_or_contract", "invariant", "past_decision", "failure_mode"}:
+    if graph_anchor_resolution is not None:
+        selection["graph_anchor"] = graph_anchor_resolution.to_dict()
+    if not knowledge_queried and query_mode in {"authority_or_contract", "invariant", "past_decision", "failure_mode"}:
         knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(root, repo_id=target.id, query=query, include_stale=False, limit=10, explain=explain)
         problems.extend(knowledge_problems)
         problems.extend(knowledge_warnings)
@@ -307,6 +389,12 @@ def build_context_bundle(
             history=graph_projection.get("history", []) if include_linked_records and isinstance(graph_projection.get("history"), list) else [],
         ),
     )
+    _displayed_groups, _continuations, compact_projection = _compact_projection(
+        groups,
+        mode=query_mode,
+        max_group_items=COMPACT_ITEM_LIMIT,
+    )
+    selection["compact_projection"] = compact_projection
     bundle = ContextBundle(
         repository=target.to_dict(),
         query={"text": query, "type": "natural_language", "mode": query_mode, "explain": explain},
@@ -354,19 +442,19 @@ def _context_index_warnings(index_problems: list[Problem]) -> list[Problem]:
     ]
 
 
-def _changed_source_candidates(
-    root: Path,
+def _merge_retrieval_chunks(
+    indexed_chunks: list[Any],
+    overlay_chunks: list[Any],
     *,
-    target: RepoTarget,
-    query: str,
-    repo_paths: set[str],
-) -> tuple[list[ContextCandidate], list[Any], list[Problem]]:
-    chunks, problems = current_source_chunks_for_paths(
-        root,
-        target=target,
-        repo_paths=repo_paths,
-    )
-    return retrieve_context(query, chunks, limit=24), chunks, problems
+    replaced_paths: set[str],
+) -> list[Any]:
+    merged: dict[tuple[str, str, str, str, int, int], Any] = {}
+    for chunk in indexed_chunks:
+        if chunk.source_ref.path not in replaced_paths:
+            merged[chunk.source_ref.key()] = chunk
+    for chunk in overlay_chunks:
+        merged[chunk.source_ref.key()] = chunk
+    return [merged[key] for key in sorted(merged)]
 
 
 def _fresh_graph_projection(
@@ -473,28 +561,11 @@ def render_context_markdown(bundle: ContextBundle) -> str:
 
 def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 120) -> dict[str, Any]:
     """Return the default agent-facing view without full evidence diagnostics."""
-    group_limits = {
-        "must_read": 2,
-        "likely_change_surface": 2,
-        "callers_and_dependents": 1,
-        "tests_and_verification": 1,
-        "reviewed_knowledge": 1,
-        "related_history": 1,
-        "supporting_evidence": 1,
-        "warnings_and_completeness": 1,
-    }
     mode = str(bundle.query.get("mode") or "auto")
-    if mode == "startup_reading":
-        group_limits["must_read"] = 5
-    elif mode in {"authority_or_contract", "invariant"}:
-        group_limits["must_read"] = 3
-    displayed_items, continuations, _continuation_counts = _compact_bundle_projection(
+    displayed_items, continuations, _projection_stats = _compact_projection(
         bundle.groups,
-        group_limits=group_limits,
-        max_group_items=max_group_items,
-        item_limit=COMPACT_ITEM_LIMIT,
-        continuation_limit=COMPACT_CONTINUATION_LIMIT,
         mode=mode,
+        max_group_items=max_group_items,
     )
     groups = {
         group: [_compact_group_item(item, excerpt_chars=excerpt_chars) for item in items]
@@ -514,13 +585,64 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
     }
 
 
+def _compact_projection(
+    groups: dict[str, list[dict[str, Any]]],
+    *,
+    mode: str,
+    max_group_items: int,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, Any]]:
+    group_limits = {
+        "must_read": 2,
+        "likely_change_surface": 2,
+        "callers_and_dependents": 1,
+        "tests_and_verification": 1,
+        "reviewed_knowledge": 1,
+        "related_history": 1,
+        "supporting_evidence": 1,
+        "warnings_and_completeness": 1,
+    }
+    if mode == "startup_reading":
+        group_limits["must_read"] = 5
+    elif mode in {"authority_or_contract", "invariant"}:
+        group_limits["must_read"] = 3
+    return _compact_bundle_projection(
+        groups,
+        group_limits=group_limits,
+        max_group_items=max_group_items,
+        item_limit=COMPACT_ITEM_LIMIT,
+        continuation_limit=COMPACT_CONTINUATION_LIMIT,
+        mode=mode,
+    )
+
+
 def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
     graph = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
-    return {
+    compact = {
         "graph_available": bool(completeness.get("graph_available")),
         "graph_freshness": compact_graph_freshness(completeness.get("graph_freshness")),
         "status": str(graph.get("status") or ("unavailable" if not completeness.get("graph_available") else "partial")),
     }
+    anchor = completeness.get("graph_anchor") if isinstance(completeness.get("graph_anchor"), dict) else {}
+    if anchor:
+        anchors = anchor.get("anchors") if isinstance(anchor.get("anchors"), list) else []
+        candidates = anchor.get("candidates") if isinstance(anchor.get("candidates"), list) else []
+        compact["graph_anchor"] = {
+            "status": str(anchor.get("status") or "unresolved"),
+            "code": str(anchor.get("code") or ContextAnchorResolutionCode.UNRESOLVED.value),
+            "seed_paths": [
+                str((item.get("anchor") or {}).get("path") or "")
+                for item in anchors
+                if isinstance(item, dict) and isinstance(item.get("anchor"), dict) and str(item["anchor"].get("path") or "")
+            ],
+            "candidate_paths": list(
+                dict.fromkeys(
+                    str((item.get("anchor") or {}).get("path") or "")
+                    for item in candidates[:5]
+                    if isinstance(item, dict) and isinstance(item.get("anchor"), dict) and str(item["anchor"].get("path") or "")
+                )
+            ),
+        }
+    return compact
 
 
 def _compact_group_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
@@ -578,19 +700,37 @@ def _compact_bundle_projection(
     item_limit: int,
     continuation_limit: int,
     mode: str,
-) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, int]]:
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, Any]]:
     """Project evidence and its producer-owned primary continuations together."""
     group_names = _ordered_context_group_names(all_groups)
     displayed_groups: dict[str, list[dict[str, Any]]] = {group: [] for group in group_names}
     selected_continuations: list[dict[str, Any]] = []
     secondary_continuations: list[dict[str, Any]] = []
 
-    warning_codes = {"context_graph_stale", "context_graph_unavailable", "context_task_history_stale", "context_graph_freshness_unavailable"}
-    displayed_groups["warnings_and_completeness"] = [
-        item
-        for item in all_groups.get("warnings_and_completeness", [])
-        if isinstance(item, dict) and str(item.get("code") or "") in warning_codes
-    ][:1]
+    warning_codes = {
+        "context_graph_stale",
+        "context_graph_unavailable",
+        "context_task_history_stale",
+        "context_graph_freshness_unavailable",
+        ContextAnchorResolutionCode.AMBIGUOUS.value,
+        "context_graph_anchor_snapshot_unresolved",
+    }
+    warning_priority = {
+        "context_graph_stale": 0,
+        "context_graph_unavailable": 1,
+        "context_graph_freshness_unavailable": 2,
+        "context_task_history_stale": 3,
+        "context_graph_anchor_snapshot_unresolved": 4,
+        ContextAnchorResolutionCode.AMBIGUOUS.value: 5,
+    }
+    displayed_groups["warnings_and_completeness"] = sorted(
+        (
+            item
+            for item in all_groups.get("warnings_and_completeness", [])
+            if isinstance(item, dict) and str(item.get("code") or "") in warning_codes
+        ),
+        key=lambda item: warning_priority.get(str(item.get("code") or ""), 99),
+    )[:1]
 
     code_first = ["likely_change_surface", "tests_and_verification", "callers_and_dependents", "must_read", "reviewed_knowledge", "related_history", "supporting_evidence"]
     authority_first = ["must_read", "reviewed_knowledge", "related_history", "likely_change_surface", "tests_and_verification", "callers_and_dependents", "supporting_evidence"]
@@ -637,11 +777,20 @@ def _compact_bundle_projection(
         if len(expanded) <= continuation_limit:
             selected_continuations = expanded
 
+    total_item_count = sum(len(items) for items in all_groups.values())
+    displayed_item_count = sum(len(items) for items in displayed_groups.values())
     all_values = _collect_bundle_continuations(all_groups)
     return displayed_groups, selected_continuations, {
-        "total": len(all_values),
-        "displayed": len(selected_continuations),
-        "omitted": max(0, len(all_values) - len(selected_continuations)),
+        "items": {
+            "total": total_item_count,
+            "displayed": displayed_item_count,
+            "omitted": max(0, total_item_count - displayed_item_count),
+        },
+        "continuations": {
+            "total": len(all_values),
+            "displayed": len(selected_continuations),
+            "omitted": max(0, len(all_values) - len(selected_continuations)),
+        },
     }
 
 
@@ -662,6 +811,170 @@ def _knowledge_related_paths(*, target: RepoTarget, evidence: list[ContextCandid
             if path.startswith(product_prefix):
                 paths.add(path.removeprefix(product_prefix))
     return paths
+
+
+def _reviewed_knowledge_path_candidates(
+    root: Path,
+    *,
+    target: RepoTarget,
+    query: str,
+    knowledge_results: list[dict[str, Any]],
+    snapshot: Any,
+    chunks: list[Any],
+    overlay_chunks: list[Any],
+    stale_workspace_paths: set[str],
+    index_available: bool,
+    evidence_index_path: Path | None,
+) -> tuple[list[ContextCandidate], list[Problem]]:
+    product_prefix = f"{target.display_path.rstrip('/')}/"
+    known_paths = {
+        str(node.identity.get("path") or "")
+        for node in (snapshot.nodes if snapshot is not None else [])
+        if node.kind == "file" and isinstance(node.facts.get("index"), dict) and str(node.identity.get("path") or "")
+    }
+    for chunk in [*chunks, *overlay_chunks]:
+        path = chunk.source_ref.path
+        if chunk.source_ref.kind in ACTIONABLE_PRODUCT_KINDS and path.startswith(product_prefix):
+            known_paths.add(path.removeprefix(product_prefix))
+
+    record_ids_by_path: dict[str, set[str]] = {}
+    problems: list[Problem] = []
+    for result in knowledge_results:
+        record = result.get("record") if isinstance(result.get("record"), dict) else {}
+        if str(record.get("status") or "") != "reviewed":
+            continue
+        match_strength = str(result.get("query_match_strength") or KnowledgeQueryMatchStrength.NONE.value)
+        if match_strength not in {
+            KnowledgeQueryMatchStrength.EXACT.value,
+            KnowledgeQueryMatchStrength.STRONG.value,
+        }:
+            result["code_anchor_status"] = "ineligible_query_match"
+            result["code_path_resolutions"] = []
+            result["resolved_code_paths"] = []
+            continue
+        result["code_anchor_status"] = "eligible"
+        record_id = str(record.get("id") or "")
+        resolutions: list[dict[str, Any]] = []
+        explicit_refs = record.get("explicit_path_refs") if isinstance(record.get("explicit_path_refs"), list) else []
+        for path_ref in explicit_refs:
+            if not isinstance(path_ref, dict):
+                continue
+            kind = str(path_ref.get("kind") or "")
+            if kind not in {
+                KnowledgeExplicitPathKind.APPLIES_TO_PATH.value,
+                KnowledgeExplicitPathKind.SOURCE_REF.value,
+            }:
+                continue
+            raw_path = str(path_ref.get("path") or "")
+            if path_ref.get("role") != KnowledgeExplicitPathRole.CODE_ANCHOR.value:
+                resolutions.append(
+                    {
+                        "kind": kind,
+                        "path": raw_path,
+                        "status": KnowledgeExplicitPathRole.PROVENANCE_ONLY.value,
+                    }
+                )
+                continue
+            resolution = resolve_repo_selector_path(
+                raw_path,
+                repository_path=target.display_path,
+                known_paths=known_paths,
+            )
+            item = {
+                "kind": kind,
+                "path": raw_path,
+                "status": resolution.status.value,
+            }
+            if resolution.status == RepoSelectorStatus.RESOLVED:
+                item["resolved_path"] = resolution.path
+                record_ids_by_path.setdefault(resolution.path, set()).add(record_id)
+            elif resolution.status == RepoSelectorStatus.AMBIGUOUS:
+                item["candidates"] = list(resolution.candidates)
+                problems.append(
+                    Problem(
+                        "warning",
+                        "context_knowledge_path_ambiguous",
+                        f"reviewed Knowledge path resolves to multiple current files: {list(resolution.candidates)}",
+                        raw_path,
+                    )
+                )
+            else:
+                problems.append(
+                    Problem(
+                        "warning",
+                        "context_knowledge_path_unresolved",
+                        "reviewed Knowledge code path does not resolve to a current file",
+                        raw_path,
+                    )
+                )
+            resolutions.append(item)
+        result["code_path_resolutions"] = resolutions
+        result["resolved_code_paths"] = sorted(
+            path
+            for path, record_ids in record_ids_by_path.items()
+            if record_id in record_ids
+        )
+
+    workspace_paths = {f"{target.display_path.rstrip('/')}/{path}" for path in record_ids_by_path}
+    selected_chunks: list[Any] = []
+    if index_available:
+        fresh_paths = workspace_paths - stale_workspace_paths
+        indexed_chunks, chunk_problems = evidence_chunks_for_paths(
+            root,
+            target=target,
+            workspace_paths=fresh_paths,
+            kinds=ACTIONABLE_PRODUCT_KINDS,
+            database_path=evidence_index_path,
+        )
+        selected_chunks.extend(indexed_chunks)
+        problems.extend(chunk_problems)
+        selected_chunks.extend(
+            chunk
+            for chunk in overlay_chunks
+            if chunk.source_ref.path in workspace_paths and chunk.source_ref.kind in ACTIONABLE_PRODUCT_KINDS
+        )
+    else:
+        selected_chunks.extend(
+            chunk
+            for chunk in chunks
+            if chunk.source_ref.path in workspace_paths and chunk.source_ref.kind in ACTIONABLE_PRODUCT_KINDS
+        )
+
+    chunks_by_path: dict[str, list[Any]] = {}
+    for chunk in selected_chunks:
+        chunks_by_path.setdefault(chunk.source_ref.path, []).append(chunk)
+    candidates: list[ContextCandidate] = []
+    for repo_path, record_ids in sorted(record_ids_by_path.items()):
+        workspace_path = f"{target.display_path.rstrip('/')}/{repo_path}"
+        path_chunks = chunks_by_path.get(workspace_path, [])
+        if not path_chunks:
+            problems.append(
+                Problem(
+                    "warning",
+                    "context_knowledge_path_source_unavailable",
+                    "reviewed Knowledge path resolved but no current Context source chunk is available",
+                    workspace_path,
+                )
+            )
+            continue
+        file_chunks = [chunk for chunk in path_chunks if chunk.source_ref.section_kind == ContextSectionKind.FILE]
+        chunk = sorted(
+            file_chunks or path_chunks,
+            key=lambda item: (item.source_ref.line_start, item.source_ref.line_end, item.source_ref.section),
+        )[0]
+        candidates.append(
+            ContextCandidate(
+                source_ref=chunk.source_ref,
+                text=excerpt_for_query(chunk.text, query, limit=700),
+                score=30.0,
+                score_breakdown={"knowledge_path": 1.0},
+                selection_reasons=[f"reviewed Knowledge explicit path: {', '.join(sorted(record_ids))}"],
+                evidence_kinds=(ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH,),
+                anchor_strength=ContextAnchorStrength.EXPLICIT,
+                related_record_ids=tuple(sorted(record_ids)),
+            )
+        )
+    return candidates, problems
 
 
 def _related_path_history(*, target: RepoTarget, evidence: list[ContextCandidate], history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -701,6 +1014,7 @@ def _startup_query_candidates(chunks: list[Any], *, target: RepoTarget, mode: st
                 score_breakdown={"startup_reading": 1.0},
                 selection_reasons=["startup/read-first source"],
                 graph_path=[],
+                evidence_kinds=(ContextEvidenceKind.STARTUP_READING,),
             )
         )
     return sorted(selected, key=lambda candidate: (-candidate.score, candidate.source_ref.path))[:8]
@@ -738,7 +1052,8 @@ def _graph_context_candidates(
     target: RepoTarget,
     source_candidates: list[ContextCandidate],
     query: str,
-    projection: dict[str, Any] | None = None,
+    anchor_resolution: ContextAnchorResolution,
+    projection: dict[str, Any],
 ) -> tuple[list[ContextCandidate], list[dict[str, str]], dict[str, Any]]:
     if snapshot is None:
         return [], [{"code": "context_graph_unavailable", "message": "Graph snapshot was not available for context query"}], {}
@@ -756,13 +1071,14 @@ def _graph_context_candidates(
         if candidate.source_ref.kind not in ACTIONABLE_PRODUCT_KINDS or not path.startswith(product_prefix):
             continue
         repo_path = path.removeprefix(product_prefix)
-        retrieval_by_path.setdefault(repo_path, candidate)
-    seed_paths = _graph_seed_paths(source_candidates, target=target)
-    if not seed_paths:
+        previous = retrieval_by_path.get(repo_path)
+        if previous is None or _candidate_sort_key(candidate) < _candidate_sort_key(previous):
+            retrieval_by_path[repo_path] = candidate
+    seed_paths = list(dict.fromkeys(candidate.anchor.path for candidate in anchor_resolution.anchors))
+    if anchor_resolution.status != ContextAnchorStatus.RESOLVED or not seed_paths:
         return [], [], {}
 
     candidates: list[ContextCandidate] = []
-    projection = projection or project_context_neighborhood(snapshot, seed_paths=seed_paths)
     relations = projection.get("relations") if isinstance(projection.get("relations"), list) else []
     anchor_scores = {
         path: retrieval_by_path[path].score
@@ -793,10 +1109,19 @@ def _graph_context_candidates(
     projected_paths = list(dict.fromkeys([*seed_paths, *[str(path) for path in projection.get("related_paths", [])]]))
     seed_path_set = set(seed_paths)
 
-    def has_exact_identity_origin(relation: dict[str, Any]) -> bool:
+    def has_direct_anchor_origin(relation: dict[str, Any]) -> bool:
         origins = relation.get("origin_paths") if isinstance(relation.get("origin_paths"), list) else []
         return any(
-            candidate is not None and float(candidate.score_breakdown.get("identity") or 0.0) > 0
+            candidate is not None
+            and bool(
+                set(candidate.evidence_kinds)
+                & {
+                    ContextEvidenceKind.EXACT_PATH,
+                    ContextEvidenceKind.EXACT_FILENAME,
+                    ContextEvidenceKind.EXACT_SYMBOL,
+                    ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH,
+                }
+            )
             for origin in origins
             for candidate in [retrieval_by_path.get(str(origin or ""))]
         )
@@ -808,10 +1133,10 @@ def _graph_context_candidates(
             continue
         path_relations = relations_by_path.get(str(path), [])
         scoring_relations = path_relations
-        exact_anchor_dependency = any(
+        direct_anchor_dependency = any(
             str(relation.get("to_path") or "") == str(path)
             and str(relation.get("edge") or "") in {"CALLS", "IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}
-            and has_exact_identity_origin(relation)
+            and has_direct_anchor_origin(relation)
             for relation in path_relations
         )
         propagated_score = 0.0
@@ -841,42 +1166,211 @@ def _graph_context_candidates(
                     "fts": float(retrieved.score_breakdown.get("fts", 0.0)) if retrieved is not None else 0.0,
                     "authority": float(retrieved.score_breakdown.get("authority", 0.0)) if retrieved is not None else 0.0,
                     "graph": propagated_score,
-                    "exact_anchor_dependency": 1.0 if exact_anchor_dependency else 0.0,
+                    "direct_anchor_dependency": 1.0 if direct_anchor_dependency else 0.0,
                 },
                 selection_reasons=reasons or ["Graph direct file relation"],
                 graph_path=scoring_relations[:3],
+                evidence_kinds=retrieved.evidence_kinds if retrieved is not None else (),
+                anchor_strength=retrieved.anchor_strength if retrieved is not None else ContextAnchorStrength.NONE,
+                related_record_ids=retrieved.related_record_ids if retrieved is not None else (),
             )
         )
-    return _dedupe_candidates(candidates), [], projection
+    warnings = []
+    if projection.get("unresolved_anchors"):
+        warnings.append(
+            {
+                "code": "context_graph_anchor_snapshot_unresolved",
+                "message": "A typed symbol anchor no longer resolved in the materialized Graph; its relations were omitted",
+            }
+        )
+    return _dedupe_candidates(candidates), warnings, projection
 
 
-def _graph_seed_paths(source_candidates: list[ContextCandidate], *, target: RepoTarget) -> list[str]:
+_EXACT_GRAPH_ANCHOR_KINDS = {
+    ContextEvidenceKind.EXACT_PATH,
+    ContextEvidenceKind.EXACT_FILENAME,
+    ContextEvidenceKind.EXACT_SYMBOL,
+}
+_EXACT_FILE_ANCHOR_KINDS = {
+    ContextEvidenceKind.EXACT_PATH,
+    ContextEvidenceKind.EXACT_FILENAME,
+}
+
+
+def _resolve_graph_anchors(
+    source_candidates: list[ContextCandidate],
+    *,
+    target: RepoTarget,
+) -> ContextAnchorResolution:
     product_prefix = f"{target.display_path.rstrip('/')}/"
-    source_paths: list[str] = []
-    test_paths: list[str] = []
+    ranked: list[tuple[int, ContextCandidate, ContextGraphAnchorCandidate]] = []
+    rejected: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
     for candidate in source_candidates:
         path = candidate.source_ref.path
         if candidate.source_ref.kind not in ACTIONABLE_PRODUCT_KINDS or not path.startswith(product_prefix):
             continue
         repo_path = path.removeprefix(product_prefix)
-        selected = test_paths if is_test_path(repo_path) else source_paths
-        if repo_path not in selected:
-            selected.append(repo_path)
-    return [*source_paths, *test_paths]
+        evidence_kinds = set(candidate.evidence_kinds)
+        symbol_anchor = candidate.source_ref.section_kind == ContextSectionKind.PROVIDER_SYMBOL and (
+            ContextEvidenceKind.EXACT_SYMBOL in evidence_kinds
+            or (
+                candidate.anchor_strength == ContextAnchorStrength.STRONG
+                and ContextEvidenceKind.SECTION_TERMS in evidence_kinds
+            )
+        )
+        anchor = GraphContextAnchor(
+            kind=GraphContextAnchorKind.SYMBOL if symbol_anchor else GraphContextAnchorKind.FILE,
+            path=repo_path,
+            symbol=candidate.source_ref.section if symbol_anchor else "",
+            line_start=candidate.source_ref.line_start if symbol_anchor else 0,
+            line_end=candidate.source_ref.line_end if symbol_anchor else 0,
+        )
+        graph_candidate = ContextGraphAnchorCandidate(
+            anchor=anchor,
+            source_ref=candidate.source_ref,
+            evidence_kinds=candidate.evidence_kinds,
+            anchor_strength=candidate.anchor_strength,
+            related_record_ids=candidate.related_record_ids,
+        )
+        tier = _graph_anchor_tier(candidate)
+        if tier is None:
+            rejected.append((candidate, graph_candidate))
+            continue
+        ranked.append((tier, candidate, graph_candidate))
+    if not ranked:
+        candidates = tuple(
+            graph_candidate
+            for _candidate, graph_candidate in sorted(
+                rejected,
+                key=lambda item: (
+                    -CONTEXT_ANCHOR_STRENGTH_PRIORITY[item[0].anchor_strength],
+                    -item[0].score,
+                    item[0].source_ref.path,
+                    item[0].source_ref.line_start,
+                ),
+            )[:5]
+        )
+        return ContextAnchorResolution(
+            status=ContextAnchorStatus.UNRESOLVED,
+            code=ContextAnchorResolutionCode.UNRESOLVED,
+            candidates=candidates,
+        )
+
+    top_tier = max(tier for tier, _candidate, _graph_candidate in ranked)
+    strongest = [
+        (candidate, graph_candidate)
+        for tier, candidate, graph_candidate in ranked
+        if tier == top_tier
+    ]
+    if top_tier == 3:
+        exact_symbols = _dedupe_graph_anchor_pairs(
+            pair
+            for pair in strongest
+            if ContextEvidenceKind.EXACT_SYMBOL in set(pair[0].evidence_kinds)
+        )
+        exact_files = _dedupe_graph_anchor_pairs(
+            pair
+            for pair in strongest
+            if set(pair[0].evidence_kinds) & _EXACT_FILE_ANCHOR_KINDS
+            and ContextEvidenceKind.EXACT_SYMBOL not in set(pair[0].evidence_kinds)
+        )
+        if exact_symbols:
+            symbol_paths = {pair[1].anchor.path for pair in exact_symbols}
+            file_paths = {pair[1].anchor.path for pair in exact_files}
+            if len(exact_symbols) != 1 or any(path not in symbol_paths for path in file_paths):
+                return _ambiguous_graph_anchor_resolution([*exact_symbols, *exact_files])
+            strongest = exact_symbols
+        else:
+            strongest = exact_files
+
+    ordered = _dedupe_graph_anchor_pairs(strongest)
+    if top_tier == 2:
+        graph_candidates = tuple(graph_candidate for _candidate, graph_candidate in ordered)
+        return ContextAnchorResolution(
+            status=ContextAnchorStatus.RESOLVED,
+            code=ContextAnchorResolutionCode.RESOLVED,
+            anchors=graph_candidates,
+            candidates=graph_candidates,
+        )
+    if len(ordered) != 1:
+        return _ambiguous_graph_anchor_resolution(ordered)
+    graph_candidates = (ordered[0][1],)
+    return ContextAnchorResolution(
+        status=ContextAnchorStatus.RESOLVED,
+        code=ContextAnchorResolutionCode.RESOLVED,
+        anchors=graph_candidates,
+        candidates=graph_candidates,
+    )
+
+
+def _graph_anchor_tier(candidate: ContextCandidate) -> int | None:
+    kinds = set(candidate.evidence_kinds)
+    if (
+        ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH in kinds
+        and candidate.anchor_strength == ContextAnchorStrength.EXPLICIT
+    ):
+        return 2
+    if kinds & _EXACT_GRAPH_ANCHOR_KINDS and candidate.anchor_strength in {
+        ContextAnchorStrength.EXACT,
+        ContextAnchorStrength.EXPLICIT,
+    }:
+        return 3
+    eligible_strong_section = (
+        candidate.anchor_strength == ContextAnchorStrength.STRONG
+        and candidate.source_ref.section_kind == ContextSectionKind.PROVIDER_SYMBOL
+        and ContextEvidenceKind.SECTION_TERMS in kinds
+    )
+    return 1 if eligible_strong_section else None
+
+
+def _dedupe_graph_anchor_pairs(
+    pairs: Iterable[tuple[ContextCandidate, ContextGraphAnchorCandidate]],
+) -> list[tuple[ContextCandidate, ContextGraphAnchorCandidate]]:
+    unique: dict[tuple[Any, ...], tuple[ContextCandidate, ContextGraphAnchorCandidate]] = {}
+    for candidate, graph_candidate in pairs:
+        anchor = graph_candidate.anchor
+        identity = anchor.key() if anchor.kind == GraphContextAnchorKind.SYMBOL else (anchor.kind.value, anchor.path)
+        previous = unique.get(identity)
+        if previous is None or candidate.score > previous[0].score:
+            unique[identity] = (candidate, graph_candidate)
+    return [
+        pair
+        for _identity, pair in sorted(
+            unique.items(),
+            key=lambda item: (
+                item[1][1].anchor.path,
+                item[1][1].anchor.symbol,
+                item[1][1].anchor.line_start,
+                item[1][1].anchor.line_end,
+            ),
+        )
+    ]
+
+
+def _ambiguous_graph_anchor_resolution(
+    pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]],
+) -> ContextAnchorResolution:
+    return ContextAnchorResolution(
+        status=ContextAnchorStatus.AMBIGUOUS,
+        code=ContextAnchorResolutionCode.AMBIGUOUS,
+        candidates=tuple(graph_candidate for _candidate, graph_candidate in pairs),
+    )
+
+
+def _graph_anchor_warning(resolution: ContextAnchorResolution) -> dict[str, str]:
+    return {
+        "code": resolution.code.value,
+        "message": "Multiple equally strong Graph anchors remain; no relation expansion was performed",
+    }
 
 
 def _graph_source_chunk(chunks: list[Any], *, query: str, retrieved: ContextCandidate | None) -> Any | None:
+    del query
     if not chunks:
         return None
     if retrieved is not None:
         for chunk in chunks:
             if chunk.source_ref.key() == retrieved.source_ref.key():
-                return chunk
-    ranked = rank_context_chunks(query, chunks, fts_scores={}, limit=1)
-    if ranked:
-        wanted = ranked[0].source_ref.key()
-        for chunk in chunks:
-            if chunk.source_ref.key() == wanted:
                 return chunk
     module_chunks = [chunk for chunk in chunks if chunk.source_ref.section.endswith(" module")]
     return sorted(module_chunks or chunks, key=lambda item: (item.source_ref.line_start, item.source_ref.line_end, item.source_ref.section))[0]
@@ -896,6 +1390,7 @@ def _graph_relation_candidate(relation: dict[str, Any], *, score: float) -> Cont
         score_breakdown={"exact": 0.0, "fts": 0.0, "authority": 0.0, "graph": 1.0},
         selection_reasons=["Graph direct relation"],
         graph_path=[relation],
+        evidence_kinds=(ContextEvidenceKind.GRAPH_RELATION,),
     )
 
 
@@ -931,27 +1426,30 @@ def _relation_reason(relation: dict[str, Any]) -> str:
 
 
 def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
-    best: dict[tuple[str, str, str, int, int], ContextCandidate] = {}
+    best: dict[tuple[str, str, str, str, int, int], ContextCandidate] = {}
     for candidate in candidates:
         key = candidate.source_ref.key()
         previous = best.get(key)
-        if previous is None or candidate.score > previous.score:
+        if previous is None or _candidate_sort_key(candidate) < _candidate_sort_key(previous):
             best[key] = candidate
     return sorted(best.values(), key=_candidate_sort_key)
 
 
-def _candidate_sort_key(candidate: ContextCandidate) -> tuple[int, float, str, int]:
+def _candidate_sort_key(candidate: ContextCandidate) -> tuple[int, int, float, str, int]:
     breakdown = candidate.score_breakdown
     direct_query_evidence = _has_direct_query_evidence(candidate)
     stage = 0 if direct_query_evidence else 1 if float(breakdown.get("graph") or 0.0) > 0 else 2
-    return (stage, -candidate.score, candidate.source_ref.path, candidate.source_ref.line_start)
+    return (
+        stage,
+        -CONTEXT_ANCHOR_STRENGTH_PRIORITY[candidate.anchor_strength],
+        -candidate.score,
+        candidate.source_ref.path,
+        candidate.source_ref.line_start,
+    )
 
 
 def _has_direct_query_evidence(candidate: ContextCandidate) -> bool:
-    return any(
-        float(candidate.score_breakdown.get(key) or 0.0) > 0
-        for key in ("startup_reading", "identity", "exact", "fts")
-    )
+    return bool(set(candidate.evidence_kinds) - {ContextEvidenceKind.GRAPH_RELATION})
 
 
 def _context_groups(
@@ -1140,6 +1638,8 @@ def _candidate_group_item(candidate: ContextCandidate, *, target: RepoTarget, st
         "selection_reasons": sorted(set(candidate.selection_reasons)) or ["retrieval match"],
         "score": candidate.score,
         "score_breakdown": candidate.score_breakdown,
+        "anchor_strength": candidate.anchor_strength.value,
+        "evidence_kinds": sorted(kind.value for kind in set(candidate.evidence_kinds)),
         "excerpt": candidate.text,
         "graph_path": candidate.graph_path,
         "continuations": _candidate_continuations(candidate, target=target),
@@ -1210,6 +1710,8 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
     continuations: list[dict[str, Any]] = []
     graph_paths: dict[str, dict[str, Any]] = {}
     breakdown: dict[str, float] = {}
+    evidence_kinds: set[ContextEvidenceKind] = set()
+    anchor_strength = ContextAnchorStrength.NONE
     for candidate in ranked:
         section = _candidate_section(candidate)
         section_key = (
@@ -1228,6 +1730,9 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
                 graph_paths.setdefault(digest_data(relation), relation)
         for key, value in candidate.score_breakdown.items():
             breakdown[key] = max(breakdown.get(key, 0.0), float(value))
+        evidence_kinds.update(candidate.evidence_kinds)
+        if CONTEXT_ANCHOR_STRENGTH_PRIORITY[candidate.anchor_strength] > CONTEXT_ANCHOR_STRENGTH_PRIORITY[anchor_strength]:
+            anchor_strength = candidate.anchor_strength
     ordered_roles = sorted(roles, key=lambda role: (_evidence_role_priority(role), role))
     item.update(
         {
@@ -1236,6 +1741,8 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
             "selection_reasons": sorted(reasons),
             "score": max(candidate.score for candidate in ranked),
             "score_breakdown": breakdown,
+            "anchor_strength": anchor_strength.value,
+            "evidence_kinds": sorted(kind.value for kind in evidence_kinds),
             "graph_path": [graph_paths[key] for key in sorted(graph_paths)],
             "continuations": _dedupe_continuations(continuations),
             "evidence_role": ordered_roles[0],
@@ -1256,7 +1763,9 @@ def _candidate_evidence_roles(candidate: ContextCandidate, *, target: RepoTarget
         is_test = is_test_path(lowered)
         if ref.kind == "config":
             roles.add("configuration")
-        if _has_direct_query_evidence(candidate):
+        if ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH in candidate.evidence_kinds:
+            roles.add("knowledge_linked_test" if is_test else "knowledge_linked_source")
+        elif _has_direct_query_evidence(candidate):
             roles.add("test_candidate" if is_test else "change_candidate")
         for relation in candidate.graph_path:
             if not isinstance(relation, dict):
@@ -1297,6 +1806,8 @@ def _evidence_role_priority(role: str) -> int:
         "test_candidate": 0,
         "authority_document": 0,
         "directly_connected_test": 1,
+        "knowledge_linked_source": 1,
+        "knowledge_linked_test": 1,
         "imported_dependency": 1,
         "called_dependency": 1,
         "structured_dependency": 1,
@@ -1315,33 +1826,38 @@ def _group_item_sort_key(
     item: dict[str, Any],
     *,
     direct_query_score: float,
-) -> tuple[int, int, float, float, str]:
+) -> tuple[int, int, int, float, float, str]:
     role = str(item.get("evidence_role") or "")
     roles = {str(value) for value in item.get("evidence_roles", []) if str(value)} if isinstance(item.get("evidence_roles"), list) else {role}
     breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
     role_priority = _evidence_role_priority(role)
+    try:
+        anchor_strength = ContextAnchorStrength(str(item.get("anchor_strength") or ContextAnchorStrength.NONE.value))
+    except ValueError:
+        anchor_strength = ContextAnchorStrength.NONE
+    anchor_priority = CONTEXT_ANCHOR_STRENGTH_PRIORITY[anchor_strength]
     if group == "callers_and_dependents":
         role_priority = 0 if role == "code_relation" else role_priority
     direct_query_stage = 0
     if group in {"likely_change_surface", "tests_and_verification"}:
         graph_score = float(breakdown.get("graph") or 0.0)
-        if (
-            float(breakdown.get("identity") or 0.0) > 0
-            or float(breakdown.get("startup_reading") or 0.0) > 0
-        ):
+        if anchor_strength in {ContextAnchorStrength.EXPLICIT, ContextAnchorStrength.EXACT}:
             direct_query_stage = 0
-        elif float(breakdown.get("exact_anchor_dependency") or 0.0) > 0:
+        elif float(breakdown.get("direct_anchor_dependency") or 0.0) > 0:
             direct_query_stage = 1
-        elif direct_query_score > 0 and graph_score <= 0:
+        elif anchor_strength == ContextAnchorStrength.STRONG:
             direct_query_stage = 2
-        elif direct_query_score > 0:
+        elif direct_query_score > 0 and graph_score <= 0:
             direct_query_stage = 3
-        elif roles & {"imported_dependency", "called_dependency", "structured_dependency", "directly_connected_test"}:
+        elif direct_query_score > 0:
             direct_query_stage = 4
-        else:
+        elif roles & {"imported_dependency", "called_dependency", "structured_dependency", "directly_connected_test"}:
             direct_query_stage = 5
+        else:
+            direct_query_stage = 6
     return (
         direct_query_stage,
+        -anchor_priority,
         role_priority,
         -direct_query_score,
         -float(item.get("score") or 0.0),

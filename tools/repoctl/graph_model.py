@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 from urllib.parse import quote
 
@@ -74,6 +75,33 @@ def canonical_json(data: Any) -> str:
 
 def digest_data(data: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
+
+
+class GraphContextAnchorKind(StrEnum):
+    FILE = "file"
+    SYMBOL = "symbol"
+
+
+@dataclass(frozen=True)
+class GraphContextAnchor:
+    kind: GraphContextAnchorKind
+    path: str
+    symbol: str = ""
+    line_start: int = 0
+    line_end: int = 0
+
+    def key(self) -> tuple[str, str, str, int, int]:
+        return (self.kind.value, self.path, self.symbol, self.line_start, self.line_end)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"kind": self.kind.value, "path": self.path}
+        if self.symbol:
+            data["symbol"] = self.symbol
+        if self.line_start:
+            data["line_start"] = self.line_start
+        if self.line_end:
+            data["line_end"] = self.line_end
+        return data
 
 
 @dataclass(frozen=True)

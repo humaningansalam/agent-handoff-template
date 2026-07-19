@@ -10,7 +10,7 @@ from .context import build_context_bundle
 from .context_chunks import chunk_markdown_file, chunk_text_source
 from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
 from .graph import project_context_neighborhood
-from .graph_model import digest_data
+from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import load_materialized_graph
 from .git import normalize_repo_path, repo_git_head
 from .language_profiles import collect_verification_hints
@@ -862,7 +862,11 @@ def _direct_task_graph_evidence(snapshot: Any, *, target: RepoTarget, chosen: li
             seed_paths.append(repo_path)
     if not seed_paths:
         return []
-    projection = project_context_neighborhood(snapshot, seed_paths=seed_paths)
+    projection = project_context_neighborhood(
+        snapshot,
+        anchors=[GraphContextAnchor(kind=GraphContextAnchorKind.FILE, path=path) for path in seed_paths],
+        mode="file_impact",
+    )
     relations = projection.get("relations") if isinstance(projection.get("relations"), list) else []
     return _dedupe_dict_items([
         _graph_relation_item(relation, reason="provider-confirmed relation from active Chosen files")
@@ -895,7 +899,7 @@ def _graph_relation_item(relation: dict[str, Any], *, reason: str) -> dict[str, 
 
 def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
     deduped: list[ContextCandidate] = []
-    seen: set[tuple[str, str, str, int, int]] = set()
+    seen: set[tuple[str, str, str, str, int, int]] = set()
     for candidate in candidates:
         key = candidate.source_ref.key()
         if key in seen:

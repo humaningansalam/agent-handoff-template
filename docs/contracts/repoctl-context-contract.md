@@ -11,11 +11,13 @@ Context is not authoritative. Source authorities remain the repo registry, sourc
 ./scripts/repoctl context query "Why is Graph non-authoritative?" --repo-id main --mode authority --format markdown
 ```
 
-`--mode` is optional. When omitted, `auto` uses the persistent FTS/source-symbol index to choose owner source, exact config/dotfile matches, and direct test anchors. It projects at most two levels of provider-confirmed import/call/test relations while keeping source, test, authority, history, and reviewed-Knowledge lanes separate. Reviewed Knowledge qualifies through either an exact query match or an explicit source/path relation; reviewed status alone is never sufficient.
+`--mode` is optional. When omitted, `auto` uses the persistent FTS/source-symbol index to choose owner source, exact config/dotfile matches, and direct test anchors. From one resolved typed anchor it projects only direct provider-confirmed call/import/test/structured-file relations while keeping source, test, authority, history, and reviewed-Knowledge lanes separate. Reviewed Knowledge qualifies through either an exact query match or an explicit source/path relation; reviewed status alone is never sufficient.
 
 Context never triggers a hidden Graph build. With a healthy materialization, queries read the persistent SQLite evidence index and overlay only changed paths. If the Graph snapshot or evidence index is missing, unreadable, incompatible, or digest-mismatched, Context returns a typed partial result from live source, config, document, task, and Knowledge evidence instead of hard-failing. Graph relations are marked unavailable and an explicit rebuild remains recovery guidance. The fallback is read-only and never repairs materialized state.
 
-Text indexing is limited to files up to 1 MiB. Registered semantic languages and SQL use `current_source`; JSON/YAML/TOML/INI/env-style configuration, Dockerfile variants, Compose files, workflow files, and repository dotfiles use the separate `config` kind; manifests and documents keep their own typed kinds. Exact full path, selected-repo suffix, filename, symbol/section, config, and dotfile identity matches outrank ordinary body-term matches.
+Text indexing is limited to files up to 1 MiB. Registered semantic languages and SQL use `current_source`; JSON/YAML/TOML/INI/env-style configuration, Dockerfile variants, Compose files, workflow files, and repository dotfiles use the separate `config` kind; manifests and documents keep their own typed kinds. Identifier comparison canonicalizes case, separators, snake case, and CamelCase into ordered parts. Exact full path, selected-repo suffix, filename, and provider symbol/section identity remain eligible independently of broad body recall and outrank ordinary body-term matches.
+
+The persistent index performs bounded, path-diverse chunk recall. Changed-path overlays replace stale indexed chunks before one final field-aware rank over the merged corpus. Canonical ordering compares typed anchor strength before the composite score, so an exact identity cannot be displaced by an arbitrarily large weak body score. Path, section/symbol, and body coverage remain separate evidence fields. The `fts` diagnostic is the sign-normalized relevance `-bm25(chunks, 4.0, 3.0, 1.0)`, preserving SQLite's BM25 magnitude and ordering rather than exposing the negative raw rank or converting result position into a synthetic score.
 
 Direct query anchors remain ahead of Graph-only dependencies in source and test groups. After an exact path/symbol identity anchor, its immediate imported, called, tested, or structured owner dependency is reserved ahead of weaker sibling body matches. Graph expansion may enrich an anchor and rank related files within the expansion stage, but a shared dependency must not displace the exact anchor merely because several consumers reference it.
 
@@ -57,9 +59,11 @@ Use `--full --json` to include raw retrieval/debug fields:
 evidence
 knowledge_results
 source_snapshots
+selection.compact_projection.items
+selection.compact_projection.continuations
 ```
 
-`evidence` contains raw query-matching source/document chunks plus provider-confirmed Graph relations projected from lexical source and test anchors. Retrieval selects the strongest matching chunk from distinct paths before allowing additional sections from the same path, so one large file cannot consume the candidate set. Token cost never participates in retrieval or evidence selection.
+`evidence` contains raw query-matching source/document chunks plus provider-confirmed Graph relations projected from lexical source and test anchors. Retrieval selects the strongest matching chunk from distinct paths before allowing additional sections from the same path, so one large file cannot consume the candidate set. Full evidence exposes typed `evidence_kinds`, `anchor_strength`, field score diagnostics, and section kind; display-only selection reasons do not drive seed or ranking decisions. Token cost never participates in retrieval or evidence selection.
 
 Compact groups merge chunks with the same path into one file-level item and preserve their locations in a `sections` list. A global budget returns at most eight actionable items, normally three to eight when enough evidence exists, with small per-lane limits so authority, source, test, history, and Knowledge do not compete in one ranking. Each item carries its reason and typed continuation. Selection counts, score diagnostics, provider coverage, and omitted-item statistics are available only with `--full` or `--explain`.
 
@@ -80,11 +84,29 @@ warnings_and_completeness
 
 In `auto`, `reviewed_knowledge` accepts exact record matches as well as records structurally linked to selected paths. `related_history` is retrieved in its own lane and never displaces owner source or direct tests. Explicit historical modes may retrieve a broader set.
 
-The repository identity is stored once at bundle level. Compact completeness contains only operational Graph availability, freshness state, and the root-evidence drift indicator; freshness counts and materialization digests are diagnostic-only. Typed continuations are deduplicated once at bundle level: current source, config, and test items own their file selector; documents own their document selector; reviewed Knowledge owns its `knowledge_record` selector; completion history owns its task selector; and a pure call relation owns its exact symbol selector with `in_file`. Repeated repo IDs, score breakdowns, provider inventories, and raw relation paths are omitted. Full output retains deterministic scoring, item-level continuations, and relation evidence.
+For Graph-expanding modes, a reviewed Knowledge result becomes a code anchor only when its typed query match is `exact` or `strong`. Weak partial/FTS matches may remain visible in the Knowledge lane but cannot project code. Code paths come only from the record's literal `applies_to.paths` entries and `source_refs` explicitly typed as `current_source` that resolve to a current file inside the selected repository. Root workspace documents and all other source-ref kinds remain provenance-only; legacy scope/file aliases, task-derived changed-file prose, claims, summaries, titles, and filenames inferred from text are never code applicability.
+
+Knowledge paths use the same repo-relative/workspace-relative resolver as Graph selectors with the current repository path set. Ambiguous, invalid, missing, stale, superseded, deprecated, or cross-repository paths fail closed. Full results expose `query_match_strength`, `code_anchor_status`, `code_path_resolutions`, and `resolved_code_paths`. A resolved code candidate carries `reviewed_knowledge_path` evidence and related record IDs, but its role is `knowledge_linked_source` or `knowledge_linked_test`; it is exploration evidence, not edit scope or authoritative ownership. A direct exact code identity remains stronger than a Knowledge-linked path.
+
+The repository identity is stored once at bundle level. Compact completeness contains operational Graph availability, freshness state, the root-evidence drift indicator, and a structured `graph_anchor` status/code for Graph-expanding modes. `resolved` includes the selected seed path, `ambiguous` preserves equally strong candidates without choosing one, and `unresolved` reports that no eligible typed anchor exists. Freshness counts and materialization digests are diagnostic-only. Typed continuations are deduplicated once at bundle level: current source, config, and test items own their file selector; documents own their document selector; reviewed Knowledge owns its `knowledge_record` selector; completion history owns its task selector; and a pure call relation owns its exact symbol selector with `in_file`. Repeated repo IDs, score breakdowns, provider inventories, and raw relation paths are omitted. Full output retains deterministic scoring, item-level continuations, typed anchor candidates, and relation evidence.
 
 ## Graph Evidence
 
-Context consumes the materialized Graph through internal Python objects; it must not parse `graph query` stdout or invoke compiler providers. `auto`, `code_location`, `call_impact`, and `file_impact` use the same query-centered file projection. The projection includes exact `IMPORTS_FILE`, provider-confirmed `CALLS`, direct or explicitly inferred `TESTS_FILE`, and syntax-resolved `USES_FILE` edges for SQL/Docker/Compose/workflow/shell dependencies. Exact owner definitions rank before surrounding consumers; lexical relevance propagates with distance decay.
+Context consumes the materialized Graph through internal Python objects; it must not parse `graph query` stdout or invoke compiler providers. Graph expansion starts only from typed exact path/filename/symbol evidence, a provider symbol with complete same-section query coverage and `strong` anchor strength, or an explicit reviewed-Knowledge path. Partial section matches and weak body-only lexical candidates remain visible retrieval evidence but never become Graph seeds.
+
+Exact identity kinds do not use a numeric path/filename/symbol precedence. One exact symbol plus exact file evidence for the same path is a compatible interpretation and keeps the narrower symbol anchor. Multiple exact symbols, multiple exact file paths, or exact symbol/file interpretations that point at different paths return `ambiguous`. A missing snapshot file/symbol, a stale path excluded from the snapshot, or no eligible typed anchor returns `unresolved` with empty anchors and seed paths while retaining diagnostic candidates. Neither `ambiguous` nor `unresolved` expands relations.
+
+Mode policies are explicit and bounded:
+
+```text
+auto          direct incoming/outgoing call, import, structured-file, and test relations; depth 1
+code_location outgoing callees/imports/structured dependencies plus direct tests; depth 1
+call_impact   incoming/outgoing calls through depth 2 plus direct tests; imports are excluded
+file_impact   incoming/outgoing imports and structured-file relations through depth 2,
+              plus direct calls and tests at depth 1
+```
+
+A provider-symbol anchor restricts first-hop `CALLS` relations to that exact symbol rather than every symbol in the file. It does not attach file-wide import or structured-file dependencies that cannot be attributed to that symbol; direct file-level tests remain eligible. Exact owner definitions remain ahead of surrounding consumers and Graph-only dependencies; relation relevance propagates only inside the selected mode policy.
 
 Context never converts free-form query tokens into Graph file or symbol selectors. Graph-derived Context items use `source_ref.kind: graph_relation`, preserve the exact provider relation and endpoint identities, and remain current-query evidence rather than durable knowledge records. Explicit `repoctl graph query` selectors remain a separate iterative exploration interface.
 

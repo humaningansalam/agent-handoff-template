@@ -51,6 +51,10 @@ Default build JSON contains the snapshot digest, node/edge counts, compact capab
 
 Default query JSON contains direct matches, at most three decision-relevant relations, and at most three reusable continuations. Query-specific traversals are returned under `paths`; queries without a traversal projection return their compact edges under `relations`. It omits node/edge counts, displayed/omitted statistics, provider coverage, analyzed-path inventories, freshness counts, and materialization digests. Compact freshness contains only state and the root-evidence drift indicator. File and symbol queries traverse importers/imports, callers/callees, direct tests, related tasks/artifacts/documents, and reviewed Knowledge in both directions. Every compact relation preserves evidence type, assertion/provider, confidence, capability completeness, and per-relation freshness. Use `--full --json` for raw nodes/edges and provider diagnostics.
 
+Context projection is a separate internal consumer of the same snapshot. It accepts typed file or provider-symbol anchors and an explicit Context mode policy. Weak lexical text never enters Graph as a selector. Every requested anchor is accounted as resolved, ambiguous, or unresolved; missing file nodes and non-unique provider symbols are never silently dropped. Symbol anchors restrict first-hop call edges to the resolved symbol, ambiguous or unresolved anchors produce no traversal, and each mode fixes relation direction and maximum depth before traversal begins.
+
+`KNOWLEDGE_APPLIES_TO` is materialized only when the record's derived lifecycle status is `reviewed`, from its literal `applies_to.paths` entry or a `source_ref` explicitly typed as `current_source`, after the shared repository selector resolver finds exactly one current file in the selected repository. A stale record may remain in Graph as historical provenance, but it never emits code-applicability edges. Root-document and other provenance-only `source_refs`, legacy aliases, task-derived changed files, and Knowledge prose do not create this edge. Ambiguous, invalid, missing, or cross-repository paths produce no edge.
+
 ## Snapshot
 
 ```json

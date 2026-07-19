@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source
+from .context_model import ContextSectionKind
 from .git import normalize_repo_path
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints, is_semantic_source_language, language_for_path, product_manifest_patterns
@@ -97,7 +98,16 @@ def collect_context_sources(
     for path in manifest_paths:
         try:
             rel = path.relative_to(root).as_posix()
-            chunks.append(chunk_text_source(root, rel, path.read_text(encoding="utf-8"), kind="product_manifest", section=path.name))
+            chunks.append(
+                chunk_text_source(
+                    root,
+                    rel,
+                    path.read_text(encoding="utf-8"),
+                    kind="product_manifest",
+                    section=path.name,
+                    section_kind=ContextSectionKind.CONFIG,
+                )
+            )
         except UnicodeDecodeError as exc:
             problems.append(Problem("warning", "context_manifest_non_utf8", str(exc), path.relative_to(root).as_posix()))
         except OSError as exc:
@@ -109,7 +119,16 @@ def collect_context_sources(
             continue
         rel = source_path.relative_to(root).as_posix()
         text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
-        chunks.append(chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}"))
+        chunks.append(
+            chunk_text_source(
+                root,
+                rel,
+                text,
+                kind="verification_hint",
+                section=f"verification: {hint.command}",
+                section_kind=ContextSectionKind.VERIFICATION,
+            )
+        )
 
     receipts: list[dict[str, Any]] = []
     receipt_warnings: list[Problem] = []
@@ -127,7 +146,16 @@ def collect_context_sources(
         for receipt in receipts:
             rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
             text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
-            chunks.append(chunk_text_source(root, rel, text, kind="completion_receipt", section=str(receipt.get("task_id") or "completion receipt")))
+            chunks.append(
+                chunk_text_source(
+                    root,
+                    rel,
+                    text,
+                    kind="completion_receipt",
+                    section=str(receipt.get("task_id") or "completion receipt"),
+                    section_kind=ContextSectionKind.TASK,
+                )
+            )
             artifact = completion_receipt_artifact_path(root, receipt)
             if artifact:
                 artifact_path = root / artifact
@@ -263,7 +291,16 @@ def _current_source_chunks_from_records(
             continue
         if not text.strip():
             continue
-        chunks.append(chunk_text_source(root, workspace_path, text, kind=kind, section=repo_path or path.name))
+        chunks.append(
+            chunk_text_source(
+                root,
+                workspace_path,
+                text,
+                kind=kind,
+                section=repo_path or path.name,
+                section_kind=ContextSectionKind.CONFIG if kind == "config" else ContextSectionKind.FILE,
+            )
+        )
     return chunks, problems
 
 
@@ -331,6 +368,7 @@ def context_overlay_chunks(
                     manifest_paths[rel].read_text(encoding="utf-8"),
                     kind="product_manifest",
                     section=manifest_paths[rel].name,
+                    section_kind=ContextSectionKind.CONFIG,
                 )
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -343,7 +381,16 @@ def context_overlay_chunks(
         if rel not in selected:
             continue
         text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
-        chunks.append(chunk_text_source(root, rel, text, kind="verification_hint", section=f"verification: {hint.command}"))
+        chunks.append(
+            chunk_text_source(
+                root,
+                rel,
+                text,
+                kind="verification_hint",
+                section=f"verification: {hint.command}",
+                section_kind=ContextSectionKind.VERIFICATION,
+            )
+        )
     history_changed = any(
         path.startswith(("docs/tasks/.repoctl-state/completions/", "docs/tasks/", "docs/archive/tasks/"))
         for path in selected
@@ -358,7 +405,16 @@ def context_overlay_chunks(
             artifacts = [artifact] if artifact else []
             if receipt_rel in selected:
                 text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
-                chunks.append(chunk_text_source(root, receipt_rel, text, kind="completion_receipt", section=task_id or "completion receipt"))
+                chunks.append(
+                    chunk_text_source(
+                        root,
+                        receipt_rel,
+                        text,
+                        kind="completion_receipt",
+                        section=task_id or "completion receipt",
+                        section_kind=ContextSectionKind.TASK,
+                    )
+                )
             for artifact in artifacts:
                 if receipt_rel not in selected and artifact not in selected:
                     continue

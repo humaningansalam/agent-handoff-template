@@ -124,29 +124,29 @@
   "Q-008": {
     "supporting": [
       {
-        "path": "repos/services/token_service.py"
+        "path": "repos/handlers/session_tokens.py"
       },
       {
-        "path": "repos/handlers/cross_login.py"
+        "path": "repos/handlers/session_login.py"
       }
     ],
     "noise": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
-        "from": "repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fcross_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A31",
+        "from": "repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fsession_login.py%3Alogin%3Afunction%3A4%3A0%3A5%3A32",
         "kind": "CALLS",
         "source": "python_ast",
-        "to": "repo:main:symbol:python_ast:python_ast%3Aservices%2Ftoken_service.py%3Aissue_token%3Afunction%3A1%3A0%3A2%3A29"
+        "to": "repo:main:symbol:python_ast:python_ast%3Ahandlers%2Fsession_tokens.py%3Aissue_session%3Afunction%3A1%3A0%3A2%3A31"
       }
     ],
     "required_knowledge_source_refs": [],
     "must_find": [
       {
-        "path": "repos/services/token_service.py"
+        "path": "repos/handlers/session_tokens.py"
       },
       {
-        "path": "repos/handlers/cross_login.py"
+        "path": "repos/handlers/session_login.py"
       }
     ]
   },

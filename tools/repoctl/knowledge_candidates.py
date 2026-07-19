@@ -5,6 +5,7 @@ import hashlib
 import re
 import sqlite3
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,31 @@ ALLOWED_SOURCE_PREFIXES = ("docs/adr/", "docs/contracts/", "docs/workflows/")
 EXCLUDED_SOURCE_PARTS = {".repoctl-state", "generated", "plans"}
 MAX_KNOWLEDGE_CLAIM_LENGTH = 300
 CLAIM_ORIGINS = {"explicit", "source_section"}
+
+
+class KnowledgeExplicitPathKind(StrEnum):
+    APPLIES_TO_PATH = "applies_to_path"
+    SOURCE_REF = "source_ref"
+
+
+class KnowledgeExplicitPathRole(StrEnum):
+    CODE_ANCHOR = "code_anchor"
+    PROVENANCE_ONLY = "provenance_only"
+
+
+class KnowledgeSourceRefKind(StrEnum):
+    CURRENT_SOURCE = "current_source"
+    DOCUMENT = "document"
+    AUTHORITY_DOCUMENT = "authority_document"
+    COMPLETION_RECEIPT = "completion_receipt"
+    TASK_ARTIFACT = "task_artifact"
+
+
+class KnowledgeQueryMatchStrength(StrEnum):
+    NONE = "none"
+    WEAK = "weak"
+    STRONG = "strong"
+    EXACT = "exact"
 
 
 def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: str, claim: str = "") -> tuple[dict[str, Any], list[Problem]]:
@@ -883,7 +909,7 @@ def query_knowledge_records(
     if event_problems:
         return {
             "schema": "repoctl.knowledge.query",
-            "schema_version": 1,
+            "schema_version": 2,
             "repo_id": repo_id,
             "query": {"text": query, "include_stale": include_stale, "include_superseded": include_superseded, "include_deprecated": include_deprecated, "explain": explain},
             "lifecycle": {
@@ -933,6 +959,7 @@ def query_knowledge_records(
             float(breakdown.get(key) or 0.0) > 0
             for key in ("exact_identity", "exact_title", "exact_claim", "exact_summary", "exact_source", "fts")
         )
+        match_strength = _knowledge_query_match_strength(breakdown, query_matched=query_matched)
         if matched_paths:
             breakdown["path_relation"] = 1.0
             reasons.append("explicit source/path relation")
@@ -944,6 +971,7 @@ def query_knowledge_records(
             "score": round(score, 6),
             "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
             "selection_reasons": reasons,
+            "query_match_strength": match_strength.value,
         }
         if matched_paths:
             item["matched_paths"] = matched_paths
@@ -966,7 +994,7 @@ def query_knowledge_records(
             returned_statuses[status] = returned_statuses.get(status, 0) + 1
     return {
         "schema": "repoctl.knowledge.query",
-        "schema_version": 1,
+        "schema_version": 2,
         "repo_id": repo_id,
         "query": {
             "text": query,
@@ -986,6 +1014,21 @@ def query_knowledge_records(
         "result_count": len(returned),
         "available_record_count": len(records),
     }, problems, warnings
+
+
+def _knowledge_query_match_strength(
+    breakdown: dict[str, float],
+    *,
+    query_matched: bool,
+) -> KnowledgeQueryMatchStrength:
+    if float(breakdown.get("exact_identity") or 0.0) >= 1.0:
+        return KnowledgeQueryMatchStrength.EXACT
+    if any(
+        float(breakdown.get(key) or 0.0) >= 1.0
+        for key in ("exact_title", "exact_claim", "exact_summary", "exact_source")
+    ):
+        return KnowledgeQueryMatchStrength.STRONG
+    return KnowledgeQueryMatchStrength.WEAK if query_matched else KnowledgeQueryMatchStrength.NONE
 
 
 def knowledge_records_for_graph(root: Path, *, repo_id: str) -> tuple[list[dict[str, Any]], list[Problem]]:
@@ -1681,6 +1724,7 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
         "claim": record.get("claim", ""),
         "summary": record.get("summary", ""),
         "source_refs": record.get("source_refs", []),
+        "explicit_path_refs": explicit_knowledge_path_refs(record),
         "record_digest": record.get("record_digest", ""),
         "applies_to": {"paths": sorted(_record_applicability_paths(record))},
         "provenance": {
@@ -1697,6 +1741,53 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
     return public
 
 
+def explicit_knowledge_path_refs(record: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    for path in sorted(_record_applicability_paths(record)):
+        refs.append(
+            {
+                "kind": KnowledgeExplicitPathKind.APPLIES_TO_PATH.value,
+                "path": path,
+                "role": KnowledgeExplicitPathRole.CODE_ANCHOR.value,
+            }
+        )
+    source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
+    for source_ref in source_refs:
+        if not isinstance(source_ref, dict):
+            continue
+        path = str(source_ref.get("path") or "").strip()
+        if not path:
+            continue
+        source_kind = str(source_ref.get("kind") or "")
+        ref = {
+            "kind": KnowledgeExplicitPathKind.SOURCE_REF.value,
+            "path": path,
+            "source_kind": source_kind,
+            "role": (
+                KnowledgeExplicitPathRole.CODE_ANCHOR.value
+                if source_kind == KnowledgeSourceRefKind.CURRENT_SOURCE.value
+                else KnowledgeExplicitPathRole.PROVENANCE_ONLY.value
+            ),
+        }
+        if source_ref.get("content_sha256"):
+            ref["content_sha256"] = str(source_ref["content_sha256"])
+        refs.append(ref)
+    return [
+        value
+        for _key, value in sorted(
+            {
+                (
+                    str(ref.get("kind") or ""),
+                    str(ref.get("path") or ""),
+                    str(ref.get("source_kind") or ""),
+                    str(ref.get("role") or ""),
+                ): ref
+                for ref in refs
+            }.items()
+        )
+    ]
+
+
 def _record_related_paths(record: dict[str, Any]) -> set[str]:
     paths = _record_applicability_paths(record)
     source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
@@ -1707,16 +1798,9 @@ def _record_related_paths(record: dict[str, Any]) -> set[str]:
 
 
 def _record_applicability_paths(record: dict[str, Any]) -> set[str]:
-    paths: set[str] = set()
-    for container_name, field_name in (("scope", "paths"), ("applies_to", "files"), ("applies_to", "paths")):
-        container = record.get(container_name) if isinstance(record.get(container_name), dict) else {}
-        values = container.get(field_name) if isinstance(container.get(field_name), list) else []
-        paths.update(str(value).strip() for value in values if str(value).strip())
-    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
-    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
-    changed_files = derived.get("changed_files") if isinstance(derived.get("changed_files"), list) else []
-    paths.update(str(value).strip() for value in changed_files if str(value).strip())
-    return paths
+    applies_to = record.get("applies_to") if isinstance(record.get("applies_to"), dict) else {}
+    values = applies_to.get("paths") if isinstance(applies_to.get("paths"), list) else []
+    return {str(value).strip() for value in values if str(value).strip()}
 
 
 def _record_lifecycle_relations(record: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:

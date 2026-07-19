@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .code_index import CodeIndexEntry, build_code_index, semantic_provider_entries
 from .git import normalize_repo_path
 from .graph_import_resolver import IMPORT_RESOLVER_LANGUAGES, resolve_code_imports
-from .graph_model import GraphEdge, GraphNode, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, change_event_id, digest_data, document_id, file_id, import_ref_id, knowledge_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
+from .graph_model import GraphContextAnchor, GraphContextAnchorKind, GraphEdge, GraphNode, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, change_event_id, digest_data, document_id, file_id, import_ref_id, knowledge_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .graph_semantic_model import SemanticProviderResult
 from .graph_semantic_provider import build_semantic_providers
 from .graph_structured_relations import STRUCTURED_EDGE_KIND, build_structured_file_relations
 from .language_profiles import graph_language_capabilities, is_semantic_source_language, language_for_path
-from .knowledge_candidates import knowledge_records_for_graph
+from .knowledge_candidates import KnowledgeExplicitPathKind, KnowledgeExplicitPathRole, knowledge_records_for_graph
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .path_roles import is_test_path
 from .repositories import RepoSelectorResolution, RepoSelectorStatus, RepoTarget, resolve_repo_selector_path
@@ -408,11 +409,12 @@ def build_graph(
         Problem("warning", "graph_knowledge_unavailable", f"{problem.code}: {problem.message}", problem.path)
         for problem in knowledge_problems
     )
-    product_prefix = f"{target.display_path.rstrip('/')}/"
+    current_paths = {entry.path for entry in entries}
     for record in knowledge_records:
         record_id = str(record.get("id") or "")
         if not record_id:
             continue
+        record_status = str(record.get("status") or "")
         record_node_id = knowledge_id(record_id)
         nodes[record_node_id] = GraphNode(
             id=record_node_id,
@@ -420,14 +422,52 @@ def build_graph(
             identity={"record_id": record_id, "repo_id": repo_id},
             facts={"record": record},
         )
-        applies_to = record.get("applies_to") if isinstance(record.get("applies_to"), dict) else {}
-        for raw_path in applies_to.get("paths", []) if isinstance(applies_to.get("paths"), list) else []:
-            path = normalize_repo_path(str(raw_path))
-            if path.startswith(product_prefix):
-                path = normalize_repo_path(path[len(product_prefix) :])
-            target_file_id = file_id(repo_id, path)
-            if path and target_file_id in nodes:
-                add_edge(GraphEdge("KNOWLEDGE_APPLIES_TO", record_node_id, target_file_id, "reviewed", "knowledge_record", {"freshness": record.get("status", "reviewed")}))
+        explicit_path_refs = record.get("explicit_path_refs") if isinstance(record.get("explicit_path_refs"), list) else []
+        for path_ref in explicit_path_refs:
+            if record_status != "reviewed":
+                continue
+            if not isinstance(path_ref, dict) or path_ref.get("kind") not in {
+                KnowledgeExplicitPathKind.APPLIES_TO_PATH.value,
+                KnowledgeExplicitPathKind.SOURCE_REF.value,
+            }:
+                continue
+            if path_ref.get("role") != KnowledgeExplicitPathRole.CODE_ANCHOR.value:
+                continue
+            raw_path = str(path_ref.get("path") or "")
+            resolution = resolve_repo_selector_path(
+                raw_path,
+                repository_path=target.display_path,
+                known_paths=current_paths,
+            )
+            if resolution.status == RepoSelectorStatus.RESOLVED:
+                add_edge(
+                    GraphEdge(
+                        "KNOWLEDGE_APPLIES_TO",
+                        record_node_id,
+                        file_id(repo_id, resolution.path),
+                        "reviewed",
+                        "knowledge_record",
+                        {"freshness": record.get("status", "reviewed"), "path_kind": path_ref.get("kind")},
+                    )
+                )
+            elif resolution.status == RepoSelectorStatus.AMBIGUOUS:
+                problems.append(
+                    Problem(
+                        "warning",
+                        "graph_knowledge_path_ambiguous",
+                        f"reviewed Knowledge path resolves to multiple current files: {list(resolution.candidates)}",
+                        raw_path,
+                    )
+                )
+            elif resolution.status in {RepoSelectorStatus.INVALID, RepoSelectorStatus.NOT_FOUND}:
+                problems.append(
+                    Problem(
+                        "warning",
+                        "graph_knowledge_path_unresolved",
+                        "reviewed Knowledge code path does not resolve to a current file",
+                        raw_path,
+                    )
+                )
         for ref in record.get("source_refs", []) if isinstance(record.get("source_refs"), list) else []:
             if not isinstance(ref, dict):
                 continue
@@ -960,23 +1000,129 @@ def _file_query_path_edges(snapshot: GraphSnapshot, edges: list[GraphEdge], file
     return selected
 
 
+@dataclass(frozen=True)
+class _ContextEdgePolicy:
+    inbound: bool
+    outbound: bool
+    max_depth: int
+
+
+_CONTEXT_GRAPH_MODE_POLICIES: dict[str, dict[str, _ContextEdgePolicy]] = {
+    "auto": {
+        "CALLS": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+        "IMPORTS_FILE": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+        "TESTS_FILE": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+        STRUCTURED_EDGE_KIND: _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+    },
+    "code_location": {
+        "CALLS": _ContextEdgePolicy(inbound=False, outbound=True, max_depth=1),
+        "IMPORTS_FILE": _ContextEdgePolicy(inbound=False, outbound=True, max_depth=1),
+        "TESTS_FILE": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+        STRUCTURED_EDGE_KIND: _ContextEdgePolicy(inbound=False, outbound=True, max_depth=1),
+    },
+    "call_impact": {
+        "CALLS": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=2),
+        "TESTS_FILE": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+    },
+    "file_impact": {
+        "CALLS": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+        "IMPORTS_FILE": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=2),
+        "TESTS_FILE": _ContextEdgePolicy(inbound=True, outbound=True, max_depth=1),
+        STRUCTURED_EDGE_KIND: _ContextEdgePolicy(inbound=True, outbound=True, max_depth=2),
+    },
+}
+
+
+def _context_anchor_symbol_ids(
+    snapshot: GraphSnapshot,
+    *,
+    nodes: dict[str, GraphNode],
+    anchors: list[GraphContextAnchor],
+) -> dict[str, set[str]]:
+    repo_id = str(snapshot.repository.get("id") or "")
+    symbols_by_file: dict[str, list[str]] = {}
+    for edge in snapshot.edges:
+        if edge.kind == "DEFINES":
+            symbols_by_file.setdefault(edge.from_id, []).append(edge.to_id)
+    anchor_nodes_by_symbol = {
+        edge.from_id: nodes[edge.to_id]
+        for edge in snapshot.edges
+        if edge.kind == "ANCHORS" and edge.to_id in nodes
+    }
+    resolved: dict[str, set[str]] = {}
+    for anchor in anchors:
+        if anchor.kind != GraphContextAnchorKind.SYMBOL:
+            continue
+        current_file_id = file_id(repo_id, anchor.path)
+        for symbol_node_id in symbols_by_file.get(current_file_id, []):
+            symbol_node = nodes.get(symbol_node_id)
+            source_anchor = anchor_nodes_by_symbol.get(symbol_node_id)
+            if symbol_node is None or source_anchor is None:
+                continue
+            provider = symbol_node.facts.get("provider") if isinstance(symbol_node.facts.get("provider"), dict) else {}
+            label = str(provider.get("qualified_name") or provider.get("name") or "")
+            if anchor.symbol and label != anchor.symbol:
+                continue
+            if str(source_anchor.identity.get("path") or "") != anchor.path:
+                continue
+            if anchor.line_start and int(source_anchor.identity.get("start_line") or 0) != anchor.line_start:
+                continue
+            if anchor.line_end and int(source_anchor.identity.get("end_line") or 0) != anchor.line_end:
+                continue
+            resolved.setdefault(current_file_id, set()).add(symbol_node_id)
+    return resolved
+
+
 def project_context_neighborhood(
     snapshot: GraphSnapshot,
     *,
-    seed_paths: list[str],
-    max_depth: int = 2,
+    anchors: list[GraphContextAnchor],
+    mode: str,
     max_relations: int = 128,
     max_history: int = 5,
 ) -> dict[str, Any]:
-    """Project direct code and task-history evidence around concrete file seeds."""
+    """Project bounded, mode-specific relations around typed Context anchors."""
     repo_id = str(snapshot.repository.get("id") or "")
     nodes = _node_by_id(snapshot)
-    normalized_seeds: list[str] = []
-    for raw_path in seed_paths:
-        normalized = normalize_repo_path(raw_path)
-        if not normalized or file_id(repo_id, normalized) not in nodes or normalized in normalized_seeds:
+    mode_policy = _CONTEXT_GRAPH_MODE_POLICIES.get(mode)
+    if mode_policy is None:
+        raise ValueError(f"unsupported Context Graph projection mode: {mode}")
+    normalized_anchors: list[GraphContextAnchor] = []
+    unresolved_anchors: list[GraphContextAnchor] = []
+    seen_anchor_keys: set[tuple[str, str, str, int, int]] = set()
+    for raw_anchor in anchors:
+        normalized = normalize_repo_path(raw_anchor.path)
+        anchor = GraphContextAnchor(
+            kind=raw_anchor.kind,
+            path=normalized or raw_anchor.path,
+            symbol=raw_anchor.symbol,
+            line_start=raw_anchor.line_start,
+            line_end=raw_anchor.line_end,
+        )
+        if anchor.key() in seen_anchor_keys:
             continue
-        normalized_seeds.append(normalized)
+        seen_anchor_keys.add(anchor.key())
+        if not normalized or file_id(repo_id, normalized) not in nodes:
+            unresolved_anchors.append(anchor)
+            continue
+        normalized_anchors.append(anchor)
+    anchored_symbol_ids = _context_anchor_symbol_ids(snapshot, nodes=nodes, anchors=normalized_anchors)
+    resolved_anchors: list[GraphContextAnchor] = []
+    ambiguous_anchors: list[GraphContextAnchor] = []
+    normalized_seeds: list[str] = []
+    for anchor in normalized_anchors:
+        current_file_id = file_id(repo_id, anchor.path)
+        if anchor.kind == GraphContextAnchorKind.SYMBOL:
+            symbol_count = len(anchored_symbol_ids.get(current_file_id, set()))
+            if symbol_count == 0:
+                unresolved_anchors.append(anchor)
+                continue
+            if symbol_count > 1:
+                ambiguous_anchors.append(anchor)
+                continue
+        resolved_anchors.append(anchor)
+        if anchor.path not in normalized_seeds:
+            normalized_seeds.append(anchor.path)
     seed_ids = {file_id(repo_id, path) for path in normalized_seeds}
 
     symbol_files: dict[str, str] = {}
@@ -1057,15 +1203,32 @@ def project_context_neighborhood(
     frontier = set(seed_ids)
     origins_by_file: dict[str, set[str]] = {seed_id: {seed_id} for seed_id in seed_ids}
     relation_priority = {"TESTS_FILE": 0, "IMPORTS_FILE": 1, STRUCTURED_EDGE_KIND: 2, "CALLS": 3}
+    max_depth = max((policy.max_depth for policy in mode_policy.values()), default=0)
     for distance in range(1, max_depth + 1):
-        eligible = [
-            relation
-            for relation in file_relations
-            if relation[1] in frontier or relation[2] in frontier
-        ]
+        eligible = []
+        for relation in file_relations:
+            edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id = relation
+            edge_policy = mode_policy.get(edge.kind)
+            if edge_policy is None or distance > edge_policy.max_depth:
+                continue
+            outbound = from_file_id in frontier and edge_policy.outbound
+            inbound = to_file_id in frontier and edge_policy.inbound
+            if distance == 1:
+                if edge.kind == "CALLS":
+                    if outbound and anchored_symbol_ids.get(from_file_id) and from_symbol_id not in anchored_symbol_ids[from_file_id]:
+                        outbound = False
+                    if inbound and anchored_symbol_ids.get(to_file_id) and to_symbol_id not in anchored_symbol_ids[to_file_id]:
+                        inbound = False
+                elif edge.kind in {"IMPORTS_FILE", STRUCTURED_EDGE_KIND}:
+                    if outbound and anchored_symbol_ids.get(from_file_id):
+                        outbound = False
+                    if inbound and anchored_symbol_ids.get(to_file_id):
+                        inbound = False
+            if outbound or inbound:
+                eligible.append((*relation, outbound, inbound))
         eligible.sort(
             key=lambda item: (
-                0 if item[1] in frontier else 1,
+                0 if item[5] else 1,
                 relation_priority.get(item[0].kind, 9),
                 0 if item[1] == item[2] else 1,
                 str(nodes.get(item[1]).identity.get("path") if nodes.get(item[1]) is not None else ""),
@@ -1075,11 +1238,11 @@ def project_context_neighborhood(
             )
         )
         next_frontier: set[str] = set()
-        for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id in eligible:
+        for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id, outbound, inbound in eligible:
             frontier_origins: set[str] = set()
-            if from_file_id in frontier:
+            if outbound:
                 frontier_origins.update(origins_by_file.get(from_file_id, {from_file_id}))
-            if to_file_id in frontier:
+            if inbound:
                 frontier_origins.update(origins_by_file.get(to_file_id, {to_file_id}))
             add_relation(
                 edge=edge,
@@ -1090,10 +1253,10 @@ def project_context_neighborhood(
                 distance=distance,
                 origin_file_ids=frontier_origins,
             )
-            if from_file_id not in visited:
+            if inbound and from_file_id not in visited:
                 next_frontier.add(from_file_id)
                 origins_by_file.setdefault(from_file_id, set()).update(frontier_origins)
-            if to_file_id not in visited:
+            if outbound and to_file_id not in visited:
                 next_frontier.add(to_file_id)
                 origins_by_file.setdefault(to_file_id, set()).update(frontier_origins)
             if len(relations) >= max_relations:
@@ -1182,7 +1345,19 @@ def project_context_neighborhood(
         for item in sorted(history_by_task[task_id], key=lambda value: str(value.get("path") or ""))
     ]
     return {
+        "mode": mode,
+        "policy": {
+            edge_kind: {
+                "inbound": edge_policy.inbound,
+                "outbound": edge_policy.outbound,
+                "max_depth": edge_policy.max_depth,
+            }
+            for edge_kind, edge_policy in sorted(mode_policy.items())
+        },
         "seed_paths": normalized_seeds,
+        "seed_anchors": [anchor.to_dict() for anchor in resolved_anchors],
+        "unresolved_anchors": [anchor.to_dict() for anchor in unresolved_anchors],
+        "ambiguous_anchors": [anchor.to_dict() for anchor in ambiguous_anchors],
         "related_paths": sorted(path for path in related_paths if path in visible_paths),
         "relations": relations,
         "history": history,

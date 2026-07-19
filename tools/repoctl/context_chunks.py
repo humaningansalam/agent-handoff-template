@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .context_model import ContextSourceRef
+from .context_model import ContextSectionKind, ContextSourceRef
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -28,6 +28,7 @@ def chunk_markdown_file(root: Path, path: Path, *, kind: str = "document") -> li
     digest = sha256_text(text)
     lines = text.splitlines()
     chunks: list[DocumentChunk] = []
+    section_kind = ContextSectionKind.TASK if kind == "task_artifact" else ContextSectionKind.DOCUMENT
     current_heading = path.name
     start_index = 0
 
@@ -36,30 +37,71 @@ def chunk_markdown_file(root: Path, path: Path, *, kind: str = "document") -> li
         if not match:
             continue
         if index > start_index:
-            chunks.append(_chunk(rel, kind, current_heading, lines[start_index:index], start_index + 1, index, digest))
+            chunks.append(
+                _chunk(
+                    rel,
+                    kind,
+                    current_heading,
+                    lines[start_index:index],
+                    start_index + 1,
+                    index,
+                    digest,
+                    section_kind=section_kind,
+                )
+            )
         current_heading = match.group(2).strip()
         start_index = index
 
     if lines:
-        chunks.append(_chunk(rel, kind, current_heading, lines[start_index:], start_index + 1, len(lines), digest))
+        chunks.append(
+            _chunk(
+                rel,
+                kind,
+                current_heading,
+                lines[start_index:],
+                start_index + 1,
+                len(lines),
+                digest,
+                section_kind=section_kind,
+            )
+        )
     elif not chunks:
-        chunks.append(_chunk(rel, kind, current_heading, [], 1, 1, digest))
+        chunks.append(_chunk(rel, kind, current_heading, [], 1, 1, digest, section_kind=section_kind))
     return [chunk for chunk in chunks if chunk.text.strip()]
 
 
-def chunk_text_source(root: Path, rel: str, text: str, *, kind: str, section: str) -> DocumentChunk:
+def chunk_text_source(
+    root: Path,
+    rel: str,
+    text: str,
+    *,
+    kind: str,
+    section: str,
+    section_kind: ContextSectionKind = ContextSectionKind.UNSPECIFIED,
+) -> DocumentChunk:
     digest = sha256_text(text)
     line_count = max(1, len(text.splitlines()))
-    return _chunk(rel, kind, section, text.splitlines(), 1, line_count, digest)
+    return _chunk(rel, kind, section, text.splitlines(), 1, line_count, digest, section_kind=section_kind)
 
 
-def _chunk(rel: str, kind: str, heading: str, lines: list[str], line_start: int, line_end: int, digest: str) -> DocumentChunk:
+def _chunk(
+    rel: str,
+    kind: str,
+    heading: str,
+    lines: list[str],
+    line_start: int,
+    line_end: int,
+    digest: str,
+    *,
+    section_kind: ContextSectionKind,
+) -> DocumentChunk:
     body = "\n".join(lines).strip()
     return DocumentChunk(
         source_ref=ContextSourceRef(
             kind=kind,
             path=rel,
             section=heading,
+            section_kind=section_kind,
             line_start=line_start,
             line_end=line_end,
             content_sha256=digest,
