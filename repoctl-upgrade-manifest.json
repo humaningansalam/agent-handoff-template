@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "replace_paths": [
     ".agents/skills/maintenance-workflow/SKILL.md",
     ".claude/agents/README.md",
