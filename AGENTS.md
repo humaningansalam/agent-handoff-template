@@ -18,7 +18,7 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 3. Assigned task file in `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
 4. Parent task file, if the task frontmatter `parent` is non-empty
 5. Only the docs listed in the task `## Context Docs`
-6. `docs/PRD.md` when shared project context is needed
+6. `docs/PRD.md` when shared project context is needed; if it is absent, read only the relevant authority document under `docs/prd/`
 7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
 For repo-scoped implementation tasks, use this order before editing product files:
@@ -91,7 +91,7 @@ Scope matrix:
 - Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
 - Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
 - Use `./scripts/repoctl task show T-... --summary --json` for compact task inspection, omit `--summary` when the full task body is needed, and use `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
-- When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`. Use `--verification-file` only for an external artifact.
+- When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`. Use `--verification-file` only for an external artifact. If the task established a reusable cross-task decision, invariant, or failure mode, add `--knowledge-kind`, an explicit `--knowledge-claim` or `--knowledge-claim-file`, and any literal `--knowledge-applies-to` paths to the same finish command so the completion receipt and review candidate are persisted together.
 - Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `--use-committed-diff`. This mode is allowed only when the recorded start HEAD is an ancestor of the current HEAD and no task-new working-tree changes remain.
 - Use `./scripts/repoctl task doctor T-... --use-committed-diff --json` to preflight that same committed-range path before finish.
 - While a task is live, `task doctor` reports current Chosen-vs-diff drift as an advisory; `task finish` remains the hard closure gate for unchosen changes.
@@ -125,7 +125,7 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - Parent tasks archive only after live children are done, canceled, or re-parented.
 - Done/canceled tasks and their completion receipts are immutable.
 - Additional work uses a new task: `./scripts/repoctl task create --follow-up-of T-old --slug ... "Follow-up title" --json`. The new task gets a new baseline; the old task is not moved or rewritten.
-- After finish, create a Knowledge candidate only when the task established a reusable cross-task decision, invariant, or failure mode. Task-derived candidates require an explicit `--claim` or `--claim-file`; the completion receipt supplies provenance, not the reusable claim. Preview with `knowledge candidate suggest --from-task ... --kind ... --claim ... --dry-run`, then use candidate show/check before explicit approval. Never hand-edit candidate JSON. Routine implementation details should remain in task history rather than durable Knowledge.
+- Create a Knowledge candidate only when the task established a reusable cross-task decision, invariant, or failure mode. Every candidate requires an explicit `--claim` or `--claim-file`; source documents and completion receipts provide provenance, never the reusable claim. Prefer the integrated `task finish --knowledge-kind ... --knowledge-claim ...` closeout. `knowledge candidate suggest --from-task ... --dry-run` remains a preview path for an already-finished task, not the normal closeout. Use candidate show/check before explicit approval, and never hand-edit candidate JSON. Approval materializes the reviewed record and synchronizes Graph in the same command; if Graph synchronization fails, keep the durable record and follow the returned typed rebuild action. Routine implementation details should remain in task history rather than durable Knowledge.
 
 ## Documentation Language
 

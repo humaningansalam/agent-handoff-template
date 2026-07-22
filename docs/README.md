@@ -27,6 +27,7 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Append log: `./scripts/repoctl task log append T-... "message" --json`
 - Finish task from completed `## Verification`: `./scripts/repoctl task finish T-... --json`
 - Finish with an external verification artifact: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
+- Finish and create a reusable Knowledge review candidate atomically: `./scripts/repoctl task finish T-... --knowledge-kind invariant --knowledge-claim "<reusable invariant>" --knowledge-applies-to src/owner.py --json`
 - Finish after an accidental product commit: `./scripts/repoctl task finish T-... --use-committed-diff --json`
 - Create follow-up work: `./scripts/repoctl task create --follow-up-of T-old --slug follow-up "Follow-up title" --json`
 - Show version: `./scripts/repoctl --version` or `./scripts/repoctl version --json`
@@ -38,9 +39,9 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Query Context compact JSON: `./scripts/repoctl context query "question" --repo-id main --json`
 - Query Context raw/debug JSON: `./scripts/repoctl context query "question" --repo-id main --full --json`
 - Pack task context compact JSON: `./scripts/repoctl context pack --task T-... --repo-id main --json`
-- Build knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --json`
-- Suggest knowledge candidate from a finished task receipt: `./scripts/repoctl knowledge candidate suggest --from-task T-... --repo-id main --kind invariant --claim "<reusable invariant>" --dry-run --json`. The task receipt supplies provenance; `--claim` or `--claim-file` supplies the reusable knowledge statement. Review with candidate show/check before approval.
-- Approve knowledge: `./scripts/repoctl knowledge approve KC-... --repo-id main --reviewed-by <label> --note-file /tmp/review.md --json`
+- Build knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --claim '<reusable claim>' --json`
+- Suggest knowledge candidate from an already-finished task receipt: `./scripts/repoctl knowledge candidate suggest --from-task T-... --repo-id main --kind invariant --claim "<reusable invariant>" --dry-run --json`. This is a preview/recovery path; normal closeout uses the `task finish --knowledge-*` flags. The task receipt supplies provenance, while `--claim` or `--claim-file` supplies the reusable statement.
+- Approve knowledge and synchronize Graph: `./scripts/repoctl knowledge approve KC-... --repo-id main --reviewed-by <label> --note-file /tmp/review.md --json`
 - Query reviewed knowledge compact JSON: `./scripts/repoctl knowledge query "question" --repo-id main --json`
 - Inspect a full reviewed record: `./scripts/repoctl knowledge show K-... --repo-id main --json` or add `--full` to the query.
 - Render llmwiki view: `./scripts/repoctl knowledge render --repo-id main --json`

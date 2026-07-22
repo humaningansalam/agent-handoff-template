@@ -165,7 +165,7 @@ def test_plan_contract_hash_includes_mechanical_verification_route(tmp_path: Pat
 
 
 def test_mechanical_verification_rejects_broad_or_p1_plan(tmp_path: Path) -> None:
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="mechanical verification requires"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as broad_error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -177,8 +177,9 @@ def test_mechanical_verification_rejects_broad_or_p1_plan(tmp_path: Path) -> Non
             acceptance_criteria_ids=("AC-001",),
             verification_mode="mechanical",
         )
+    assert broad_error.value.code == "mechanical_scope_invalid"
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="mechanical verification is limited"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as surface_error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -190,10 +191,11 @@ def test_mechanical_verification_rejects_broad_or_p1_plan(tmp_path: Path) -> Non
             acceptance_criteria_ids=("AC-001",),
             verification_mode="mechanical",
         )
+    assert surface_error.value.code == "mechanical_surface_unsupported"
 
 
 def test_safe_artifact_writer_rejects_forbidden_repo_surface(tmp_path: Path) -> None:
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="forbidden affected surfaces"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as surface_error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -204,8 +206,9 @@ def test_safe_artifact_writer_rejects_forbidden_repo_surface(tmp_path: Path) -> 
             affected_surfaces=("repos/src/app.py",),
             acceptance_criteria_ids=("AC-001",),
         )
+    assert surface_error.value.code == "forbidden_surface"
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="mechanical verification requires"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as severity_error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -218,10 +221,11 @@ def test_safe_artifact_writer_rejects_forbidden_repo_surface(tmp_path: Path) -> 
             failure_mode_severity="P1",
             verification_mode="mechanical",
         )
+    assert severity_error.value.code == "mechanical_scope_invalid"
 
 
 def test_safe_artifact_writer_rejects_candidate_artifact_without_candidate(tmp_path: Path) -> None:
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="candidate-id is required"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -229,6 +233,7 @@ def test_safe_artifact_writer_rejects_candidate_artifact_without_candidate(tmp_p
             summary="plan structured evidence",
             workflow_id="mw-safe-writer",
         )
+    assert error.value.code == "candidate_id_required"
 
 
 def test_safe_artifact_writer_cli_root_must_match_claude_project_dir(tmp_path: Path, monkeypatch) -> None:
@@ -236,7 +241,7 @@ def test_safe_artifact_writer_cli_root_must_match_claude_project_dir(tmp_path: P
     outside.mkdir()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="CLAUDE_PROJECT_DIR"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.run(
             safe_artifact_writer.parse_args(
                 [
@@ -254,6 +259,7 @@ def test_safe_artifact_writer_cli_root_must_match_claude_project_dir(tmp_path: P
                 ]
             )
         )
+    assert error.value.code == "project_root_mismatch"
 
 
 def test_safe_artifact_writer_cli_outputs_json(tmp_path: Path, capsys) -> None:
@@ -380,7 +386,7 @@ def test_safe_artifact_writer_rejects_candidate_id_that_does_not_match_active_st
         tmp_path,
     )
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="candidate-id must match active candidate"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -391,10 +397,11 @@ def test_safe_artifact_writer_rejects_candidate_id_that_does_not_match_active_st
             affected_surfaces=("docs/PRD.md",),
             acceptance_criteria_ids=("AC-001",),
         )
+    assert error.value.code == "candidate_id_mismatch"
 
 
 def test_safe_artifact_writer_rejects_plan_without_structured_metadata(tmp_path: Path) -> None:
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="affected-surface"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -404,10 +411,11 @@ def test_safe_artifact_writer_rejects_plan_without_structured_metadata(tmp_path:
             candidate_id="DOCS-001",
             acceptance_criteria_ids=("AC1",),
         )
+    assert error.value.code == "affected_surface_required"
 
 
 def test_safe_artifact_writer_requires_cartography_before_critical_harness_plan(tmp_path: Path) -> None:
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="requires cartography evidence before writing plan"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -418,6 +426,7 @@ def test_safe_artifact_writer_requires_cartography_before_critical_harness_plan(
             affected_surfaces=("docs/MAINTENANCE_HARNESS_CONTRACT.md",),
             acceptance_criteria_ids=("AC-001",),
         )
+    assert error.value.code == "cartography_required"
 
 
 def test_safe_artifact_writer_allows_critical_harness_plan_after_cartography(tmp_path: Path) -> None:
@@ -457,7 +466,7 @@ def test_safe_artifact_writer_requires_shards_for_broad_critical_plan(tmp_path: 
         active_candidate_id="CAND-001",
     )
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="require cartography shard queue"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -473,6 +482,7 @@ def test_safe_artifact_writer_requires_shards_for_broad_critical_plan(tmp_path: 
             ),
             acceptance_criteria_ids=("AC-001",),
         )
+    assert error.value.code == "cartography_shards_required"
 
 
 def test_safe_artifact_writer_allows_broad_critical_plan_with_shard_queue(tmp_path: Path) -> None:
@@ -515,7 +525,7 @@ def test_safe_artifact_writer_rejects_workflow_id_outside_active_session(tmp_pat
         tmp_path,
     )
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="active maintenance session"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="cartography",
@@ -523,6 +533,7 @@ def test_safe_artifact_writer_rejects_workflow_id_outside_active_session(tmp_pat
             summary="cartography structured evidence",
             workflow_id="mw-wrong",
         )
+    assert error.value.code == "workflow_session_mismatch"
 
 
 def test_safe_artifact_writer_rejects_workflow_id_outside_current_state(tmp_path: Path) -> None:
@@ -532,7 +543,7 @@ def test_safe_artifact_writer_rejects_workflow_id_outside_current_state(tmp_path
         tmp_path,
     )
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="current maintenance state"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="cartography",
@@ -540,6 +551,7 @@ def test_safe_artifact_writer_rejects_workflow_id_outside_current_state(tmp_path
             summary="cartography structured evidence",
             workflow_id="mw-wrong",
         )
+    assert error.value.code == "workflow_state_mismatch"
 
 
 def test_safe_artifact_writer_blocks_replanning_after_critic_without_structured_review(tmp_path: Path) -> None:
@@ -557,7 +569,7 @@ def test_safe_artifact_writer_blocks_replanning_after_critic_without_structured_
         tmp_path,
     )
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="structured approval-ready metadata"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -568,6 +580,7 @@ def test_safe_artifact_writer_blocks_replanning_after_critic_without_structured_
             affected_surfaces=("docs/OPERATIONS_CONTRACT.md",),
             acceptance_criteria_ids=("AC-001",),
         )
+    assert error.value.code == "replan_requires_review_metadata"
 
 
 def test_safe_artifact_writer_blocks_replanning_after_approval_ready_review(tmp_path: Path) -> None:
@@ -590,7 +603,7 @@ def test_safe_artifact_writer_blocks_replanning_after_approval_ready_review(tmp_
         tmp_path,
     )
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="before human approval"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="cartography",
@@ -599,6 +612,7 @@ def test_safe_artifact_writer_blocks_replanning_after_approval_ready_review(tmp_
             workflow_id="mw-approval-ready",
             active_candidate_id="DOCS-002",
         )
+    assert error.value.code == "replan_blocked_awaiting_approval"
 
 
 def test_safe_artifact_writer_allows_replanning_after_nonready_review(tmp_path: Path) -> None:
@@ -657,7 +671,7 @@ def test_safe_artifact_writer_blocks_nonready_replanning_without_planner_retry(t
     )
 
 
-    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError, match="maintenance-planner before writing plan"):
+    with pytest.raises(safe_artifact_writer.SafeArtifactWriterError) as error:
         safe_artifact_writer.write_artifact(
             tmp_path,
             kind="plan",
@@ -668,3 +682,4 @@ def test_safe_artifact_writer_blocks_nonready_replanning_without_planner_retry(t
             affected_surfaces=("docs/OPERATIONS_CONTRACT.md",),
             acceptance_criteria_ids=("AC-001",),
         )
+    assert error.value.code == "retry_route_blocked"

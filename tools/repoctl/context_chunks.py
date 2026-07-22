@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .context_model import ContextSectionKind, ContextSourceRef
+from .document_roles import DocumentRole, source_document_role
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -16,15 +17,23 @@ class DocumentChunk:
     source_ref: ContextSourceRef
     text: str
     title: str
+    document_role: DocumentRole = DocumentRole.UNSPECIFIED
 
 
 def sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def chunk_markdown_file(root: Path, path: Path, *, kind: str = "document") -> list[DocumentChunk]:
+def chunk_markdown_file(
+    root: Path,
+    path: Path,
+    *,
+    kind: str = "document",
+    document_role: DocumentRole = DocumentRole.UNSPECIFIED,
+) -> list[DocumentChunk]:
     text = path.read_text(encoding="utf-8")
     rel = path.relative_to(root).as_posix()
+    role = source_document_role(kind=kind, path=rel, assigned=document_role)
     digest = sha256_text(text)
     lines = text.splitlines()
     chunks: list[DocumentChunk] = []
@@ -47,6 +56,7 @@ def chunk_markdown_file(root: Path, path: Path, *, kind: str = "document") -> li
                     index,
                     digest,
                     section_kind=section_kind,
+                    document_role=role,
                 )
             )
         current_heading = match.group(2).strip()
@@ -63,10 +73,23 @@ def chunk_markdown_file(root: Path, path: Path, *, kind: str = "document") -> li
                 len(lines),
                 digest,
                 section_kind=section_kind,
+                document_role=role,
             )
         )
     elif not chunks:
-        chunks.append(_chunk(rel, kind, current_heading, [], 1, 1, digest, section_kind=section_kind))
+        chunks.append(
+            _chunk(
+                rel,
+                kind,
+                current_heading,
+                [],
+                1,
+                1,
+                digest,
+                section_kind=section_kind,
+                document_role=role,
+            )
+        )
     return [chunk for chunk in chunks if chunk.text.strip()]
 
 
@@ -78,10 +101,21 @@ def chunk_text_source(
     kind: str,
     section: str,
     section_kind: ContextSectionKind = ContextSectionKind.UNSPECIFIED,
+    document_role: DocumentRole = DocumentRole.UNSPECIFIED,
 ) -> DocumentChunk:
     digest = sha256_text(text)
     line_count = max(1, len(text.splitlines()))
-    return _chunk(rel, kind, section, text.splitlines(), 1, line_count, digest, section_kind=section_kind)
+    return _chunk(
+        rel,
+        kind,
+        section,
+        text.splitlines(),
+        1,
+        line_count,
+        digest,
+        section_kind=section_kind,
+        document_role=source_document_role(kind=kind, path=rel, assigned=document_role),
+    )
 
 
 def _chunk(
@@ -94,6 +128,7 @@ def _chunk(
     digest: str,
     *,
     section_kind: ContextSectionKind,
+    document_role: DocumentRole,
 ) -> DocumentChunk:
     body = "\n".join(lines).strip()
     return DocumentChunk(
@@ -108,4 +143,5 @@ def _chunk(
         ),
         text=body,
         title=heading,
+        document_role=document_role,
     )

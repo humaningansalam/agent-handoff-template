@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import tools.repoctl.knowledge_candidates as knowledge_candidates
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
+from tools.repoctl.knowledge_candidates import knowledge_records_for_graph
 from tests.repoctl.knowledge_test_helpers import (
     _approve_knowledge_source,
     _read_event,
@@ -21,7 +23,7 @@ from tests.repoctl.knowledge_test_helpers import (
 def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     note = tmp_path / "review-note.md"
     note.write_text("Reviewed source refs and approved as reusable project decision.\n", encoding="utf-8")
@@ -178,6 +180,118 @@ def test_knowledge_check_reports_event_digest_mismatch(tmp_path: Path, monkeypat
 
 
 
+def test_knowledge_consumers_reject_record_without_approval_event(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+
+    approve_payload = _approve_knowledge_source(capsys)
+    event_path = tmp_path / approve_payload["data"]["event_path"]
+    event_path.unlink()
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 1
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload["data"]["result_count"] == 0
+    assert query_payload["problems"][0]["code"] == "knowledge_approval_incomplete"
+
+    graph_records, graph_problems = knowledge_records_for_graph(tmp_path, repo_id="main")
+    assert graph_records == []
+    assert [problem.code for problem in graph_problems] == ["knowledge_approval_incomplete"]
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["event_checks"]["error_count"] == 1
+    assert check_payload["problems"][0]["code"] == "knowledge_approval_incomplete"
+
+
+def test_knowledge_consumers_recompute_record_digest(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_knowledge_workspace(tmp_path, monkeypatch)
+    (repo / "safe.py").write_text("SAFE = True\n", encoding="utf-8")
+    (repo / "wrong.py").write_text("WRONG = True\n", encoding="utf-8")
+
+    approve_payload = _approve_knowledge_source(capsys, build_args=["--applies-to", "safe.py"])
+    candidate_id = approve_payload["candidate_id"]
+    record_path = tmp_path / approve_payload["data"]["record_path"]
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["applies_to"] = {"paths": ["wrong.py"]}
+    record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 1
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload["data"]["result_count"] == 0
+    assert {problem["code"] for problem in query_payload["problems"]} == {
+        "knowledge_event_record_digest_mismatch",
+        "knowledge_record_digest_mismatch",
+    }
+
+    graph_records, graph_problems = knowledge_records_for_graph(tmp_path, repo_id="main")
+    assert graph_records == []
+    assert {problem.code for problem in graph_problems} == {
+        "knowledge_event_record_digest_mismatch",
+        "knowledge_record_digest_mismatch",
+    }
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["event_checks"]["error_count"] == 2
+    assert check_payload["data"]["record_checks"]["problem_codes"]["knowledge_record_digest_mismatch"] == 1
+
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 1
+    retry_payload = json.loads(capsys.readouterr().out)
+    assert retry_payload["problems"][0]["code"] == "knowledge_record_digest_mismatch"
+
+
+def test_candidate_check_and_approval_reject_identity_and_digest_tampering(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_multirepo_workspace(tmp_path, monkeypatch)
+
+    cases = (
+        ("id", "knowledge_candidate_id_mismatch"),
+        ("repo_id", "knowledge_candidate_repo_mismatch"),
+        ("candidate_digest", "knowledge_candidate_digest_mismatch"),
+    )
+    for tamper, expected_code in cases:
+        assert main(
+            [
+                "knowledge",
+                "candidate",
+                "build",
+                "--source",
+                "docs/contracts/repoctl-context-contract.md",
+                "--repo-id",
+                "web",
+                "--claim",
+                "Reviewed Context remains non-authoritative.",
+                "--json",
+            ]
+        ) == 0
+        built = json.loads(capsys.readouterr().out)["data"]
+        candidate_id = built["candidate"]["id"]
+        candidate_path = tmp_path / built["path"]
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+
+        if tamper == "id":
+            candidate["id"] = f"{candidate_id}-payload"
+        elif tamper == "repo_id":
+            candidate["repo_id"] = "api"
+        else:
+            candidate["claim"] = "Tampered candidate claim."
+        if tamper != "candidate_digest":
+            candidate["candidate_digest"] = digest_data(
+                {key: value for key, value in candidate.items() if key != "candidate_digest"}
+            )
+        candidate_path.write_text(
+            json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        assert main(["knowledge", "candidate", "check", candidate_id, "--repo-id", "web", "--json"]) == 1
+        check_payload = json.loads(capsys.readouterr().out)
+        assert [problem["code"] for problem in check_payload["problems"]] == [expected_code]
+
+        assert main(["knowledge", "approve", candidate_id, "--repo-id", "web", "--json"]) == 1
+        approve_payload = json.loads(capsys.readouterr().out)
+        assert [problem["code"] for problem in approve_payload["problems"]] == [expected_code]
+        assert not (tmp_path / "docs/knowledge/records" / f"K{candidate_id[2:]}.json").exists()
+
+
 def test_knowledge_query_rejects_invalid_lifecycle_events(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
@@ -208,7 +322,11 @@ def test_knowledge_query_ranks_more_specific_record_first(tmp_path: Path, monkey
 
     broad_record = _approve_knowledge_source(capsys)["data"]["record"]["id"]
 
-    specific_record = _approve_knowledge_source(capsys, source="docs/adr/context-benchmark-gates.md")["data"]["record"]["id"]
+    specific_record = _approve_knowledge_source(
+        capsys,
+        source="docs/adr/context-benchmark-gates.md",
+        claim="Context benchmark gates reject stale reviewed knowledge source drift before release.",
+    )["data"]["record"]["id"]
 
     assert main(["knowledge", "query", "context benchmark stale reviewed knowledge source drift", "--repo-id", "main", "--explain", "--json"]) == 0
 
@@ -221,6 +339,82 @@ def test_knowledge_query_ranks_more_specific_record_first(tmp_path: Path, monkey
     assert first["score"] > second["score"]
     assert first["score_breakdown"]["exact_claim"] == 1.0
     assert "exact claim match" in first["selection_reasons"]
+
+
+def test_knowledge_consumers_require_complete_supersede_lifecycle(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+
+    old_record = _approve_knowledge_source(capsys, claim="Original reviewed routing decision.")["data"]["record"]["id"]
+    replacement = _approve_knowledge_source(
+        capsys,
+        claim="Replacement reviewed routing decision.",
+        approve_args=["--supersedes", old_record],
+    )
+    replacement_candidate = replacement["candidate_id"]
+    superseded_event_path = tmp_path / replacement["data"]["superseded_events"][0]["event_path"]
+    superseded_event_path.unlink()
+
+    assert main(["knowledge", "query", "Replacement reviewed routing decision.", "--repo-id", "main", "--json"]) == 1
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload["data"]["result_count"] == 0
+    assert query_payload["problems"][0]["code"] == "knowledge_superseded_event_missing"
+
+    graph_records, graph_problems = knowledge_records_for_graph(tmp_path, repo_id="main")
+    assert graph_records == []
+    assert [problem.code for problem in graph_problems] == ["knowledge_superseded_event_missing"]
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert check_payload["data"]["event_checks"]["error_count"] == 1
+    assert check_payload["problems"][0]["code"] == "knowledge_superseded_event_missing"
+
+    assert main(["knowledge", "approve", replacement_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 1
+    retry_payload = json.loads(capsys.readouterr().out)
+    assert retry_payload["problems"][0]["code"] == "knowledge_superseded_event_missing"
+
+
+def test_knowledge_approval_rollback_attempts_all_written_artifacts(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+
+    old_record = _approve_knowledge_source(capsys, claim="Original reviewed routing decision.")["data"]["record"]["id"]
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Replacement reviewed routing decision.", "--json"]) == 0
+    replacement_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    replacement_record = "K" + replacement_candidate[2:]
+    replacement_record_path = tmp_path / "docs/knowledge/records" / f"{replacement_record}.json"
+    approved_event_path: list[Path] = []
+    unlink_attempts: list[Path] = []
+    real_atomic_write = knowledge_candidates.atomic_write
+    real_unlink = Path.unlink
+
+    def fail_superseded_event(path: Path, text: str) -> None:
+        payload = json.loads(text)
+        if payload.get("type") == "approved":
+            approved_event_path[:] = [path]
+        if payload.get("type") == "superseded":
+            raise OSError("injected superseded event write failure")
+        real_atomic_write(path, text)
+
+    def fail_approved_event_rollback(self: Path, *args, **kwargs):
+        unlink_attempts.append(self)
+        if approved_event_path and self == approved_event_path[0]:
+            raise OSError("injected approved event rollback failure")
+        return real_unlink(self, *args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(knowledge_candidates, "atomic_write", fail_superseded_event)
+        patcher.setattr(Path, "unlink", fail_approved_event_rollback)
+        assert main(["knowledge", "approve", replacement_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 1
+        failed_payload = json.loads(capsys.readouterr().out)
+
+    assert failed_payload["problems"][0]["code"] == "knowledge_approval_rollback_failed"
+    assert approved_event_path[0].is_file()
+    assert replacement_record_path in unlink_attempts
+    assert not replacement_record_path.exists()
+
+    assert main(["knowledge", "approve", replacement_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 1
+    retry_payload = json.loads(capsys.readouterr().out)
+    assert retry_payload["problems"][0]["code"] == "knowledge_approval_incomplete"
+    assert not replacement_record_path.exists()
 
 
 def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -297,7 +491,7 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
 def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     reason = tmp_path / "reject.md"
     reason.write_text("Candidate is too broad for reviewed knowledge.\n", encoding="utf-8")

@@ -12,14 +12,14 @@ from typing import Any
 from .io import LOCK_REL, RepoctlError, atomic_write
 from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_git_head, repo_git_status, repo_path_fingerprints
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
-from .repositories import RepoSelectorStatus, RepoTarget, default_repo_target, repo_layout, resolve_repo_selector_path
+from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoSelectorStatus, RepoTarget, default_repo_target, repo_layout, resolve_repo_selector_path
 from .settings import document_language, validate_document_language
 
 LIVE = {"todo", "doing", "blocked"}
 NON_LIVE = {"done", "canceled"}
 STATUSES = LIVE | NON_LIVE
-AREAS = {"", "repo", "backend", "frontend", "infra", "docs", "ops", "mobile"}
-REPO_REQUIRED_AREAS = {"repo", "backend", "frontend", "infra", "mobile"}
+AREAS = TASK_AREAS
+REPO_REQUIRED_AREAS = REPO_REQUIRED_TASK_AREAS
 TASK_RE = re.compile(r"^(T-[0-9]{14}Z)--[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
 ID_RE = re.compile(r"^T-[0-9]{14}Z$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -204,11 +204,14 @@ class Problem:
     code: str
     message: str
     path: str | None = None
+    cause_code: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         data = {"severity": self.severity, "code": self.code, "message": self.message}
         if self.path is not None:
             data["path"] = self.path
+        if self.cause_code is not None:
+            data["cause_code"] = self.cause_code
         return data
 
 

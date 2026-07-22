@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import re
-import subprocess
 import hashlib
 import json
+import re
+import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping
 
 from .io import RepoctlError, atomic_write
+from .markdown import parse_frontmatter
 from .settings import load_repoctl_settings
 
 
 REPO_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 PRODUCT_REPO_DIRS = ("repos",)
+TASK_AREAS = frozenset({"", "repo", "backend", "frontend", "infra", "docs", "ops", "mobile"})
+REPO_REQUIRED_TASK_AREAS = frozenset({"repo", "backend", "frontend", "infra", "mobile"})
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,34 @@ class RepoSelectorStatus(StrEnum):
     NOT_FOUND = "not_found"
     INVALID = "invalid"
     AMBIGUOUS = "ambiguous"
+
+
+class RepositoryStateSource(StrEnum):
+    GRAPH = "graph"
+    KNOWLEDGE_CANDIDATE = "knowledge_candidate"
+    KNOWLEDGE_RECORD = "knowledge_record"
+    KNOWLEDGE_EVENT = "knowledge_event"
+    COMPLETION_RECEIPT = "completion_receipt"
+
+
+class TaskRepositoryScope(StrEnum):
+    WORKSPACE = "workspace"
+    REPOSITORY = "repository"
+    INVALID = "invalid"
+
+
+def task_repository_scope(frontmatter: Mapping[str, Any]) -> TaskRepositoryScope:
+    raw_repo_id = frontmatter.get("repo_id")
+    raw_area = frontmatter.get("area")
+    if not isinstance(raw_repo_id, str) or not isinstance(raw_area, str):
+        return TaskRepositoryScope.INVALID
+    if raw_repo_id != raw_repo_id.strip() or raw_area != raw_area.strip():
+        return TaskRepositoryScope.INVALID
+    if raw_area not in TASK_AREAS or (raw_repo_id and not REPO_ID_RE.fullmatch(raw_repo_id)):
+        return TaskRepositoryScope.INVALID
+    if raw_repo_id or raw_area in REPO_REQUIRED_TASK_AREAS:
+        return TaskRepositoryScope.REPOSITORY
+    return TaskRepositoryScope.WORKSPACE
 
 
 @dataclass(frozen=True)
@@ -435,6 +466,130 @@ def repo_check_problems(layout: RepoLayout) -> list[dict[str, str]]:
     return problems
 
 
+def _completion_receipt_task_scope(root: Path, receipt_path: Path, payload: Mapping[str, Any]) -> TaskRepositoryScope:
+    raw_task_path = payload.get("task_path_at_completion")
+    task_id = payload.get("task_id")
+    if not isinstance(raw_task_path, str) or not isinstance(task_id, str):
+        return TaskRepositoryScope.INVALID
+    if (
+        raw_task_path != raw_task_path.strip()
+        or "\\" in raw_task_path
+        or not re.fullmatch(r"T-[0-9]{14}Z", task_id)
+        or receipt_path.stem != task_id
+    ):
+        return TaskRepositoryScope.INVALID
+    task_path = PurePosixPath(raw_task_path)
+    if task_path.is_absolute() or ".." in task_path.parts or task_path.parent.as_posix() not in {"docs/tasks", "docs/archive/tasks"}:
+        return TaskRepositoryScope.INVALID
+    if not task_path.name.startswith(f"{task_id}--") or task_path.suffix != ".md":
+        return TaskRepositoryScope.INVALID
+
+    exact = root / raw_task_path
+    if exact.is_file():
+        candidates = [exact]
+    else:
+        candidates = [
+            *sorted((root / "docs/tasks").glob(f"{task_id}--*.md")),
+            *sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")),
+        ]
+        candidates = [candidate for candidate in candidates if candidate.is_file()]
+        if len(candidates) != 1:
+            return TaskRepositoryScope.INVALID
+
+    try:
+        root_resolved = root.resolve()
+        resolved = candidates[0].resolve(strict=True)
+        relative = resolved.relative_to(root_resolved)
+        if PurePosixPath(relative.as_posix()).parent.as_posix() not in {"docs/tasks", "docs/archive/tasks"}:
+            return TaskRepositoryScope.INVALID
+        frontmatter, _body = parse_frontmatter(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RepoctlError):
+        return TaskRepositoryScope.INVALID
+    if frontmatter.get("id") != task_id or frontmatter.get("status") != "done":
+        return TaskRepositoryScope.INVALID
+    return task_repository_scope(frontmatter)
+
+
+def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    namespaces: dict[str, dict[str, Any]] = {}
+    problems: list[dict[str, str]] = []
+
+    def add(repo_id: str, *, source: RepositoryStateSource, path: Path) -> None:
+        normalized = repo_id.strip()
+        rel = path.relative_to(root).as_posix()
+        if not normalized:
+            problems.append(_problem("error", "repository_state_identity_missing", "repository-scoped state is missing repo_id", rel))
+            return
+        item = namespaces.setdefault(normalized, {"repo_id": normalized, "sources": set(), "paths": []})
+        item["sources"].add(source.value)
+        item["paths"].append(rel)
+
+    def add_json(path: Path, *, source: RepositoryStateSource) -> None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            problems.append(_problem("error", "repository_state_invalid", str(exc), path.relative_to(root).as_posix()))
+            return
+        if not isinstance(payload, dict):
+            problems.append(_problem("error", "repository_state_invalid", "repository-scoped state must be a JSON object", path.relative_to(root).as_posix()))
+            return
+        raw_repo_id = payload.get("repo_id")
+        if source is RepositoryStateSource.COMPLETION_RECEIPT and raw_repo_id == "":
+            if _completion_receipt_task_scope(root, path, payload) is TaskRepositoryScope.WORKSPACE:
+                return
+        add(str(raw_repo_id or ""), source=source, path=path)
+
+    for state_root, source in (
+        (root / ".repoctl-state/graph", RepositoryStateSource.GRAPH),
+        (root / ".repoctl-state/knowledge/candidates", RepositoryStateSource.KNOWLEDGE_CANDIDATE),
+    ):
+        if not state_root.is_dir():
+            continue
+        for path in sorted(item for item in state_root.iterdir() if item.is_dir()):
+            if any(child.is_file() for child in path.rglob("*")):
+                add(path.name, source=source, path=path)
+
+    for directory, pattern, source in (
+        (root / "docs/knowledge/records", "K-*.json", RepositoryStateSource.KNOWLEDGE_RECORD),
+        (root / "docs/knowledge/events", "E-*.json", RepositoryStateSource.KNOWLEDGE_EVENT),
+        (root / "docs/tasks/.repoctl-state/completions", "T-*.json", RepositoryStateSource.COMPLETION_RECEIPT),
+    ):
+        if directory.is_dir():
+            for path in sorted(directory.glob(pattern)):
+                add_json(path, source=source)
+
+    result: list[dict[str, Any]] = []
+    for repo_id, item in sorted(namespaces.items()):
+        paths = sorted(set(str(path) for path in item["paths"]))
+        result.append(
+            {
+                "repo_id": repo_id,
+                "sources": sorted(str(source) for source in item["sources"]),
+                "path_count": len(paths),
+                "paths": paths[:20],
+                "paths_truncated": len(paths) > 20,
+            }
+        )
+    return result, problems
+
+
+def _require_bound_repository_state(root: Path, *, repo_ids: set[str]) -> None:
+    namespaces, problems = repository_state_namespaces(root)
+    if problems:
+        first = problems[0]
+        raise RepoctlError(first["message"], code=first["code"], path=first["path"])
+    unbound = [item for item in namespaces if str(item.get("repo_id") or "") not in repo_ids]
+    if not unbound:
+        return
+    ids = ", ".join(str(item["repo_id"]) for item in unbound)
+    paths = [str(path) for item in unbound for path in item.get("paths", []) if str(path)]
+    raise RepoctlError(
+        f"repository-scoped state is not bound to the adopted repository identities: {ids}; do not guess a state migration",
+        code="repository_state_identity_unbound",
+        path=paths[0] if paths else ".repoctl-state",
+    )
+
+
 def adopt_repositories(root: Path, *, all_candidates: bool = False, path: str = "", repo_id: str = "") -> RepoLayout:
     layout = repo_layout(root)
     if not layout.candidates:
@@ -492,6 +647,7 @@ def adopt_repositories(root: Path, *, all_candidates: bool = False, path: str = 
     new_settings = dict(settings)
     new_settings["repositories"] = entries
     validated = _layout_from_settings(root, new_settings)
+    _require_bound_repository_state(root, repo_ids={target.id for target in validated.targets})
     docs_dir = root / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     config_path = docs_dir / "repoctl.json"

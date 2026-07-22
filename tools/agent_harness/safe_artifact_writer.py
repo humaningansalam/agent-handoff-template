@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -49,8 +50,45 @@ VALID_RETRY_TARGETS = {
 }
 
 
+class SafeArtifactWriterErrorCode(StrEnum):
+    UNKNOWN_ARTIFACT_KIND = "unknown_artifact_kind"
+    WORKFLOW_ID_REQUIRED = "workflow_id_required"
+    CANDIDATE_ID_REQUIRED = "candidate_id_required"
+    INVALID_REVISION = "invalid_revision"
+    INVALID_QUEUE_POLICY = "invalid_queue_policy"
+    APPROVAL_READY_REQUIRED = "approval_ready_required"
+    VERIFICATION_PASSED_REQUIRED = "verification_passed_required"
+    WORKFLOW_STATE_MISMATCH = "workflow_state_mismatch"
+    WORKFLOW_SESSION_MISMATCH = "workflow_session_mismatch"
+    RETRY_ROUTE_BLOCKED = "retry_route_blocked"
+    REPLAN_REQUIRES_PLANNER = "replan_requires_planner"
+    REPLAN_BLOCKED_AWAITING_APPROVAL = "replan_blocked_awaiting_approval"
+    REPLAN_REQUIRES_REVIEW_METADATA = "replan_requires_review_metadata"
+    MECHANICAL_SCOPE_INVALID = "mechanical_scope_invalid"
+    FORBIDDEN_SURFACE = "forbidden_surface"
+    CARTOGRAPHY_REQUIRED = "cartography_required"
+    CARTOGRAPHY_SHARDS_REQUIRED = "cartography_shards_required"
+    INVALID_EVIDENCE_STATUS = "invalid_evidence_status"
+    SUMMARY_REQUIRED = "summary_required"
+    INVALID_RETRY_TARGET = "invalid_retry_target"
+    FINDING_FIELDS_REQUIRED = "finding_fields_required"
+    INVALID_FINDING_VERDICT = "invalid_finding_verdict"
+    INVALID_FINDING_SEVERITY = "invalid_finding_severity"
+    CANDIDATE_ID_MISMATCH = "candidate_id_mismatch"
+    ACTIVE_CANDIDATE_REQUIRED = "active_candidate_required"
+    ACTIVE_CANDIDATE_QUEUED = "active_candidate_queued"
+    AFFECTED_SURFACE_REQUIRED = "affected_surface_required"
+    ACCEPTANCE_CRITERIA_REQUIRED = "acceptance_criteria_required"
+    INVALID_FAILURE_SEVERITY = "invalid_failure_severity"
+    MECHANICAL_SURFACE_UNSUPPORTED = "mechanical_surface_unsupported"
+    UNKNOWN_COMMAND = "unknown_command"
+    PROJECT_ROOT_MISMATCH = "project_root_mismatch"
+
+
 class SafeArtifactWriterError(RuntimeError):
-    pass
+    def __init__(self, code: SafeArtifactWriterErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code.value
 
 
 def _canonical_path(workflow_id: str, candidate_id: str, latest_name: str, revision: int) -> str:
@@ -91,21 +129,30 @@ def write_artifact(
     normalized_kind = kind.strip()
     latest_name = KIND_TO_LATEST.get(normalized_kind)
     if latest_name is None:
-        raise SafeArtifactWriterError(f"unknown maintenance artifact kind: {kind}")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.UNKNOWN_ARTIFACT_KIND,
+            f"unknown maintenance artifact kind: {kind}",
+        )
     workflow = workflow_id.strip()
     if not workflow:
-        raise SafeArtifactWriterError("workflow-id is required")
+        raise SafeArtifactWriterError(SafeArtifactWriterErrorCode.WORKFLOW_ID_REQUIRED, "workflow-id is required")
     _require_active_workflow_match(root, workflow)
     candidate = candidate_id.strip() or "run"
     if normalized_kind in CANDIDATE_KINDS and candidate == "run":
-        raise SafeArtifactWriterError(f"candidate-id is required for {normalized_kind}")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.CANDIDATE_ID_REQUIRED,
+            f"candidate-id is required for {normalized_kind}",
+        )
     if normalized_kind in CANDIDATE_KINDS:
         _require_candidate_lineage_match(root, workflow, candidate)
     if revision < 1:
-        raise SafeArtifactWriterError("revision must be >= 1")
+        raise SafeArtifactWriterError(SafeArtifactWriterErrorCode.INVALID_REVISION, "revision must be >= 1")
     normalized_queue_policy = queue_policy.strip()
     if normalized_queue_policy and normalized_queue_policy not in {"human-decision", "auto-continuation"}:
-        raise SafeArtifactWriterError("queue-policy must be human-decision or auto-continuation")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.INVALID_QUEUE_POLICY,
+            "queue-policy must be human-decision or auto-continuation",
+        )
     _require_plan_review_route_before_replanning(root, workflow, normalized_kind)
     _require_policy_route_prerequisites(
         root,
@@ -165,7 +212,10 @@ def write_artifact(
         write_json_atomic_under_root(root / harness_paths.PLAN_METADATA_JSON, plan_metadata, root)
     if normalized_kind == "plan-review":
         if approval_ready is None:
-            raise SafeArtifactWriterError("plan-review artifacts require approval-ready metadata")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.APPROVAL_READY_REQUIRED,
+                "plan-review artifacts require approval-ready metadata",
+            )
         write_json_atomic_under_root(
             root / harness_paths.PLAN_REVIEW_METADATA_JSON,
             {
@@ -178,7 +228,10 @@ def write_artifact(
         )
     if normalized_kind == "execution-review":
         if verification_passed is None:
-            raise SafeArtifactWriterError("execution-review artifacts require verification-passed metadata")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.VERIFICATION_PASSED_REQUIRED,
+                "execution-review artifacts require verification-passed metadata",
+            )
         write_json_atomic_under_root(
             root / harness_paths.EXECUTION_REVIEW_METADATA_JSON,
             {
@@ -226,7 +279,10 @@ def _require_active_workflow_match(root: Path, workflow_id: str) -> None:
             state = {}
         state_workflow = str(state.get("workflow_id") or "").strip() if isinstance(state, dict) else ""
         if state_workflow and state_workflow != workflow_id:
-            raise SafeArtifactWriterError(f"workflow-id must match current maintenance state: {state_workflow}")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.WORKFLOW_STATE_MISMATCH,
+                f"workflow-id must match current maintenance state: {state_workflow}",
+            )
     active_dir = root / harness_paths.ARTIFACT_ROOT / "active-sessions"
     if not active_dir.is_dir() or active_dir.is_symlink():
         return
@@ -243,7 +299,10 @@ def _require_active_workflow_match(root: Path, workflow_id: str) -> None:
             workflow_ids.add(marker_workflow)
     if workflow_ids and workflow_id not in workflow_ids:
         expected = ", ".join(sorted(workflow_ids))
-        raise SafeArtifactWriterError(f"workflow-id must match active maintenance session: {expected}")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.WORKFLOW_SESSION_MISMATCH,
+            f"workflow-id must match active maintenance session: {expected}",
+        )
 
 
 def _require_plan_review_route_before_replanning(root: Path, workflow_id: str, kind: str) -> None:
@@ -252,7 +311,7 @@ def _require_plan_review_route_before_replanning(root: Path, workflow_id: str, k
     if str(state.get("workflow_id") or "").strip() == workflow_id:
         retry_block = retry_artifact_write_block_reason(root, state, kind)
         if retry_block:
-            raise SafeArtifactWriterError(retry_block)
+            raise SafeArtifactWriterError(SafeArtifactWriterErrorCode.RETRY_ROUTE_BLOCKED, retry_block)
     if kind not in {"cartography", "plan"}:
         return
     if str(state.get("workflow_id") or "").strip() != workflow_id:
@@ -269,10 +328,19 @@ def _require_plan_review_route_before_replanning(root: Path, workflow_id: str, k
             return
         if kind == "plan":
             return
-        raise SafeArtifactWriterError("plan review is not approval-ready; rerun maintenance-planner before writing cartography")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.REPLAN_REQUIRES_PLANNER,
+            "plan review is not approval-ready; rerun maintenance-planner before writing cartography",
+        )
     if approval_ready is True:
-        raise SafeArtifactWriterError("plan review is approval-ready; do not replace cartography or plan before human approval")
-    raise SafeArtifactWriterError("maintenance-plan-critic completed; write plan-review artifact with structured approval-ready metadata before replanning")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.REPLAN_BLOCKED_AWAITING_APPROVAL,
+            "plan review is approval-ready; do not replace cartography or plan before human approval",
+        )
+    raise SafeArtifactWriterError(
+        SafeArtifactWriterErrorCode.REPLAN_REQUIRES_REVIEW_METADATA,
+        "maintenance-plan-critic completed; write plan-review artifact with structured approval-ready metadata before replanning",
+    )
 
 
 def _state_with_structured_retry(state: dict[str, Any], root: Path, workflow_id: str) -> dict[str, Any]:
@@ -320,18 +388,30 @@ def _require_policy_route_prerequisites(
     mode = VerificationMode(str(verification_mode).strip() or VerificationMode.SEMANTIC.value)
     severity = failure_mode_severity.strip().upper() or "P3"
     if mode == VerificationMode.MECHANICAL and (len(surfaces) != 1 or severity in {"P0", "P1"}):
-        raise SafeArtifactWriterError("mechanical verification requires exactly one affected surface and P2/P3 severity")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.MECHANICAL_SCOPE_INVALID,
+            "mechanical verification requires exactly one affected surface and P2/P3 severity",
+        )
     _reject_forbidden_or_unsafe_mechanical_surfaces(surfaces, mode)
     policy = policy_for_surfaces(surfaces, severity=failure_mode_severity, verification_mode=verification_mode)
     if not policy.route:
-        raise SafeArtifactWriterError("forbidden affected surfaces cannot be routed by maintenance workflow")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.FORBIDDEN_SURFACE,
+            "forbidden affected surfaces cannot be routed by maintenance workflow",
+        )
     if not policy.route or policy.route[0] != "maintenance-cartographer":
         return
     cartography_path = root / harness_paths.ARTIFACT_ROOT / harness_paths.LATEST_ARTIFACTS["cartography"]
     if not cartography_path.is_file() or cartography_path.is_symlink():
-        raise SafeArtifactWriterError(f"policy route {policy.profile.value} requires cartography evidence before writing plan")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.CARTOGRAPHY_REQUIRED,
+            f"policy route {policy.profile.value} requires cartography evidence before writing plan",
+        )
     if policy.profile == WorkflowProfile.CRITICAL_HARNESS and len(surfaces) >= 4 and not _cartography_has_sharded_queue(root):
-        raise SafeArtifactWriterError("CRITICAL_HARNESS plans with 4 or more affected surfaces require cartography shard queue before writing plan")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.CARTOGRAPHY_SHARDS_REQUIRED,
+            "CRITICAL_HARNESS plans with 4 or more affected surfaces require cartography shard queue before writing plan",
+        )
 
 
 def _cartography_has_sharded_queue(root: Path) -> bool:
@@ -361,10 +441,13 @@ def _structured_evidence(
 ) -> dict[str, Any]:
     normalized_status = status.strip()
     if normalized_status not in VALID_EVIDENCE_STATUSES:
-        raise SafeArtifactWriterError("evidence status must be passed or failed")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.INVALID_EVIDENCE_STATUS,
+            "evidence status must be passed or failed",
+        )
     normalized_summary = summary.strip()
     if not normalized_summary:
-        raise SafeArtifactWriterError("evidence summary is required")
+        raise SafeArtifactWriterError(SafeArtifactWriterErrorCode.SUMMARY_REQUIRED, "evidence summary is required")
     blockers = [str(item).strip() for item in blocking_findings if str(item).strip()]
     evidence: dict[str, Any] = {
         "schema_version": 1,
@@ -380,7 +463,10 @@ def _structured_evidence(
     if normalized_retry:
         if normalized_retry not in VALID_RETRY_TARGETS:
             allowed = ", ".join(sorted(VALID_RETRY_TARGETS))
-            raise SafeArtifactWriterError(f"retry-target must be one of: {allowed}")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.INVALID_RETRY_TARGET,
+                f"retry-target must be one of: {allowed}",
+            )
         evidence["retry_target"] = normalized_retry
     commands = _normalize_list(checked_commands)
     if commands:
@@ -412,12 +498,21 @@ def _structured_findings(
         finding_id = _nth(finding_ids, index)
         verdict = _nth(finding_verdicts, index)
         if not finding_id or not verdict:
-            raise SafeArtifactWriterError("finding-id and finding-verdict are required for every finding row")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.FINDING_FIELDS_REQUIRED,
+                "finding-id and finding-verdict are required for every finding row",
+            )
         if verdict not in {"pass", "fail", "warn"}:
-            raise SafeArtifactWriterError("finding-verdict must be pass, fail, or warn")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.INVALID_FINDING_VERDICT,
+                "finding-verdict must be pass, fail, or warn",
+            )
         severity = _nth(finding_severities, index) or "P3"
         if severity not in {"P0", "P1", "P2", "P3"}:
-            raise SafeArtifactWriterError("finding-severity must be P0, P1, P2, or P3")
+            raise SafeArtifactWriterError(
+                SafeArtifactWriterErrorCode.INVALID_FINDING_SEVERITY,
+                "finding-severity must be P0, P1, P2, or P3",
+            )
         row = {
             "id": finding_id,
             "surface": _nth(finding_surfaces, index),
@@ -446,7 +541,10 @@ def _require_candidate_lineage_match(root: Path, workflow_id: str, candidate_id:
         return
     active = str(candidate_state.get("active_candidate_id") or "").strip()
     if active and candidate_id != active:
-        raise SafeArtifactWriterError(f"candidate-id must match active candidate: {active}")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.CANDIDATE_ID_MISMATCH,
+            f"candidate-id must match active candidate: {active}",
+        )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -493,9 +591,15 @@ def _candidate_state_payload(
         return {}
     policy = (queue_policy or "human-decision") if queued else ""
     if queued and not active:
-        raise SafeArtifactWriterError("active-candidate-id is required when queued candidates are provided")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.ACTIVE_CANDIDATE_REQUIRED,
+            "active-candidate-id is required when queued candidates are provided",
+        )
     if active in queued:
-        raise SafeArtifactWriterError("active candidate cannot also be queued")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.ACTIVE_CANDIDATE_QUEUED,
+            "active candidate cannot also be queued",
+        )
     return {
         "schema_version": 1,
         "workflow_id": workflow_id,
@@ -521,15 +625,27 @@ def _plan_metadata_payload(
     surfaces = _normalize_list(affected_surfaces)
     criteria = _normalize_list(acceptance_criteria_ids)
     if not surfaces:
-        raise SafeArtifactWriterError("plan artifacts require at least one affected-surface metadata value")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.AFFECTED_SURFACE_REQUIRED,
+            "plan artifacts require at least one affected-surface metadata value",
+        )
     if not criteria:
-        raise SafeArtifactWriterError("plan artifacts require at least one acceptance-criteria-id metadata value")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.ACCEPTANCE_CRITERIA_REQUIRED,
+            "plan artifacts require at least one acceptance-criteria-id metadata value",
+        )
     severity = failure_mode_severity.strip().upper() or "P3"
     if severity not in {"P0", "P1", "P2", "P3"}:
-        raise SafeArtifactWriterError("failure-mode-severity must be P0, P1, P2, or P3")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.INVALID_FAILURE_SEVERITY,
+            "failure-mode-severity must be P0, P1, P2, or P3",
+        )
     mode = VerificationMode(str(verification_mode).strip() or VerificationMode.SEMANTIC.value)
     if mode == VerificationMode.MECHANICAL and (len(surfaces) != 1 or severity in {"P0", "P1"}):
-        raise SafeArtifactWriterError("mechanical verification requires exactly one affected surface and P2/P3 severity")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.MECHANICAL_SCOPE_INVALID,
+            "mechanical verification requires exactly one affected surface and P2/P3 severity",
+        )
     _reject_forbidden_or_unsafe_mechanical_surfaces(surfaces, mode)
     ambiguity = _cartography_artifact_exists(root)
     contract_payload = plan_contract_payload(
@@ -572,12 +688,18 @@ def _plan_metadata_payload(
 def _reject_forbidden_or_unsafe_mechanical_surfaces(surfaces: Sequence[str], mode: VerificationMode) -> None:
     classes = tuple(classify_surface(surface) for surface in surfaces)
     if any(surface_class == SurfaceClass.FORBIDDEN_SURFACE for surface_class in classes):
-        raise SafeArtifactWriterError("forbidden affected surfaces cannot be routed by maintenance workflow")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.FORBIDDEN_SURFACE,
+            "forbidden affected surfaces cannot be routed by maintenance workflow",
+        )
     if mode != VerificationMode.MECHANICAL:
         return
     surface = str(surfaces[0]) if surfaces else ""
     if not mechanical_verification_allowed((surface,), classes):
-        raise SafeArtifactWriterError("mechanical verification is limited to low-risk prose or the maintenance contract typo surface")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.MECHANICAL_SURFACE_UNSUPPORTED,
+            "mechanical verification is limited to low-risk prose or the maintenance contract typo surface",
+        )
 
 
 def _normalize_candidate_ids(values: Sequence[str]) -> list[str]:
@@ -633,11 +755,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command != "write":
-        raise SafeArtifactWriterError(f"unknown command: {args.command}")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.UNKNOWN_COMMAND,
+            f"unknown command: {args.command}",
+        )
     root = Path(args.root).resolve()
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir and root != Path(project_dir).resolve():
-        raise SafeArtifactWriterError("safe artifact writer --root must match CLAUDE_PROJECT_DIR")
+        raise SafeArtifactWriterError(
+            SafeArtifactWriterErrorCode.PROJECT_ROOT_MISMATCH,
+            "safe artifact writer --root must match CLAUDE_PROJECT_DIR",
+        )
     return write_artifact(
         root,
         kind=args.kind,

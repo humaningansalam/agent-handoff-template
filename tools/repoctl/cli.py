@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -23,11 +24,11 @@ from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph, materialize_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_candidates import KnowledgeArtifactErrorCode, approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, prepare_knowledge_candidate_from_completion, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_render import render_knowledge
-from .meta import check_meta, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
+from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
-from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, require_repo_target
+from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target
 from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
@@ -52,6 +53,11 @@ class ProductReadiness(StrEnum):
     NOT_EVALUATED = "not_evaluated"
 
 
+class UpgradePostflightStatus(StrEnum):
+    READY = "ready"
+    RECOVERY_REQUIRED = "recovery_required"
+
+
 class FieldGateApplicability(StrEnum):
     REPOCTL_RELEASE_CANDIDATE = "repoctl_release_candidate"
 
@@ -59,6 +65,10 @@ class FieldGateApplicability(StrEnum):
 class NextActionKind(StrEnum):
     BASELINE_OWNERSHIP_RESOLUTION = "baseline_ownership_resolution"
     TASK_SCOPE_REVIEW = "task_scope_review"
+    GRAPH_BUILD = "graph_build"
+    GRAPH_REBUILD = "graph_rebuild"
+    GRAPH_REFRESH = "graph_refresh"
+    CONTEXT_RESUME = "context_resume"
 
 
 class BaselineOwnership(StrEnum):
@@ -188,6 +198,14 @@ def _problem_path(problem: Any) -> str:
     return ""
 
 
+def _problem_cause_code(problem: Any) -> str:
+    if isinstance(problem, Problem):
+        return problem.cause_code or ""
+    if isinstance(problem, dict):
+        return str(problem.get("cause_code") or "")
+    return ""
+
+
 def _mapping_at(data: dict[str, Any] | None, *keys: str) -> dict[str, Any]:
     current: Any = data or {}
     for key in keys:
@@ -236,9 +254,46 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             seen.add(key)
             actions.append(action)
 
+    def add_context_graph_recovery(kind: NextActionKind, *, source: str) -> None:
+        bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
+        repository = (data or {}).get("repository") if isinstance((data or {}).get("repository"), dict) else {}
+        if not repository and isinstance(bundle.get("repository"), dict):
+            repository = bundle["repository"]
+        repo_id = str(repository.get("id") or "<id>")
+        rebuild = kind == NextActionKind.GRAPH_REBUILD
+        label = {
+            NextActionKind.GRAPH_BUILD: "Build the materialized Graph and evidence index",
+            NextActionKind.GRAPH_REBUILD: "Rebuild the materialized Graph and evidence index",
+            NextActionKind.GRAPH_REFRESH: "Refresh the materialized Graph and evidence index",
+        }[kind]
+        add(
+            label,
+            command=f"./scripts/repoctl graph build --repo-id {repo_id}{' --rebuild' if rebuild else ''} --json",
+            kind=kind,
+            source=source,
+        )
+
+        query = bundle.get("query") if isinstance(bundle.get("query"), dict) else {}
+        query_text = str(query.get("text") or "")
+        if not query_text:
+            return
+        mode = str(query.get("mode") or "auto")
+        mode_arg = f" --mode {shlex.quote(mode.replace('_', '-'))}" if mode != "auto" else ""
+        explain_arg = " --explain" if bool(query.get("explain")) else ""
+        add(
+            "Rerun the same Context query after Graph recovery",
+            command=(
+                f"./scripts/repoctl context query {shlex.quote(query_text)} --repo-id {repo_id}"
+                f"{mode_arg}{explain_arg} --json"
+            ),
+            kind=NextActionKind.CONTEXT_RESUME,
+            source="data.bundle.query",
+        )
+
     for problem in problems:
         code = _problem_code(problem)
         path = _problem_path(problem)
+        cause_code = _problem_cause_code(problem)
         if code == "missing_verification_file":
             add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
             add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --json")
@@ -347,6 +402,18 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Inspect plan conflicts before applying", path=path or "/tmp/repoctl-upgrade-plan.json")
         elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
             add("Apply the declared benchmark corpus before running this gate", path="tests/fixtures/context-benchmark/corpus.json")
+        elif code in {"context_graph_unavailable", "context_evidence_index_unavailable"}:
+            recovery_kind = (
+                NextActionKind.GRAPH_BUILD
+                if cause_code == "graph_snapshot_missing"
+                else NextActionKind.GRAPH_REBUILD
+            )
+            add_context_graph_recovery(recovery_kind, source="problems[].cause_code")
+        elif code == "context_graph_stale":
+            add_context_graph_recovery(
+                NextActionKind.GRAPH_REFRESH,
+                source="problems[].code",
+            )
         elif code in {
             "graph_materialization_incomplete",
             "graph_materialization_invalid",
@@ -370,10 +437,18 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
             add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
         elif code == "knowledge_candidate_claim_required":
-            add("State the reusable decision, invariant, or failure mode explicitly", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+            add("State the reusable decision, invariant, or failure mode explicitly", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --kind <kind> --claim '<reusable claim>' --json")
         elif code == "knowledge_records_empty":
-            add("Build a reviewable candidate from a source document", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --json")
+            add("Build a reviewable candidate from a source document", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --kind <kind> --claim '<reusable claim>' --json")
             add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+    bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
+    completeness = bundle.get("completeness") if isinstance(bundle.get("completeness"), dict) else {}
+    freshness = completeness.get("graph_freshness") if isinstance(completeness.get("graph_freshness"), dict) else {}
+    if str(freshness.get("status") or "") == "stale":
+        add_context_graph_recovery(
+            NextActionKind.GRAPH_REFRESH,
+            source="data.bundle.completeness.graph_freshness.status",
+        )
     return actions
 
 
@@ -646,6 +721,41 @@ def _compact_field_gate_summary(summary: Any) -> dict[str, Any]:
     return compact
 
 
+_REVIEWED_KNOWLEDGE_BENCHMARK_SUMMARY_FIELDS = {
+    "knowledge_deprecated_record_excluded",
+    "knowledge_expected_questions",
+    "knowledge_result_questions",
+    "knowledge_score_breakdown_integrity",
+    "knowledge_source_ref_integrity",
+    "knowledge_source_status_current",
+    "knowledge_stale_record_excluded",
+    "knowledge_superseded_record_excluded",
+    "mean_knowledge_recall_at_5",
+}
+
+
+def _context_retrieval_field_gate_summary(summary: Any) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    projected = {
+        str(key): value
+        for key, value in summary.items()
+        if key not in _REVIEWED_KNOWLEDGE_BENCHMARK_SUMMARY_FIELDS and key != "by_category"
+    }
+    categories = summary.get("by_category") if isinstance(summary.get("by_category"), dict) else {}
+    if categories:
+        projected["by_category"] = {
+            str(category): {
+                str(key): value
+                for key, value in values.items()
+                if key not in _REVIEWED_KNOWLEDGE_BENCHMARK_SUMMARY_FIELDS
+            }
+            for category, values in categories.items()
+            if isinstance(values, dict)
+        }
+    return projected
+
+
 def _compact_release_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
     compact = {
         key: data[key]
@@ -772,17 +882,17 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
     knowledge_gate_warnings = [problem for problem in candidate_problems if problem.severity == "warning"]
     gates.append(
         _release_candidate_gate_result(
-            name="knowledge_check",
+            name="reviewed_knowledge_check",
             command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --include-candidates --json",
             mutates_workspace=False,
             data=knowledge_data,
             problems=knowledge_gate_problems,
             warnings=_problem_dicts(knowledge_gate_warnings),
             summary={
-                "record_count": int(knowledge_data.get("record_count") or 0),
-                "event_count": int(knowledge_data.get("event_count") or 0),
-                "record_error_count": len([problem for problem in knowledge_problems if problem.severity == "error"]),
-                "record_problem_codes": _problem_code_counts([problem for problem in knowledge_problems if problem.severity == "error"]),
+                "reviewed_record_count": int(knowledge_data.get("record_count") or 0),
+                "reviewed_event_count": int(knowledge_data.get("event_count") or 0),
+                "reviewed_record_error_count": len([problem for problem in knowledge_problems if problem.severity == "error"]),
+                "reviewed_record_problem_codes": _problem_code_counts([problem for problem in knowledge_problems if problem.severity == "error"]),
                 "candidate_total_count": int(candidate_data.get("candidate_total_count") or 0) if isinstance(candidate_data, dict) else 0,
                 "candidate_checked_count": len(candidate_data.get("results", [])) if isinstance(candidate_data.get("results"), list) else 0,
                 "candidate_error_count": len([problem for problem in candidate_problems if problem.severity == "error"]),
@@ -856,7 +966,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                         warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
                         summary={
                             "question_count": context_benchmark.get("question_count", 0),
-                            **(context_benchmark.get("summary", {}) if isinstance(context_benchmark.get("summary"), dict) else {}),
+                            **_context_retrieval_field_gate_summary(context_benchmark.get("summary")),
                         },
                     )
                 )
@@ -972,7 +1082,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                     warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
                     summary={
                         "question_count": multi_benchmark.get("question_count", 0),
-                        **(multi_benchmark.get("summary", {}) if isinstance(multi_benchmark.get("summary"), dict) else {}),
+                        **_context_retrieval_field_gate_summary(multi_benchmark.get("summary")),
                     },
                 )
             )
@@ -1490,14 +1600,43 @@ def cmd_repo_check(args: argparse.Namespace) -> int:
 
 def cmd_repo_adopt(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    before = repo_layout(root)
+    existing_ids = {target.id for target in before.targets}
     with repoctl_lock(root):
         layout = adopt_repositories(root, all_candidates=args.all, path=args.path or "", repo_id=args.repo_id or "")
-    payload = {"ok": True, "command": "repo.adopt", "data": layout.to_dict(), "problems": [], "warnings": []}
+        initialized: list[dict[str, Any]] = []
+        problems: list[Problem] = []
+        for target in layout.targets:
+            if target.id in existing_ids:
+                continue
+            metadata = ensure_store(root, target=target)
+            snapshot, graph_problems, graph_meta = materialize_graph(root, target=target, rebuild=True)
+            problems.extend(graph_problems)
+            initialized.append(
+                {
+                    "repository": target.to_dict(),
+                    "metadata": metadata,
+                    "graph": {
+                        "status": "ready" if snapshot is not None and not _has_errors(graph_problems) else "failed",
+                        "summary": _graph_snapshot_summary(snapshot) if snapshot is not None else None,
+                        "materialization": _compact_graph_materialization(graph_meta.get("materialization", {})),
+                    },
+                }
+            )
+    data = layout.to_dict()
+    data["initialization"] = initialized
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "repo.adopt",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
+        "warnings": [problem.to_dict() for problem in problems if problem.severity == "warning"],
+    }
     if args.json:
         _json(payload)
     else:
         print("repoctl repo adopt: ok")
-    return 0
+    return 1 if _has_errors(problems) else 0
 
 
 def cmd_task_list(args: argparse.Namespace) -> int:
@@ -2450,25 +2589,26 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
     receipt_writes = result.get("receipt_writes") or []
     if not receipt_writes and result.get("receipt_path") is not None and result.get("receipt_text"):
         receipt_writes = [(result["receipt_path"], str(result["receipt_text"]))]
-    original_receipts: dict[Path, str | None] = {}
+    state_writes = [*receipt_writes, *(result.get("additional_state_writes") or [])]
+    original_state: dict[Path, str | None] = {}
 
-    def restore_receipts() -> None:
-        for receipt_path, original_text in original_receipts.items():
+    def restore_state() -> None:
+        for state_path, original_text in original_state.items():
             if original_text is None:
-                if receipt_path.exists() and receipt_path.is_file():
-                    receipt_path.unlink()
+                if state_path.exists() and state_path.is_file():
+                    state_path.unlink()
             else:
-                atomic_write(receipt_path, original_text)
+                atomic_write(state_path, original_text)
 
-    if receipt_writes:
+    if state_writes:
         try:
-            for receipt_path, receipt_text in receipt_writes:
-                if receipt_path not in original_receipts:
-                    original_receipts[receipt_path] = receipt_path.read_text(encoding="utf-8") if receipt_path.is_file() else None
-                receipt_path.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write(receipt_path, str(receipt_text))
+            for state_path, state_text in state_writes:
+                if state_path not in original_state:
+                    original_state[state_path] = state_path.read_text(encoding="utf-8") if state_path.is_file() else None
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(state_path, str(state_text))
         except Exception:
-            restore_receipts()
+            restore_state()
             remove_written_archives()
             if task_written:
                 atomic_write(result["task"].path, original_task_text)
@@ -2481,7 +2621,7 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
                     source.unlink()
         except Exception:
             restore_removed_sources()
-            restore_receipts()
+            restore_state()
             remove_written_archives()
             raise
     board_path = root / "docs/BOARD.md"
@@ -2497,17 +2637,75 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
         atomic_write(board_path, render_board(board_text, kept))
     except Exception:
         restore_removed_sources()
-        restore_receipts()
+        restore_state()
         remove_written_archives()
         if task_written:
             atomic_write(result["task"].path, original_task_text)
         raise
 
 
+def _explicit_claim_input(
+    root: Path,
+    *,
+    claim: str,
+    claim_file: str,
+    code_prefix: str,
+    label: str,
+) -> tuple[str, list[Problem]]:
+    normalized_claim = claim.strip()
+    normalized_file = claim_file.strip()
+    if not normalized_file:
+        return normalized_claim, []
+    path = Path(normalized_file)
+    resolved = path if path.is_absolute() else root / path
+    if not resolved.is_file():
+        return "", [Problem("error", f"{code_prefix}_claim_file_missing", f"{label} claim file is missing", normalized_file)]
+    try:
+        normalized_claim = resolved.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", [Problem("error", f"{code_prefix}_claim_file_unreadable", str(exc), normalized_file)]
+    if not normalized_claim:
+        return "", [Problem("error", f"{code_prefix}_claim_file_empty", f"{label} claim file is empty", normalized_file)]
+    return normalized_claim, []
+
+
+def _task_finish_knowledge_request(root: Path, args: argparse.Namespace) -> dict[str, Any] | None:
+    kind = str(getattr(args, "knowledge_kind", "") or "")
+    raw_claim = str(getattr(args, "knowledge_claim", "") or "")
+    claim_file = str(getattr(args, "knowledge_claim_file", "") or "")
+    applies_to = [str(value) for value in (getattr(args, "knowledge_applies_to", []) or []) if str(value)]
+    requested = bool(kind or raw_claim or claim_file or applies_to)
+    if not requested:
+        return None
+    if not kind:
+        raise RepoctlError(
+            "knowledge closeout requires --knowledge-kind",
+            code="knowledge_closeout_kind_required",
+        )
+    claim, claim_problems = _explicit_claim_input(
+        root,
+        claim=raw_claim,
+        claim_file=claim_file,
+        code_prefix="knowledge_closeout",
+        label="knowledge closeout",
+    )
+    if claim_problems:
+        problem = claim_problems[0]
+        raise RepoctlError(problem.message, code=problem.code, path=problem.path)
+    if not claim:
+        raise RepoctlError(
+            "knowledge closeout requires --knowledge-claim or --knowledge-claim-file",
+            code="knowledge_closeout_claim_required",
+        )
+    return {"kind": kind, "claim": claim, "applies_to": applies_to}
+
+
 def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task_id = resolve_task(root, args.task_id).id
     verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="finish")
+    knowledge_request = _task_finish_knowledge_request(root, args)
+    prepared_candidate = None
     with repoctl_lock(root):
         meta_gate, delta, result = _prepare_task_finish(
             root,
@@ -2515,6 +2713,31 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
             verification=verification,
             use_committed_diff=args.use_committed_diff,
         )
+        receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
+        repo_id = str(receipt.get("repo_id") or "")
+        if knowledge_request is not None:
+            if not repo_id:
+                raise RepoctlError(
+                    "knowledge closeout is available only for a repo-scoped completed task",
+                    code="knowledge_closeout_repo_required",
+                    path=result.get("old_path", ""),
+                )
+            prepared_candidate, candidate_problems = prepare_knowledge_candidate_from_completion(
+                root,
+                receipt=receipt,
+                receipt_rel=result["receipt_path"].relative_to(root).as_posix(),
+                receipt_text=str(result.get("receipt_text") or ""),
+                artifact_rel=str(result.get("new_path") or ""),
+                artifact_text=str(result.get("text") or ""),
+                repo_id=repo_id,
+                kind=str(knowledge_request["kind"]),
+                claim=str(knowledge_request["claim"]),
+                applies_to=list(knowledge_request["applies_to"]),
+            )
+            if candidate_problems or prepared_candidate is None:
+                problem = candidate_problems[0] if candidate_problems else Problem("error", "knowledge_closeout_failed", "knowledge closeout candidate could not be prepared")
+                raise RepoctlError(problem.message, code=problem.code, path=problem.path)
+            result["additional_state_writes"] = [(prepared_candidate.path, prepared_candidate.text)]
         _write_task_result(root, result)
     finish_summary = _finish_summary(meta_gate, delta)
     data = {
@@ -2532,8 +2755,23 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     }
     receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
     repo_id = str(receipt.get("repo_id") or "")
-    next_actions = []
-    if repo_id:
+    if prepared_candidate is not None:
+        data["knowledge_closeout"] = {
+            "status": "candidate_created",
+            "candidate_id": prepared_candidate.data["candidate"]["id"],
+            "candidate_path": prepared_candidate.data["path"],
+            "kind": prepared_candidate.data["candidate"]["kind"],
+            "applies_to": prepared_candidate.data["candidate"].get("applies_to", {"paths": []}),
+        }
+        next_actions = _knowledge_candidate_next_actions(
+            prepared_candidate.data,
+            repo_id=repo_id,
+            dry_run=False,
+        )
+    else:
+        data["knowledge_closeout"] = {"status": "not_requested"}
+        next_actions = []
+    if repo_id and prepared_candidate is None:
         next_actions.append(
             {
                 "label": "Preview a Knowledge candidate only if this task produced a reusable decision, invariant, or failure mode",
@@ -3985,13 +4223,35 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
             kind=args.kind,
             write=not getattr(args, "dry_run", False),
             claim=claim,
+            applies_to=list(getattr(args, "applies_to", []) or []),
         )
     elif args.from_receipt:
-        data, problems = build_knowledge_candidate_from_receipt(root, task_id=args.from_receipt, repo_id=args.repo_id, kind=args.kind, claim=claim)
+        data, problems = build_knowledge_candidate_from_receipt(
+            root,
+            task_id=args.from_receipt,
+            repo_id=args.repo_id,
+            kind=args.kind,
+            claim=claim,
+            applies_to=list(getattr(args, "applies_to", []) or []),
+        )
     elif args.from_pack:
-        data, problems = build_knowledge_candidate_from_pack(root, pack=Path(args.from_pack), repo_id=args.repo_id, kind=args.kind, claim=claim)
+        data, problems = build_knowledge_candidate_from_pack(
+            root,
+            pack=Path(args.from_pack),
+            repo_id=args.repo_id,
+            kind=args.kind,
+            claim=claim,
+            applies_to=list(getattr(args, "applies_to", []) or []),
+        )
     else:
-        data, problems = build_knowledge_candidate(root, source=Path(args.source), repo_id=args.repo_id, kind=args.kind, claim=claim)
+        data, problems = build_knowledge_candidate(
+            root,
+            source=Path(args.source),
+            repo_id=args.repo_id,
+            kind=args.kind,
+            claim=claim,
+            applies_to=list(getattr(args, "applies_to", []) or []),
+        )
     response_data = data
     if getattr(args, "knowledge_candidate_command", "") == "suggest" and not getattr(args, "full", False):
         response_data = _compact_knowledge_candidate_data(data)
@@ -4048,21 +4308,13 @@ def _knowledge_candidate_next_actions(data: dict[str, Any], *, repo_id: str, dry
 
 
 def _knowledge_candidate_claim_input(root: Path, args: argparse.Namespace) -> tuple[str, list[Problem]]:
-    claim = str(getattr(args, "claim", "") or "").strip()
-    claim_file = str(getattr(args, "claim_file", "") or "").strip()
-    if not claim_file:
-        return claim, []
-    path = Path(claim_file)
-    resolved = path if path.is_absolute() else root / path
-    if not resolved.is_file():
-        return "", [Problem("error", "knowledge_candidate_claim_file_missing", "knowledge candidate claim file is missing", claim_file)]
-    try:
-        claim = resolved.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        return "", [Problem("error", "knowledge_candidate_claim_file_unreadable", str(exc), claim_file)]
-    if not claim:
-        return "", [Problem("error", "knowledge_candidate_claim_file_empty", "knowledge candidate claim file is empty", claim_file)]
-    return claim, []
+    return _explicit_claim_input(
+        root,
+        claim=str(getattr(args, "claim", "") or ""),
+        claim_file=str(getattr(args, "claim_file", "") or ""),
+        code_prefix="knowledge_candidate",
+        label="knowledge candidate",
+    )
 
 
 def _compact_knowledge_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -4392,9 +4644,35 @@ def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def _sync_graph_after_knowledge_change(
+    root: Path,
+    *,
+    target: RepoTarget,
+) -> tuple[dict[str, Any], list[Problem]]:
+    snapshot, problems, meta = materialize_graph(root, target=target, rebuild=False)
+    materialization = meta.get("materialization") if isinstance(meta.get("materialization"), dict) else {}
+    recovered_from = ""
+    if snapshot is None and str(materialization.get("status") or "") in {
+        "incompatible",
+        "incomplete",
+        "invalid",
+        "repository_mismatch",
+    }:
+        recovered_from = str(materialization.get("status") or "")
+        snapshot, problems, meta = materialize_graph(root, target=target, rebuild=True)
+        materialization = meta.get("materialization") if isinstance(meta.get("materialization"), dict) else {}
+    return {
+        "status": "synced" if snapshot is not None and not _has_errors(problems) else "failed",
+        "repository": target.to_dict(),
+        "materialization": _compact_graph_materialization(materialization),
+        "summary": _graph_snapshot_summary(snapshot) if snapshot is not None else None,
+        "recovered_from": recovered_from,
+    }, problems
+
+
 def cmd_knowledge_approve(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
+    target = require_repo_target(root, repo_id=args.repo_id)
     review_note = ""
     note_problems: list[Problem] = []
     if args.note_file:
@@ -4409,31 +4687,46 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
                 note_problems.append(Problem("error", "knowledge_approve_note_empty", "approval note file is empty", note_path.as_posix()))
     if note_problems:
         data, problems = {}, note_problems
+        graph_sync: dict[str, Any] = {"status": "not_run"}
+        graph_problems: list[Problem] = []
     else:
-        data, problems = approve_knowledge_candidate(
-            root,
-            repo_id=args.repo_id,
-            candidate_id=args.candidate_id,
-            supersedes=args.supersedes,
-            reviewed_by=args.reviewed_by,
-            review_note=review_note,
-        )
+        with repoctl_lock(root):
+            data, problems = approve_knowledge_candidate(
+                root,
+                repo_id=args.repo_id,
+                candidate_id=args.candidate_id,
+                supersedes=args.supersedes,
+                reviewed_by=args.reviewed_by,
+                review_note=review_note,
+            )
+            if data and not _has_errors(problems):
+                graph_sync, graph_problems = _sync_graph_after_knowledge_change(root, target=target)
+            else:
+                graph_sync, graph_problems = {"status": "not_run"}, []
     record = data.get("record", {}) if data else {}
     response_data = data if getattr(args, "full", False) else _compact_knowledge_approval_data(data)
+    if response_data:
+        response_data["graph_sync"] = graph_sync
+    all_problems = [*problems, *graph_problems]
+    graph_warnings = [problem.to_dict() for problem in graph_problems if problem.severity == "warning"]
+    next_actions: list[dict[str, Any]] = []
+    if data and not _has_errors(problems):
+        if _has_errors(graph_problems):
+            next_actions.extend(_next_actions_for_problems(graph_problems, data={"repository": target.to_dict()}))
+        else:
+            next_actions.append(
+                {
+                    "label": "Refresh the non-authoritative llmwiki view",
+                    "command": f"./scripts/repoctl knowledge render --repo-id {args.repo_id} --json",
+                }
+            )
     payload = {
-        "ok": not _has_errors(problems),
+        "ok": not _has_errors(all_problems),
         "command": "knowledge approve",
         "data": response_data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": _knowledge_approval_warnings(record),
-        "next_actions": [
-            {
-                "label": "Refresh the non-authoritative llmwiki view",
-                "command": f"./scripts/repoctl knowledge render --repo-id {args.repo_id} --json",
-            }
-        ]
-        if data and not _has_errors(problems)
-        else [],
+        "problems": [problem.to_dict() for problem in all_problems if problem.severity == "error"],
+        "warnings": [*_knowledge_approval_warnings(record), *graph_warnings],
+        "next_actions": next_actions,
     }
     if args.json:
         _json(payload)
@@ -4442,7 +4735,7 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
         print(f"knowledge record {record.get('id', '')} path={data.get('record_path', '')}")
         for problem in problems:
             print(problem.message)
-    return 1 if _has_errors(problems) else 0
+    return 1 if _has_errors(all_problems) else 0
 
 
 def _knowledge_approval_warnings(record: dict[str, Any]) -> list[dict[str, str]]:
@@ -4716,22 +5009,329 @@ def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+_REFRESHABLE_KNOWLEDGE_CANDIDATE_CODES = {
+    "knowledge_source_digest_drift",
+}
+
+_KNOWLEDGE_CANDIDATE_READ_CODES = {
+    KnowledgeArtifactErrorCode.CANDIDATE_INVALID_JSON,
+    KnowledgeArtifactErrorCode.CANDIDATE_NOT_OBJECT,
+    KnowledgeArtifactErrorCode.CANDIDATE_UNREADABLE,
+}
+_KNOWLEDGE_RECORD_READ_CODES = {
+    KnowledgeArtifactErrorCode.RECORD_INVALID_JSON,
+    KnowledgeArtifactErrorCode.RECORD_NOT_OBJECT,
+    KnowledgeArtifactErrorCode.RECORD_UNREADABLE,
+}
+_KNOWLEDGE_EVENT_READ_CODES = {
+    KnowledgeArtifactErrorCode.EVENT_INVALID_JSON,
+    KnowledgeArtifactErrorCode.EVENT_NOT_OBJECT,
+    KnowledgeArtifactErrorCode.EVENT_UNREADABLE,
+}
+
+
+def _knowledge_candidate_postflight_action(*, repo_id: str, result: dict[str, Any]) -> dict[str, str] | None:
+    candidate_id = str(result.get("candidate_id") or "")
+    if not candidate_id:
+        return None
+    raw_problems = result.get("problems") if isinstance(result.get("problems"), list) else []
+    problem_codes = {
+        str(problem.get("code") or "")
+        for problem in raw_problems
+        if isinstance(problem, dict) and str(problem.get("code") or "")
+    }
+    if problem_codes and problem_codes <= _REFRESHABLE_KNOWLEDGE_CANDIDATE_CODES:
+        return {
+            "kind": "knowledge_candidate_refresh",
+            "repo_id": repo_id,
+            "command": f"./scripts/repoctl knowledge candidate refresh {candidate_id} --repo-id {repo_id} --json",
+        }
+    return {
+        "kind": "knowledge_candidate_manual_review",
+        "repo_id": repo_id,
+        "command": f"./scripts/repoctl knowledge candidate show {candidate_id} --repo-id {repo_id} --json",
+    }
+
+
+def _knowledge_artifact_postflight_action(*, repo_id: str, problem: Problem) -> dict[str, str] | None:
+    artifact_id = Path(problem.path or "").stem
+    if problem.code in _KNOWLEDGE_CANDIDATE_READ_CODES and artifact_id.startswith("KC-"):
+        return {
+            "kind": "knowledge_candidate_manual_review",
+            "repo_id": repo_id,
+            "command": f"./scripts/repoctl knowledge candidate show {artifact_id} --repo-id {repo_id} --json",
+        }
+    if problem.code in _KNOWLEDGE_RECORD_READ_CODES and artifact_id.startswith("K-"):
+        return {
+            "kind": "knowledge_record_manual_review",
+            "repo_id": repo_id,
+            "command": f"./scripts/repoctl knowledge show {artifact_id} --repo-id {repo_id} --json",
+        }
+    if problem.code in _KNOWLEDGE_EVENT_READ_CODES and artifact_id.startswith("E-"):
+        return {
+            "kind": "knowledge_event_manual_review",
+            "repo_id": repo_id,
+            "command": f"./scripts/repoctl knowledge event show {artifact_id} --repo-id {repo_id} --json",
+        }
+    return None
+
+
+def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
+    layout = repo_layout(root)
+    namespaces, namespace_problem_dicts = repository_state_namespaces(root)
+    layout_problem_dicts = repo_check_problems(layout)
+    repository_runtime_uninitialized = (
+        not layout.targets
+        and not namespaces
+        and bool(layout_problem_dicts)
+        and all(str(problem.get("code") or "") == "repository_git_unavailable" for problem in layout_problem_dicts)
+    )
+    problems = [] if repository_runtime_uninitialized else _problems_from_dicts(layout_problem_dicts)
+    problems.extend(_problems_from_dicts(namespace_problem_dicts))
+    configured_ids = {target.id for target in layout.targets}
+    unbound_namespaces = [item for item in namespaces if str(item.get("repo_id") or "") not in configured_ids]
+    for item in unbound_namespaces:
+        paths = item.get("paths") if isinstance(item.get("paths"), list) else []
+        problems.append(
+            Problem(
+                "error",
+                "upgrade_repository_state_identity_unbound",
+                f"repository-scoped state is not bound to a configured repository identity: {item.get('repo_id', '')}",
+                str(paths[0]) if paths else ".repoctl-state",
+            )
+        )
+
+    repositories: list[dict[str, Any]] = []
+    recovery_actions: list[dict[str, str]] = []
+    for target in layout.targets:
+        metadata_problems = check_meta(root, target=target)
+        record_data, record_problems = check_knowledge_records(root, repo_id=target.id)
+        candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=target.id, pending_only=True)
+        snapshot, graph_problems, graph_meta = load_materialized_graph(root, target=target)
+        freshness: dict[str, Any] = {"status": str((graph_meta.get("materialization") or {}).get("status") or "missing")}
+        freshness_problems: list[Problem] = []
+        if snapshot is not None and not _has_errors(graph_problems):
+            freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
+            if str(freshness.get("status") or "") == "stale":
+                freshness_problems.append(
+                    Problem(
+                        "warning",
+                        "upgrade_graph_stale",
+                        "materialized Graph is valid but stale after upgrade",
+                        target.display_path,
+                    )
+                )
+        repository_problems = [
+            *metadata_problems,
+            *record_problems,
+            *candidate_problems,
+            *graph_problems,
+            *freshness_problems,
+        ]
+        problems.extend(repository_problems)
+
+        materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
+        graph_status = str(materialization.get("status") or "missing")
+        if graph_status == "missing":
+            recovery_actions.append(
+                {
+                    "kind": "graph_build",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                }
+            )
+        elif graph_status != "materialized":
+            recovery_actions.append(
+                {
+                    "kind": "graph_rebuild",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --rebuild --json",
+                }
+            )
+        elif str(freshness.get("status") or "") == "stale":
+            recovery_actions.append(
+                {
+                    "kind": "graph_refresh",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                }
+            )
+        if _has_errors(metadata_problems):
+            metadata_codes = {problem.code for problem in metadata_problems}
+            recovery_actions.append(
+                {
+                    "kind": "metadata_repair",
+                    "repo_id": target.id,
+                    "command": (
+                        f"./scripts/repoctl meta init --repo-id {target.id} --json"
+                        if "missing_repometa_policy" in metadata_codes
+                        else f"./scripts/repoctl meta check --repo-id {target.id} --json"
+                    ),
+                }
+            )
+        for problem in [*record_problems, *candidate_problems]:
+            action = _knowledge_artifact_postflight_action(repo_id=target.id, problem=problem)
+            if action is not None:
+                recovery_actions.append(action)
+        for result in candidate_data.get("results", []) if isinstance(candidate_data.get("results"), list) else []:
+            if not isinstance(result, dict) or bool(result.get("passed")):
+                continue
+            action = _knowledge_candidate_postflight_action(repo_id=target.id, result=result)
+            if action is not None:
+                recovery_actions.append(action)
+        repositories.append(
+            {
+                "repository": target.to_dict(),
+                "metadata": {
+                    "status": "ready" if not _has_errors(metadata_problems) else "invalid",
+                    "problem_codes": _problem_code_counts(metadata_problems),
+                },
+                "reviewed_knowledge": {
+                    "record_count": int(record_data.get("record_count") or 0),
+                    "event_count": int(record_data.get("event_count") or 0),
+                    "problem_codes": _problem_code_counts(record_problems),
+                },
+                "knowledge_candidates": {
+                    "total_count": int(candidate_data.get("candidate_total_count") or 0),
+                    "checked_count": int(candidate_data.get("candidate_count") or 0),
+                    "error_count": int(candidate_data.get("error_count") or 0),
+                    "warning_count": int(candidate_data.get("warning_count") or 0),
+                    "problem_codes": _problem_code_counts(candidate_problems),
+                },
+                "graph": {
+                    "materialization": _compact_graph_materialization(materialization),
+                    "freshness": compact_graph_freshness(freshness),
+                    "summary": _graph_snapshot_summary(snapshot) if snapshot is not None else None,
+                    "problem_codes": _problem_code_counts([*graph_problems, *freshness_problems]),
+                },
+            }
+        )
+
+    deduped_recovery: list[dict[str, str]] = []
+    seen_recovery: set[tuple[str, str, str]] = set()
+    for action in recovery_actions:
+        key = (str(action.get("kind") or ""), str(action.get("repo_id") or ""), str(action.get("command") or ""))
+        if key not in seen_recovery:
+            seen_recovery.add(key)
+            deduped_recovery.append(action)
+    recovery_priority = {
+        "metadata_repair": 0,
+        "knowledge_candidate_refresh": 1,
+        "knowledge_candidate_manual_review": 1,
+        "knowledge_record_manual_review": 1,
+        "knowledge_event_manual_review": 1,
+        "graph_build": 2,
+        "graph_rebuild": 2,
+        "graph_refresh": 2,
+    }
+    deduped_recovery.sort(key=lambda item: (recovery_priority.get(str(item.get("kind") or ""), 99), str(item.get("repo_id") or ""), str(item.get("command") or "")))
+    deduped_problems: list[Problem] = []
+    seen_problems: set[tuple[str, str, str, str]] = set()
+    for problem in problems:
+        key = (problem.severity, problem.code, problem.path or "", problem.message)
+        if key not in seen_problems:
+            seen_problems.add(key)
+            deduped_problems.append(problem)
+    problems = deduped_problems
+    status = UpgradePostflightStatus.RECOVERY_REQUIRED if _has_errors(problems) or deduped_recovery else UpgradePostflightStatus.READY
+    return {
+        "schema": "repoctl.upgrade.postflight",
+        "schema_version": 1,
+        "status": status,
+        "product_repository_runtime": "configured" if layout.targets else "not_initialized",
+        "repository_layout": layout.to_dict(),
+        "repository_state": {
+            "namespaces": namespaces,
+            "unbound_repo_ids": sorted(str(item.get("repo_id") or "") for item in unbound_namespaces),
+        },
+        "repositories": repositories,
+        "recovery_actions": deduped_recovery,
+    }, problems
+
+
+def cmd_upgrade_postflight(args: argparse.Namespace) -> int:
+    root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else _workspace_root_or_cwd()
+    data, problems = _upgrade_postflight(root)
+    payload = {
+        "ok": data.get("status") == UpgradePostflightStatus.READY,
+        "command": "upgrade.postflight",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
+        "warnings": [problem.to_dict() for problem in problems if problem.severity == "warning"],
+        "next_actions": data.get("recovery_actions", []),
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"repoctl upgrade postflight: {data.get('status', '')}")
+        for action in data.get("recovery_actions", []):
+            print(action.get("command", ""))
+    return 0 if payload["ok"] else 1
+
+
+def _run_upgraded_postflight(root: Path, command: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    resolved_command = [str(root / "scripts/repoctl"), *command[1:]]
+    env = os.environ.copy()
+    env["PYTHON"] = sys.executable
+    try:
+        result = subprocess.run(resolved_command, cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=120)
+    except subprocess.TimeoutExpired:
+        return {}, [
+            {
+                "severity": "error",
+                "code": "upgrade_postflight_timeout",
+                "message": "upgraded repoctl postflight did not complete within 120 seconds",
+                "path": "scripts/repoctl",
+            }
+        ], []
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}, [
+            {
+                "severity": "error",
+                "code": "upgrade_postflight_invalid_output",
+                "message": (result.stderr or result.stdout or "upgraded repoctl returned no JSON output")[:1000],
+                "path": "scripts/repoctl",
+            }
+        ], []
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return {}, [
+            {
+                "severity": "error",
+                "code": "upgrade_postflight_invalid_output",
+                "message": "upgraded repoctl postflight output has an invalid JSON envelope",
+                "path": "scripts/repoctl",
+            }
+        ], []
+    errors = payload.get("problems") if isinstance(payload.get("problems"), list) else []
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    return payload["data"], errors, warnings
+
+
 def cmd_upgrade_apply(args: argparse.Namespace) -> int:
     root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else find_workspace_root()
     data = apply_upgrade(root, plan_file=args.plan_file)
+    postflight_command = data.get("postflight_command") if isinstance(data.get("postflight_command"), list) else []
+    if postflight_command:
+        postflight, postflight_problems, postflight_warnings = _run_upgraded_postflight(root, [str(value) for value in postflight_command])
+    else:
+        postflight, postflight_problems, postflight_warnings = {"status": "not_declared"}, [], []
+    data["postflight"] = postflight
     payload = {
-        "ok": True,
+        "ok": not postflight_problems and postflight.get("status") in {UpgradePostflightStatus.READY, "not_declared"},
         "command": "upgrade.apply",
         "data": data,
-        "problems": [],
-        "warnings": list(data.get("warnings", [])),
+        "problems": postflight_problems,
+        "warnings": [*list(data.get("warnings", [])), *postflight_warnings],
+        "next_actions": postflight.get("recovery_actions", []) if isinstance(postflight, dict) else [],
     }
     if args.json:
         _json(payload)
     else:
         print(f"repoctl upgrade apply: {len(data['applied'])} change(s) applied")
         print(f"receipt: {data['receipt_path']}")
-    return 0
+    return 0 if payload["ok"] else 1
 
 
 def cmd_meta_set(args: argparse.Namespace) -> int:
@@ -4922,6 +5522,11 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.add_argument("task_id")
     task_finish.add_argument("--verification-file")
     task_finish.add_argument("--use-committed-diff", action="store_true", help="validate recorded task-start HEAD through current HEAD when product changes were committed before finish")
+    task_finish.add_argument("--knowledge-kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="")
+    task_finish_knowledge_claim = task_finish.add_mutually_exclusive_group()
+    task_finish_knowledge_claim.add_argument("--knowledge-claim", default="")
+    task_finish_knowledge_claim.add_argument("--knowledge-claim-file", default="")
+    task_finish.add_argument("--knowledge-applies-to", action="append", default=[], help="current selected-repository file governed by the reusable claim; repeat as needed")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block")
@@ -5161,6 +5766,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_build_claim = knowledge_candidate_build.add_mutually_exclusive_group()
     knowledge_candidate_build_claim.add_argument("--claim", default="")
     knowledge_candidate_build_claim.add_argument("--claim-file", default="")
+    knowledge_candidate_build.add_argument("--applies-to", action="append", default=[], help="current selected-repository file governed by the claim; repeat as needed")
     knowledge_candidate_build.add_argument("--json", action="store_true")
     knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build, knowledge_candidate_command="build")
     knowledge_candidate_suggest = knowledge_candidate_sub.add_parser("suggest")
@@ -5171,6 +5777,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_suggest_claim = knowledge_candidate_suggest.add_mutually_exclusive_group()
     knowledge_candidate_suggest_claim.add_argument("--claim", default="")
     knowledge_candidate_suggest_claim.add_argument("--claim-file", default="")
+    knowledge_candidate_suggest.add_argument("--applies-to", action="append", default=[], help="current selected-repository file governed by the claim; repeat as needed")
     knowledge_candidate_suggest.add_argument("--full", action="store_true", help="include the full candidate summary")
     knowledge_candidate_suggest.add_argument("--json", action="store_true")
     knowledge_candidate_suggest.set_defaults(func=cmd_knowledge_candidate_build, source="", from_receipt="", from_pack="", knowledge_candidate_command="suggest")
@@ -5280,6 +5887,10 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_plan.add_argument("--output", help="optional path for a plan artifact; omitted keeps the command read-only")
     upgrade_plan.add_argument("--json", action="store_true")
     upgrade_plan.set_defaults(func=cmd_upgrade_plan)
+    upgrade_postflight = upgrade_sub.add_parser("postflight")
+    upgrade_postflight.add_argument("--workspace-root", help="workspace to inspect; defaults to the current workspace")
+    upgrade_postflight.add_argument("--json", action="store_true")
+    upgrade_postflight.set_defaults(func=cmd_upgrade_postflight)
     upgrade_apply = upgrade_sub.add_parser("apply")
     upgrade_apply.add_argument("--workspace-root", help="workspace to upgrade; defaults to the current workspace")
     upgrade_apply.add_argument("--plan-file", required=True)

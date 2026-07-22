@@ -14,6 +14,7 @@ from .io import RepoctlError, atomic_write, repoctl_lock
 
 MANIFEST_REL = Path("repoctl-upgrade-manifest.json")
 UPGRADE_STATE_REL = Path("docs/tasks/.repoctl-state/upgrades")
+UPGRADE_POSTFLIGHT_COMMAND = ["./scripts/repoctl", "upgrade", "postflight", "--json"]
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def _load_manifest(source_root: Path) -> dict[str, Any]:
     create_paths = manifest.get("create_paths", [])
     remove_paths = manifest.get("remove_paths", [])
     preserve_paths = manifest.get("preserve_paths")
+    postflight_command = manifest.get("postflight_command", [])
     if not isinstance(replace_paths, list) or not all(isinstance(path, str) for path in replace_paths):
         raise RepoctlError("upgrade manifest replace_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
     if not isinstance(create_paths, list) or not all(isinstance(path, str) for path in create_paths):
@@ -144,10 +146,17 @@ def _load_manifest(source_root: Path) -> dict[str, Any]:
         raise RepoctlError("upgrade manifest remove_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
     if not isinstance(preserve_paths, list) or not all(isinstance(path, str) for path in preserve_paths):
         raise RepoctlError("upgrade manifest preserve_paths must be a list of strings", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
+    if postflight_command not in ([], UPGRADE_POSTFLIGHT_COMMAND):
+        raise RepoctlError(
+            "upgrade manifest postflight_command must be the canonical repoctl postflight command",
+            code="invalid_upgrade_manifest",
+            path=MANIFEST_REL.as_posix(),
+        )
     manifest["replace_paths"] = sorted({_safe_rel(path) for path in replace_paths})
     manifest["create_paths"] = sorted({_safe_rel(path) for path in create_paths})
     manifest["remove_paths"] = sorted({_safe_rel(path) for path in remove_paths})
     manifest["preserve_paths"] = sorted({_safe_rel(path) for path in preserve_paths})
+    manifest["postflight_command"] = list(postflight_command)
     managed = [*manifest["replace_paths"], *manifest["create_paths"], *manifest["remove_paths"]]
     if len(set(managed)) != len(managed):
         raise RepoctlError("upgrade manifest paths cannot appear in more than one managed path list", code="invalid_upgrade_manifest", path=MANIFEST_REL.as_posix())
@@ -201,6 +210,7 @@ def _plan_payload(
         "create_paths": manifest["create_paths"],
         "remove_paths": manifest["remove_paths"],
         "preserve_paths": manifest["preserve_paths"],
+        "postflight_command": manifest["postflight_command"],
         "operations": [operation.to_dict() for operation in operations],
         "conflicts": conflicts,
     }
@@ -400,6 +410,8 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
     for key in ("replace_paths", "create_paths", "remove_paths", "preserve_paths"):
         if sorted(plan.get(key) or []) != manifest[key]:
             raise RepoctlError(f"upgrade plan {key} does not match source manifest", code="invalid_upgrade_plan")
+    if list(plan.get("postflight_command") or []) != manifest["postflight_command"]:
+        raise RepoctlError("upgrade plan postflight_command does not match source manifest", code="invalid_upgrade_plan")
     managed = set(manifest["replace_paths"]) | set(manifest["create_paths"]) | set(manifest["remove_paths"])
     preserve_seeds = set(_preserve_seed_paths(source_root, manifest))
     preserved = manifest["preserve_paths"]
@@ -531,7 +543,9 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         "backups": backups,
         "backup": backup,
         "receipt_path": (UPGRADE_STATE_REL / run_id / "receipt.json").as_posix(),
+        "postflight_command": list(plan.get("postflight_command") or []),
         "verification_commands": [
+            "./scripts/repoctl upgrade postflight --json",
             "./scripts/repoctl check --json",
             "./scripts/repoctl meta check --json",
         ],

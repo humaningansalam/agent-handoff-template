@@ -72,6 +72,19 @@ def test_release_archive_contains_repoctl_repository_module_and_imports(tmp_path
     assert payload["command"] == "repo.list"
 
 
+def test_release_manifest_manages_every_public_example() -> None:
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+    manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
+    managed = {*manifest["replace_paths"], *manifest["create_paths"]}
+    example_files = {
+        path.relative_to(source_root).as_posix()
+        for path in (source_root / "examples").rglob("*")
+        if path.is_file()
+    }
+
+    assert example_files <= managed
+
+
 def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))

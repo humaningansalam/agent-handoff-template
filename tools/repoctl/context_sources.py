@@ -8,7 +8,7 @@ from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_sourc
 from .context_model import ContextSectionKind
 from .git import normalize_repo_path
 from .graph_model import GraphSnapshot, digest_data
-from .language_profiles import collect_verification_hints, is_semantic_source_language, language_for_path, product_manifest_patterns
+from .language_profiles import collect_verification_hints, is_context_source_language, language_for_path, product_manifest_patterns
 from .meta import meta_inventory
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
@@ -17,6 +17,7 @@ from .tasks import Problem, collect_completion_receipts, completion_receipt_arti
 DOCUMENT_PATTERNS = (
     "AGENTS.md",
     "README.md",
+    "docs/README.md",
     "docs/BOARD.md",
     "docs/PRD.md",
     "docs/prd/**/*.md",
@@ -64,7 +65,7 @@ def context_source_kind(repo_path: str, classification: str) -> str:
         or classification == "excluded"
     ):
         return ""
-    if is_semantic_source_language(language_for_path(repo_path)):
+    if is_context_source_language(language_for_path(repo_path)):
         return "current_source"
     path = Path(repo_path)
     name = path.name.casefold()
@@ -454,6 +455,7 @@ def context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:
                     "context_graph_completion_receipt_invalid",
                     f"{problem.message}; graph task receipt evidence is incomplete for this Context bundle",
                     problem.path,
+                    problem.code,
                 )
             )
         else:
@@ -461,8 +463,9 @@ def context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:
                 Problem(
                     "warning",
                     "context_graph_unavailable",
-                    f"{problem.code}: {problem.message}; source, document, task, and Knowledge evidence remain available",
+                    f"{problem.message}; source, document, task, and Knowledge evidence remain available",
                     problem.path,
+                    problem.code,
                 )
             )
     return mapped

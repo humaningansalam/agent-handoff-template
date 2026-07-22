@@ -1,23 +1,41 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .context import build_context_bundle
+from .context import (
+    CONTEXT_GRAPH_FRESHNESS_WARNING_CODES,
+    build_context_bundle,
+    context_graph_freshness_warnings,
+)
 from .context_chunks import chunk_markdown_file, chunk_text_source
 from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
+from .context_retrieval import rank_context_chunks
+from .document_roles import (
+    AUTHORITY_DOCUMENT_ROLES,
+    SOURCE_EXCLUDED_DOCUMENT_ROLES,
+    DocumentRole,
+    source_document_role,
+)
 from .graph import project_context_neighborhood
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
-from .graph_store import load_materialized_graph
+from .graph_store import graph_materialization_freshness, load_materialized_graph
 from .git import normalize_repo_path, repo_git_head
 from .language_profiles import collect_verification_hints
 from .markdown import find_section
 from .path_roles import PathRole, classify_path_role
 from .repositories import RepoTarget
 from .tasks import Problem, Task, resolve_task, task_discovery_values
+
+
+@dataclass(frozen=True)
+class ContextDocRef:
+    declared_path: str
+    workspace_path: str
+    path: Path
 
 
 def estimate_tokens(text: str) -> int:
@@ -103,6 +121,8 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     bundle: ContextBundle | None = None
     problems: list[Problem] = []
     meta: dict[str, Any] = {"repository": target.to_dict()}
+    context_docs, context_doc_problems = _resolve_context_docs(root, task)
+    problems.extend(context_doc_problems)
     snapshot, graph_problems, graph_meta = load_materialized_graph(root, target=target)
     if query:
         bundle, bundle_problems, meta = build_context_bundle(
@@ -114,23 +134,58 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             include_linked_records=False,
         )
         problems.extend(bundle_problems)
-    task_graph_evidence = _direct_task_graph_evidence(snapshot, target=target, chosen=chosen) if stage == "scoped" and snapshot is not None else []
-    mandatory_candidates, mandatory_problems = _explicit_context_doc_candidates(root, task)
-    problems.extend(mandatory_problems)
-    required_candidates, required_problems = _required_task_candidates(root, target=target, task=task)
+    graph_freshness, graph_freshness_problems = _task_pack_graph_freshness(
+        root,
+        target=target,
+        snapshot=snapshot,
+        bundle=bundle,
+    )
+    task_graph_evidence = (
+        _direct_task_graph_evidence(
+            snapshot,
+            target=target,
+            chosen=chosen,
+            freshness=graph_freshness,
+        )
+        if stage == "scoped" and snapshot is not None
+        else []
+    )
+    explicit_candidates, explicit_problems = _explicit_context_doc_candidates(
+        root,
+        target=target,
+        context_docs=context_docs,
+    )
+    problems.extend(explicit_problems)
+    required_candidates, required_problems = _required_task_candidates(
+        root,
+        target=target,
+        task=task,
+        query=query,
+    )
     problems.extend(required_problems)
+    required_paths = {
+        candidate.source_ref.path
+        for candidate in required_candidates
+    }
+    mandatory_candidates = [
+        candidate
+        for candidate in explicit_candidates
+        if candidate.source_ref.path not in required_paths
+    ]
     discovery_candidates, discovery_problems = _discovery_file_candidates(root, target=target, chosen=chosen, reviewed=reviewed)
     problems.extend(discovery_problems)
     fallback_candidates, fallback_problems = _startup_fallback_candidates(root, target=target, task=task)
     problems.extend(fallback_problems)
     verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
     problems.extend(verification_problems)
-    allowed_bundle_kinds = {"current_source", "config", "product_manifest", "verification_hint", "graph_relation"}
-    bundle_candidates = [
-        candidate
-        for candidate in (bundle.evidence if bundle is not None else [])
-        if candidate.source_ref.kind in allowed_bundle_kinds
-    ][:8]
+    bundle_candidates = _task_pack_bundle_candidates(
+        bundle,
+        excluded_paths={
+            *(candidate.source_ref.path for candidate in required_candidates),
+            *(candidate.source_ref.path for candidate in mandatory_candidates),
+        },
+        limit=8,
+    )
     if stage == "scoped":
         fallback_candidates = [candidate for candidate in fallback_candidates if candidate.source_ref.kind == "product_manifest"]
     context_candidates = _dedupe_candidates(
@@ -138,7 +193,14 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     )
     groups = _group_candidates(context_candidates, repository_path=target.display_path)
     groups["task_graph_evidence"] = task_graph_evidence
-    groups.update(_agent_pack_groups(groups, bundle))
+    groups.update(
+        _agent_pack_groups(
+            groups,
+            bundle,
+            graph_freshness=graph_freshness,
+            graph_freshness_problems=graph_freshness_problems,
+        )
+    )
     groups["edit_candidates"] = _candidate_items(
         discovery_candidates,
         reason="Chosen files are the active edit scope",
@@ -152,15 +214,22 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     _mark_group_requirements(
         groups,
         required_paths={
-            "AGENTS.md",
-            "docs/PRD.md",
-            task.rel_path,
-            *(_context_doc_paths(task)),
+            *(candidate.source_ref.path for candidate in required_candidates),
+            *(candidate.source_ref.path for candidate in mandatory_candidates),
             *chosen_paths,
         },
     )
     graph_completeness = snapshot.completeness if snapshot is not None else {}
-    warnings = [*_pack_warnings(bundle, task), *_graph_capability_warnings(graph_completeness, graph_meta), *_pack_quality_warnings(groups, task)]
+    warnings = [
+        *_pack_warnings(
+            bundle,
+            task,
+            graph_freshness=graph_freshness,
+            graph_freshness_problems=graph_freshness_problems,
+        ),
+        *_graph_capability_warnings(graph_completeness, graph_meta),
+        *_pack_quality_warnings(groups, task),
+    ]
     observed_head, _head_state = repo_git_head(root, target)
     input_digest = digest_data(
         {
@@ -168,7 +237,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             "candidate_query_history": _without_discovery_placeholders(discovery.get("Candidate query", [])),
             "reviewed_files": reviewed,
             "chosen_files": chosen,
-            "context_docs": _context_doc_digest_inputs(root, task),
+            "context_docs": _context_doc_digest_inputs(explicit_candidates),
             "repository": target.to_dict(),
             "observed_head": observed_head,
             "graph_snapshot_digest": snapshot.snapshot_digest if snapshot is not None else "",
@@ -373,7 +442,7 @@ def _compact_pack_summary(groups: dict[str, list[dict[str, Any]]], metrics: dict
 
 def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    for key in ("status", "record_id", "code", "selection_reason", "requirement"):
+    for key in ("status", "record_id", "code", "document_role", "selection_reason", "requirement"):
         if item.get(key):
             compact[key] = item[key]
     ref = item.get("source_ref")
@@ -577,10 +646,33 @@ def _without_discovery_placeholders(values: list[str]) -> list[str]:
     return [value for value in values if value.strip().strip("`").lower() not in placeholders]
 
 
-def _required_task_candidates(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
+def _required_task_candidates(
+    root: Path,
+    *,
+    target: RepoTarget,
+    task: Task,
+    query: str,
+) -> tuple[list[ContextCandidate], list[Problem]]:
     candidates: list[ContextCandidate] = []
     problems: list[Problem] = []
-    for rel_path in ("AGENTS.md", "docs/PRD.md", task.rel_path):
+    required_paths = ["AGENTS.md", task.rel_path]
+    canonical_prd = root / "docs/PRD.md"
+    if canonical_prd.is_file():
+        required_paths.insert(1, "docs/PRD.md")
+    else:
+        split_prd = _select_split_prd_path(root, query=query, repository_path=target.display_path)
+        if split_prd:
+            required_paths.insert(1, split_prd)
+        else:
+            problems.append(
+                Problem(
+                    "warning",
+                    "context_pack_product_authority_missing",
+                    "required product authority is missing; provide docs/PRD.md or a document under docs/prd/",
+                    "docs/PRD.md",
+                )
+            )
+    for rel_path in required_paths:
         path = root / rel_path
         if not path.is_file():
             problems.append(Problem("warning", "context_pack_required_source_missing", "required context source is missing", rel_path))
@@ -599,9 +691,48 @@ def _required_task_candidates(root: Path, *, target: RepoTarget, task: Task) -> 
                 score_breakdown={"required_task_context": 1.0},
                 selection_reasons=["Required task context"],
                 graph_path=[],
+                document_role=source_document_role(
+                    kind=chunk.source_ref.kind,
+                    path=chunk.source_ref.path,
+                    repository_path=target.display_path,
+                    assigned=chunk.document_role,
+                ),
             )
         )
     return candidates, problems
+
+
+def _select_split_prd_path(
+    root: Path,
+    *,
+    query: str,
+    repository_path: str,
+) -> str:
+    chunks = []
+    for path in sorted((root / "docs/prd").glob("**/*.md")):
+        if not path.is_file():
+            continue
+        try:
+            chunks.extend(
+                chunk
+                for chunk in chunk_markdown_file(root, path)
+                if chunk.document_role == DocumentRole.PRODUCT_AUTHORITY
+            )
+        except (OSError, UnicodeDecodeError):
+            continue
+    ranked = rank_context_chunks(
+        query,
+        chunks,
+        limit=1,
+        repository_path=repository_path,
+    ) if query else []
+    if ranked:
+        return ranked[0].source_ref.path
+    paths = sorted({chunk.source_ref.path for chunk in chunks})
+    for preferred in ("docs/prd/README.md", "docs/prd/INDEX.md"):
+        if preferred in paths:
+            return preferred
+    return paths[0] if paths else ""
 
 
 def _discovery_file_candidates(root: Path, *, target: RepoTarget, chosen: list[str], reviewed: list[str]) -> tuple[list[ContextCandidate], list[Problem]]:
@@ -651,6 +782,12 @@ def _discovery_file_candidates(root: Path, *, target: RepoTarget, chosen: list[s
                     score_breakdown={"structured_discovery": 1.0},
                     selection_reasons=[reason],
                     graph_path=[],
+                    document_role=source_document_role(
+                        kind=chunk.source_ref.kind,
+                        path=chunk.source_ref.path,
+                        repository_path=target.display_path,
+                        assigned=chunk.document_role,
+                    ),
                 )
             )
     return candidates, problems
@@ -681,16 +818,14 @@ def _mark_group_requirements(groups: dict[str, list[dict[str, Any]]], *, require
             item["requirement"] = "required" if path in normalized_required else "optional"
 
 
-def _context_doc_digest_inputs(root: Path, task: Task) -> list[dict[str, str]]:
-    inputs: list[dict[str, str]] = []
-    for rel_path in _context_doc_paths(task):
-        path = root / rel_path
-        try:
-            digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            digest = ""
-        inputs.append({"path": rel_path, "content_sha256": digest})
-    return inputs
+def _context_doc_digest_inputs(candidates: list[ContextCandidate]) -> list[dict[str, str]]:
+    return [
+        {
+            "path": candidate.source_ref.path,
+            "content_sha256": candidate.source_ref.content_sha256,
+        }
+        for candidate in candidates
+    ]
 
 
 def _task_content_digest(task: Task) -> str:
@@ -703,21 +838,94 @@ def _task_content_digest(task: Task) -> str:
 CONTEXT_DOC_RE = re.compile(r"`([^`]+)`")
 
 
-def _explicit_context_doc_candidates(root: Path, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
+def _resolve_context_docs(root: Path, task: Task) -> tuple[list[ContextDocRef], list[Problem]]:
+    context_docs: list[ContextDocRef] = []
+    problems: list[Problem] = []
+    seen_declared: set[str] = set()
+    seen_workspace: set[str] = set()
+    resolved_root = root.resolve()
+    section = _section(task, "Context Docs")
+    for match in CONTEXT_DOC_RE.finditer(section):
+        declared_path = match.group(1).strip()
+        if not declared_path or declared_path in seen_declared:
+            continue
+        seen_declared.add(declared_path)
+        normalized = normalize_repo_path(declared_path)
+        if not normalized or normalized != declared_path or "\\" in declared_path or Path(declared_path).is_absolute():
+            problems.append(
+                Problem(
+                    "warning",
+                    "context_pack_context_doc_invalid_path",
+                    "task Context Docs paths must be normalized workspace-relative paths",
+                    declared_path,
+                )
+            )
+            continue
+        path = root / normalized
+        try:
+            resolved = path.resolve()
+            workspace_path = resolved.relative_to(resolved_root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            problems.append(
+                Problem(
+                    "error",
+                    "context_pack_context_doc_outside_workspace",
+                    "task Context Docs path must stay inside workspace",
+                    declared_path,
+                )
+            )
+            continue
+        if workspace_path in seen_workspace:
+            continue
+        seen_workspace.add(workspace_path)
+        context_docs.append(
+            ContextDocRef(
+                declared_path=declared_path,
+                workspace_path=workspace_path,
+                path=resolved,
+            )
+        )
+    return context_docs, problems
+
+
+def _explicit_context_doc_candidates(
+    root: Path,
+    *,
+    target: RepoTarget,
+    context_docs: list[ContextDocRef],
+) -> tuple[list[ContextCandidate], list[Problem]]:
     candidates: list[ContextCandidate] = []
     problems: list[Problem] = []
-    for rel_path in _context_doc_paths(task):
-        path = root / rel_path
-        try:
-            path.resolve().relative_to(root.resolve())
-        except ValueError:
-            problems.append(Problem("error", "context_pack_context_doc_outside_workspace", "task Context Docs path must stay inside workspace", rel_path))
-            continue
+    for context_doc in context_docs:
+        rel_path = context_doc.workspace_path
+        path = context_doc.path
         if not path.is_file():
             problems.append(Problem("warning", "context_pack_context_doc_missing", "task Context Docs path is missing", rel_path))
             continue
+        document_role = source_document_role(
+            kind="document",
+            path=rel_path,
+            repository_path=target.display_path,
+        )
+        if document_role in SOURCE_EXCLUDED_DOCUMENT_ROLES:
+            problems.append(
+                Problem(
+                    "warning",
+                    "context_pack_generated_view_excluded",
+                    "generated Knowledge views are non-authoritative and cannot be used as Context Docs",
+                    rel_path,
+                )
+            )
+            continue
         try:
-            chunk = chunk_text_source(root, rel_path, path.read_text(encoding="utf-8"), kind="document", section=path.name)
+            chunk = chunk_text_source(
+                root,
+                rel_path,
+                path.read_text(encoding="utf-8"),
+                kind="document",
+                section=path.name,
+                document_role=document_role,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             problems.append(Problem("warning", "context_pack_context_doc_unreadable", str(exc), rel_path))
             continue
@@ -729,22 +937,10 @@ def _explicit_context_doc_candidates(root: Path, task: Task) -> tuple[list[Conte
                 score_breakdown={"explicit_context_doc": 1.0},
                 selection_reasons=["Task Context Docs explicit source"],
                 graph_path=[],
+                document_role=chunk.document_role,
             )
         )
     return candidates, problems
-
-
-def _context_doc_paths(task: Task) -> list[str]:
-    section = _section(task, "Context Docs")
-    paths: list[str] = []
-    seen: set[str] = set()
-    for match in CONTEXT_DOC_RE.finditer(section):
-        rel_path = match.group(1).strip()
-        if not rel_path or rel_path in seen:
-            continue
-        seen.add(rel_path)
-        paths.append(rel_path)
-    return paths
 
 
 def _startup_fallback_candidates(root: Path, *, target: RepoTarget, task: Task) -> tuple[list[ContextCandidate], list[Problem]]:
@@ -774,6 +970,12 @@ def _startup_fallback_candidates(root: Path, *, target: RepoTarget, task: Task) 
                     score_breakdown={"startup_fallback": 1.0},
                     selection_reasons=["Startup fallback source before structured Discovery is available"],
                     graph_path=[],
+                    document_role=source_document_role(
+                        kind=chunk.source_ref.kind,
+                        path=chunk.source_ref.path,
+                        repository_path=target.display_path,
+                        assigned=chunk.document_role,
+                    ),
                 )
             )
     return candidates, problems
@@ -850,7 +1052,42 @@ def _verification_hint_candidates(root: Path, *, target: RepoTarget) -> tuple[li
     return candidates, problems
 
 
-def _direct_task_graph_evidence(snapshot: Any, *, target: RepoTarget, chosen: list[str]) -> list[dict[str, Any]]:
+def _task_pack_graph_freshness(
+    root: Path,
+    *,
+    target: RepoTarget,
+    snapshot: Any,
+    bundle: ContextBundle | None,
+) -> tuple[dict[str, Any], list[Problem]]:
+    if bundle is not None:
+        freshness = bundle.completeness.get("graph_freshness")
+        if isinstance(freshness, dict) and freshness.get("status"):
+            return freshness, []
+    if snapshot is None:
+        return {"status": "missing", "changed_paths": []}, []
+    freshness, problems = graph_materialization_freshness(
+        root,
+        target=target,
+        snapshot=snapshot,
+    )
+    return freshness, problems
+
+
+def _direct_task_graph_evidence(
+    snapshot: Any,
+    *,
+    target: RepoTarget,
+    chosen: list[str],
+    freshness: dict[str, Any],
+) -> list[dict[str, Any]]:
+    freshness_status = str(freshness.get("status") or "")
+    if freshness_status not in {"current", "stale"}:
+        return []
+    stale_paths = {
+        normalize_repo_path(str(path))
+        for path in freshness.get("changed_paths", [])
+        if normalize_repo_path(str(path))
+    }
     prefix = f"{target.display_path.rstrip('/')}/"
     seed_paths: list[str] = []
     for workspace_path in chosen:
@@ -858,7 +1095,7 @@ def _direct_task_graph_evidence(snapshot: Any, *, target: RepoTarget, chosen: li
         if not normalized.startswith(prefix):
             continue
         repo_path = normalize_repo_path(normalized[len(prefix) :])
-        if repo_path and repo_path not in seed_paths:
+        if repo_path and repo_path not in stale_paths and repo_path not in seed_paths:
             seed_paths.append(repo_path)
     if not seed_paths:
         return []
@@ -872,6 +1109,8 @@ def _direct_task_graph_evidence(snapshot: Any, *, target: RepoTarget, chosen: li
         _graph_relation_item(relation, reason="provider-confirmed relation from active Chosen files")
         for relation in relations
         if isinstance(relation, dict)
+        and normalize_repo_path(str(relation.get("from_path") or "")) not in stale_paths
+        and normalize_repo_path(str(relation.get("to_path") or "")) not in stale_paths
     ])
 
 
@@ -907,6 +1146,56 @@ def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandid
         seen.add(key)
         deduped.append(candidate)
     return deduped
+
+
+def _task_pack_bundle_candidates(
+    bundle: ContextBundle | None,
+    *,
+    excluded_paths: set[str],
+    limit: int,
+) -> list[ContextCandidate]:
+    if bundle is None or limit <= 0:
+        return []
+    allowed_kinds = {"current_source", "config", "product_manifest", "verification_hint", "graph_relation"}
+    eligible = [
+        candidate
+        for candidate in bundle.evidence
+        if candidate.source_ref.path not in excluded_paths
+        and (
+            candidate.source_ref.kind in allowed_kinds
+            or candidate.document_role in AUTHORITY_DOCUMENT_ROLES
+            or candidate.document_role == DocumentRole.PROCEDURE
+        )
+    ]
+    reserved: list[ContextCandidate] = []
+    authority = next(
+        (candidate for candidate in eligible if candidate.document_role in AUTHORITY_DOCUMENT_ROLES),
+        None,
+    )
+    procedure = next(
+        (candidate for candidate in eligible if candidate.document_role == DocumentRole.PROCEDURE),
+        None,
+    )
+    if authority is not None:
+        reserved.append(authority)
+    if procedure is not None:
+        reserved.append(procedure)
+    fill = [candidate for candidate in eligible if candidate.document_role == DocumentRole.UNSPECIFIED]
+    selected: list[ContextCandidate] = []
+    seen: set[tuple[Any, ...]] = set()
+    for candidate in [*reserved, *fill]:
+        key: tuple[Any, ...]
+        if candidate.source_ref.kind == "graph_relation":
+            key = ("source_ref", *candidate.source_ref.key())
+        else:
+            key = ("source_path", candidate.source_ref.kind, candidate.source_ref.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _read_pack_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
@@ -1266,33 +1555,36 @@ def _group_candidates(candidates: list[ContextCandidate], *, repository_path: st
     for candidate in candidates:
         ref = candidate.source_ref
         item = candidate.to_dict()
+        document_role = source_document_role(
+            kind=ref.kind,
+            path=ref.path,
+            repository_path=repository_path,
+            assigned=candidate.document_role,
+        )
         if candidate.score_breakdown.get("required_task_context") or candidate.score_breakdown.get("explicit_context_doc"):
             groups["must_read"].append(item)
         elif candidate.score_breakdown.get("structured_discovery"):
             continue
+        elif candidate.score_breakdown.get("startup_fallback"):
+            groups["must_read"].append(item)
+        elif document_role in AUTHORITY_DOCUMENT_ROLES or document_role == DocumentRole.PROCEDURE:
+            groups["must_read"].append(item)
+        elif ref.kind == "document" and document_role != DocumentRole.UNSPECIFIED:
+            groups["maybe_relevant"].append(item)
         elif ref.kind == "verification_hint" or "Verification" in ref.section or classify_path_role(ref.path, repository_path=repository_path) in {PathRole.TEST, PathRole.WORKFLOW}:
             groups["verification_hints"].append(item)
-        elif _must_read_ref_path(ref.path):
-            groups["must_read"].append(item)
         else:
             groups["maybe_relevant"].append(item)
     return groups
 
 
-def _must_read_ref_path(path: str) -> bool:
-    lowered = path.lower()
-    name = lowered.rsplit("/", 1)[-1]
-    return (
-        path in {"AGENTS.md", "README.md", "docs/README.md", "docs/PRD.md"}
-        or path.startswith("docs/contracts/")
-        or path.startswith("docs/adr/")
-        or lowered == "repos/readme.md"
-        or lowered.startswith("repos/") and name in {"package.json", "tsconfig.json", "jsconfig.json", "pyproject.toml", "pubspec.yaml", "analysis_options.yaml", "cargo.toml", "go.mod", "manifest.json", "projectversion.txt", "requirements.txt"}
-        or lowered.startswith("repos/") and name.startswith("requirements-") and name.endswith(".txt")
-        or lowered.startswith("repos/docs/")
-        or lowered.startswith("repos/") and lowered.endswith("/readme.md")
-    )
-def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextBundle | None) -> dict[str, list[dict[str, Any]]]:
+def _agent_pack_groups(
+    groups: dict[str, list[dict[str, Any]]],
+    bundle: ContextBundle | None,
+    *,
+    graph_freshness: dict[str, Any],
+    graph_freshness_problems: list[Problem],
+) -> dict[str, list[dict[str, Any]]]:
     likely_change = _copy_items(groups.get("maybe_relevant"))
     impact = [
         *_copy_items(groups.get("task_graph_evidence")),
@@ -1300,7 +1592,11 @@ def _agent_pack_groups(groups: dict[str, list[dict[str, Any]]], bundle: ContextB
         *_copy_items(_graph_items(groups.get("maybe_relevant", []))),
     ]
     verification = _copy_items(groups.get("verification_hints"))
-    warnings = _warning_items(bundle)
+    warnings = _warning_items(
+        bundle,
+        graph_freshness=graph_freshness,
+        graph_freshness_problems=graph_freshness_problems,
+    )
     return {
         "likely_change": _dedupe_dict_items(likely_change),
         "impact": _dedupe_dict_items(impact),
@@ -1330,17 +1626,36 @@ def _bundle_graph_relation_items(bundle: ContextBundle | None) -> list[dict[str,
     return items
 
 
-def _warning_items(bundle: ContextBundle | None) -> list[dict[str, Any]]:
-    if bundle is None:
-        return []
+def _warning_items(
+    bundle: ContextBundle | None,
+    *,
+    graph_freshness: dict[str, Any],
+    graph_freshness_problems: list[Problem],
+) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
-    graph_completeness = bundle.completeness.get("graph_completeness") if isinstance(bundle.completeness.get("graph_completeness"), dict) else {}
+    graph_completeness = (
+        bundle.completeness.get("graph_completeness")
+        if bundle is not None and isinstance(bundle.completeness.get("graph_completeness"), dict)
+        else {}
+    )
     if graph_completeness and not graph_completeness.get("code_facts_complete", True):
         warnings.append(
             {
                 "status": "warning",
                 "code": "context_pack_graph_code_facts_incomplete",
                 "selection_reason": f"Graph parse errors: {graph_completeness.get('parse_error_count', 0)}",
+            }
+        )
+    for warning in _task_pack_freshness_warnings(
+        bundle,
+        graph_freshness=graph_freshness,
+        graph_freshness_problems=graph_freshness_problems,
+    ):
+        warnings.append(
+            {
+                "status": "warning",
+                "selection_reason": warning["message"],
+                **warning,
             }
         )
     return warnings
@@ -1476,7 +1791,37 @@ def _knowledge_text(item: dict[str, Any]) -> str:
     return "\n".join(str(record.get(key) or "") for key in ("title", "claim", "summary"))
 
 
-def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
+def _task_pack_freshness_warnings(
+    bundle: ContextBundle | None,
+    *,
+    graph_freshness: dict[str, Any],
+    graph_freshness_problems: list[Problem],
+) -> list[dict[str, str]]:
+    if bundle is not None:
+        bundled = [
+            {
+                "code": str(item.get("code") or ""),
+                "message": str(item.get("message") or item.get("selection_reason") or ""),
+            }
+            for item in bundle.groups.get("warnings_and_completeness", [])
+            if isinstance(item, dict)
+            and str(item.get("code") or "") in CONTEXT_GRAPH_FRESHNESS_WARNING_CODES
+        ]
+        if bundled:
+            return bundled
+    return context_graph_freshness_warnings(
+        graph_freshness,
+        freshness_problems=graph_freshness_problems,
+    )
+
+
+def _pack_warnings(
+    bundle: Any,
+    task: Task,
+    *,
+    graph_freshness: dict[str, Any],
+    graph_freshness_problems: list[Problem],
+) -> list[dict[str, str]]:
     warnings = [
         {
             "code": "context_pack_not_authoritative",
@@ -1491,6 +1836,13 @@ def _pack_warnings(bundle: Any, task: Task) -> list[dict[str, str]]:
                 "message": f"task repo_id is {task_repo_id}, but context pack used {bundle.repository.get('id')}",
             }
         )
+    warnings.extend(
+        _task_pack_freshness_warnings(
+            bundle,
+            graph_freshness=graph_freshness,
+            graph_freshness_problems=graph_freshness_problems,
+        )
+    )
     if bundle is None:
         return warnings
     completeness = bundle.completeness if isinstance(bundle.completeness, dict) else {}

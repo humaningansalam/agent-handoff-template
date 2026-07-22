@@ -65,10 +65,11 @@ def _approve_knowledge_source(
     *,
     source: str = "docs/contracts/repoctl-context-contract.md",
     repo_id: str = "main",
+    claim: str = "Context returns source bundles but does not create authoritative knowledge.",
     build_args: list[str] | None = None,
     approve_args: list[str] | None = None,
 ) -> dict:
-    build = ["knowledge", "candidate", "build", "--source", source, "--repo-id", repo_id, "--json"]
+    build = ["knowledge", "candidate", "build", "--source", source, "--repo-id", repo_id, "--claim", claim, "--json"]
     if build_args:
         build[-1:-1] = build_args
     assert main(build) == 0

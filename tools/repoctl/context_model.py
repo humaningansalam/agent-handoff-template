@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from .document_roles import DocumentRole
 from .graph_model import GraphContextAnchor, digest_data
 
 
@@ -134,9 +135,10 @@ class ContextCandidate:
     evidence_kinds: tuple[ContextEvidenceKind, ...] = ()
     anchor_strength: ContextAnchorStrength = ContextAnchorStrength.NONE
     related_record_ids: tuple[str, ...] = ()
+    document_role: DocumentRole = DocumentRole.UNSPECIFIED
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "source_ref": self.source_ref.to_dict(),
             "excerpt": self.text,
             "score": round(self.score, 6),
@@ -147,6 +149,9 @@ class ContextCandidate:
             "anchor_strength": self.anchor_strength.value,
             "related_record_ids": sorted(set(self.related_record_ids)),
         }
+        if self.document_role != DocumentRole.UNSPECIFIED:
+            data["document_role"] = self.document_role.value
+        return data
 
 
 @dataclass(frozen=True)
@@ -160,7 +165,7 @@ class ContextBundle:
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 7
+    schema_version: int = 9
     authoritative: bool = False
     bundle_digest: str = ""
 

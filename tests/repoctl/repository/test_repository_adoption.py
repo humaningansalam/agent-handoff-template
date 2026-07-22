@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tests.repoctl.task_lifecycle_helpers import add_board_task, commit_all, task_text, write_verification
 from tests.repoctl.workspace.test_check import write_workspace
 
 
@@ -76,6 +77,76 @@ def test_repo_adopt_all_pins_collection_targets(tmp_path: Path, monkeypatch, cap
         {"id": "api", "path": "repos/api", "identity_source": "pinned"},
         {"id": "web", "path": "repos/web", "identity_source": "pinned"},
     ]
+
+
+def test_root_completion_receipt_does_not_create_repository_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    text = task_text(task_id, status="doing").replace('area: ""', 'area: "ops"')
+    add_board_task(tmp_path, f"{task_id}--workspace-update.md", text)
+    verification = write_verification(tmp_path, "workspace update verified\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    finish_payload = json.loads(capsys.readouterr().out)
+    receipt = json.loads((tmp_path / finish_payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == 2
+    assert receipt["repo_id"] == ""
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 0
+    postflight_payload = json.loads(capsys.readouterr().out)
+    assert postflight_payload["problems"] == []
+    assert postflight_payload["data"]["repository_state"]["namespaces"] == []
+
+    receipt_path = tmp_path / finish_payload["data"]["completion_receipt"]
+    tampered = dict(receipt)
+    tampered["task_id"] = "T-20260609184047Z"
+    receipt_path.write_text(json.dumps(tampered, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 1
+    tampered_payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "repository_state_identity_missing" for problem in tampered_payload["problems"])
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+
+    assert main(["repo", "adopt", "--all", "--json"]) == 0
+    adoption_payload = json.loads(capsys.readouterr().out)
+    assert adoption_payload["data"]["targets"] == [
+        {"id": "api", "path": "repos/api", "identity_source": "pinned"},
+        {"id": "web", "path": "repos/web", "identity_source": "pinned"},
+    ]
+
+
+def test_repo_scoped_completion_receipt_with_empty_identity_fails_closed(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    commit_all(repo)
+    task_id = "T-20260609184046Z"
+    text = (
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+    )
+    add_board_task(tmp_path, f"{task_id}--repo-update.md", text)
+    verification = write_verification(tmp_path, "repository update verified\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    finish_payload = json.loads(capsys.readouterr().out)
+    receipt_path = tmp_path / finish_payload["data"]["completion_receipt"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["repo_id"] == "main"
+    receipt["repo_id"] = ""
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 1
+    postflight_payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "repository_state_identity_missing" for problem in postflight_payload["problems"])
 
 
 def test_repo_adopt_single_candidate_then_merge_next_candidate(tmp_path: Path, monkeypatch, capsys) -> None:

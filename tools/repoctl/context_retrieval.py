@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from enum import StrEnum
 
 from .context_chunks import DocumentChunk
 from .context_model import (
@@ -10,6 +11,12 @@ from .context_model import (
     ContextCandidate,
     ContextEvidenceKind,
     ContextSectionKind,
+)
+from .document_roles import (
+    ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES,
+    SOURCE_EXCLUDED_DOCUMENT_ROLES,
+    DocumentRole,
+    source_document_role,
 )
 from .path_roles import is_test_path
 
@@ -47,11 +54,176 @@ STOPWORDS = {
 }
 
 
-def retrieve_context(query: str, chunks: list[DocumentChunk], *, limit: int = 20) -> list[ContextCandidate]:
-    return rank_context_chunks(query, chunks, limit=limit)
+class ContextRetrievalLane(StrEnum):
+    PRODUCT_SOURCE = "product_source"
+    PRODUCT_TEST = "product_test"
+    PRODUCT_DOCUMENT = "product_document"
+    PROJECT_CANONICAL = "project_canonical"
+    PROJECT_GOVERNANCE = "project_governance"
+    PROJECT_PROCEDURE = "project_procedure"
+    PROJECT_DOCUMENT = "project_document"
+    TASK_HISTORY = "task_history"
+    SUPPORTING = "supporting"
 
 
-def rank_context_chunks(query: str, chunks: list[DocumentChunk], *, limit: int = 20) -> list[ContextCandidate]:
+AUTO_RETRIEVAL_LANE_LIMITS = {
+    ContextRetrievalLane.PRODUCT_SOURCE: 12,
+    ContextRetrievalLane.PRODUCT_TEST: 3,
+    ContextRetrievalLane.PRODUCT_DOCUMENT: 2,
+    ContextRetrievalLane.PROJECT_CANONICAL: 2,
+    ContextRetrievalLane.PROJECT_GOVERNANCE: 2,
+    ContextRetrievalLane.PROJECT_PROCEDURE: 2,
+    ContextRetrievalLane.PROJECT_DOCUMENT: 2,
+    ContextRetrievalLane.TASK_HISTORY: 2,
+    ContextRetrievalLane.SUPPORTING: 1,
+}
+
+
+def retrieve_context(
+    query: str,
+    chunks: list[DocumentChunk],
+    *,
+    limit: int = 20,
+    repository_path: str = "",
+) -> list[ContextCandidate]:
+    return rank_context_chunks(query, chunks, limit=limit, repository_path=repository_path)
+
+
+def retrieve_context_balanced(
+    query: str,
+    chunks: list[DocumentChunk],
+    *,
+    mode: str,
+    repository_path: str,
+    limit: int = 20,
+) -> list[ContextCandidate]:
+    ranked = rank_context_chunks(
+        query,
+        chunks,
+        limit=-1,
+        repository_path=repository_path,
+    )
+    if mode != "auto" or limit < 0:
+        return ranked if limit < 0 else ranked[:limit]
+
+    by_lane: dict[ContextRetrievalLane, list[ContextCandidate]] = {
+        lane: [] for lane in ContextRetrievalLane
+    }
+    for candidate in ranked:
+        lane = context_retrieval_lane(
+            kind=candidate.source_ref.kind,
+            path=candidate.source_ref.path,
+            repository_path=repository_path,
+            document_role=candidate.document_role,
+        )
+        by_lane[lane].append(candidate)
+
+    selected: dict[tuple[str, str, str, str, int, int], ContextCandidate] = {}
+
+    def add(candidate: ContextCandidate) -> None:
+        if len(selected) < limit:
+            selected.setdefault(candidate.source_ref.key(), candidate)
+
+    lane_heads = [candidates[0] for candidates in by_lane.values() if candidates]
+    for candidate in sorted(lane_heads, key=_retrieval_sort_key):
+        add(candidate)
+    if len(selected) >= limit:
+        return sorted(selected.values(), key=_retrieval_sort_key)[:limit]
+
+    for candidate in ranked:
+        if candidate.anchor_strength == ContextAnchorStrength.EXACT:
+            add(candidate)
+    if len(selected) >= limit:
+        return sorted(selected.values(), key=_retrieval_sort_key)[:limit]
+
+    selected_per_lane = {
+        lane: sum(
+            1
+            for candidate in selected.values()
+            if context_retrieval_lane(
+                kind=candidate.source_ref.kind,
+                path=candidate.source_ref.path,
+                repository_path=repository_path,
+                document_role=candidate.document_role,
+            )
+            == lane
+        )
+        for lane in ContextRetrievalLane
+    }
+    for candidate in ranked:
+        lane = context_retrieval_lane(
+            kind=candidate.source_ref.kind,
+            path=candidate.source_ref.path,
+            repository_path=repository_path,
+            document_role=candidate.document_role,
+        )
+        if selected_per_lane[lane] >= AUTO_RETRIEVAL_LANE_LIMITS[lane]:
+            continue
+        before = len(selected)
+        add(candidate)
+        if len(selected) > before:
+            selected_per_lane[lane] += 1
+        if len(selected) >= limit:
+            break
+
+    for candidate in ranked:
+        if len(selected) >= limit:
+            break
+        add(candidate)
+    return sorted(selected.values(), key=_retrieval_sort_key)
+
+
+def context_retrieval_lane(
+    *,
+    kind: str,
+    path: str,
+    repository_path: str,
+    document_role: DocumentRole = DocumentRole.UNSPECIFIED,
+) -> ContextRetrievalLane:
+    if kind in {"completion_receipt", "task_artifact"}:
+        return ContextRetrievalLane.TASK_HISTORY
+
+    normalized_repository = repository_path.replace("\\", "/").strip("/")
+    normalized_path = path.replace("\\", "/").strip("/")
+    role = source_document_role(
+        kind=kind,
+        path=normalized_path,
+        repository_path=normalized_repository,
+        assigned=document_role,
+    )
+    product_prefix = f"{normalized_repository}/" if normalized_repository else ""
+    is_product_path = bool(product_prefix and normalized_path.startswith(product_prefix))
+    if is_product_path:
+        if kind == "verification_hint" or (
+            kind in {"current_source", "config"}
+            and is_test_path(normalized_path, repository_path=normalized_repository)
+        ):
+            return ContextRetrievalLane.PRODUCT_TEST
+        if kind in {"current_source", "config"}:
+            return ContextRetrievalLane.PRODUCT_SOURCE
+        if kind == "product_manifest":
+            return ContextRetrievalLane.PRODUCT_DOCUMENT
+
+    if kind in {"document", "product_manifest", "verification_hint"}:
+        if role in {DocumentRole.OPERATING_AUTHORITY, DocumentRole.PRODUCT_AUTHORITY}:
+            return ContextRetrievalLane.PROJECT_CANONICAL
+        if role == DocumentRole.GOVERNANCE_AUTHORITY:
+            return ContextRetrievalLane.PROJECT_GOVERNANCE
+        if role == DocumentRole.PROCEDURE:
+            return ContextRetrievalLane.PROJECT_PROCEDURE
+        if is_product_path and kind == "document" and role == DocumentRole.UNSPECIFIED:
+            return ContextRetrievalLane.PRODUCT_DOCUMENT
+        return ContextRetrievalLane.PROJECT_DOCUMENT
+    return ContextRetrievalLane.SUPPORTING
+
+
+def rank_context_chunks(
+    query: str,
+    chunks: list[DocumentChunk],
+    *,
+    limit: int = 20,
+    repository_path: str = "",
+) -> list[ContextCandidate]:
     terms = context_query_terms(query)
     ordered_terms = _ordered_query_terms(query)
     selectors = context_identity_selectors(query)
@@ -59,6 +231,12 @@ def rank_context_chunks(query: str, chunks: list[DocumentChunk], *, limit: int =
     candidates: list[ContextCandidate] = []
 
     for chunk in chunks:
+        document_role = source_document_role(
+            kind=chunk.source_ref.kind,
+            path=chunk.source_ref.path,
+            repository_path=repository_path,
+            assigned=chunk.document_role,
+        )
         path_terms = set(canonical_identifier_sequence(chunk.source_ref.path))
         section_terms = set(canonical_identifier_sequence(chunk.source_ref.section))
         body_terms = set(canonical_identifier_sequence(chunk.text))
@@ -71,9 +249,16 @@ def rank_context_chunks(query: str, chunks: list[DocumentChunk], *, limit: int =
             section=chunk.source_ref.section,
             section_kind=chunk.source_ref.section_kind,
         )
+        if document_role in SOURCE_EXCLUDED_DOCUMENT_ROLES:
+            continue
+        if (
+            document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES
+            and not identity_kinds
+        ):
+            continue
         identity_score, _ = _identity_score_from_kinds(identity_kinds)
         fts_score = fts_scores.get(chunk.source_ref.key(), 0.0)
-        authority_score = _authority_score(chunk)
+        authority_score = _authority_score(chunk, document_role=document_role)
         evidence_kinds = set(identity_kinds)
         reasons: list[str] = []
 
@@ -130,6 +315,7 @@ def rank_context_chunks(query: str, chunks: list[DocumentChunk], *, limit: int =
                     section_kind=chunk.source_ref.section_kind,
                     section_coverage=section_coverage,
                 ),
+                document_role=document_role,
             )
         )
 
@@ -276,28 +462,37 @@ def _retrieval_sort_key(candidate: ContextCandidate) -> tuple[int, float, str, i
     )
 
 
-def _authority_score(chunk: DocumentChunk) -> float:
+def _authority_score(
+    chunk: DocumentChunk,
+    *,
+    document_role: DocumentRole,
+) -> float:
     path = chunk.source_ref.path
     kind = chunk.source_ref.kind
     section = chunk.source_ref.section.lower()
-    if path.startswith("docs/contracts/"):
+    role = document_role
+    if role == DocumentRole.PRODUCT_AUTHORITY:
+        return 0.75
+    if role == DocumentRole.OPERATING_AUTHORITY:
+        return 0.7
+    if role == DocumentRole.GOVERNANCE_AUTHORITY:
+        if path.lower().startswith("docs/adr/") and section == "decision":
+            return 0.5
         return 0.45
-    if path.startswith("docs/adr/"):
-        return 0.5 if section == "decision" else 0.4
+    if role == DocumentRole.PROCEDURE:
+        return 0.35
+    if role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES | SOURCE_EXCLUDED_DOCUMENT_ROLES:
+        return 0.0
     if kind == "completion_receipt":
         return 0.35
     if kind == "task_artifact":
         return 0.3
     if kind in {"current_source", "config"}:
         return 0.25
-    if path in {"AGENTS.md", "docs/PRD.md"}:
-        return 0.45
-    if path == "README.md":
-        return 0.25
-    if path.startswith("docs/workflows/"):
-        return 0.2
     if _is_product_doc_path(path) or kind == "product_manifest":
         return 0.3
+    if role == DocumentRole.REFERENCE:
+        return 0.2
     if kind.startswith("graph_"):
         return 0.05
     return 0.1

@@ -4,6 +4,7 @@ import json
 import hashlib
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -13,6 +14,7 @@ from .context_chunks import chunk_markdown_file
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write
 from .markdown import find_section, parse_frontmatter
+from .repositories import RepoSelectorStatus, require_repo_target, resolve_repo_selector_path
 from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path, normalize_task_id
 
 
@@ -20,7 +22,7 @@ ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
 ALLOWED_SOURCE_PREFIXES = ("docs/adr/", "docs/contracts/", "docs/workflows/")
 EXCLUDED_SOURCE_PARTS = {".repoctl-state", "generated", "plans"}
 MAX_KNOWLEDGE_CLAIM_LENGTH = 300
-CLAIM_ORIGINS = {"explicit", "source_section"}
+CLAIM_ORIGINS = {"explicit"}
 
 
 class KnowledgeExplicitPathKind(StrEnum):
@@ -48,7 +50,59 @@ class KnowledgeQueryMatchStrength(StrEnum):
     EXACT = "exact"
 
 
-def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: str, claim: str = "") -> tuple[dict[str, Any], list[Problem]]:
+class KnowledgeArtifactKind(StrEnum):
+    CANDIDATE = "candidate"
+    RECORD = "record"
+    EVENT = "event"
+
+
+class KnowledgeArtifactErrorCode(StrEnum):
+    CANDIDATE_INVALID_JSON = "knowledge_candidate_invalid_json"
+    CANDIDATE_NOT_OBJECT = "knowledge_candidate_not_object"
+    CANDIDATE_UNREADABLE = "knowledge_candidate_unreadable"
+    RECORD_INVALID_JSON = "knowledge_record_invalid_json"
+    RECORD_NOT_OBJECT = "knowledge_record_not_object"
+    RECORD_UNREADABLE = "knowledge_record_unreadable"
+    EVENT_INVALID_JSON = "knowledge_event_invalid_json"
+    EVENT_NOT_OBJECT = "knowledge_event_not_object"
+    EVENT_UNREADABLE = "knowledge_event_unreadable"
+
+
+class KnowledgeCandidateIntegrityErrorCode(StrEnum):
+    ID_MISMATCH = "knowledge_candidate_id_mismatch"
+    REPO_MISMATCH = "knowledge_candidate_repo_mismatch"
+    DIGEST_MISMATCH = "knowledge_candidate_digest_mismatch"
+
+
+@dataclass(frozen=True)
+class PreparedKnowledgeCandidate:
+    data: dict[str, Any]
+    path: Path
+    text: str
+
+
+@dataclass(frozen=True)
+class KnowledgeArtifactRead:
+    data: dict[str, Any] | None
+    problem: Problem | None
+
+
+@dataclass(frozen=True)
+class KnowledgeApprovalBinding:
+    event: dict[str, Any] | None
+    problems: tuple[Problem, ...]
+    superseded_events: tuple[dict[str, Any], ...] = ()
+
+
+def build_knowledge_candidate(
+    root: Path,
+    *,
+    source: Path,
+    repo_id: str,
+    kind: str,
+    claim: str,
+    applies_to: list[str] | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     rel = _source_rel(root, source)
@@ -61,10 +115,25 @@ def build_knowledge_candidate(root: Path, *, source: Path, repo_id: str, kind: s
     if not chunks:
         return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", rel)]
     primary = _primary_chunk(chunks, kind)
-    return _write_candidate_from_chunk(root, repo_id=repo_id, kind=kind, primary=primary, claim_override=claim)
+    return _write_candidate_from_chunk(
+        root,
+        repo_id=repo_id,
+        kind=kind,
+        primary=primary,
+        claim=claim,
+        applies_to=applies_to,
+    )
 
 
-def build_knowledge_candidate_from_pack(root: Path, *, pack: Path, repo_id: str, kind: str, claim: str = "") -> tuple[dict[str, Any], list[Problem]]:
+def build_knowledge_candidate_from_pack(
+    root: Path,
+    *,
+    pack: Path,
+    repo_id: str,
+    kind: str,
+    claim: str,
+    applies_to: list[str] | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     pack_path = pack if pack.is_absolute() else root / pack
@@ -88,7 +157,8 @@ def build_knowledge_candidate_from_pack(root: Path, *, pack: Path, repo_id: str,
         repo_id=repo_id,
         kind=kind,
         primary=primary,
-        claim_override=claim,
+        claim=claim,
+        applies_to=applies_to,
         derived_from={
             "kind": "context_pack",
             "path": pack_path.relative_to(root).as_posix() if pack_path.is_relative_to(root) else pack_path.as_posix(),
@@ -109,17 +179,24 @@ def _write_candidate_from_chunk(
     repo_id: str,
     kind: str,
     primary: Any,
-    claim_override: str = "",
+    claim: str,
+    applies_to: list[str] | None = None,
     derived_from: dict[str, Any] | None = None,
     checklist: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
     candidate_claim, claim_problem = _validated_candidate_claim(
-        primary.text,
-        override=claim_override,
+        claim=claim,
         problem_path=primary.source_ref.path,
     )
     if claim_problem is not None:
         return {}, [claim_problem]
+    applicability_paths, applicability_problems = _validated_candidate_applicability_paths(
+        root,
+        repo_id=repo_id,
+        values=applies_to or [],
+    )
+    if applicability_problems:
+        return {}, applicability_problems
     candidate_id = _unique_candidate_id(root, repo_id, primary.title, primary.source_ref.content_sha256)
     candidate = {
         "schema": "repoctl.knowledge.candidate",
@@ -131,9 +208,10 @@ def _write_candidate_from_chunk(
         "authoritative": False,
         "title": primary.title,
         "claim": candidate_claim,
-        "claim_origin": "explicit" if claim_override.strip() else "source_section",
+        "claim_origin": "explicit",
         "summary": _summary(primary.text),
         "source_refs": [primary.source_ref.to_dict()],
+        "applies_to": {"paths": applicability_paths},
         "review": {
             "required": True,
             "status": "pending",
@@ -148,7 +226,7 @@ def _write_candidate_from_chunk(
     }
     if derived_from:
         candidate["derived_from"] = derived_from
-    candidate["candidate_digest"] = digest_data(candidate)
+    candidate["candidate_digest"] = _knowledge_candidate_digest(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(destination, json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -161,8 +239,9 @@ def build_knowledge_candidate_from_receipt(
     task_id: str,
     repo_id: str,
     kind: str,
+    claim: str,
     write: bool = True,
-    claim: str = "",
+    applies_to: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
@@ -177,32 +256,67 @@ def build_knowledge_candidate_from_receipt(
     artifact_path = root / artifact_rel
     if not artifact_rel or not artifact_path.is_file():
         return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_rel)]
-    if not claim.strip():
-        return {}, [
-            Problem(
-                "error",
-                "knowledge_candidate_claim_required",
-                "task-derived knowledge requires an explicit reusable claim; pass --claim or --claim-file",
-                normalized_task_id,
-            )
-        ]
-    artifact_text = artifact_path.read_text(encoding="utf-8")
-    title = _receipt_title(receipt, artifact_text)
-    summary = _receipt_summary(receipt, artifact_text)
-    candidate_claim, claim_problem = _validated_candidate_claim(
-        "",
-        override=claim,
-        problem_path=normalized_task_id,
-    )
-    if claim_problem is not None:
-        return {}, [claim_problem]
     receipt_text = (root / receipt_rel).read_text(encoding="utf-8")
-    changed_files = _receipt_changed_files(receipt)
+    artifact_text = artifact_path.read_text(encoding="utf-8")
+    prepared, prepare_problems = prepare_knowledge_candidate_from_completion(
+        root,
+        receipt=receipt,
+        receipt_rel=receipt_rel,
+        receipt_text=receipt_text,
+        artifact_rel=artifact_rel,
+        artifact_text=artifact_text,
+        repo_id=repo_id,
+        kind=kind,
+        claim=claim,
+        applies_to=applies_to,
+    )
+    if prepare_problems or prepared is None:
+        return {}, prepare_problems
+    data = dict(prepared.data)
+    if not write:
+        data["dry_run"] = True
+        data["would_write_path"] = data["path"]
+        data["path"] = ""
+        return data, []
+    prepared.path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(prepared.path, prepared.text)
+    return data, []
+
+
+def prepare_knowledge_candidate_from_completion(
+    root: Path,
+    *,
+    receipt: dict[str, Any],
+    receipt_rel: str,
+    receipt_text: str,
+    artifact_rel: str,
+    artifact_text: str,
+    repo_id: str,
+    kind: str,
+    claim: str,
+    applies_to: list[str] | None = None,
+) -> tuple[PreparedKnowledgeCandidate | None, list[Problem]]:
+    if kind not in ALLOWED_KINDS:
+        return None, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
+    task_id = normalize_task_id(str(receipt.get("task_id") or ""))
+    if str(receipt.get("repo_id") or "") != repo_id:
+        return None, [Problem("error", "knowledge_candidate_receipt_repo_mismatch", "completion receipt repo_id does not match candidate repo_id", task_id)]
+    candidate_claim, claim_problem = _validated_candidate_claim(claim=claim, problem_path=task_id)
+    if claim_problem is not None:
+        return None, [claim_problem]
+    applicability_paths, applicability_problems = _validated_candidate_applicability_paths(
+        root,
+        repo_id=repo_id,
+        values=applies_to or [],
+    )
+    if applicability_problems:
+        return None, applicability_problems
+    title = _receipt_title(receipt, artifact_text)
     source_refs = [
         {
             "kind": "completion_receipt",
             "path": receipt_rel,
-            "section": normalized_task_id,
+            "section": task_id,
             "content_sha256": _sha256_text(receipt_text),
         },
         {
@@ -224,42 +338,44 @@ def build_knowledge_candidate_from_receipt(
         "title": title,
         "claim": candidate_claim,
         "claim_origin": "explicit",
-        "summary": summary,
+        "summary": _receipt_summary(receipt, artifact_text),
         "source_refs": source_refs,
+        "applies_to": {"paths": applicability_paths},
         "review": {
             "required": True,
             "status": "pending",
             "checklist": [
                 "completion receipt and task artifact digests still match",
                 "candidate captures a stable reusable fact, not one-off task prose",
+                "explicit applicability paths identify only current files governed by the claim",
                 "candidate should not replace task, Board, Graph, or .repometa authority",
             ],
         },
         "conflict_detected": False,
         "derived_from": {
             "kind": "completion_receipt",
-            "task_id": normalized_task_id,
+            "task_id": task_id,
             "repo_id": repo_id,
             "verification_artifact": artifact_rel,
-            "changed_files": changed_files,
+            "changed_files": _receipt_changed_files(receipt),
         },
     }
-    candidate["candidate_digest"] = digest_data(candidate)
+    candidate["candidate_digest"] = _knowledge_candidate_digest(candidate)
     destination = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
     data = {"candidate": candidate, "path": destination.relative_to(root).as_posix()}
-    if not write:
-        data["dry_run"] = True
-        data["would_write_path"] = data["path"]
-        data["path"] = ""
-        return data, []
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(destination, json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    return data, []
+    return PreparedKnowledgeCandidate(
+        data=data,
+        path=destination,
+        text=json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    ), []
 
 
 def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = False) -> dict[str, Any]:
     directory = _candidate_dir(root, repo_id)
-    candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    candidates = [
+        _require_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.CANDIDATE)
+        for path in sorted(directory.glob("KC-*.json"))
+    ] if directory.exists() else []
     review_states = _candidate_review_states(root, repo_id=repo_id)
     items = [
         {
@@ -290,7 +406,10 @@ def list_knowledge_candidates(root: Path, *, repo_id: str, with_checks: bool = F
 
 def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     directory = _candidate_dir(root, repo_id)
-    candidate_records = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    candidate_records = [
+        _require_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.CANDIDATE)
+        for path in sorted(directory.glob("KC-*.json"))
+    ] if directory.exists() else []
     candidates = list_knowledge_candidates(root, repo_id=repo_id)["candidates"]
     candidate_review_states: dict[str, int] = {}
     for item in candidates:
@@ -386,7 +505,10 @@ def show_knowledge_event(root: Path, *, repo_id: str, event_id: str) -> tuple[di
     path = _event_dir(root) / f"{event_id}.json"
     if not path.is_file():
         return {}, [Problem("error", "knowledge_event_not_found", f"knowledge event not found: {event_id}", path.relative_to(root).as_posix())]
-    event = _read_candidate(path)
+    read = _read_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.EVENT)
+    if read.problem is not None:
+        return {}, [read.problem]
+    event = read.data or {}
     if str(event.get("repo_id") or "") != repo_id:
         return {}, [Problem("error", "knowledge_event_repo_mismatch", "knowledge event belongs to a different repo", event_id)]
     return {"event": event, "path": path.relative_to(root).as_posix()}, []
@@ -398,7 +520,10 @@ def show_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> 
     path = _candidate_dir(root, repo_id) / f"{candidate_id}.json"
     if not path.is_file():
         return {}, [Problem("error", "knowledge_candidate_not_found", f"candidate not found: {candidate_id}", path.relative_to(root).as_posix())]
-    return {"candidate": _read_candidate(path), "path": path.relative_to(root).as_posix()}, []
+    read = _read_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.CANDIDATE)
+    if read.problem is not None:
+        return {}, [read.problem]
+    return {"candidate": read.data or {}, "path": path.relative_to(root).as_posix()}, []
 
 
 def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
@@ -422,22 +547,36 @@ def check_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) ->
 
 def check_all_knowledge_candidates(root: Path, *, repo_id: str, pending_only: bool = True) -> tuple[dict[str, Any], list[Problem]]:
     directory = _candidate_dir(root, repo_id)
-    candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    candidate_paths = sorted(directory.glob("KC-*.json")) if directory.exists() else []
+    candidates, read_problems = _read_knowledge_artifacts(
+        root,
+        candidate_paths,
+        kind=KnowledgeArtifactKind.CANDIDATE,
+    )
     if pending_only:
-        review_states = _candidate_review_states(root, repo_id=repo_id)
+        events, _ = _read_knowledge_artifacts(
+            root,
+            sorted(_event_dir(root).glob("E-*.json")),
+            kind=KnowledgeArtifactKind.EVENT,
+        )
+        review_states = _candidate_review_states_from_events(
+            [event for event in events if str(event.get("repo_id") or "") == repo_id]
+        )
         checked_candidates = [candidate for candidate in candidates if review_states.get(str(candidate.get("id") or ""), "pending") == "pending"]
     else:
         checked_candidates = candidates
     data = _candidate_checks(root, repo_id=repo_id, candidates=checked_candidates)
-    data["candidate_total_count"] = len(candidates)
+    data["candidate_total_count"] = len(candidate_paths)
     data["pending_only"] = pending_only
     data["skipped_non_pending_count"] = len(candidates) - len(checked_candidates)
-    problems: list[Problem] = []
+    problems: list[Problem] = list(read_problems)
     for result in data["results"]:
         for problem in result["problems"]:
             problems.append(Problem("error", str(problem.get("code") or ""), str(problem.get("message") or ""), str(problem.get("path") or "") or None))
         for warning in result["warnings"]:
             problems.append(Problem("warning", str(warning.get("code") or ""), str(warning.get("message") or ""), str(warning.get("path") or "") or None))
+    data["error_count"] = int(data.get("error_count") or 0) + len([problem for problem in read_problems if problem.severity == "error"])
+    data["warning_count"] = int(data.get("warning_count") or 0) + len([problem for problem in read_problems if problem.severity == "warning"])
     return data, problems
 
 
@@ -450,7 +589,20 @@ def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
         return {}, [Problem("error", "knowledge_candidate_repo_mismatch", "candidate belongs to a different repo", candidate_id)]
     kind = str(old_candidate.get("kind") or "")
     derived_from = old_candidate.get("derived_from")
-    if isinstance(derived_from, dict) and derived_from.get("kind") == "completion_receipt":
+    claim_origin = str(old_candidate.get("claim_origin") or "")
+    receipt_derived = isinstance(derived_from, dict) and derived_from.get("kind") == "completion_receipt"
+    if claim_origin != "explicit":
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_candidate_task_claim_not_explicit"
+                if receipt_derived
+                else "knowledge_candidate_claim_origin_invalid",
+                "candidate requires manual review and a newly supplied explicit reusable claim instead of refresh",
+                candidate_id,
+            )
+        ]
+    if receipt_derived:
         task_id = str(derived_from.get("task_id") or "")
         if not task_id:
             return {}, [Problem("error", "knowledge_candidate_refresh_source_missing", "receipt-derived candidate is missing task_id", candidate_id)]
@@ -460,12 +612,20 @@ def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) 
             repo_id=repo_id,
             kind=kind,
             claim=str(old_candidate.get("claim") or ""),
+            applies_to=_knowledge_applicability_paths(old_candidate),
         )
     else:
         source_path = _refresh_source_path(old_candidate)
         if not source_path:
             return {}, [Problem("error", "knowledge_candidate_refresh_source_missing", "candidate has no refreshable document source", candidate_id)]
-        refreshed_data, refresh_problems = build_knowledge_candidate(root, source=Path(source_path), repo_id=repo_id, kind=kind)
+        refreshed_data, refresh_problems = build_knowledge_candidate(
+            root,
+            source=Path(source_path),
+            repo_id=repo_id,
+            kind=kind,
+            claim=str(old_candidate.get("claim") or ""),
+            applies_to=_knowledge_applicability_paths(old_candidate),
+        )
     if refresh_problems:
         return {}, refresh_problems
 
@@ -513,6 +673,8 @@ def refresh_knowledge_record_candidate(root: Path, *, repo_id: str, record_id: s
         repo_id=repo_id,
         kind=kind,
         primary=_primary_chunk(chunks, kind),
+        claim=str(record.get("claim") or ""),
+        applies_to=_knowledge_applicability_paths(record),
         derived_from={
             "kind": "knowledge_record",
             "record_id": record_id,
@@ -555,7 +717,10 @@ def refresh_knowledge_record_candidate(root: Path, *, repo_id: str, record_id: s
 
 def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_records: bool = False) -> tuple[dict[str, Any], list[Problem]]:
     directory = _candidate_dir(root, repo_id)
-    candidates = [_read_candidate(path) for path in sorted(directory.glob("KC-*.json"))] if directory.exists() else []
+    candidates = [
+        _require_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.CANDIDATE)
+        for path in sorted(directory.glob("KC-*.json"))
+    ] if directory.exists() else []
     refreshed_before = _refreshed_candidate_ids(root, repo_id=repo_id)
     review_states = _candidate_review_states(root, repo_id=repo_id)
     refreshed_candidates: list[dict[str, Any]] = []
@@ -641,6 +806,93 @@ def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_reco
     }, problems
 
 
+def _approval_lifecycle_events(events: list[dict[str, Any]], *, record_id: str) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if str(event.get("type") or "") in {"approved", "deprecated", "superseded", "refreshed_record_candidate"}
+        and (
+            str(event.get("record_id") or "") == record_id
+            or str(event.get("superseded_by") or "") == record_id
+        )
+    ]
+
+
+def _approval_event_for_record(
+    root: Path,
+    *,
+    repo_id: str,
+    record: dict[str, Any],
+    candidate_id: str,
+    events: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, Problem | None]:
+    binding = _knowledge_approval_binding(
+        record,
+        events if events is not None else _load_events(root, repo_id=repo_id),
+        candidate_id=candidate_id,
+    )
+    if binding.problems:
+        return None, binding.problems[0]
+    return binding.event, None
+
+
+def _commit_knowledge_approval(
+    root: Path,
+    artifacts: list[tuple[Path, dict[str, Any]]],
+) -> list[Problem]:
+    for path, _ in artifacts:
+        if path.exists():
+            return [
+                Problem(
+                    "error",
+                    "knowledge_approval_artifact_exists",
+                    "knowledge approval target already exists",
+                    path.relative_to(root).as_posix(),
+                )
+            ]
+
+    written: list[Path] = []
+    current_path = artifacts[0][0]
+    try:
+        for current_path, payload in artifacts:
+            atomic_write(current_path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            written.append(current_path)
+    except OSError:
+        rollback_failures: list[Path] = []
+        for path in reversed(written):
+            try:
+                path.unlink()
+            except OSError:
+                rollback_failures.append(path)
+        if rollback_failures:
+            return [
+                Problem(
+                    "error",
+                    "knowledge_approval_rollback_failed",
+                    "knowledge approval write failed and created artifacts could not be rolled back",
+                    path.relative_to(root).as_posix(),
+                    cause_code="knowledge_approval_write_failed",
+                )
+                for path in rollback_failures
+            ]
+        return [
+            Problem(
+                "error",
+                "knowledge_approval_write_failed",
+                "knowledge approval artifacts could not be committed",
+                current_path.relative_to(root).as_posix(),
+            )
+        ]
+    except Exception:
+        for path in reversed(written):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+    return []
+
+
 def approve_knowledge_candidate(
     root: Path,
     *,
@@ -684,6 +936,7 @@ def approve_knowledge_candidate(
         "claim": candidate.get("claim", ""),
         "summary": candidate.get("summary", ""),
         "source_refs": candidate.get("source_refs", []),
+        "applies_to": candidate.get("applies_to", {"paths": []}),
         "supersedes": supersedes,
         "created_from": {
             "candidate_id": candidate_id,
@@ -704,17 +957,51 @@ def approve_knowledge_candidate(
         },
         "authoritative": True,
     }
-    record["record_digest"] = digest_data(record)
+    record["record_digest"] = _knowledge_record_digest(record)
     record_path = _record_dir(root) / f"{record_id}.json"
+    existing_events = _load_events(root, repo_id=repo_id)
     if record_path.exists():
+        existing = _require_knowledge_artifact(root, record_path, kind=KnowledgeArtifactKind.RECORD)
+        existing_created_from = existing.get("created_from") if isinstance(existing.get("created_from"), dict) else {}
+        if (
+            str(existing.get("repo_id") or "") == repo_id
+            and str(existing_created_from.get("candidate_id") or "") == candidate_id
+            and str(existing_created_from.get("candidate_digest") or "") == str(candidate.get("candidate_digest") or "")
+        ):
+            approved_event, approval_problem = _approval_event_for_record(
+                root,
+                repo_id=repo_id,
+                record=existing,
+                candidate_id=candidate_id,
+                events=existing_events,
+            )
+            if approval_problem is not None or approved_event is None:
+                return {}, [approval_problem] if approval_problem is not None else []
+            event_path = _event_dir(root) / f"{approved_event['id']}.json"
+            return {
+                "record": existing,
+                "record_path": record_path.relative_to(root).as_posix(),
+                "event": approved_event,
+                "event_path": event_path.relative_to(root).as_posix(),
+                "superseded_events": [],
+                "already_approved": True,
+            }, []
         return {}, [Problem("error", "knowledge_record_exists", f"knowledge record already exists: {record_id}", record_path.relative_to(root).as_posix())]
-    record_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(record_path, json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    lifecycle_residue = _approval_lifecycle_events(existing_events, record_id=record_id)
+    if lifecycle_residue:
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_approval_incomplete",
+                "knowledge approval lifecycle artifacts exist without the reviewed record",
+                str(lifecycle_residue[0].get("id") or record_id),
+            )
+        ]
 
     event = {
         "schema": "repoctl.knowledge.event",
         "schema_version": 1,
-        "id": _event_id("approved", record_id),
+        "id": _unique_event_id(root, "approved", record_id),
         "type": "approved",
         "repo_id": repo_id,
         "record_id": record_id,
@@ -728,14 +1015,12 @@ def approve_knowledge_candidate(
     }
     event["event_digest"] = digest_data(event)
     event_path = _event_dir(root) / f"{event['id']}.json"
-    event_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    superseded_events = []
+    superseded_events: list[dict[str, Any]] = []
     for superseded_id in supersedes:
         superseded_event = {
             "schema": "repoctl.knowledge.event",
             "schema_version": 1,
-            "id": _event_id("superseded", superseded_id),
+            "id": _unique_event_id(root, "superseded", superseded_id),
             "type": "superseded",
             "repo_id": repo_id,
             "record_id": superseded_id,
@@ -745,8 +1030,19 @@ def approve_knowledge_candidate(
         }
         superseded_event["event_digest"] = digest_data(superseded_event)
         superseded_path = _event_dir(root) / f"{superseded_event['id']}.json"
-        atomic_write(superseded_path, json.dumps(superseded_event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
         superseded_events.append({"event": superseded_event, "event_path": superseded_path.relative_to(root).as_posix()})
+
+    artifacts = [
+        (record_path, record),
+        (event_path, event),
+        *[
+            (root / item["event_path"], item["event"])
+            for item in superseded_events
+        ],
+    ]
+    write_problems = _commit_knowledge_approval(root, artifacts)
+    if write_problems:
+        return {}, write_problems
     return {
         "record": record,
         "record_path": record_path.relative_to(root).as_posix(),
@@ -820,7 +1116,10 @@ def show_knowledge_record(root: Path, *, record_id: str, repo_id: str) -> tuple[
     path = _record_dir(root) / f"{record_id}.json"
     if not path.is_file():
         return {}, [Problem("error", "knowledge_record_not_found", f"knowledge record not found: {record_id}", path.relative_to(root).as_posix())]
-    record = _read_candidate(path)
+    read = _read_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.RECORD)
+    if read.problem is not None:
+        return {}, [read.problem]
+    record = read.data or {}
     if str(record.get("repo_id") or "") != repo_id:
         return {}, [Problem("error", "knowledge_record_repo_mismatch", "knowledge record belongs to a different repo", record_id)]
     return {"record": record, "path": path.relative_to(root).as_posix()}, []
@@ -834,11 +1133,23 @@ def _problem_code_counts(problems: list[Problem]) -> dict[str, int]:
 
 
 def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any], list[Problem]]:
-    problems: list[Problem] = []
-    records = [_read_candidate(path) for path in sorted(_record_dir(root).glob("K-*.json"))]
+    record_paths = sorted(_record_dir(root).glob("K-*.json"))
+    event_paths = sorted(_event_dir(root).glob("E-*.json"))
+    records, record_read_problems = _read_knowledge_artifacts(
+        root,
+        record_paths,
+        kind=KnowledgeArtifactKind.RECORD,
+    )
+    events, event_read_problems = _read_knowledge_artifacts(
+        root,
+        event_paths,
+        kind=KnowledgeArtifactKind.EVENT,
+    )
+    problems: list[Problem] = list(record_read_problems)
     selected = [record for record in records if str(record.get("repo_id") or "") == repo_id]
+    selected_events = [event for event in events if str(event.get("repo_id") or "") == repo_id]
     superseded_ids = _superseded_ids(selected)
-    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
+    deprecated_ids = _deprecated_ids_from_events(selected_events)
     record_results: list[dict[str, Any]] = []
     for record in selected:
         record_id = str(record.get("id") or "")
@@ -858,15 +1169,18 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
             }
         )
     supersession_problems = _supersession_problems(selected)
-    event_problems = event_integrity_problems(root, repo_id=repo_id, records=selected)
+    event_problems = [
+        *event_read_problems,
+        *event_integrity_problems(root, repo_id=repo_id, records=selected, events=selected_events),
+    ]
     problems.extend(supersession_problems)
     problems.extend(event_problems)
     return {
         "schema": "repoctl.knowledge.check",
         "schema_version": 1,
         "repo_id": repo_id,
-        "record_count": len(selected),
-        "event_count": len(_load_events(root, repo_id=repo_id)),
+        "record_count": len(selected) + len(record_read_problems),
+        "event_count": len(selected_events) + len(event_read_problems),
         "records": record_results,
         "record_checks": {
             "error_count": len([problem for problem in problems if problem.severity == "error" and not problem.code.startswith("knowledge_event_")]),
@@ -905,7 +1219,7 @@ def query_knowledge_records(
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
-    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records, events=events)
     if event_problems:
         return {
             "schema": "repoctl.knowledge.query",
@@ -1034,7 +1348,7 @@ def _knowledge_query_match_strength(
 def knowledge_records_for_graph(root: Path, *, repo_id: str) -> tuple[list[dict[str, Any]], list[Problem]]:
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
-    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records, events=events)
     if any(problem.severity == "error" for problem in event_problems):
         return [], event_problems
     superseded_ids = _superseded_ids(records)
@@ -1218,18 +1532,59 @@ def _artifact_section(text: str, heading: str) -> str:
     return text[section.body_start : section.end].strip()
 
 
-def _claim(text: str) -> str:
-    for line in text.splitlines():
-        stripped = line.strip().lstrip("-").strip()
-        if stripped and not stripped.startswith("```") and not stripped.startswith("#"):
-            return stripped
-    return ""
+def _validated_candidate_applicability_paths(
+    root: Path,
+    *,
+    repo_id: str,
+    values: list[str],
+) -> tuple[list[str], list[Problem]]:
+    if not values:
+        return [], []
+    target = require_repo_target(root, repo_id=repo_id)
+    target_root = target.root_path.resolve()
+    paths: list[str] = []
+    problems: list[Problem] = []
+    for value in values:
+        resolution = resolve_repo_selector_path(value, repository_path=target.display_path)
+        if resolution.status != RepoSelectorStatus.RESOLVED or not resolution.path:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_candidate_applies_to_invalid",
+                    "knowledge applicability path must be a normalized path inside the selected repository",
+                    value,
+                )
+            )
+            continue
+        path = target.root_path / resolution.path
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path.absolute()
+        if target_root not in (resolved, *resolved.parents) or not path.is_file():
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_candidate_applies_to_missing",
+                    "knowledge applicability path must resolve to a current file in the selected repository",
+                    value,
+                )
+            )
+            continue
+        if resolution.path not in paths:
+            paths.append(resolution.path)
+    return sorted(paths), problems
 
 
-def _validated_candidate_claim(text: str, *, override: str, problem_path: str) -> tuple[str, Problem | None]:
-    claim = override.strip() or _claim(text)
+def _validated_candidate_claim(*, claim: str, problem_path: str) -> tuple[str, Problem | None]:
+    claim = claim.strip()
     if not claim:
-        return "", Problem("error", "knowledge_candidate_claim_missing", "candidate claim is missing", problem_path)
+        return "", Problem(
+            "error",
+            "knowledge_candidate_claim_required",
+            "knowledge candidates require an explicit reusable claim; pass --claim or --claim-file",
+            problem_path,
+        )
     if len(claim) > MAX_KNOWLEDGE_CLAIM_LENGTH:
         return "", Problem(
             "error",
@@ -1304,27 +1659,149 @@ def _event_dir(root: Path) -> Path:
     return root / "docs/knowledge/events"
 
 
-def _read_candidate(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data if isinstance(data, dict) else {}
+def _artifact_error_code(
+    kind: KnowledgeArtifactKind,
+    *,
+    invalid_json: bool = False,
+    not_object: bool = False,
+) -> KnowledgeArtifactErrorCode:
+    if kind == KnowledgeArtifactKind.CANDIDATE:
+        if invalid_json:
+            return KnowledgeArtifactErrorCode.CANDIDATE_INVALID_JSON
+        if not_object:
+            return KnowledgeArtifactErrorCode.CANDIDATE_NOT_OBJECT
+        return KnowledgeArtifactErrorCode.CANDIDATE_UNREADABLE
+    if kind == KnowledgeArtifactKind.RECORD:
+        if invalid_json:
+            return KnowledgeArtifactErrorCode.RECORD_INVALID_JSON
+        if not_object:
+            return KnowledgeArtifactErrorCode.RECORD_NOT_OBJECT
+        return KnowledgeArtifactErrorCode.RECORD_UNREADABLE
+    if invalid_json:
+        return KnowledgeArtifactErrorCode.EVENT_INVALID_JSON
+    if not_object:
+        return KnowledgeArtifactErrorCode.EVENT_NOT_OBJECT
+    return KnowledgeArtifactErrorCode.EVENT_UNREADABLE
+
+
+def _read_knowledge_artifact(root: Path, path: Path, *, kind: KnowledgeArtifactKind) -> KnowledgeArtifactRead:
+    rel = path.relative_to(root).as_posix()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return KnowledgeArtifactRead(
+            None,
+            Problem("error", _artifact_error_code(kind), f"knowledge {kind.value} is unreadable", rel),
+        )
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return KnowledgeArtifactRead(
+            None,
+            Problem("error", _artifact_error_code(kind, invalid_json=True), f"knowledge {kind.value} JSON is invalid", rel),
+        )
+    if not isinstance(data, dict):
+        return KnowledgeArtifactRead(
+            None,
+            Problem("error", _artifact_error_code(kind, not_object=True), f"knowledge {kind.value} must be a JSON object", rel),
+        )
+    if kind == KnowledgeArtifactKind.CANDIDATE:
+        integrity_problem = _knowledge_candidate_integrity_problem(
+            data,
+            expected_candidate_id=path.stem,
+            expected_repo_id=path.parent.name,
+            path=rel,
+        )
+        if integrity_problem is not None:
+            return KnowledgeArtifactRead(None, integrity_problem)
+    return KnowledgeArtifactRead(data, None)
+
+
+def _knowledge_candidate_integrity_problem(
+    candidate: dict[str, Any],
+    *,
+    expected_candidate_id: str,
+    expected_repo_id: str,
+    path: str,
+) -> Problem | None:
+    if str(candidate.get("id") or "") != expected_candidate_id:
+        return Problem(
+            "error",
+            KnowledgeCandidateIntegrityErrorCode.ID_MISMATCH,
+            "knowledge candidate id does not match its artifact path",
+            path,
+        )
+    if str(candidate.get("repo_id") or "") != expected_repo_id:
+        return Problem(
+            "error",
+            KnowledgeCandidateIntegrityErrorCode.REPO_MISMATCH,
+            "knowledge candidate repo_id does not match its repository namespace",
+            path,
+        )
+    if str(candidate.get("candidate_digest") or "") != _knowledge_candidate_digest(candidate):
+        return Problem(
+            "error",
+            KnowledgeCandidateIntegrityErrorCode.DIGEST_MISMATCH,
+            "knowledge candidate digest does not match candidate content",
+            path,
+        )
+    return None
+
+
+def _require_knowledge_artifact(root: Path, path: Path, *, kind: KnowledgeArtifactKind) -> dict[str, Any]:
+    result = _read_knowledge_artifact(root, path, kind=kind)
+    if result.problem is not None:
+        raise RepoctlError(
+            result.problem.message,
+            code=result.problem.code,
+            path=result.problem.path,
+        )
+    return result.data or {}
+
+
+def _read_knowledge_artifacts(
+    root: Path,
+    paths: list[Path],
+    *,
+    kind: KnowledgeArtifactKind,
+) -> tuple[list[dict[str, Any]], list[Problem]]:
+    items: list[dict[str, Any]] = []
+    problems: list[Problem] = []
+    for path in paths:
+        result = _read_knowledge_artifact(root, path, kind=kind)
+        if result.problem is not None:
+            problems.append(result.problem)
+        elif result.data is not None:
+            items.append(result.data)
+    return items, problems
 
 
 def _load_records(root: Path) -> list[dict[str, Any]]:
     directory = _record_dir(root)
-    return [_read_candidate(path) for path in sorted(directory.glob("K-*.json"))] if directory.exists() else []
+    return [
+        _require_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.RECORD)
+        for path in sorted(directory.glob("K-*.json"))
+    ] if directory.exists() else []
 
 
 def _load_events(root: Path, *, repo_id: str) -> list[dict[str, Any]]:
     directory = _event_dir(root)
     if not directory.exists():
         return []
-    events = [_read_candidate(path) for path in sorted(directory.glob("E-*.json"))]
+    events = [
+        _require_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.EVENT)
+        for path in sorted(directory.glob("E-*.json"))
+    ]
     return [event for event in events if str(event.get("repo_id") or "") == repo_id]
 
 
 def _candidate_review_states(root: Path, *, repo_id: str) -> dict[str, str]:
+    return _candidate_review_states_from_events(_load_events(root, repo_id=repo_id))
+
+
+def _candidate_review_states_from_events(events: list[dict[str, Any]]) -> dict[str, str]:
     states: dict[str, str] = {}
-    for event in _load_events(root, repo_id=repo_id):
+    for event in events:
         candidate_id = str(event.get("candidate_id") or "")
         if not candidate_id:
             continue
@@ -1410,8 +1887,12 @@ def _superseded_ids(records: list[dict[str, Any]]) -> set[str]:
 
 
 def _deprecated_ids(root: Path, *, repo_id: str) -> set[str]:
+    return _deprecated_ids_from_events(_load_events(root, repo_id=repo_id))
+
+
+def _deprecated_ids_from_events(events: list[dict[str, Any]]) -> set[str]:
     values: set[str] = set()
-    for event in _load_events(root, repo_id=repo_id):
+    for event in events:
         if event.get("type") == "deprecated":
             record_id = str(event.get("record_id") or "")
             if record_id:
@@ -1437,24 +1918,248 @@ def _supersession_problems(records: list[dict[str, Any]]) -> list[Problem]:
     return problems
 
 
-def event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str, Any]]) -> list[Problem]:
+def _knowledge_record_digest(record: dict[str, Any]) -> str:
+    return digest_data({key: value for key, value in record.items() if key != "record_digest"})
+
+
+def _knowledge_candidate_digest(candidate: dict[str, Any]) -> str:
+    return digest_data({key: value for key, value in candidate.items() if key != "candidate_digest"})
+
+
+def _knowledge_event_digest_problem(event: dict[str, Any]) -> Problem | None:
+    event_id = str(event.get("id") or "")
+    expected_digest = str(event.get("event_digest") or "")
+    actual_digest = digest_data({key: value for key, value in event.items() if key != "event_digest"})
+    if expected_digest == actual_digest:
+        return None
+    return Problem(
+        "error",
+        "knowledge_event_digest_mismatch",
+        "knowledge event digest does not match event content",
+        event_id,
+    )
+
+
+def _knowledge_approval_binding(
+    record: dict[str, Any],
+    events: list[dict[str, Any]],
+    *,
+    candidate_id: str = "",
+    validate_event_digest: bool = True,
+) -> KnowledgeApprovalBinding:
+    record_id = str(record.get("id") or "")
+    record_path = f"docs/knowledge/records/{record_id}.json"
+    problems: list[Problem] = []
+    actual_record_digest = _knowledge_record_digest(record)
+    if str(record.get("record_digest") or "") != actual_record_digest:
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_record_digest_mismatch",
+                "reviewed knowledge record digest does not match record content",
+                record_path,
+            )
+        )
+
+    matches = [
+        event
+        for event in events
+        if event.get("type") == "approved"
+        and str(event.get("record_id") or "") == record_id
+    ]
+    if not matches:
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_approval_incomplete",
+                "reviewed knowledge record has no matching approval event",
+                record_path,
+            )
+        )
+        return KnowledgeApprovalBinding(None, tuple(problems))
+    if len(matches) > 1:
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_approval_event_duplicate",
+                "reviewed knowledge record has multiple approval events",
+                record_id,
+            )
+        )
+        return KnowledgeApprovalBinding(None, tuple(problems))
+
+    event = matches[0]
+    if validate_event_digest:
+        event_digest_problem = _knowledge_event_digest_problem(event)
+        if event_digest_problem is not None:
+            problems.append(event_digest_problem)
+
+    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
+    record_candidate_id = str(created_from.get("candidate_id") or "")
+    event_candidate_id = str(event.get("candidate_id") or "")
+    if (
+        not record_candidate_id
+        or event_candidate_id != record_candidate_id
+        or (candidate_id and record_candidate_id != candidate_id)
+    ):
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_approval_candidate_mismatch",
+                "knowledge approval event candidate does not match reviewed record provenance",
+                record_id,
+            )
+        )
+    if str(event.get("record_digest") or "") != actual_record_digest:
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_event_record_digest_mismatch",
+                "knowledge approval event record digest does not match reviewed record content",
+                record_id,
+            )
+        )
+
+    raw_record_supersedes = record.get("supersedes")
+    record_supersedes = (
+        [value.strip() for value in raw_record_supersedes if isinstance(value, str) and value.strip()]
+        if isinstance(raw_record_supersedes, list)
+        else []
+    )
+    if (
+        not isinstance(raw_record_supersedes, list)
+        or len(record_supersedes) != len(raw_record_supersedes)
+        or len(set(record_supersedes)) != len(record_supersedes)
+    ):
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_supersedes_invalid",
+                "reviewed knowledge record supersedes must contain unique record ids",
+                record_id,
+            )
+        )
+
+    raw_event_supersedes = event.get("supersedes")
+    event_supersedes = (
+        [value.strip() for value in raw_event_supersedes if isinstance(value, str) and value.strip()]
+        if isinstance(raw_event_supersedes, list)
+        else []
+    )
+    if (
+        not isinstance(raw_event_supersedes, list)
+        or len(event_supersedes) != len(raw_event_supersedes)
+        or sorted(event_supersedes) != sorted(record_supersedes)
+    ):
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_approval_supersedes_mismatch",
+                "knowledge approval event supersedes do not match reviewed record",
+                record_id,
+            )
+        )
+
+    linked_superseded_events = [
+        item
+        for item in events
+        if item.get("type") == "superseded"
+        and str(item.get("superseded_by") or "") == record_id
+    ]
+    expected_supersedes = set(record_supersedes)
+    linked_by_record: dict[str, list[dict[str, Any]]] = {}
+    for item in linked_superseded_events:
+        linked_by_record.setdefault(str(item.get("record_id") or ""), []).append(item)
+    for superseded_id in sorted(expected_supersedes):
+        linked = linked_by_record.get(superseded_id, [])
+        if not linked:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_superseded_event_missing",
+                    "reviewed knowledge supersession has no matching lifecycle event",
+                    superseded_id,
+                )
+            )
+            continue
+        if len(linked) > 1:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_superseded_event_duplicate",
+                    "reviewed knowledge supersession has multiple lifecycle events",
+                    superseded_id,
+                )
+            )
+            continue
+        superseded_event = linked[0]
+        if validate_event_digest:
+            superseded_digest_problem = _knowledge_event_digest_problem(superseded_event)
+            if superseded_digest_problem is not None:
+                problems.append(superseded_digest_problem)
+        if str(superseded_event.get("approved_event_id") or "") != str(event.get("id") or ""):
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_superseded_event_approval_mismatch",
+                    "knowledge superseded event does not reference the matching approval event",
+                    superseded_id,
+                )
+            )
+        if str(superseded_event.get("record_digest") or "") != actual_record_digest:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_event_record_digest_mismatch",
+                    "knowledge superseded event digest does not match replacement record content",
+                    record_id,
+                )
+            )
+    for unexpected_id in sorted(set(linked_by_record) - expected_supersedes):
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_superseded_event_unexpected",
+                "knowledge superseded event is not declared by the replacement record",
+                unexpected_id or record_id,
+            )
+        )
+    return KnowledgeApprovalBinding(
+        event,
+        tuple(problems),
+        tuple(sorted(linked_superseded_events, key=lambda item: str(item.get("id") or ""))),
+    )
+
+
+def event_integrity_problems(
+    root: Path,
+    *,
+    repo_id: str,
+    records: list[dict[str, Any]],
+    events: list[dict[str, Any]] | None = None,
+) -> list[Problem]:
     problems: list[Problem] = []
     by_id = {str(record.get("id") or ""): record for record in records}
-    for event in _load_events(root, repo_id=repo_id):
+    inspected_events = events if events is not None else _load_events(root, repo_id=repo_id)
+    event_digests_valid = True
+    for event in inspected_events:
         event_id = str(event.get("id") or "")
-        expected_digest = str(event.get("event_digest") or "")
-        actual_digest = digest_data({key: value for key, value in event.items() if key != "event_digest"})
-        if expected_digest != actual_digest:
-            problems.append(Problem("error", "knowledge_event_digest_mismatch", "knowledge event digest does not match event content", event_id))
+        event_digest_problem = _knowledge_event_digest_problem(event)
+        if event_digest_problem is not None:
+            problems.append(event_digest_problem)
+            event_digests_valid = False
             continue
         event_type = str(event.get("type") or "")
-        if event_type in {"approved", "deprecated"}:
+        if event_type == "approved":
+            record_id = str(event.get("record_id") or "")
+            if record_id not in by_id:
+                problems.append(Problem("error", "knowledge_event_record_missing", "knowledge event references a missing record", record_id or event_id))
+        elif event_type == "deprecated":
             record_id = str(event.get("record_id") or "")
             record = by_id.get(record_id)
             if record is None:
                 problems.append(Problem("error", "knowledge_event_record_missing", "knowledge event references a missing record", record_id or event_id))
-                continue
-            if str(event.get("record_digest") or "") != str(record.get("record_digest") or ""):
+            elif str(event.get("record_digest") or "") != _knowledge_record_digest(record):
                 problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge event record digest does not match current record", record_id))
         elif event_type == "superseded":
             record_id = str(event.get("record_id") or "")
@@ -1464,7 +2169,7 @@ def event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str
             replacement = by_id.get(superseded_by)
             if replacement is None:
                 problems.append(Problem("error", "knowledge_event_superseded_by_missing", "knowledge superseded event references a missing replacement record", superseded_by or event_id))
-            elif str(event.get("record_digest") or "") != str(replacement.get("record_digest") or ""):
+            elif str(event.get("record_digest") or "") != _knowledge_record_digest(replacement):
                 problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge superseded event digest does not match replacement record", superseded_by))
         elif event_type in {"rejected_candidate", "refreshed_candidate"}:
             continue
@@ -1474,10 +2179,19 @@ def event_integrity_problems(root: Path, *, repo_id: str, records: list[dict[str
             if record is None:
                 problems.append(Problem("error", "knowledge_event_record_missing", "knowledge refreshed-record event references a missing record", record_id or event_id))
                 continue
-            if str(event.get("record_digest") or "") != str(record.get("record_digest") or ""):
+            if str(event.get("record_digest") or "") != _knowledge_record_digest(record):
                 problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge refreshed-record event digest does not match record", record_id))
         else:
             problems.append(Problem("error", "knowledge_event_type_unknown", "knowledge event type is unknown", event_id))
+    if not event_digests_valid:
+        return problems
+    for record in records:
+        binding = _knowledge_approval_binding(
+            record,
+            inspected_events,
+            validate_event_digest=False,
+        )
+        problems.extend(binding.problems)
     return problems
 
 
@@ -1581,6 +2295,20 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
                 problems.append(Problem("error", "knowledge_candidate_source_excluded", "candidate source is excluded from knowledge ingestion", rel))
             if not str(ref.get("content_sha256") or "").startswith("sha256:"):
                 problems.append(Problem("error", "knowledge_candidate_source_hash_invalid", "candidate source hash is invalid", rel))
+    applies_to = candidate.get("applies_to")
+    if applies_to is not None and (not isinstance(applies_to, dict) or not isinstance(applies_to.get("paths"), list)):
+        problems.append(Problem("error", "knowledge_candidate_applies_to_invalid", "candidate applies_to.paths must be a list", candidate_id))
+    elif isinstance(applies_to, dict):
+        raw_paths = [str(value) for value in applies_to.get("paths", []) if isinstance(value, str)]
+        if len(raw_paths) != len(applies_to.get("paths", [])):
+            problems.append(Problem("error", "knowledge_candidate_applies_to_invalid", "candidate applies_to.paths entries must be strings", candidate_id))
+        else:
+            _normalized_paths, applicability_problems = _validated_candidate_applicability_paths(
+                root,
+                repo_id=str(candidate.get("repo_id") or ""),
+                values=raw_paths,
+            )
+            problems.extend(applicability_problems)
     problems.extend(_source_digest_problems(root, candidate, record_id=candidate_id))
     problems.extend(_context_pack_provenance_warnings(root, candidate))
     duplicate = _duplicate_reviewed_claim(root, candidate)
@@ -1801,6 +2529,10 @@ def _record_applicability_paths(record: dict[str, Any]) -> set[str]:
     applies_to = record.get("applies_to") if isinstance(record.get("applies_to"), dict) else {}
     values = applies_to.get("paths") if isinstance(applies_to.get("paths"), list) else []
     return {str(value).strip() for value in values if str(value).strip()}
+
+
+def _knowledge_applicability_paths(value: dict[str, Any]) -> list[str]:
+    return sorted(_record_applicability_paths(value))
 
 
 def _record_lifecycle_relations(record: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:

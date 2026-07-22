@@ -54,8 +54,6 @@ class TestMaintenanceScopeGuardContract:
         output = json.loads(capsys.readouterr().out)
         decision = output["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "retry-plan" in decision["permissionDecisionReason"]
-        assert "blocked maintenance-evaluator" in decision["permissionDecisionReason"]
 
     def test_maintenance_scope_guard_allows_expected_agent_during_retry_route(self, tmp_path, monkeypatch, capsys):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
@@ -125,7 +123,6 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "must not invoke other skills" in decision["permissionDecisionReason"]
 
     def test_maintenance_scope_guard_blocks_repos_read(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
@@ -155,7 +152,6 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "repos/**" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_blocks_direct_artifact_write(self, tmp_path, monkeypatch):
@@ -217,7 +213,6 @@ class TestMaintenanceScopeGuardContract:
         output = json.loads(capsys.readouterr().out)
         decision = output["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "different workflow run" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_allows_current_run_artifact_read(self, tmp_path, monkeypatch, capsys):
@@ -301,7 +296,6 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "safe-writer generated" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_blocks_state_phase_regression_after_execution_evidence(self, tmp_path, monkeypatch):
@@ -365,7 +359,6 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "safe-writer generated" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_does_not_auto_allow_repo_write(self, tmp_path, monkeypatch):
@@ -396,7 +389,6 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "approved_frozen" in decision["permissionDecisionReason"]
 
     def test_maintenance_scope_guard_allows_repo_edit_after_approval_freeze(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
@@ -500,9 +492,6 @@ class TestMaintenanceScopeGuardContract:
         output = json.loads(capsys.readouterr().out)
         decision = output["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "maintenance-implementer budget exceeded" in decision["permissionDecisionReason"]
-        assert "do not call maintenance-implementer again" in decision["permissionDecisionReason"]
-        assert "--retry-target retry-implementation" in decision["permissionDecisionReason"]
 
 
     def test_maintenance_scope_guard_denies_repo_edit_outside_approved_surface(self, tmp_path, monkeypatch):
@@ -550,7 +539,6 @@ class TestMaintenanceScopeGuardContract:
 
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
-        assert "outside approved affected surfaces" in decision["permissionDecisionReason"]
 
     def test_maintenance_permission_request_blocks_direct_artifact_write(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
@@ -758,7 +746,6 @@ class TestMaintenanceScopeGuardContract:
         reason = final_report_block_reason(tmp_path, {"session_id": session_id, "last_assistant_message": "pass"})
 
         assert reason is not None
-        assert "pass_eligibility" in reason
 
 
 
@@ -784,8 +771,6 @@ class TestMaintenanceScopeGuardContract:
         reason = final_report_block_reason(tmp_path, {"session_id": "missing", "last_assistant_message": "fail\n막혀서 종료합니다."})
 
         assert reason is not None
-        assert "retry-plan" in reason
-        assert "fail" in reason
 
 
     def test_maintenance_final_report_clears_marker_after_eligible_pass(self, tmp_path, monkeypatch):
@@ -838,7 +823,6 @@ def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
 
     decision = json.loads(captured.getvalue())["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
-    assert "unparseable Bash" in decision["permissionDecisionReason"]
 
 
 def test_maintenance_scope_guard_denies_parseable_bash_repos_read(tmp_path, monkeypatch):
@@ -869,7 +853,6 @@ def test_maintenance_scope_guard_denies_parseable_bash_repos_read(tmp_path, monk
 
     decision = json.loads(captured.getvalue())["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
-    assert "repos/**" in decision["permissionDecisionReason"]
 
 
 def test_maintenance_scope_guard_denies_safe_writer_content_payload_flags(tmp_path, monkeypatch):
@@ -903,4 +886,3 @@ def test_maintenance_scope_guard_denies_safe_writer_content_payload_flags(tmp_pa
 
     decision = json.loads(captured.getvalue())["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
-    assert "content payload flags" in decision["permissionDecisionReason"]

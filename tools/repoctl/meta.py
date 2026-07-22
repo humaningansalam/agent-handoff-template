@@ -271,6 +271,21 @@ def _ensure_store(repo: Path) -> None:
         atomic_write(policy, _json_dumps(DEFAULT_POLICY))
 
 
+def ensure_store(root: Path, *, target: RepoTarget | None = None) -> dict[str, Any]:
+    repo = _repo(root, target)
+    if not repo.is_dir():
+        raise RepoctlError("product repository directory is required before preparing .repometa")
+    prefix = _repo_prefix(root, repo)
+    policy = _policy_path(repo)
+    existed = policy.is_file()
+    _ensure_store(repo)
+    return {
+        "status": "existing" if existed else "initialized",
+        "created": [] if existed else [f"{prefix}/.repometa/policy.json"],
+        "policy": f"{prefix}/.repometa/policy.json",
+    }
+
+
 def init_store(root: Path, *, target: RepoTarget | None = None) -> dict[str, Any]:
     repo = _repo(root, target)
     if not repo.is_dir():

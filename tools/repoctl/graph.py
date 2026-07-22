@@ -406,7 +406,7 @@ def build_graph(
 
     knowledge_records, knowledge_problems = knowledge_records_for_graph(root, repo_id=repo_id)
     problems.extend(
-        Problem("warning", "graph_knowledge_unavailable", f"{problem.code}: {problem.message}", problem.path)
+        Problem("warning", "graph_knowledge_unavailable", problem.message, problem.path, problem.code)
         for problem in knowledge_problems
     )
     current_paths = {entry.path for entry in entries}

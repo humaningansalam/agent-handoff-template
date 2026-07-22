@@ -8,8 +8,21 @@ from typing import Any
 from .code_index import CodeIndexEntry
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
 from .context_model import ContextSectionKind, ContextSourceRef
-from .context_retrieval import FTS_FIELD_WEIGHTS, context_identity_evidence, context_identity_selectors, context_query_terms
+from .context_retrieval import (
+    AUTO_RETRIEVAL_LANE_LIMITS,
+    FTS_FIELD_WEIGHTS,
+    ContextRetrievalLane,
+    context_identity_evidence,
+    context_identity_selectors,
+    context_query_terms,
+    context_retrieval_lane,
+)
 from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, context_source_kind
+from .document_roles import (
+    ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES,
+    SOURCE_EXCLUDED_DOCUMENT_ROLES,
+    source_document_role,
+)
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints
 from .repositories import RepoTarget
@@ -380,6 +393,15 @@ def _source_manifest(connection: sqlite3.Connection, kinds: set[str]) -> str:
     return digest_data([dict(row) for row in rows])
 
 
+def _source_path_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        str(row["kind"]): int(row["count"])
+        for row in connection.execute(
+            "SELECT kind, COUNT(DISTINCT path) AS count FROM chunks GROUP BY kind ORDER BY kind"
+        )
+    }
+
+
 def materialize_evidence_index(
     root: Path,
     *,
@@ -452,6 +474,7 @@ def materialize_evidence_index(
                 str(row["kind"]): int(row["count"])
                 for row in connection.execute("SELECT kind, COUNT(*) AS count FROM chunks GROUP BY kind ORDER BY kind")
             }
+            source_path_counts = _source_path_counts(connection)
             metadata = {
                 "schema": EVIDENCE_INDEX_SCHEMA,
                 "schema_version": EVIDENCE_INDEX_SCHEMA_VERSION,
@@ -459,6 +482,7 @@ def materialize_evidence_index(
                 "graph_input_digest": graph_input_digest,
                 "snapshot_digest": snapshot.snapshot_digest,
                 "chunk_counts": counts,
+                "source_path_counts": source_path_counts,
                 "document_manifest_digest": _source_manifest(connection, {"document", "product_manifest", "verification_hint"}),
                 "receipt_manifest_digest": _source_manifest(connection, {"completion_receipt", "task_artifact"}),
                 "current_source_manifest_digest": _source_manifest(connection, {"current_source", "config"}),
@@ -532,11 +556,13 @@ def evidence_index_binding_problems(
     return []
 
 
-def _row_chunk(row: sqlite3.Row) -> DocumentChunk:
+def _row_chunk(row: sqlite3.Row, *, repository_path: str) -> DocumentChunk:
+    kind = str(row["kind"])
+    path = str(row["path"])
     return DocumentChunk(
         source_ref=ContextSourceRef(
-            kind=str(row["kind"]),
-            path=str(row["path"]),
+            kind=kind,
+            path=path,
             section=str(row["section"]),
             section_kind=ContextSectionKind(str(row["section_kind"])),
             line_start=int(row["line_start"]),
@@ -545,13 +571,18 @@ def _row_chunk(row: sqlite3.Row) -> DocumentChunk:
         ),
         text=str(row["body"]),
         title=str(row["title"]),
+        document_role=source_document_role(
+            kind=kind,
+            path=path,
+            repository_path=repository_path,
+        ),
     )
 
 
 def _retrieval_filter(mode: str, target: RepoTarget) -> tuple[str, list[Any]]:
     prefix = f"{target.display_path.rstrip('/')}/%"
     if mode == "auto":
-        return "(c.path LIKE ? OR c.kind IN ('completion_receipt', 'task_artifact'))", [prefix]
+        return "1 = 1", []
     if mode in {"code_location", "call_impact", "file_impact"}:
         return "c.path LIKE ? AND c.kind IN ('current_source', 'config', 'product_manifest', 'verification_hint')", [prefix]
     if mode in {"past_decision", "failure_mode"}:
@@ -591,6 +622,8 @@ def query_evidence_index(
     path = _database_path(root, target, database_path)
     connection = _connect(path, read_only=True)
     try:
+        if not isinstance(metadata.get("source_path_counts"), dict):
+            metadata = {**metadata, "source_path_counts": _source_path_counts(connection)}
         filter_sql, filter_params = _retrieval_filter(mode, target)
         fts_rows = _path_diverse_fts_rows(
             connection,
@@ -598,6 +631,8 @@ def query_evidence_index(
             filter_sql=filter_sql,
             filter_params=filter_params,
             limit=limit,
+            mode=mode,
+            repository_path=target.display_path,
         )
         exact_rows = _exact_identity_rows(
             connection,
@@ -607,7 +642,10 @@ def query_evidence_index(
             limit=limit,
         )
         rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in [*fts_rows, *exact_rows]}
-        return [_row_chunk(row) for _row_id, row in sorted(rows.items())], metadata, []
+        return [
+            _row_chunk(row, repository_path=target.display_path)
+            for _row_id, row in sorted(rows.items())
+        ], metadata, []
     except (sqlite3.Error, ValueError) as exc:
         return [], metadata, [Problem("error", "evidence_index_query_failed", str(exc), _path_label(root, path))]
     finally:
@@ -621,6 +659,8 @@ def _path_diverse_fts_rows(
     filter_sql: str,
     filter_params: list[Any],
     limit: int,
+    mode: str,
+    repository_path: str,
 ) -> list[sqlite3.Row]:
     if not terms:
         return []
@@ -636,11 +676,21 @@ def _path_diverse_fts_rows(
         """,
         [phrase, *filter_params],
     )
+    if mode == "auto":
+        return _lane_balanced_fts_rows(cursor, repository_path=repository_path)
+
     path_limit = max(24, max(1, limit) * 2)
     chunks_per_path = 4
     path_counts: dict[str, int] = {}
     rows: list[sqlite3.Row] = []
     for row in cursor:
+        document_role = source_document_role(
+            kind=str(row["kind"]),
+            path=str(row["path"]),
+            repository_path=repository_path,
+        )
+        if document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES | SOURCE_EXCLUDED_DOCUMENT_ROLES:
+            continue
         row_path = str(row["path"])
         path_counts.setdefault(row_path, 0)
         if path_counts[row_path] < chunks_per_path:
@@ -648,6 +698,48 @@ def _path_diverse_fts_rows(
             path_counts[row_path] += 1
         if len(path_counts) >= path_limit:
             break
+    return rows
+
+
+def _lane_balanced_fts_rows(
+    cursor: sqlite3.Cursor,
+    *,
+    repository_path: str,
+) -> list[sqlite3.Row]:
+    lane_path_limits = {
+        lane: max(2, lane_limit * 2)
+        for lane, lane_limit in AUTO_RETRIEVAL_LANE_LIMITS.items()
+    }
+    lane_paths: dict[ContextRetrievalLane, set[str]] = {
+        lane: set() for lane in ContextRetrievalLane
+    }
+    chunks_per_path = 4
+    path_counts: dict[tuple[ContextRetrievalLane, str], int] = {}
+    rows: list[sqlite3.Row] = []
+    for row in cursor:
+        document_role = source_document_role(
+            kind=str(row["kind"]),
+            path=str(row["path"]),
+            repository_path=repository_path,
+        )
+        if document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES | SOURCE_EXCLUDED_DOCUMENT_ROLES:
+            continue
+        lane = context_retrieval_lane(
+            kind=str(row["kind"]),
+            path=str(row["path"]),
+            repository_path=repository_path,
+            document_role=document_role,
+        )
+        row_path = str(row["path"])
+        known_paths = lane_paths[lane]
+        if row_path not in known_paths and len(known_paths) >= lane_path_limits[lane]:
+            continue
+        known_paths.add(row_path)
+        key = (lane, row_path)
+        path_counts.setdefault(key, 0)
+        if path_counts[key] < chunks_per_path:
+            rows.append(row)
+            path_counts[key] += 1
     return rows
 
 
@@ -715,7 +807,10 @@ def evidence_chunks_for_paths(
             f"SELECT * FROM chunks WHERE path IN ({path_placeholders}){kind_sql} ORDER BY path, line_start, section",
             params,
         ).fetchall()
-        return [_row_chunk(row) for row in rows], []
+        return [
+            _row_chunk(row, repository_path=target.display_path)
+            for row in rows
+        ], []
     except sqlite3.Error as exc:
         return [], [Problem("error", "evidence_index_query_failed", str(exc), _path_label(root, path))]
     finally:

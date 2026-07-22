@@ -223,6 +223,132 @@ Use project context without structured discovery yet.
     assert "context_pack_no_structured_discovery" in warning_codes
 
 
+def test_context_pack_uses_split_prd_and_procedure_but_excludes_generated_view(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("def update_repository_metadata():\n    return True\n", encoding="utf-8")
+    for index in range(12):
+        (repo / f"repository_metadata_authority_procedure_{index}.py").write_text(
+            f"def repository_metadata_authority_procedure_{index}():\n    return True\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "docs/PRD.md").unlink()
+    (tmp_path / "docs/prd").mkdir()
+    split_prd = tmp_path / "docs/prd/repository-understanding.md"
+    split_prd.write_text(
+        "# Repository Understanding\n\nRepository metadata changes must preserve project authority and current source evidence.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs/prd/billing.md").write_text(
+        "# Billing\n\nInvoice retry policy and subscription lifecycle.\n",
+        encoding="utf-8",
+    )
+    procedure = tmp_path / "docs/workflows/repo-metadata.md"
+    procedure.write_text(
+        "# Repository Metadata Procedure\n\nUpdate repository metadata through repoctl after inspecting the owning source file.\n\n## Verification\n\nVerify the repository metadata authority procedure result.\n",
+        encoding="utf-8",
+    )
+    generated = tmp_path / "docs/knowledge/generated/repository-metadata.md"
+    generated.parent.mkdir(parents=True)
+    generated.write_text(
+        "# Generated View\n\nRendered repository metadata reference.\n",
+        encoding="utf-8",
+    )
+    product_generated = repo / "docs/knowledge/generated/repository-metadata.md"
+    product_generated.parent.mkdir(parents=True)
+    product_generated.write_text(
+        "# Product Generated View\n\nRendered product repository metadata reference.\n",
+        encoding="utf-8",
+    )
+    product_procedure = repo / "docs/workflows/repository-metadata.md"
+    product_procedure.parent.mkdir(parents=True)
+    product_procedure.write_text(
+        "# Product Repository Metadata Procedure\n\nRepository metadata authority procedure for the selected product.\n",
+        encoding="utf-8",
+    )
+    task_id = "T-20260622010123Z"
+    aliased_generated = "docs/../docs/knowledge/generated/repository-metadata.md"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="document-roles",
+        title="Update repository metadata safely",
+        query="repository metadata authority procedure",
+        goal="Use the applicable project authority and procedure.",
+        context_doc=aliased_generated,
+    )
+    task_path = next((tmp_path / "docs/tasks").glob(f"{task_id}--*.md"))
+    task_path.write_text(
+        task_path.read_text(encoding="utf-8").replace(
+            f"- `{aliased_generated}`",
+            "\n".join(
+                (
+                    f"- `{aliased_generated}`",
+                    "- `docs/prd/repository-understanding.md`",
+                    "- `docs/knowledge/generated/repository-metadata.md`",
+                    "- `repos/docs/knowledge/generated/repository-metadata.md`",
+                    "- `repos/docs/workflows/repository-metadata.md`",
+                )
+            ),
+        ),
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", "3000", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    original_input_digest = payload["data"]["input_digest"]
+    groups = payload["data"]["groups"]
+    must_read = {
+        item["source_ref"]["path"]: item
+        for item in groups["must_read"]
+    }
+    must_read_paths = [item["source_ref"]["path"] for item in groups["must_read"]]
+    assert len(must_read_paths) == len(set(must_read_paths))
+    assert must_read_paths.count("docs/prd/repository-understanding.md") == 1
+    assert must_read["docs/prd/repository-understanding.md"]["document_role"] == "product_authority"
+    assert must_read["docs/prd/repository-understanding.md"]["requirement"] == "required"
+    assert must_read["docs/workflows/repo-metadata.md"]["document_role"] == "procedure"
+    assert must_read["repos/docs/workflows/repository-metadata.md"]["document_role"] == "procedure"
+    assert must_read["repos/docs/workflows/repository-metadata.md"]["requirement"] == "required"
+    assert all(
+        item["source_ref"]["path"] != "docs/workflows/repo-metadata.md"
+        for item in groups["verification"]
+    )
+    assert all(
+        item.get("source_ref", {}).get("path")
+        not in {
+            "docs/knowledge/generated/repository-metadata.md",
+            "repos/docs/knowledge/generated/repository-metadata.md",
+        }
+        for items in groups.values()
+        for item in items
+        if isinstance(item, dict)
+    )
+    warning_codes = {warning["code"] for warning in payload["warnings"]}
+    assert "context_pack_context_doc_invalid_path" in warning_codes
+    assert "context_pack_generated_view_excluded" in warning_codes
+    assert "context_pack_product_authority_missing" not in warning_codes
+
+    generated.write_text(
+        "# Generated View\n\nChanged rendered repository metadata reference.\n",
+        encoding="utf-8",
+    )
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", "3000", "--json"]) == 0
+
+    refreshed = json.loads(capsys.readouterr().out)
+    assert refreshed["data"]["input_digest"] == original_input_digest
+
+    split_prd.write_text(
+        "# Repository Understanding\n\nChanged product authority for repository metadata.\n",
+        encoding="utf-8",
+    )
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", "3000", "--json"]) == 0
+
+    authority_changed = json.loads(capsys.readouterr().out)
+    assert authority_changed["data"]["input_digest"] != original_input_digest
+
+
 def test_context_pack_includes_manifest_verification_hints(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "package.json").write_text(
@@ -293,6 +419,44 @@ def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, 
     assert any("login --CALLS--> validate_token" in str(item.get("excerpt", "")) for item in groups["impact"])
 
 
+def test_context_pack_excludes_stale_chosen_file_graph_relations(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    flow = repo / "auth/flow.py"
+    flow.parent.mkdir()
+    flow.write_text(
+        "def validate_token(token: str) -> bool:\n"
+        "    return token == \"ok\"\n\n\n"
+        "def login(token: str) -> str:\n"
+        "    return \"ok\" if validate_token(token) else \"denied\"\n",
+        encoding="utf-8",
+    )
+    task_id = "T-20260622010124Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="stale-graph",
+        title="Change login behavior",
+        query="What calls validate_token?",
+        goal="Change login behavior without relying on stale Graph relations.",
+        reviewed="repos/auth/flow.py",
+        chosen="repos/auth/flow.py",
+    )
+    _materialize(tmp_path)
+    flow.write_text(
+        "def login(token: str) -> str:\n"
+        "    return \"ok\" if token == \"ok\" else \"denied\"\n",
+        encoding="utf-8",
+    )
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--full", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    groups = payload["data"]["groups"]
+    assert all("login --CALLS--> validate_token" not in str(item.get("excerpt", "")) for item in groups["impact"])
+    assert any(item.get("code") == "context_graph_stale" for item in groups["warnings"])
+    assert any(warning.get("code") == "context_graph_stale" for warning in payload["warnings"])
+
+
 def test_context_pack_warns_on_incomplete_graph_code_facts(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "broken.py").write_text("def broken(:\n", encoding="utf-8")
@@ -349,7 +513,7 @@ def test_context_pack_does_not_load_unrelated_knowledge_history(tmp_path: Path, 
         query="source authority knowledge",
         goal="Do not write failed context pack artifacts.",
     )
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     event_id = json.loads(capsys.readouterr().out)["data"]["event"]["id"]

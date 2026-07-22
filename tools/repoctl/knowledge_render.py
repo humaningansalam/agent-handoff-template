@@ -32,7 +32,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path, check: bool = Fa
         return {}, [Problem("error", "knowledge_render_output_not_generated", "render output must stay under docs/knowledge/generated so generated views cannot become context sources", output.as_posix())]
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
-    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records)
+    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records, events=events)
     if event_problems:
         return {
             "schema": "repoctl.knowledge.render",

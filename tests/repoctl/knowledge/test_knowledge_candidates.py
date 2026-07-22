@@ -21,7 +21,7 @@ from tests.repoctl.repository.test_repositories import commit_all
 def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     build_payload = json.loads(capsys.readouterr().out)
     candidate = build_payload["data"]["candidate"]
     assert candidate["schema"] == "repoctl.knowledge.candidate"
@@ -53,7 +53,7 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert check_payload["data"]["passed"] is True
     assert check_payload["data"]["checks"]["source_refs_valid"] is True
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
     assert second_candidate["id"] != candidate["id"]
 
@@ -73,7 +73,7 @@ def test_knowledge_source_provenance_is_not_product_applicability(tmp_path: Path
     product_doc.parent.mkdir(parents=True)
     product_doc.write_text("# Product-local file with the same relative path\n", encoding="utf-8")
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -89,11 +89,11 @@ def test_knowledge_source_provenance_is_not_product_applicability(tmp_path: Path
 def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
 
     assert main(["knowledge", "candidate", "check", second_candidate, "--repo-id", "main", "--json"]) == 0
@@ -112,7 +112,7 @@ def test_knowledge_candidate_check_warns_on_duplicate_reviewed_claim(tmp_path: P
 
 def test_knowledge_query_requires_query_or_explicit_path_relation(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -224,15 +224,15 @@ def test_knowledge_candidate_from_task_reports_target_invalid_receipt(tmp_path: 
 def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     first_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", first_candidate, "--repo-id", "main", "--json"]) == 0
     old_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     second_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", second_candidate, "--repo-id", "main", "--supersedes", old_record, "--json"]) == 0
     capsys.readouterr()
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     third_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
 
     assert main(["knowledge", "candidate", "check", third_candidate, "--repo-id", "main", "--json"]) == 0
@@ -253,7 +253,7 @@ def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Pat
 def test_knowledge_candidate_check_blocks_source_digest_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
@@ -269,8 +269,9 @@ def test_knowledge_candidate_check_blocks_source_digest_drift(tmp_path: Path, mo
 
 def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
+    explicit_claim = "Context bundles remain read-only evidence and never become an authority source."
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", explicit_claim, "--json"]) == 0
     old_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
     source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\n## Update\n\nThe source changed after candidate creation.\n", encoding="utf-8")
@@ -286,6 +287,8 @@ def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tm
     assert refresh_payload["data"]["event"]["candidate_id"] == old_candidate["id"]
     assert refresh_payload["data"]["event"]["new_candidate_id"] == new_candidate["id"]
     assert refresh_payload["warnings"][0]["code"] == "knowledge_candidate_refresh_creates_new_candidate"
+    assert new_candidate["claim"] == explicit_claim
+    assert new_candidate["claim_origin"] == "explicit"
 
     assert main(["knowledge", "candidate", "check", new_candidate["id"], "--repo-id", "main", "--json"]) == 0
     new_check = json.loads(capsys.readouterr().out)
@@ -301,14 +304,10 @@ def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tm
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
 
-
-
-
-
 def test_knowledge_candidate_rejects_state_source(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", ".repoctl-state/knowledge/private-plan.md", "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--source", ".repoctl-state/knowledge/private-plan.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_source_excluded"
@@ -317,14 +316,14 @@ def test_knowledge_candidate_rejects_state_source(tmp_path: Path, monkeypatch, c
 def test_knowledge_candidate_rejects_generated_knowledge_source(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/knowledge/generated/decisions.md", "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--source", "docs/knowledge/generated/decisions.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_source_excluded"
 
@@ -342,9 +341,9 @@ def test_knowledge_candidate_ids_are_global_across_repos(tmp_path: Path, monkeyp
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "web", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "web", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "api", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "api", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert api_candidate != web_candidate
 
@@ -355,7 +354,7 @@ def test_knowledge_candidate_ids_are_global_across_repos(tmp_path: Path, monkeyp
     assert api_record != web_record
 
 
-def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_finish_creates_source_linked_knowledge_candidate(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -395,16 +394,29 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
         "def deliver() -> str:\n    return 'after'\n\n\ndef retry() -> str:\n    return deliver()\n",
         encoding="utf-8",
     )
-    assert main(["task", "finish", "T-20260609184046Z", "--verification-file", verification.as_posix(), "--json"]) == 0
+    claim = "Webhook delivery retries must reuse the receipt-backed delivery path."
+    assert main(
+        [
+            "task",
+            "finish",
+            "T-20260609184046Z",
+            "--verification-file",
+            verification.as_posix(),
+            "--knowledge-kind",
+            "invariant",
+            "--knowledge-claim",
+            claim,
+            "--knowledge-applies-to",
+            "service.py",
+            "--json",
+        ]
+    ) == 0
     finish_payload = json.loads(capsys.readouterr().out)
     assert finish_payload["data"]["completion_receipt"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
-    assert "knowledge candidate suggest --from-task T-20260609184046Z" in finish_payload["next_actions"][0]["command"]
-
-    claim = "Webhook delivery retries must reuse the receipt-backed delivery path."
-    assert main(["knowledge", "candidate", "build", "--from-receipt", "T-20260609184046Z", "--repo-id", "main", "--kind", "invariant", "--claim", claim, "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    candidate = payload["data"]["candidate"]
+    assert finish_payload["data"]["knowledge_closeout"]["status"] == "candidate_created"
+    assert any("knowledge candidate check" in action["command"] for action in finish_payload["next_actions"])
+    candidate_path = tmp_path / finish_payload["data"]["knowledge_closeout"]["candidate_path"]
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
     assert candidate["kind"] == "invariant"
     assert candidate["claim"] == claim
     assert candidate["claim_origin"] == "explicit"
@@ -417,6 +429,7 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
         "verification_artifact": "docs/archive/tasks/T-20260609184046Z--receipt-backed.md",
         "changed_files": ["service.py"],
     }
+    assert candidate["applies_to"] == {"paths": ["service.py"]}
     source_refs = candidate["source_refs"]
     assert source_refs[0]["kind"] == "completion_receipt"
     assert source_refs[0]["path"] == "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
@@ -425,8 +438,6 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert source_refs[1]["path"] == "docs/archive/tasks/T-20260609184046Z--receipt-backed.md"
     assert source_refs[1]["content_sha256"].startswith("sha256:")
     assert "pytest tests/repoctl/knowledge/test_knowledge_candidates.py" in candidate["summary"]
-    assert any("knowledge candidate show" in action["command"] for action in payload["next_actions"])
-    assert any("knowledge candidate check" in action["command"] for action in payload["next_actions"])
 
     assert main(["knowledge", "candidate", "show", candidate["id"], "--repo-id", "main", "--format", "markdown"]) == 0
     review = capsys.readouterr().out
@@ -441,20 +452,21 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
     assert all(node["kind"] != "knowledge" for node in pending_snapshot["nodes"])
 
     assert main(["knowledge", "approve", candidate["id"], "--repo-id", "main", "--json"]) == 0
-    approved = json.loads(capsys.readouterr().out)["data"]["record"]
+    approval_payload = json.loads(capsys.readouterr().out)
+    approved = approval_payload["data"]["record"]
+    assert approval_payload["data"]["graph_sync"]["status"] == "synced"
     assert approved["review"]["source_digest_set"]
     record_id = approved["id"]
 
-    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
-    reviewed_snapshot = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    reviewed_snapshot = json.loads((tmp_path / ".repoctl-state/graph/main/snapshot.json").read_text(encoding="utf-8"))
     assert any(node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id for node in reviewed_snapshot["nodes"])
-    assert not any(edge["kind"] == "KNOWLEDGE_APPLIES_TO" for edge in reviewed_snapshot["edges"])
+    assert any(edge["kind"] == "KNOWLEDGE_APPLIES_TO" for edge in reviewed_snapshot["edges"])
     assert any(edge["kind"] == "KNOWLEDGE_SOURCED_FROM" for edge in reviewed_snapshot["edges"])
     assert any(edge["kind"] == "KNOWLEDGE_DERIVED_FROM_TASK" for edge in reviewed_snapshot["edges"])
 
     assert main(["graph", "query", "--repo-id", "main", "--file", "repos/service.py", "--json"]) == 0
     graph_result = json.loads(capsys.readouterr().out)["data"]["result"]
-    assert not any(path["edge"] == "KNOWLEDGE_APPLIES_TO" for path in graph_result["paths"])
+    assert any(path["edge"] == "KNOWLEDGE_APPLIES_TO" for path in graph_result["paths"])
 
     assert main(["context", "query", claim, "--repo-id", "main", "--json"]) == 0
     knowledge_item = json.loads(capsys.readouterr().out)["data"]["bundle"]["groups"]["reviewed_knowledge"][0]
@@ -474,34 +486,8 @@ def test_knowledge_candidate_builds_from_completion_receipt(tmp_path: Path, monk
         for node in reviewed_snapshot["nodes"]
         if node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id
     )
-    assert reviewed_graph_record["applies_to"] == {"paths": []}
-    assert {ref["role"] for ref in reviewed_graph_record["explicit_path_refs"]} == {"provenance_only"}
-    stale_record = {**reviewed_graph_record, "status": "stale"}
-    with monkeypatch.context() as lifecycle_patch:
-        lifecycle_patch.setattr(
-            "tools.repoctl.graph.knowledge_records_for_graph",
-            lambda _root, *, repo_id: ([stale_record], []),
-        )
-        assert main(["graph", "build", "--repo-id", "main", "--rebuild", "--full", "--json"]) == 0
-        lifecycle_snapshot = json.loads(capsys.readouterr().out)["data"]["snapshot"]
-    lifecycle_knowledge_node = next(
-        node["id"]
-        for node in lifecycle_snapshot["nodes"]
-        if node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id
-    )
-    lifecycle_edges = [
-        edge
-        for edge in lifecycle_snapshot["edges"]
-        if edge["from"] == lifecycle_knowledge_node
-        and edge["kind"] in {"KNOWLEDGE_APPLIES_TO", "KNOWLEDGE_SOURCED_FROM", "KNOWLEDGE_DERIVED_FROM_TASK"}
-    ]
-    assert {edge["kind"] for edge in lifecycle_edges} == {
-        "KNOWLEDGE_SOURCED_FROM",
-        "KNOWLEDGE_DERIVED_FROM_TASK",
-    }
-    assert all(edge["facts"]["freshness"] == "stale" for edge in lifecycle_edges)
-    assert main(["graph", "build", "--repo-id", "main", "--rebuild", "--full", "--json"]) == 0
-    capsys.readouterr()
+    assert reviewed_graph_record["applies_to"] == {"paths": ["service.py"]}
+    assert {ref["role"] for ref in reviewed_graph_record["explicit_path_refs"]} == {"code_anchor", "provenance_only"}
 
     task_artifact = tmp_path / source_refs[1]["path"]
     task_artifact.write_text(task_artifact.read_text(encoding="utf-8") + "\nsource drift\n", encoding="utf-8")
@@ -542,7 +528,6 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 1
     missing_claim = json.loads(capsys.readouterr().out)
     assert missing_claim["problems"][0]["code"] == "knowledge_candidate_claim_required"
-    assert "--claim or --claim-file" in missing_claim["problems"][0]["message"]
     assert any("--claim '<reusable claim>'" in action.get("command", "") for action in missing_claim["next_actions"])
     assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
 
@@ -592,7 +577,7 @@ def test_knowledge_candidate_suggest_from_task_requires_receipt(tmp_path: Path, 
 def test_knowledge_candidate_build_requires_one_source_mode(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_source_required"

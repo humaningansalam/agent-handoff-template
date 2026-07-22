@@ -12,8 +12,10 @@ Coding agents can edit code, but they do not reliably preserve project state acr
 - metadata, task state, and generated context drift apart
 - useful decisions and failure modes are rediscovered instead of reused
 - generated summaries can be mistaken for source authority
+- a new agent repeatedly scans a large repository to rediscover product authority, implementation owners, direct tests, and prior decisions that the workspace already contains
+- semantically different documents compete as generic evidence, allowing indexes, templates, or broad references to displace the applicable authority or procedure and cause avoidable exploration and rework
 
-This template solves the workspace coordination problem around agents. It does not replace the agents and does not replace the product repository.
+This template solves workspace coordination and repository-understanding startup around agents. It provides a compact, source-linked starting view over current code, relationships, project authority, procedures, task history, and explicitly reviewed reusable knowledge. It does not replace agent reasoning, exact search, typed Graph traversal, direct source inspection, or the product repository.
 
 ## Target Users
 
@@ -29,8 +31,9 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - select the correct product repository explicitly
 - mutate task/control state only through repoctl gates
 - capture verification evidence before declaring work done
-- retrieve source-linked Graph/Context evidence for the active task
-- promote only reviewed, source-linked knowledge into durable records
+- start ambiguous repository work from a compact, high-signal Context bundle that combines current source, provider-confirmed Graph relations, current project documents, task history, and applicable Reviewed Knowledge without merging their authority
+- follow typed continuations toward likely owner, change, dependency, and verification surfaces without repeatedly rescanning the repository
+- promote only explicitly reviewed, source-linked knowledge into durable records
 - render llmwiki pages as disposable views, not authority
 
 ## Success Criteria
@@ -39,7 +42,10 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
 - Task finish leaves auditable verification evidence and stable completion receipts.
 - Graph and Context answers preserve source refs, repo IDs, digests, freshness, typed continuations, and completeness warnings.
-- Reviewed Knowledge records require approval and remain separate from generated llmwiki output.
+- For an ambiguous repository question or task startup, compact Context surfaces the applicable authority or procedure and the likely source, relation, and test surfaces ahead of generic indexes and templates.
+- Document meaning remains consistent across materialized-index and live-fallback retrieval, compact grouping, and Task Pack projection; split `docs/prd/**` documents retain product-authority semantics.
+- Current project documents, task history, and explicitly reviewed reusable records are reported as distinct project-knowledge lanes; zero Reviewed Knowledge records never means that project knowledge is empty.
+- Reviewed Knowledge records require an explicit approval action and remain separate from generated llmwiki output; the actor may be a human or an authorized agent.
 
 ## Core Requirements
 
@@ -56,6 +62,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Treat `repos/` or configured `repos/<repo-id>/` entries as product repository boundaries.
 - Require explicit `repo_id` where multi-repo ambiguity exists.
 - Keep root operations, task state, contracts, workflows, and repoctl tooling separate from product code changes.
+- Keep versioned authority and procedures shared by humans and agents in workspace or product documentation, executable agent-only behavior in `.agents/skills/**`, and regenerable Graph/index state in `.repoctl-state/**`.
 
 ### repoctl Mutation Gates
 
@@ -68,12 +75,15 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Materialize Graph and its persistent evidence index as one deterministic boundary over source facts, metadata, documents, receipts, imports, symbols, calls, and artifacts; queries read it without hidden rebuilds or unchanged-source rescans.
 - Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays and typed continuations for iterative exploration.
 - Preserve source refs, digests, repo namespaces, and completeness diagnostics.
+- Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.
+- Keep active authority and procedures eligible for ordinary retrieval, keep templates from consuming ordinary recall unless explicitly addressed, and never ingest generated views as source evidence.
+- Treat current project documents, task history, and Reviewed Knowledge as separate complementary evidence lanes rather than one interchangeable corpus.
 - Do not turn Context output into task scope, source authority, or reviewed knowledge automatically.
 
 ### Reviewed Knowledge And llmwiki
 
 - Store reviewed knowledge in `docs/knowledge/records/**` with lifecycle events in `docs/knowledge/events/**`.
-- Require explicit review before durable knowledge exists.
+- Require an explicit review action before durable knowledge exists; do not infer approval from source prose or task completion alone.
 - Treat generated llmwiki pages as regenerable, non-authoritative views.
 - Do not ingest generated llmwiki output as future source evidence.
 
@@ -83,6 +93,8 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - MCP transport is not included in this template release.
 - Chat/session memory is not project authority.
 - Generated llmwiki pages are not source authority.
+- Context is not a universal replacement for exact symbol search, typed Graph traversal, or direct source inspection.
+- Repository Understanding does not require moving the established documentation tree, mandatory per-document frontmatter, embeddings, or a second content-management system.
 
 ## Adoption Rule
 

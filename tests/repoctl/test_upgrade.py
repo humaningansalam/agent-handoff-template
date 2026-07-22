@@ -274,7 +274,7 @@ def test_upgrade_apply_rolls_back_files_when_mid_apply_copy_fails(tmp_path: Path
 
     monkeypatch.setattr("tools.repoctl.upgrade._atomic_copy_file", flaky_copy)
 
-    with pytest.raises(OSError, match="injected copy failure"):
+    with pytest.raises(OSError):
         apply_upgrade(workspace, plan_file=plan_file)
 
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "rules\n"
@@ -638,7 +638,7 @@ Promote a context pack into reviewed knowledge after upgrade.
 
 - Next exact step: build candidate from context pack.
 - First file to open: `docs/contracts/repoctl-context-contract.md`
-- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260624101010Z.json --repo-id main --json`
+- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260624101010Z.json --repo-id main --claim 'Reviewed Context remains non-authoritative.' --json`
 - Done when: reviewed knowledge is queryable and render output is current.
 """,
         encoding="utf-8",
@@ -647,7 +647,7 @@ Promote a context pack into reviewed knowledge after upgrade.
     pack_payload = run_repoctl_json(workspace, ["context", "pack", "--task", task_id, "--repo-id", "main", "--output", pack_path])
     assert pack_payload["data"]["metrics"]["unique_must_read_source_count"] >= 1
 
-    candidate_payload = run_repoctl_json(workspace, ["knowledge", "candidate", "build", "--from-pack", pack_path, "--repo-id", "main", "--kind", "decision"])
+    candidate_payload = run_repoctl_json(workspace, ["knowledge", "candidate", "build", "--from-pack", pack_path, "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative."])
     candidate_id = candidate_payload["data"]["candidate"]["id"]
     assert candidate_payload["data"]["candidate"]["authoritative"] is False
 

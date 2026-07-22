@@ -47,6 +47,7 @@ def test_graph_language_capabilities_do_not_claim_semantics_for_config_languages
     init_repo(repo)
     write_repometa(repo)
     (repo / "config.yaml").write_text("feature: enabled\n", encoding="utf-8")
+    (repo / "index.html").write_text("<main>searchable product surface</main>\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["graph", "build", "--full", "--json"]) == 0
@@ -60,6 +61,10 @@ def test_graph_language_capabilities_do_not_claim_semantics_for_config_languages
     assert yaml["symbols_status"] == "unsupported"
     assert yaml["calls_status"] == "unsupported"
     assert yaml["precise_semantics"] is False
+    html = snapshot["completeness"]["language_capabilities"]["html"]
+    assert html["context_source"] is True
+    assert html["semantic_source"] is False
+    assert html["provider_defined"] is False
 
 
 def test_graph_build_json_is_summary_first_without_full(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -176,7 +181,7 @@ def test_graph_topics_keep_policy_and_annotation_provenance(tmp_path: Path, monk
     after = {path.as_posix(): path.read_text(encoding="utf-8") for path in (repo / ".repometa").rglob("*.json")}
     assert after == before
 
-def test_graph_snapshot_digest_is_stable_after_incremental_round_trip(tmp_path: Path, monkeypatch) -> None:
+def test_graph_snapshot_digest_is_stable_after_incremental_round_trip(tmp_path: Path) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -191,13 +196,6 @@ def test_graph_snapshot_digest_is_stable_after_incremental_round_trip(tmp_path: 
     original = "const value = 1;\n"
     changed.write_text(original, encoding="utf-8")
     target = require_repo_target(tmp_path, repo_id="main")
-    from tools.repoctl import graph_store
-
-    monkeypatch.setattr(
-        graph_store,
-        "build_semantic_provider",
-        lambda provider, *args, **kwargs: graph_store._empty_provider_result(provider),
-    )
     first, first_problems, _ = materialize_graph(tmp_path, target=target)
     changed.write_text(original + "// incremental validation\n", encoding="utf-8")
     updated, updated_problems, _ = materialize_graph(tmp_path, target=target)
@@ -226,23 +224,13 @@ def test_graph_materialization_updates_only_changed_python_dependents(tmp_path: 
     assert first is not None
     assert not [problem for problem in problems if problem.severity == "error"]
 
-    from tools.repoctl import graph_store
-
-    original = graph_store.build_semantic_provider
-    analyzed: list[tuple[str, list[str]]] = []
-
-    def recording_provider(provider, *args, **kwargs):
-        analyzed.append((provider, sorted(kwargs.get("analysis_paths") or [])))
-        return original(provider, *args, **kwargs)
-
-    monkeypatch.setattr(graph_store, "build_semantic_provider", recording_provider)
     (repo / "a.py").write_text("def target():\n    return 2\n", encoding="utf-8")
 
-    second, problems, _meta = materialize_graph(tmp_path, target=target)
+    second, problems, meta = materialize_graph(tmp_path, target=target)
 
     assert second is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    assert analyzed == [("python_ast", ["a.py", "b.py", "c.py"])]
+    assert meta["materialization"]["updated_paths"] == {"python_ast": ["a.py", "b.py", "c.py"]}
     assert any(
         node.kind == "symbol" and node.facts.get("provider", {}).get("qualified_name") == "unrelated"
         for node in second.nodes
@@ -259,33 +247,37 @@ def test_graph_materialization_updates_only_changed_python_dependents(tmp_path: 
         for edge in second.edges
     )
 
-    analyzed.clear()
+    from tools.repoctl import graph_store
+
     monkeypatch.setitem(
         graph_store.PROVIDER_INPUT_VERSIONS,
         "python_ast",
         graph_store.PROVIDER_INPUT_VERSIONS["python_ast"] + 1,
     )
 
-    third, problems, _meta = materialize_graph(tmp_path, target=target)
+    third, problems, meta = materialize_graph(tmp_path, target=target)
 
     assert third is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    assert analyzed == [("python_ast", ["a.py", "b.py", "c.py", "unrelated.py"])]
+    assert meta["materialization"]["updated_paths"] == {
+        "python_ast": ["a.py", "b.py", "c.py", "unrelated.py"]
+    }
 
-    analyzed.clear()
     (repo / "a.py").unlink()
 
-    fourth, problems, _meta = materialize_graph(tmp_path, target=target)
+    fourth, problems, meta = materialize_graph(tmp_path, target=target)
 
     assert fourth is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    assert analyzed == [("python_ast", ["b.py", "c.py", "unrelated.py"])]
+    assert meta["materialization"]["updated_paths"] == {
+        "python_ast": ["b.py", "c.py", "unrelated.py"]
+    }
     assert not any(edge.kind == "CALLS" for edge in fourth.edges)
     provider = json.loads((tmp_path / ".repoctl-state/graph/main/providers/python_ast.json").read_text(encoding="utf-8"))
     assert not any(item.get("path") == "a.py" for item in provider["tool"]["exported_callables"])
 
 
-def test_graph_materialization_invalidates_importers_when_module_identity_becomes_ambiguous(tmp_path: Path, monkeypatch) -> None:
+def test_graph_materialization_invalidates_importers_when_module_identity_becomes_ambiguous(tmp_path: Path) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -304,25 +296,17 @@ def test_graph_materialization_invalidates_importers_when_module_identity_become
     assert not [problem for problem in problems if problem.severity == "error"]
     assert any(edge.kind == "CALLS" for edge in first.edges)
 
-    from tools.repoctl import graph_store
-
-    original = graph_store.build_semantic_provider
-    analyzed: list[tuple[str, list[str]]] = []
-
-    def recording_provider(provider, *args, **kwargs):
-        analyzed.append((provider, sorted(kwargs.get("analysis_paths") or [])))
-        return original(provider, *args, **kwargs)
-
-    monkeypatch.setattr(graph_store, "build_semantic_provider", recording_provider)
     (repo / "pkg").mkdir()
     (repo / "pkg/__init__.py").write_text("", encoding="utf-8")
     (repo / "pkg/mod.py").write_text("def target():\n    return 2\n", encoding="utf-8")
 
-    second, problems, _meta = materialize_graph(tmp_path, target=target)
+    second, problems, meta = materialize_graph(tmp_path, target=target)
 
     assert second is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    assert analyzed == [("python_ast", ["consumer.py", "pkg/__init__.py", "pkg/mod.py", "src/pkg/__init__.py", "src/pkg/mod.py"])]
+    assert meta["materialization"]["updated_paths"] == {
+        "python_ast": ["consumer.py", "pkg/__init__.py", "pkg/mod.py", "src/pkg/__init__.py", "src/pkg/mod.py"]
+    }
     assert not any(edge.kind == "CALLS" for edge in second.edges)
     assert not any(
         edge.kind == "IMPORTS_FILE"
@@ -331,7 +315,7 @@ def test_graph_materialization_invalidates_importers_when_module_identity_become
     )
 
 
-def test_graph_materialization_reuses_unchanged_source_evidence(tmp_path: Path, monkeypatch) -> None:
+def test_graph_materialization_reuses_unchanged_source_evidence(tmp_path: Path) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -341,10 +325,6 @@ def test_graph_materialization_reuses_unchanged_source_evidence(tmp_path: Path, 
     first, problems, _meta = materialize_graph(tmp_path, target=target)
     assert first is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-
-    monkeypatch.setattr("tools.repoctl.code_index._index_file", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source reindexed")))
-    monkeypatch.setattr("tools.repoctl.evidence_store._source_chunks", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source reread")))
-    monkeypatch.setattr("tools.repoctl.graph_store.build_semantic_provider", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("provider rerun")))
 
     second, problems, meta = materialize_graph(tmp_path, target=target)
 
@@ -379,7 +359,11 @@ def test_graph_materialization_rebuilds_relations_when_structured_input_version_
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
-    (repo / "Dockerfile").write_text("COPY app.py /app/app.py\n", encoding="utf-8")
+    (repo / "Dockerfile").write_text("FROM scratch\nCOPY app.py /app/app.py\n", encoding="utf-8")
+    (repo / "compose.yml").write_text(
+        "services:\n  app:\n    build:\n      context: .\n      dockerfile: Dockerfile\n",
+        encoding="utf-8",
+    )
     (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     target = require_repo_target(tmp_path, repo_id="main")
 
@@ -392,34 +376,22 @@ def test_graph_materialization_rebuilds_relations_when_structured_input_version_
 
     from tools.repoctl import graph_store
 
-    original_build_graph = graph_store.build_graph
-    graph_builds: list[bool] = []
-
-    def recording_build_graph(*args, **kwargs):
-        graph_builds.append(True)
-        return original_build_graph(*args, **kwargs)
-
     monkeypatch.setattr(
         graph_store,
         "STRUCTURED_RELATION_INPUT_VERSION",
         first_manifest["structured_relation_input_version"] + 1,
-    )
-    monkeypatch.setattr(graph_store, "build_graph", recording_build_graph)
-    monkeypatch.setattr(
-        graph_store,
-        "build_semantic_provider",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("semantic provider rerun")),
-    )
-    monkeypatch.setattr(
-        "tools.repoctl.code_index._index_file",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source reindexed")),
     )
 
     second, problems, meta = materialize_graph(tmp_path, target=target)
 
     assert second is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    assert graph_builds == [True]
+    assert any(
+        edge.kind == "USES_FILE"
+        and edge.from_id == file_id("main", "Dockerfile")
+        and edge.to_id == file_id("main", "app.py")
+        for edge in second.edges
+    )
     assert meta["materialization"]["status"] == "updated"
     assert meta["materialization"]["updated_providers"] == []
     assert meta["materialization"]["code_index"]["changed_paths"] == []

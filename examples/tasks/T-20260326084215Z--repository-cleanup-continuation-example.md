@@ -1,16 +1,17 @@
 ---
 id: T-20260326084215Z
-title: "Repository cleanup follow-up (example)"
+title: "Repository cleanup continuation (example)"
 status: doing # todo, doing, blocked, done, canceled (see AGENTS.md)
 owner: "agent"
-repo_ref: "chore/T-20260326084215Z-repo-cleanup-example"
+repo_ref: ""
+repo_id: ""
 created: 20260326T084215Z
 area: "docs"
 parent: ""
 depends_on: []
 ---
 
-# T-20260326084215Z - Repository cleanup follow-up (example)
+# T-20260326084215Z - Repository cleanup continuation (example)
 
 ## Context Docs
 
@@ -22,6 +23,18 @@ Example:
 ## Goal
 
 Demonstrate a concrete in-progress task file with embedded handoff.
+
+## Work Area
+
+- Task record: `examples/tasks/T-20260326084215Z--repository-cleanup-continuation-example.md`
+- Primary surface: Root workspace documentation and examples
+- Area hint: docs
+
+## Discovery
+
+- Candidate query: not applicable to this root-only documentation example
+- Candidate files reviewed: `README.md`, `AGENTS.md`, `docs/tasks/TEMPLATE.md`
+- Chosen files: `README.md`, `AGENTS.md`, `examples/tasks/`
 
 ## In Scope
 
@@ -55,5 +68,5 @@ Demonstrate a concrete in-progress task file with embedded handoff.
 
 - Next exact step: Confirm README quick-start text still matches the canonical task filename and current workspace conventions.
 - First file to open: `README.md`
-- First command to run: `rg -n "T-YYYYMMDDHHMMSSZ--slug\\.md|repo/" README.md`
+- First command to run: `rg -n "T-YYYYMMDDHHMMSSZ--slug\\.md|repos/" README.md`
 - Done when: README references the canonical task filename and current workspace conventions only.

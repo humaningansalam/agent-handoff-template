@@ -4,12 +4,12 @@ title: "Replace with parent task title"
 # canonical values: todo | doing | blocked | done | canceled (see AGENTS.md)
 status: todo
 owner: "unassigned"
-# optional future branch/worktree hint; never used as repository selector
+# root-only parent tasks must leave this empty
 repo_ref: ""
-# optional stable product repository id; child tasks usually own executable repo scope
+# root-only parent tasks must leave this empty; child tasks own repository identity
 repo_id: ""
 created: YYYYMMDDTHHMMSSZ
-# optional: frontend | backend | infra | docs | ops
+# optional root-only area: docs | ops; leave empty when neither applies
 area: ""
 # parent tasks should leave this empty
 parent: ""
@@ -32,7 +32,7 @@ Example:
 ## Work Area
 
 - Task record: `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
-- Primary surface: Identify child task surfaces before implementation starts.
+- Primary surface: Coordinate independently verifiable repo-scoped child tasks; product edits stay in those child tasks.
 - Area hint: none provided
 
 ## Goal
@@ -97,7 +97,7 @@ Update on a best-effort basis; omissions are not rule violations.
 - Done when: The parent task reflects the latest child state (including non-live tasks) and the next agent can continue without guessing.
 
 <!--
-Use this template only when the work needs a coordinating parent task across multiple narrower child tasks.
+Use this template only when the work needs a root-only coordinating parent across multiple independently verifiable repo-scoped child tasks.
 Child tasks should use `docs/tasks/TEMPLATE.md` with `parent: "T-..."` filled in.
 The child's `parent` field is the authoritative link; this file's child lists are convenience summaries.
 -->

@@ -26,7 +26,7 @@ def test_knowledge_candidate_builds_from_context_pack_authority_source(tmp_path:
         title="Promote context pack authority",
         query="repoctl Context contract",
         goal="Create a candidate from a context pack without making the pack an authority source.",
-        first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622070707Z.json --repo-id main --json",
+        first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622070707Z.json --repo-id main --claim 'Reviewed Context remains non-authoritative.' --json",
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     pack = tmp_path / ".repoctl-state/context-pack/T-20260622070707Z.json"
@@ -34,7 +34,7 @@ def test_knowledge_candidate_builds_from_context_pack_authority_source(tmp_path:
     assert main(["context", "pack", "--task", "T-20260622070707Z", "--repo-id", "main", "--output", pack.as_posix(), "--json"]) == 0
     pack_payload = json.loads(capsys.readouterr().out)
 
-    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     candidate = payload["data"]["candidate"]
@@ -60,7 +60,7 @@ def test_knowledge_candidate_builds_from_context_pack_authority_source(tmp_path:
     failed_pack = tmp_path / ".repoctl-state/context-pack/failed.json"
     failed_pack.write_text(json.dumps(failed_pack_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["knowledge", "candidate", "build", "--from-pack", failed_pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-pack", failed_pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
     failed_payload = json.loads(capsys.readouterr().out)
     assert failed_payload["problems"][0]["code"] == "knowledge_candidate_pack_failed"
 
@@ -100,14 +100,14 @@ def test_context_pack_promotes_to_reviewed_knowledge_cleanly(tmp_path: Path, mon
         title="Promote clean context pack",
         query="repoctl Context contract",
         goal="Promote a current context pack into reviewed knowledge.",
-        first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622090909Z.json --repo-id main --json",
+        first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622090909Z.json --repo-id main --claim 'Reviewed Context remains non-authoritative.' --json",
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     pack = tmp_path / ".repoctl-state/context-pack/T-20260622090909Z.json"
 
     assert main(["context", "pack", "--task", "T-20260622090909Z", "--repo-id", "main", "--output", pack.as_posix(), "--json"]) == 0
     capsys.readouterr()
-    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
 
     assert main(["knowledge", "candidate", "check", candidate["id"], "--repo-id", "main", "--json"]) == 0
@@ -145,7 +145,7 @@ def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(
         title="Reject stale context pack",
         query="repoctl Context contract",
         goal="Reject stale context pack inputs.",
-        first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622080808Z.json --repo-id main --json",
+        first_command="./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260622080808Z.json --repo-id main --claim 'Reviewed Context remains non-authoritative.' --json",
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     pack = tmp_path / ".repoctl-state/context-pack/T-20260622080808Z.json"
@@ -154,7 +154,7 @@ def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(
     capsys.readouterr()
     outside_pack = tmp_path.parent / f"{tmp_path.name}-outside-pack.json"
     outside_pack.write_text(pack.read_text(encoding="utf-8"), encoding="utf-8")
-    assert main(["knowledge", "candidate", "build", "--from-pack", outside_pack.as_posix(), "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-pack", outside_pack.as_posix(), "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
     outside_payload = json.loads(capsys.readouterr().out)
     assert outside_payload["problems"][0]["code"] == "knowledge_candidate_pack_outside_workspace"
 
@@ -162,14 +162,14 @@ def test_knowledge_candidate_from_context_pack_rejects_drift_and_generated_pack(
     generated_pack.parent.mkdir(parents=True, exist_ok=True)
     generated_pack.write_text(pack.read_text(encoding="utf-8"), encoding="utf-8")
 
-    assert main(["knowledge", "candidate", "build", "--from-pack", generated_pack.as_posix(), "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-pack", generated_pack.as_posix(), "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
     generated_payload = json.loads(capsys.readouterr().out)
     assert generated_payload["problems"][0]["code"] == "knowledge_candidate_pack_generated"
 
     source = tmp_path / "docs/contracts/repoctl-context-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged after pack.\n", encoding="utf-8")
 
-    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-pack", pack.as_posix(), "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 1
     drift_payload = json.loads(capsys.readouterr().out)
     assert drift_payload["problems"][0]["code"] == "knowledge_candidate_pack_source_drift"
     assert drift_payload["problems"][0]["path"] == "docs/contracts/repoctl-context-contract.md"

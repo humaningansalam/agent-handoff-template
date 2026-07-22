@@ -16,7 +16,7 @@ def _write_context_docs(root: Path) -> None:
     (root / "docs/contracts").mkdir(parents=True, exist_ok=True)
     (root / "docs/workflows").mkdir(parents=True, exist_ok=True)
     (root / "docs/PRD.md").write_text(
-        "# PRD\n\n## Evidence And Context\n\nEvidence Context comes before reviewed knowledge. It retrieves source-bound evidence before any human-reviewed knowledge record is promoted.\n",
+        "# PRD\n\n## Evidence And Context\n\nEvidence Context comes before reviewed knowledge. It retrieves source-bound evidence before any explicitly reviewed knowledge record is promoted.\n",
         encoding="utf-8",
     )
     (root / "docs/contracts/repoctl-graph-contract.md").write_text(
@@ -213,11 +213,11 @@ def _write_context_benchmark_collection_corpus(root: Path, fixture: Path) -> Non
 
 
 def _approve_superseded_context_knowledge(capsys) -> tuple[str, str]:
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     first_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", first_candidate_id, "--repo-id", "main", "--json"]) == 0
     old_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     replacement_candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--supersedes", old_record_id, "--json"]) == 0
     new_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
@@ -225,7 +225,7 @@ def _approve_superseded_context_knowledge(capsys) -> tuple[str, str]:
 
 
 def _approve_deprecated_context_knowledge(tmp_path: Path, capsys) -> str:
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
