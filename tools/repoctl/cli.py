@@ -28,7 +28,7 @@ from .knowledge_candidates import KnowledgeArtifactErrorCode, approve_knowledge_
 from .knowledge_render import render_knowledge
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
-from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target
+from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, unbound_repository_state_namespaces
 from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
@@ -5137,7 +5137,12 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
     problems = [] if repository_runtime_uninitialized else _problems_from_dicts(layout_problem_dicts)
     problems.extend(_problems_from_dicts(namespace_problem_dicts))
     configured_ids = {target.id for target in layout.targets}
-    unbound_namespaces = [item for item in namespaces if str(item.get("repo_id") or "") not in configured_ids]
+    unbound_namespaces = unbound_repository_state_namespaces(namespaces, repo_ids=configured_ids)
+    historical_unbound_namespaces = [
+        item
+        for item in namespaces
+        if str(item.get("repo_id") or "") not in configured_ids and item not in unbound_namespaces
+    ]
     for item in unbound_namespaces:
         paths = item.get("paths") if isinstance(item.get("paths"), list) else []
         problems.append(
@@ -5291,6 +5296,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
         "repository_state": {
             "namespaces": namespaces,
             "unbound_repo_ids": sorted(str(item.get("repo_id") or "") for item in unbound_namespaces),
+            "historical_unbound_repo_ids": sorted(str(item.get("repo_id") or "") for item in historical_unbound_namespaces),
         },
         "repositories": repositories,
         "recovery_actions": deduped_recovery,

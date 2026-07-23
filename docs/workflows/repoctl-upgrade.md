@@ -42,6 +42,8 @@ The adopter test command covers managed runtime and workspace contracts. Templat
 
 Upgrade never rewrites task baselines, ownership decisions, completion receipts, archived tasks, or other preserved project state. These records remain byte-for-byte unchanged while managed control-plane code is replaced. The upgraded runtime accepts only its current structured schemas; postflight reports incompatible candidates, unbound repository state, and invalid or stale Graph materialization without inferred repair, compatibility aliases, or a separate legacy store.
 
+A completion receipt keeps the `repo_id` that owned the task when it finished. After a repository split or replacement, a namespace containing only completion receipts is historical evidence: postflight reports it under `historical_unbound_repo_ids`, but it does not require a currently configured repository identity. Graph materializations, pending candidates, reviewed Knowledge records, and Knowledge events remain current repository state and still fail closed when their `repo_id` is unbound. Remove or rebuild obsolete generated Graph state and review invalid pending candidates explicitly; never rewrite receipt provenance to make an old identity look current.
+
 Each apply receipt records the managed source digest and backup tree digest. `./scripts/repoctl upgrade status --json` calculates backup `availability` as `available`, `missing`, `digest_mismatch`, or `not_required` without modifying the receipt. Backups use manual retention in this version; there is no prune command.
 
 Workflow docs are distributed as `create_paths` by default. This lets new workspaces receive the canonical workflows while preserving modified workflows in existing workspaces.

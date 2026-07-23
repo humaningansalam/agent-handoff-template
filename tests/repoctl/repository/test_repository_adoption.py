@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tests.repoctl.context_test_helpers import _write_completion_receipt
 from tests.repoctl.task_lifecycle_helpers import add_board_task, commit_all, task_text, write_verification
 from tests.repoctl.workspace.test_check import write_workspace
 
@@ -77,6 +78,39 @@ def test_repo_adopt_all_pins_collection_targets(tmp_path: Path, monkeypatch, cap
         {"id": "api", "path": "repos/api", "identity_source": "pinned"},
         {"id": "web", "path": "repos/web", "identity_source": "pinned"},
     ]
+
+
+def test_historical_completion_receipts_do_not_bind_current_repository_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    init_repo(tmp_path / "repos/api")
+    _write_completion_receipt(tmp_path, repo_id="main")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["repo", "adopt", "--all", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 0
+    historical_payload = json.loads(capsys.readouterr().out)
+    main_namespace = next(item for item in historical_payload["data"]["repository_state"]["namespaces"] if item["repo_id"] == "main")
+    assert main_namespace["sources"] == ["completion_receipt"]
+    assert main_namespace["identity_binding"] == "historical"
+    assert historical_payload["data"]["repository_state"]["unbound_repo_ids"] == []
+    assert historical_payload["data"]["repository_state"]["historical_unbound_repo_ids"] == ["main"]
+    assert not any(problem["code"] == "upgrade_repository_state_identity_unbound" for problem in historical_payload["problems"])
+
+    legacy_graph = tmp_path / ".repoctl-state/graph/main/manifest.json"
+    legacy_graph.parent.mkdir(parents=True)
+    legacy_graph.write_text("{}\n", encoding="utf-8")
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 1
+    active_payload = json.loads(capsys.readouterr().out)
+    main_namespace = next(item for item in active_payload["data"]["repository_state"]["namespaces"] if item["repo_id"] == "main")
+    assert main_namespace["sources"] == ["completion_receipt", "graph"]
+    assert main_namespace["identity_binding"] == "required"
+    assert active_payload["data"]["repository_state"]["unbound_repo_ids"] == ["main"]
+    assert active_payload["data"]["repository_state"]["historical_unbound_repo_ids"] == []
+    assert any(problem["code"] == "upgrade_repository_state_identity_unbound" for problem in active_payload["problems"])
 
 
 def test_root_completion_receipt_does_not_create_repository_namespace(tmp_path: Path, monkeypatch, capsys) -> None:

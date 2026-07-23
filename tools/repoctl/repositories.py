@@ -42,12 +42,23 @@ class RepoSelectorStatus(StrEnum):
     AMBIGUOUS = "ambiguous"
 
 
+class RepositoryStateIdentityBinding(StrEnum):
+    REQUIRED = "required"
+    HISTORICAL = "historical"
+
+
 class RepositoryStateSource(StrEnum):
     GRAPH = "graph"
     KNOWLEDGE_CANDIDATE = "knowledge_candidate"
     KNOWLEDGE_RECORD = "knowledge_record"
     KNOWLEDGE_EVENT = "knowledge_event"
     COMPLETION_RECEIPT = "completion_receipt"
+
+    @property
+    def identity_binding(self) -> RepositoryStateIdentityBinding:
+        if self is RepositoryStateSource.COMPLETION_RECEIPT:
+            return RepositoryStateIdentityBinding.HISTORICAL
+        return RepositoryStateIdentityBinding.REQUIRED
 
 
 class TaskRepositoryScope(StrEnum):
@@ -521,7 +532,7 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
             problems.append(_problem("error", "repository_state_identity_missing", "repository-scoped state is missing repo_id", rel))
             return
         item = namespaces.setdefault(normalized, {"repo_id": normalized, "sources": set(), "paths": []})
-        item["sources"].add(source.value)
+        item["sources"].add(source)
         item["paths"].append(rel)
 
     def add_json(path: Path, *, source: RepositoryStateSource) -> None:
@@ -561,10 +572,17 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
     result: list[dict[str, Any]] = []
     for repo_id, item in sorted(namespaces.items()):
         paths = sorted(set(str(path) for path in item["paths"]))
+        sources = sorted(item["sources"], key=lambda source: source.value)
+        identity_binding = (
+            RepositoryStateIdentityBinding.REQUIRED
+            if any(source.identity_binding is RepositoryStateIdentityBinding.REQUIRED for source in sources)
+            else RepositoryStateIdentityBinding.HISTORICAL
+        )
         result.append(
             {
                 "repo_id": repo_id,
-                "sources": sorted(str(source) for source in item["sources"]),
+                "sources": [source.value for source in sources],
+                "identity_binding": identity_binding.value,
                 "path_count": len(paths),
                 "paths": paths[:20],
                 "paths_truncated": len(paths) > 20,
@@ -573,12 +591,26 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
     return result, problems
 
 
+def unbound_repository_state_namespaces(namespaces: list[dict[str, Any]], *, repo_ids: set[str]) -> list[dict[str, Any]]:
+    unbound: list[dict[str, Any]] = []
+    for item in namespaces:
+        if str(item.get("repo_id") or "") in repo_ids:
+            continue
+        try:
+            binding = RepositoryStateIdentityBinding(str(item.get("identity_binding") or ""))
+        except ValueError:
+            binding = RepositoryStateIdentityBinding.REQUIRED
+        if binding is RepositoryStateIdentityBinding.REQUIRED:
+            unbound.append(item)
+    return unbound
+
+
 def _require_bound_repository_state(root: Path, *, repo_ids: set[str]) -> None:
     namespaces, problems = repository_state_namespaces(root)
     if problems:
         first = problems[0]
         raise RepoctlError(first["message"], code=first["code"], path=first["path"])
-    unbound = [item for item in namespaces if str(item.get("repo_id") or "") not in repo_ids]
+    unbound = unbound_repository_state_namespaces(namespaces, repo_ids=repo_ids)
     if not unbound:
         return
     ids = ", ".join(str(item["repo_id"]) for item in unbound)
