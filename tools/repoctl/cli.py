@@ -119,6 +119,31 @@ def _complete_json_envelope(data: Any) -> None:
         data.setdefault("warnings", [])
         data.setdefault("problems", [])
         data.setdefault("next_actions", _next_actions_for_problems([*data.get("problems", []), *data.get("warnings", [])], data=data.get("data", data)))
+        _validate_targeted_next_actions(data)
+
+
+def _validate_targeted_next_actions(envelope: dict[str, Any]) -> None:
+    actions = envelope.get("next_actions")
+    if not isinstance(actions, list):
+        raise RepoctlError("JSON envelope next_actions must be a list", code="invalid_json_envelope")
+    for action in actions:
+        if not isinstance(action, dict) or "targets" not in action:
+            continue
+        targets = action.get("targets")
+        if not isinstance(targets, list) or not targets or any(not isinstance(target, str) or not target for target in targets):
+            raise RepoctlError("targeted next_action must contain non-empty string targets", code="invalid_json_envelope")
+        source = str(action.get("source") or "")
+        source_value: Any = envelope
+        for segment in source.split(".") if source else []:
+            if not isinstance(source_value, dict) or segment not in source_value:
+                source_value = None
+                break
+            source_value = source_value[segment]
+        if source_value != targets:
+            raise RepoctlError(
+                "targeted next_action source must resolve to exactly its targets",
+                code="invalid_json_envelope",
+            )
 
 
 def _workspace_root_or_cwd() -> Path:
@@ -180,6 +205,11 @@ def _workspace_output_path(root: Path, output: str, *, code: str) -> tuple[Path 
     except ValueError:
         return None, Problem("error", code, "output artifact must stay inside the workspace", output)
     return path, None
+
+
+def _invalidate_output_artifact(path: Path | None) -> None:
+    if path is not None and (path.is_file() or path.is_symlink()):
+        path.unlink()
 
 
 def _problem_code(problem: Any) -> str:
@@ -304,21 +334,21 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
         elif code in {"actual_changes_outside_chosen", "task_chosen_scope_drift"}:
-            scope = _mapping_at(data, "repo_changes", "scope")
-            unchosen = _string_list(scope.get("unchosen_actual_paths"))
-            source = "data.repo_changes.scope.unchosen_actual_paths" if unchosen else ""
-            add(
-                "Review repository changes outside the active Chosen scope",
-                command=f"./scripts/repoctl task discovery add {task_id} --reviewed <approved-task-path> --chosen <approved-task-path> --json",
-                kind=NextActionKind.TASK_SCOPE_REVIEW,
-                source=source,
-                choices=[
-                    TaskScopeResolution.ADD_TO_CHOSEN,
-                    TaskScopeResolution.REVERT_CHANGE,
-                    TaskScopeResolution.MOVE_TO_FOLLOW_UP,
-                ],
-                targets=unchosen,
-            )
+            action_inputs = _mapping_at(data, "action_inputs")
+            unchosen = _string_list(action_inputs.get("unchosen_actual_paths"))
+            if unchosen:
+                add(
+                    "Review repository changes outside the active Chosen scope",
+                    command=f"./scripts/repoctl task discovery add {task_id} --reviewed <approved-task-path> --chosen <approved-task-path> --json",
+                    kind=NextActionKind.TASK_SCOPE_REVIEW,
+                    source="data.action_inputs.unchosen_actual_paths",
+                    choices=[
+                        TaskScopeResolution.ADD_TO_CHOSEN,
+                        TaskScopeResolution.REVERT_CHANGE,
+                        TaskScopeResolution.MOVE_TO_FOLLOW_UP,
+                    ],
+                    targets=unchosen,
+                )
             add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
             add("Initialize repos/ as an independent git repository", command="git -C repos init")
@@ -326,23 +356,21 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Preflight committed range", command=f"./scripts/repoctl task doctor {task_id} --use-committed-diff --json")
             add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --json")
         elif code == "baseline_conflict":
-            repo_changes = _mapping_at(data, "repo_changes")
-            structured_conflicts = _string_list(repo_changes.get("baseline_conflicts"))
-            conflicts = list(structured_conflicts)
-            if not conflicts and path:
-                conflicts = [path]
+            action_inputs = _mapping_at(data, "action_inputs")
+            conflicts = _string_list(action_inputs.get("baseline_conflicts"))
             resolution_args = " ".join(
                 f"--resolution {shlex.quote(f'{conflict}=<task|preexisting>')}"
                 for conflict in conflicts
             ) or "--resolution '<path>=<task|preexisting>'"
-            add(
-                "Preview baseline ownership resolutions",
-                command=f"./scripts/repoctl task baseline resolve {task_id} {resolution_args} --preview --json",
-                kind=NextActionKind.BASELINE_OWNERSHIP_RESOLUTION,
-                source="data.repo_changes.baseline_conflicts" if structured_conflicts else "",
-                choices=[BaselineOwnership.TASK, BaselineOwnership.PREEXISTING],
-                targets=conflicts,
-            )
+            if conflicts:
+                add(
+                    "Preview baseline ownership resolutions",
+                    command=f"./scripts/repoctl task baseline resolve {task_id} {resolution_args} --preview --json",
+                    kind=NextActionKind.BASELINE_OWNERSHIP_RESOLUTION,
+                    source="data.action_inputs.baseline_conflicts",
+                    choices=[BaselineOwnership.TASK, BaselineOwnership.PREEXISTING],
+                    targets=conflicts,
+                )
             add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code == "repo_history_rewritten":
             add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
@@ -1679,12 +1707,12 @@ def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> d
         return None
     scope = discovery_scope_delta(task, target, list(delta.get("changes") or []))
     delta["scope"] = scope
-    if not scope["unchosen_actual_paths"] and not scope["unused_chosen_paths"]:
+    if not scope["unchosen_actual_paths"]:
         return None
     return {
         "severity": "warning",
         "code": "task_chosen_scope_drift",
-        "message": "current repository changes and active Chosen files differ; this is advisory until task finish",
+        "message": "current repository changes include paths outside the active Chosen files; this is advisory until task finish",
         "path": task.rel_path,
     }
 
@@ -1713,9 +1741,12 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         scope_warning = _task_scope_drift_warning(root, task, delta)
         if scope_warning is not None:
             warnings.append(scope_warning)
-    full_repo_changes = _repo_change_summary(delta, compact=False) if delta else None
     repo_changes = _repo_change_summary(delta, compact=bool(args.summary or args.section)) if delta else None
     summary = {"task": task.to_list_dict(), "path": task.rel_path, "repo_changes": repo_changes}
+    if delta:
+        action_inputs = _task_action_inputs(delta)
+        if action_inputs:
+            summary["action_inputs"] = action_inputs
     if args.section:
         text = task.path.read_text(encoding="utf-8")
         section = find_section(text, args.section)
@@ -1737,8 +1768,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
             "problems": [],
             "warnings": warnings,
         }
-    action_data = {**summary, "task_id": task.id, "repo_changes": full_repo_changes}
-    payload["next_actions"] = _next_actions_for_problems(warnings, data=action_data)
+    payload["next_actions"] = _next_actions_for_problems(warnings, data={**summary, "task_id": task.id})
     if args.json:
         _json(payload)
     elif args.section:
@@ -1932,7 +1962,6 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         *([str(scope_warning["code"])] if scope_warning is not None else []),
     ]
     finish_ready = task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers
-    full_repo_changes = _repo_change_summary(delta, compact=False)
     data = {
         "task_id": task.id,
         "status": task.status,
@@ -1948,6 +1977,9 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             "task_section_complete": verification_ready,
         },
     }
+    action_inputs = _task_action_inputs(delta)
+    if action_inputs:
+        data["action_inputs"] = action_inputs
     payload = {
         "ok": not blockers,
         "command": "task.doctor",
@@ -1958,10 +1990,9 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             *([scope_warning] if scope_warning is not None else []),
         ],
     }
-    action_data = {**data, "repo_changes": full_repo_changes}
     payload["next_actions"] = _next_actions_for_problems(
         [*payload["problems"], *payload["warnings"]],
-        data=action_data,
+        data=data,
     )
     return payload
 
@@ -1982,6 +2013,18 @@ def _scope_summary(scope: Any, *, compact: bool) -> dict[str, Any]:
         summary[f"{key}_count"] = count
         summary[f"{key}_truncated"] = truncated
     return summary
+
+
+def _task_action_inputs(delta: dict[str, Any]) -> dict[str, list[str]]:
+    inputs: dict[str, list[str]] = {}
+    conflicts = _string_list(delta.get("baseline_conflicts"))
+    if conflicts:
+        inputs["baseline_conflicts"] = conflicts
+    scope = delta.get("scope") if isinstance(delta.get("scope"), dict) else {}
+    unchosen = _string_list(scope.get("unchosen_actual_paths"))
+    if unchosen:
+        inputs["unchosen_actual_paths"] = unchosen
+    return inputs
 
 
 def _repo_change_summary(delta: dict[str, Any], *, compact: bool = True) -> dict[str, Any]:
@@ -4019,8 +4062,15 @@ def cmd_context_benchmark_compare(args: argparse.Namespace) -> int:
 
 def cmd_context_pack(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    output: Path | None = None
+    output_problem: Problem | None = None
+    if args.output:
+        output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
+    _invalidate_output_artifact(output)
     target = require_repo_target(root, repo_id=args.repo_id)
     data, problems, meta = build_task_context_pack(root, target=target, task_id=args.task, budget_tokens=args.budget_tokens, explain=args.explain)
+    if output_problem is not None:
+        problems.append(output_problem)
     payload_data = {**data, **meta} if args.full else {**compact_task_context_pack(data), **meta}
     payload = {
         "ok": not _has_errors(problems),
@@ -4031,24 +4081,22 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     }
     output_format = "json" if args.json else args.format
     written_output = ""
-    if args.output and not _has_errors(problems):
-        output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
-        if output_problem is not None:
-            problems.append(output_problem)
-            payload["ok"] = False
-            payload["problems"] = [problem.to_dict() for problem in problems if problem.severity == "error"]
-        else:
-            written_output = output.relative_to(root).as_posix()
-            if data and output_format == "json":
-                payload["data"]["artifact"] = {
-                    "path": output.relative_to(root).as_posix(),
-                    "pack_digest": payload["data"].get("pack_digest", ""),
-                }
-            _complete_json_envelope(payload)
+    if output is not None and not _has_errors(problems):
+        written_output = output.relative_to(root).as_posix()
+        if data and output_format == "json":
+            payload["data"]["artifact"] = {
+                "path": output.relative_to(root).as_posix(),
+                "pack_digest": payload["data"].get("pack_digest", ""),
+            }
+        _complete_json_envelope(payload)
+        try:
             if output_format == "markdown":
                 atomic_write(output, render_task_context_pack_markdown(data))
             else:
                 atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        except Exception:
+            _invalidate_output_artifact(output)
+            raise
     if output_format == "json":
         _json(payload)
     elif output_format == "markdown":
@@ -5924,7 +5972,8 @@ def main(argv: list[str] | None = None) -> int:
             problem = {"severity": "error", "code": error.code, "message": str(error)}
             if error.path:
                 problem["path"] = error.path
-            _json({"ok": False, "command": _command_name(args), "data": _error_data(args), "problems": [problem], "warnings": []})
+            error_data = _error_data(args)
+            _json({"ok": False, "command": _command_name(args), "data": error_data, "problems": [problem], "warnings": []})
         else:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2

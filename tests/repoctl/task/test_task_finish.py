@@ -170,7 +170,7 @@ def test_task_doctor_and_finish_share_baseline_conflict_preflight(tmp_path: Path
 def test_task_doctor_and_finish_share_actual_scope_preflight(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
-    init_committed_product_repo(repo, {"app.py": "value = 1\n", "extra.py": "value = 1\n"})
+    init_committed_product_repo(repo, {"app.py": "value = 1\n", "extra.py": "value = 1\n", "other.py": "value = 1\n"})
     text = (
         task_text("T-20260609184046Z", status="todo")
         .replace('area: ""', 'area: "repo"')
@@ -184,6 +184,7 @@ def test_task_doctor_and_finish_share_actual_scope_preflight(tmp_path: Path, mon
     capsys.readouterr()
     record_discovery(tmp_path, "T-20260609184046Z", query="app value", reviewed="repos/app.py", chosen="repos/app.py")
     (repo / "extra.py").write_text("value = 2\n", encoding="utf-8")
+    (repo / "other.py").write_text("value = 2\n", encoding="utf-8")
 
     assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
     doctor_payload = json.loads(capsys.readouterr().out)
@@ -194,6 +195,8 @@ def test_task_doctor_and_finish_share_actual_scope_preflight(tmp_path: Path, mon
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
     finish_payload = json.loads(capsys.readouterr().out)
     assert finish_payload["problems"][0]["code"] == "actual_changes_outside_chosen"
+    assert not any(action.get("kind") == "task_scope_review" for action in finish_payload["next_actions"])
+    assert any(action["label"] == "Inspect task repo changes" for action in finish_payload["next_actions"])
 
 
 def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path, monkeypatch, capsys) -> None:

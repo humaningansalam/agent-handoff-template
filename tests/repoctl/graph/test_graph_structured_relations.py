@@ -72,6 +72,9 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
     (repo / "src/jobs.ts").write_text(
         "import { createClient } from '@supabase/supabase-js';\n"
         "const client = createClient(url, key);\n"
+        "const credential = /(?:api[_-]?key|secret)\\s*[:=]\\s*[\\\"']?[^\\s\\\"'`]{8,}/i;\n"
+        "if (url) /[\\\"'`]/.test(String(url));\n"
+        "const label = `${JSON.stringify(`claim-${String(url)}`)}`;\n"
         "export const claim = () => client.rpc('claim_job');\n",
         encoding="utf-8",
     )
@@ -159,6 +162,32 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
         item.get("source_ref", {}).get("kind") == "graph_relation" and "--USES_FILE-->" in item.get("excerpt", "")
         for item in bundle["groups"]["callers_and_dependents"]
     )
+
+
+def test_structured_rpc_analysis_skips_sources_without_supported_client_imports(tmp_path: Path) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+
+    (repo / "src").mkdir()
+    (repo / "src/App.tsx").write_text(
+        "export function App() { return <span>ready</span>; }\n",
+        encoding="utf-8",
+    )
+    (repo / "scripts").mkdir()
+    (repo / "scripts/watcher-fanout-benchmark.mjs").write_text(
+        "const summary = `${Math.round(bytes / 1024 / 1024)} MiB`;\n",
+        encoding="utf-8",
+    )
+
+    _materialize(tmp_path)
+    snapshot = json.loads((tmp_path / ".repoctl-state/graph/main/snapshot.json").read_text(encoding="utf-8"))
+    coverage = snapshot["completeness"]["provider_coverage"]["structured_relations"]
+
+    assert coverage["status"] == "complete"
+    assert coverage["analyzed_paths"] == ["scripts/watcher-fanout-benchmark.mjs", "src/App.tsx"]
+    assert coverage["failed_paths"] == []
 
 
 def test_graph_structured_relations_fail_closed_when_ownership_is_ambiguous_or_dynamic(tmp_path: Path) -> None:

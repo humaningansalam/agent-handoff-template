@@ -14,8 +14,14 @@ from .code_index import CodeIndexEntry
 from .tasks import Problem
 
 
-STRUCTURED_RELATION_INPUT_VERSION = 2
+STRUCTURED_RELATION_INPUT_VERSION = 4
 STRUCTURED_EDGE_KIND = "USES_FILE"
+_DART_SUPABASE_MODULES = frozenset(
+    {
+        "package:supabase/supabase.dart",
+        "package:supabase_flutter/supabase_flutter.dart",
+    }
+)
 
 
 class StructuredRelationType(StrEnum):
@@ -313,6 +319,11 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
         for entry in entries
         if entry.classification != "excluded" and entry.language in {"python", "javascript", "typescript", "dart"}
     }
+    rpc_candidate_paths = {
+        path
+        for path in rpc_source_paths
+        if entry_by_path[path].parse_status == "ok" and _entry_has_supported_rpc_client_import(entry_by_path[path])
+    }
     eligible_paths = supported_paths | rpc_source_paths
     analyzed_paths: set[str] = set()
     failed_paths: set[str] = set()
@@ -340,7 +351,7 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
         analyzed_paths.add(path)
         return result.value
 
-    for path in sorted(eligible_paths):
+    for path in sorted(supported_paths | rpc_candidate_paths):
         text = _read_source(repo, path, problems=problems, failed_paths=failed_paths)
         if text is not None:
             texts[path] = text
@@ -392,9 +403,6 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
                 sql_references.extend(references)
 
     for path in sorted(rpc_source_paths):
-        text = texts.get(path)
-        if text is None:
-            continue
         entry = entry_by_path[path]
         if entry.parse_status != "ok":
             accept(
@@ -404,6 +412,12 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
                     entry.parse_error or "source parser did not produce a valid syntax tree",
                 ),
             )
+            continue
+        if path not in rpc_candidate_paths:
+            analyzed_paths.add(path)
+            continue
+        text = texts.get(path)
+        if text is None:
             continue
         calls = accept(path, _rpc_calls(text, language=entry.language))
         if calls is None:
@@ -1613,6 +1627,16 @@ def _rpc_calls(text: str, *, language: str) -> _ParseResult[tuple[_RpcCall, ...]
     return _parsed(())
 
 
+def _entry_has_supported_rpc_client_import(entry: CodeIndexEntry) -> bool:
+    if entry.language == "python":
+        return any(_python_supabase_module(occurrence.module) for occurrence in entry.import_occurrences)
+    if entry.language in {"javascript", "typescript"}:
+        return any(_javascript_supabase_module(specifier) for specifier in entry.imports)
+    if entry.language == "dart":
+        return any(specifier in _DART_SUPABASE_MODULES for specifier in entry.imports)
+    return False
+
+
 class _PythonRpcVisitor:
     def __init__(self) -> None:
         self.scopes: list[dict[str, _ClientBinding]] = [{}]
@@ -2205,10 +2229,7 @@ def _dart_rpc_calls(text: str) -> _ParseResult[tuple[_RpcCall, ...]]:
 def _dart_has_supabase_import(tokens: list[_Token]) -> bool:
     for index, token in enumerate(tokens[:-1]):
         if token.value == "import" and tokens[index + 1].kind == _TokenKind.STRING:
-            if tokens[index + 1].value in {
-                "package:supabase/supabase.dart",
-                "package:supabase_flutter/supabase_flutter.dart",
-            }:
+            if tokens[index + 1].value in _DART_SUPABASE_MODULES:
                 return True
     return False
 
@@ -2274,6 +2295,20 @@ def _code_tokens(text: str, *, language: str) -> _ParseResult[tuple[_Token, ...]
             line += fragment.count("\n")
             index = end + 2
             continue
+        if language == "javascript" and char == "/" and _javascript_regex_can_start(tokens):
+            start_line = line
+            index, line, complete = _read_javascript_regex(text, index, line)
+            if not complete:
+                return _parse_failed("graph_structured_client_parse_failed", "code regular expression literal is unterminated", start_line)
+            tokens.append(_Token(_TokenKind.SYMBOL, "<regex>", start_line))
+            continue
+        if language == "javascript" and char == "`":
+            start_line = line
+            value, index, line, complete, static = _read_javascript_template(text, index, line)
+            if not complete:
+                return _parse_failed("graph_structured_client_parse_failed", "code template literal is unterminated", start_line)
+            tokens.append(_Token(_TokenKind.STRING, value, start_line, static=static))
+            continue
         if char in {'"', "'", "`"}:
             start_line = line
             value, index, line, complete, static = _read_code_string(
@@ -2293,10 +2328,171 @@ def _code_tokens(text: str, *, language: str) -> _ParseResult[tuple[_Token, ...]
                 index += 1
             tokens.append(_Token(_TokenKind.IDENTIFIER, text[start:index], line))
             continue
-        if char in {".", "(", ")", "{", "}", "[", "]", ",", ";", "=", ":", "?", "+", "<", ">"}:
+        if char in {".", "(", ")", "{", "}", "[", "]", ",", ";", "=", ":", "?", "+", "-", "*", "/", "%", "!", "~", "&", "|", "^", "<", ">"}:
             tokens.append(_Token(_TokenKind.SYMBOL, char, line))
         index += 1
     return _parsed(tuple(tokens))
+
+
+_JAVASCRIPT_REGEX_PREFIX_SYMBOLS = frozenset(
+    {"(", "[", "{", ",", ";", "=", ":", "?", "+", "-", "*", "/", "%", "!", "~", "&", "|", "^", "<", ">"}
+)
+_JAVASCRIPT_REGEX_PREFIX_KEYWORDS = frozenset(
+    {"await", "case", "delete", "do", "else", "in", "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield"}
+)
+_JAVASCRIPT_STATEMENT_PAREN_KEYWORDS = frozenset({"if", "for", "while", "with"})
+
+
+def _javascript_regex_can_start(tokens: list[_Token]) -> bool:
+    if not tokens:
+        return True
+    previous = tokens[-1]
+    if previous.kind == _TokenKind.SYMBOL:
+        if previous.value in _JAVASCRIPT_REGEX_PREFIX_SYMBOLS:
+            return True
+        if previous.value == ")":
+            opening = _matching_open_token(tokens, len(tokens) - 1)
+            if opening > 0 and tokens[opening - 1].kind == _TokenKind.IDENTIFIER:
+                prefix = tokens[opening - 1].value
+                if prefix in _JAVASCRIPT_STATEMENT_PAREN_KEYWORDS:
+                    return True
+                if prefix == "await" and opening > 1 and tokens[opening - 2].value == "for":
+                    return True
+        return False
+    return previous.kind == _TokenKind.IDENTIFIER and previous.value in _JAVASCRIPT_REGEX_PREFIX_KEYWORDS
+
+
+def _read_javascript_regex(text: str, index: int, line: int) -> tuple[int, int, bool]:
+    index += 1
+    escaped = False
+    in_character_class = False
+    while index < len(text):
+        char = text[index]
+        if char == "\n" and not escaped:
+            return index, line, False
+        if char == "\n":
+            line += 1
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "[":
+            in_character_class = True
+        elif char == "]" and in_character_class:
+            in_character_class = False
+        elif char == "/" and not in_character_class:
+            index += 1
+            while index < len(text) and text[index].isalpha():
+                index += 1
+            return index, line, True
+        index += 1
+    return index, line, False
+
+
+def _read_javascript_template(text: str, index: int, line: int) -> tuple[str, int, int, bool, bool]:
+    value: list[str] = []
+    index += 1
+    escaped = False
+    static = True
+    while index < len(text):
+        char = text[index]
+        if char == "\n":
+            line += 1
+        if escaped:
+            value.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if char == "`":
+            return "".join(value), index + 1, line, True, static
+        if text.startswith("${", index):
+            static = False
+            value.append("${}")
+            index, line, complete = _skip_javascript_template_expression(text, index + 2, line)
+            if not complete:
+                return "".join(value), index, line, False, static
+            continue
+        value.append(char)
+        index += 1
+    return "".join(value), index, line, False, static
+
+
+def _skip_javascript_template_expression(text: str, index: int, line: int) -> tuple[int, int, bool]:
+    depth = 1
+    tokens: list[_Token] = []
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            line += 1 if char == "\n" else 0
+            index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            if end < 0:
+                return len(text), line, False
+            index = end
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                return len(text), line, False
+            fragment = text[index : end + 2]
+            line += fragment.count("\n")
+            index = end + 2
+            continue
+        if char == "/" and _javascript_regex_can_start(tokens):
+            start_line = line
+            index, line, complete = _read_javascript_regex(text, index, line)
+            if not complete:
+                return index, line, False
+            tokens.append(_Token(_TokenKind.SYMBOL, "<regex>", start_line))
+            continue
+        if char == "`":
+            start_line = line
+            _value, index, line, complete, static = _read_javascript_template(text, index, line)
+            if not complete:
+                return index, line, False
+            tokens.append(_Token(_TokenKind.STRING, "", start_line, static=static))
+            continue
+        if char in {'"', "'"}:
+            start_line = line
+            value, index, line, complete, static = _read_code_string(
+                text,
+                index,
+                line,
+                quote=char,
+                dart_interpolation=False,
+            )
+            if not complete:
+                return index, line, False
+            tokens.append(_Token(_TokenKind.STRING, value, start_line, static=static))
+            continue
+        if char.isalpha() or char in {"_", "$"}:
+            start = index
+            while index < len(text) and (text[index].isalnum() or text[index] in {"_", "$"}):
+                index += 1
+            tokens.append(_Token(_TokenKind.IDENTIFIER, text[start:index], line))
+            continue
+        if char == "{":
+            depth += 1
+            tokens.append(_Token(_TokenKind.SYMBOL, char, line))
+            index += 1
+            continue
+        if char == "}":
+            depth -= 1
+            index += 1
+            if depth == 0:
+                return index, line, True
+            tokens.append(_Token(_TokenKind.SYMBOL, char, line))
+            continue
+        if char in {".", "(", ")", "[", "]", ",", ";", "=", ":", "?", "+", "-", "*", "/", "%", "!", "~", "&", "|", "^", "<", ">"}:
+            tokens.append(_Token(_TokenKind.SYMBOL, char, line))
+        index += 1
+    return index, line, False
 
 
 def _read_code_string(

@@ -118,9 +118,65 @@ def test_task_show_reports_current_chosen_scope_drift_as_advisory(tmp_path: Path
     assert payload["warnings"][0]["code"] == "task_chosen_scope_drift"
     assert set(payload["warnings"][0]) == {"severity", "code", "message", "path"}
     scope_action = next(action for action in payload["next_actions"] if action.get("kind") == "task_scope_review")
-    assert scope_action["source"] == "data.repo_changes.scope.unchosen_actual_paths"
+    assert scope_action["source"] == "data.action_inputs.unchosen_actual_paths"
     assert scope_action["choices"] == ["add_to_chosen", "revert_change", "move_to_follow_up"]
-    assert scope_action["targets"] == ["other.py"]
+    assert scope_action["targets"] == payload["data"]["action_inputs"]["unchosen_actual_paths"] == ["other.py"]
+
+
+def test_task_show_keeps_unused_chosen_paths_informational(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"chosen.py": "x = 1\n"})
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("- pending", "- Command: pytest\n- Result: pass")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "chosen behavior", "--reviewed", "repos/chosen.py", "--chosen", "repos/chosen.py", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["finish_ready"] is True
+    assert payload["data"]["repo_changes"]["scope"]["unchosen_actual_paths"] == []
+    assert payload["data"]["repo_changes"]["scope"]["unused_chosen_paths"] == ["chosen.py"]
+    assert not any(warning["code"] == "task_chosen_scope_drift" for warning in payload["warnings"])
+    assert not any(action.get("kind") == "task_scope_review" for action in payload["next_actions"])
+
+
+def test_task_show_exposes_complete_scope_action_inputs_when_summary_is_truncated(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    files = {"chosen.py": "value = 1\n", **{f"other_{index:02d}.py": "value = 1\n" for index in range(25)}}
+    init_committed_product_repo(repo, files)
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "chosen behavior", "--reviewed", "repos/chosen.py", "--chosen", "repos/chosen.py", "--json"]) == 0
+    capsys.readouterr()
+    for path in sorted(files):
+        if path != "chosen.py":
+            (repo / path).write_text("value = 2\n", encoding="utf-8")
+
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    scope = payload["data"]["repo_changes"]["scope"]
+    assert scope["unchosen_actual_paths_count"] == 25
+    assert len(scope["unchosen_actual_paths"]) == 20
+    assert scope["unchosen_actual_paths_truncated"] is True
+    action = next(action for action in payload["next_actions"] if action.get("kind") == "task_scope_review")
+    assert action["source"] == "data.action_inputs.unchosen_actual_paths"
+    assert action["targets"] == payload["data"]["action_inputs"]["unchosen_actual_paths"]
+    assert len(action["targets"]) == 25
 
 
 def test_task_start_and_summary_bound_large_path_collections(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -144,13 +200,18 @@ def test_task_start_and_summary_bound_large_path_collections(tmp_path: Path, mon
         (repo / path).write_text("value = 3\n", encoding="utf-8")
 
     assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
-    summary = json.loads(capsys.readouterr().out)["data"]["repo_changes"]
+    payload = json.loads(capsys.readouterr().out)
+    summary = payload["data"]["repo_changes"]
     assert summary["task_new"] == 25
     assert len(summary["task_new_files"]) == 20
     assert summary["task_new_files_truncated"] is True
     assert summary["baseline_conflict_count"] == 25
     assert len(summary["baseline_conflicts"]) == 20
     assert summary["baseline_conflicts_truncated"] is True
+    action = next(action for action in payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution")
+    assert action["source"] == "data.action_inputs.baseline_conflicts"
+    assert action["targets"] == payload["data"]["action_inputs"]["baseline_conflicts"]
+    assert len(action["targets"]) == 25
 
     assert main(["task", "show", "T-20260609184046Z", "--json"]) == 0
     full_summary = json.loads(capsys.readouterr().out)["data"]["repo_changes"]
@@ -202,14 +263,20 @@ def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tm
     assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     action = next(action for action in payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution")
-    assert action["source"] == "data.repo_changes.baseline_conflicts"
+    assert action["source"] == "data.action_inputs.baseline_conflicts"
     assert action["choices"] == ["task", "preexisting"]
-    assert action["targets"] == ["a.py", "b.py"]
+    assert action["targets"] == payload["data"]["action_inputs"]["baseline_conflicts"] == ["a.py", "b.py"]
     command = shlex.split(action["command"])
     resolutions = [command[index + 1] for index, token in enumerate(command) if token == "--resolution"]
     assert resolutions == ["a.py=<task|preexisting>", "b.py=<task|preexisting>"]
     assert "--preview" in command
     assert "--ownership" not in command
+
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
+    finish_payload = json.loads(capsys.readouterr().out)
+    assert finish_payload["problems"][0]["code"] == "baseline_conflict"
+    assert not any(action.get("kind") == "baseline_ownership_resolution" for action in finish_payload["next_actions"])
+    assert any(action["label"] == "Inspect task repo changes" for action in finish_payload["next_actions"])
 
 
 

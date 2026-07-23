@@ -49,6 +49,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert data["stage"] == "scoped"
     assert data["seed"]["source"] == "discovery_query_history_only"
     assert data["input_digest"].startswith("sha256:")
+    assert data["render_projection"] == "full"
     assert data["stop_reason"] in {"required_evidence_satisfied", "budget_reached"}
     assert data["budget"]["final_render_estimated_tokens"] <= 1200
     assert any(item["source_ref"]["path"] == "docs/contracts/repoctl-context-contract.md" for item in data["groups"]["must_read"])
@@ -134,12 +135,58 @@ def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path
     assert "AGENTS.md" in required_paths
     assert f"docs/tasks/{task_id}--required-budget.md" in required_paths
     assert "repos/app.py" in required_paths
-    assert data["stop_reason"] == "required_evidence_exceeds_budget"
-    assert data["budget"]["final_render_estimated_tokens"] > data["budget"]["maximum_estimated_tokens"]
+    assert data["render_projection"] == "required_reference_manifest"
+    assert data["stop_reason"] == "budget_reached"
+    assert data["budget"]["final_render_estimated_tokens"] <= data["budget"]["maximum_estimated_tokens"]
     rendered = render_task_context_pack_markdown(data)
     assert all(path in rendered for path in context_docs)
     assert "AGENTS.md" in rendered
     assert f"docs/tasks/{task_id}--required-budget.md" in rendered
+    assert "repos/app.py" in rendered
+    assert "details and digests remain in full JSON" in rendered
+
+    exact_budget = data["budget"]["final_render_estimated_tokens"]
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", str(exact_budget), "--full", "--json"]) == 0
+    exact = json.loads(capsys.readouterr().out)["data"]
+    assert exact["render_projection"] == "required_reference_manifest"
+    assert exact["stop_reason"] == "budget_reached"
+    assert exact["budget"]["final_render_estimated_tokens"] <= exact_budget
+
+
+def test_context_pack_reports_irreducible_required_reference_overflow(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    task_id = "T-20260622010123Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="required-overflow",
+        title="Report irreducible required evidence overflow",
+        query="run",
+        goal="Keep required source identities explicit.",
+        reviewed="repos/app.py",
+        chosen="repos/app.py",
+    )
+    output = tmp_path / ".repoctl-state/context-pack/irreducible.json"
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", "1500", "--output", output.as_posix(), "--full", "--json"]) == 0
+    previous_artifact = output.read_bytes()
+    assert previous_artifact
+    capsys.readouterr()
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", "1", "--output", output.as_posix(), "--full", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    data = payload["data"]
+    assert payload["ok"] is False
+    assert payload["problems"][0]["code"] == "context_pack_required_evidence_exceeds_budget"
+    assert data["render_projection"] == "required_reference_manifest"
+    assert data["stop_reason"] == "required_evidence_exceeds_budget"
+    assert data["budget"]["final_render_estimated_tokens"] > data["budget"]["maximum_estimated_tokens"]
+    assert not output.exists()
+    rendered = render_task_context_pack_markdown(data)
+    assert "AGENTS.md" in rendered
+    assert f"docs/tasks/{task_id}--required-overflow.md" in rendered
     assert "repos/app.py" in rendered
 
 

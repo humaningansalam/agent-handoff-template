@@ -42,6 +42,21 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
+def _stabilize_render_estimate(data: dict[str, Any], *, budget_tokens: int) -> int:
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    data["metrics"] = metrics
+    estimate = -1
+    for _ in range(4):
+        current = estimate_tokens(render_task_context_pack_markdown(data))
+        data["budget"]["final_render_estimated_tokens"] = current
+        metrics["requested_tokens"] = budget_tokens
+        metrics["estimated_tokens"] = current
+        if current == estimate:
+            return current
+        estimate = current
+    return estimate
+
+
 def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, force: bool = False) -> tuple[dict[str, Any], list[Problem]]:
     problems: list[Problem] = []
     tasks_path = fixture / "tasks.json"
@@ -249,6 +264,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         "schema_version": 2,
         "authoritative": False,
         "stage": stage,
+        "render_projection": "full",
         "input_digest": input_digest,
         "task": {
             "id": task.id,
@@ -272,19 +288,37 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         "maximum_estimated_tokens": budget_tokens,
         "final_render_estimated_tokens": 0,
     }
+    data["stop_reason"] = "required_evidence_satisfied"
+    data["metrics"]["requested_tokens"] = budget_tokens
+    data["metrics"]["estimated_tokens"] = budget_tokens
     data["pack_digest"] = "sha256:" + "0" * 64
     stop_reason = _apply_render_budget(data, budget_tokens=budget_tokens)
     data["stop_reason"] = stop_reason
     data["metrics"] = _pack_metrics(data["groups"], bundle)
-    data["budget"]["final_render_estimated_tokens"] = estimate_tokens(render_task_context_pack_markdown(data))
-    data["metrics"]["requested_tokens"] = budget_tokens
-    data["metrics"]["estimated_tokens"] = data["budget"]["final_render_estimated_tokens"]
+    final_estimate = _stabilize_render_estimate(data, budget_tokens=budget_tokens)
+    if final_estimate > budget_tokens and data.get("render_projection") != "required_reference_manifest":
+        data["render_projection"] = "required_reference_manifest"
+        data["stop_reason"] = "budget_reached"
+        final_estimate = _stabilize_render_estimate(data, budget_tokens=budget_tokens)
+    if final_estimate > budget_tokens:
+        data["stop_reason"] = "required_evidence_exceeds_budget"
+        _stabilize_render_estimate(data, budget_tokens=budget_tokens)
+        problems.append(
+            Problem(
+                "error",
+                "context_pack_required_evidence_exceeds_budget",
+                "required source references cannot fit within the requested context pack budget",
+                task.rel_path,
+            )
+        )
     data.pop("pack_digest", None)
     data["pack_digest"] = digest_data(data)
     return data, problems, meta
 
 
 def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
+    if data.get("render_projection") == "required_reference_manifest":
+        return _render_required_reference_manifest(data)
     task = data.get("task") if isinstance(data.get("task"), dict) else {}
     seed = data.get("seed") if isinstance(data.get("seed"), dict) else {}
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
@@ -346,6 +380,58 @@ def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _render_required_reference_manifest(data: dict[str, Any]) -> str:
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    budget = data.get("budget") if isinstance(data.get("budget"), dict) else {}
+    lines = [
+        "# Agent Context Pack",
+        "",
+        f"- Task: `{task.get('id', '')}`",
+        f"- Repository: `{task.get('repo_id', '')}`",
+        f"- Stage: `{data.get('stage', '')}`",
+        f"- Stop reason: `{data.get('stop_reason', '')}`",
+        f"- Maximum estimated tokens: {budget.get('maximum_estimated_tokens', 0)}",
+        "",
+        "Open every source directly; details and digests remain in full JSON.",
+        "",
+    ]
+    sections = (
+        ("must_read", "Read First"),
+        ("edit_candidates", "Active Edit Candidates"),
+        ("supporting_evidence", "Required Supporting Evidence"),
+        ("likely_change", "Required Likely Change Surface"),
+        ("impact", "Required Impact Surface"),
+        ("verification", "Required Verification Sources"),
+        ("warnings", "Required Warnings"),
+    )
+    seen: set[tuple[str, str, str]] = set()
+    for group, title in sections:
+        refs: list[dict[str, Any]] = []
+        items = groups.get(group)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict) or item.get("requirement") != "required":
+                continue
+            ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+            key = (str(ref.get("kind") or ""), str(ref.get("path") or ""), str(ref.get("section") or ""))
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            refs.append(ref)
+        if not refs:
+            continue
+        lines.extend([f"## {title}", ""])
+        for ref in refs:
+            path = str(ref.get("path") or "")
+            section_name = str(ref.get("section") or "")
+            section = f" ({section_name})" if section_name and section_name != Path(path).name else ""
+            lines.append(f"- `{path}`{section}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 COMPACT_GROUP_LIMITS = {
     "must_read": 7,
     "edit_candidates": 8,
@@ -360,8 +446,16 @@ COMPACT_GROUP_LIMITS = {
 def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180) -> dict[str, Any]:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
     canonical_groups = ("must_read", "edit_candidates", "supporting_evidence", "likely_change", "impact", "verification", "warnings")
+    reference_only = data.get("render_projection") == "required_reference_manifest"
     compact_groups = {
-        group: [_compact_pack_item(item, excerpt_chars=excerpt_chars) for item in _compact_group_items(groups.get(group) or [], group)]
+        group: [
+            _compact_pack_item(
+                item,
+                excerpt_chars=excerpt_chars,
+                reference_only=reference_only and item.get("requirement") == "required",
+            )
+            for item in _compact_group_items(groups.get(group) or [], group)
+        ]
         for group in canonical_groups
     }
     group_counts = {name: len(items) for name, items in sorted(groups.items()) if isinstance(items, list)}
@@ -371,6 +465,7 @@ def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180)
         "view": "compact",
         "authoritative": data.get("authoritative", False),
         "stage": data.get("stage", ""),
+        "render_projection": data.get("render_projection", "full"),
         "input_digest": data.get("input_digest", ""),
         "stop_reason": data.get("stop_reason", ""),
         "budget": data.get("budget", {}),
@@ -440,8 +535,21 @@ def _compact_pack_summary(groups: dict[str, list[dict[str, Any]]], metrics: dict
     }
 
 
-def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int) -> dict[str, Any]:
+def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int, reference_only: bool = False) -> dict[str, Any]:
     compact: dict[str, Any] = {}
+    if reference_only:
+        for key in ("document_role", "requirement"):
+            if item.get(key):
+                compact[key] = item[key]
+        ref = item.get("source_ref")
+        if isinstance(ref, dict):
+            compact["source_ref"] = {
+                key: ref[key]
+                for key in ("kind", "path", "section")
+                if ref.get(key)
+            }
+        compact["projection"] = "reference_only"
+        return compact
     for key in ("status", "record_id", "code", "document_role", "selection_reason", "requirement"):
         if item.get(key):
             compact[key] = item[key]
@@ -1745,6 +1853,8 @@ def _graph_capability_warnings(completeness: dict[str, Any], graph_meta: dict[st
 
 def _apply_render_budget(data: dict[str, Any], *, budget_tokens: int) -> str:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+    data["render_projection"] = "full"
+    data["stop_reason"] = "required_evidence_satisfied"
     for items in groups.values():
         if not isinstance(items, list):
             continue
@@ -1766,9 +1876,16 @@ def _apply_render_budget(data: dict[str, Any], *, budget_tokens: int) -> str:
                 break
             items.pop(optional_index)
             removed = True
+            data["stop_reason"] = "budget_reached"
             estimate = estimate_tokens(render_task_context_pack_markdown(data))
     if estimate <= budget_tokens:
         return "budget_reached" if removed else "required_evidence_satisfied"
+    data["render_projection"] = "required_reference_manifest"
+    data["stop_reason"] = "budget_reached"
+    estimate = estimate_tokens(render_task_context_pack_markdown(data))
+    if estimate <= budget_tokens:
+        return "budget_reached"
+    data["stop_reason"] = "required_evidence_exceeds_budget"
     return "required_evidence_exceeds_budget"
 
 

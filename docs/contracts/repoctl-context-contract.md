@@ -173,6 +173,7 @@ stage
 input_digest
 stop_reason
 budget
+render_projection
 must_read
 edit_candidates
 supporting_evidence
@@ -182,9 +183,11 @@ verification
 warnings
 ```
 
+`render_projection` is `full` when detailed Markdown fits the requested budget. If required sources dominate the budget, it becomes `required_reference_manifest`: full JSON keeps required item details and digests, while Markdown and compact JSON project required items to source identities so an agent can open them directly without paying for repeated excerpts.
+
 Use `--full --json` to include the raw nested Context bundle and full evidence details.
 
-When `--output` is supplied, the full requested artifact is written to that path. Markdown stdout reports only the artifact path instead of duplicating the complete pack; omit `--output` when the rendered Markdown itself is required on stdout.
+When `--output` is supplied, the requested path is invalidated before generation and the full artifact is written there only after successful construction. A failed run therefore cannot leave an older pack at that path looking current. Markdown stdout reports only the artifact path instead of duplicating the complete pack; omit `--output` when the rendered Markdown itself is required on stdout.
 
 `stage: bootstrap` is available before active Chosen files exist. It contains AGENTS, the task, explicit Context Docs, product identity/manifests, capability warnings, and canonical product authority. Product authority is `docs/PRD.md` when present; otherwise the task query selects one bounded relevant document under `docs/prd/**`, with `README.md` or `INDEX.md` as deterministic no-query fallbacks. Context Doc paths are resolved once at the input boundary as canonical workspace-relative paths; non-canonical aliases and workspace escapes are rejected, and generated Knowledge views are excluded in both workspace and selected-product document trees. Task Context Docs and the selected product authority are required evidence and never compete with lexical search results. The pack is not required before initial file inspection. `stage: scoped` is used after Discovery has an active Chosen set.
 
@@ -205,9 +208,9 @@ no_more_eligible_evidence
 required_evidence_exceeds_budget
 ```
 
-`final_render_estimated_tokens` must not exceed `maximum_estimated_tokens` unless the required evidence alone exceeds the budget, in which case the stop reason is `required_evidence_exceeds_budget`.
+`final_render_estimated_tokens` must not exceed `maximum_estimated_tokens` unless even the required-source reference manifest exceeds the budget. That irreducible case returns `ok: false`, problem code `context_pack_required_evidence_exceeds_budget`, and stop reason `required_evidence_exceeds_budget`; it never writes an oversized artifact as a successful pack.
 
-Each Task Pack group item records `requirement: required | optional` and preserves `document_role` when the source is a classified shared document. Required evidence is AGENTS, the selected canonical product-authority document, the task source ref, explicit Context Docs, and scoped Chosen refs. Query-relevant authority and procedure candidates receive bounded reservation before general source fill, and bundle candidates whose canonical path is already required or explicit are not projected again. Budget trimming may shorten excerpts and remove optional evidence, but it must never remove required source refs.
+Each Task Pack group item records `requirement: required | optional` and preserves `document_role` when the source is a classified shared document. Required evidence is AGENTS, the selected canonical product-authority document, the task source ref, explicit Context Docs, and scoped Chosen refs. Query-relevant authority and procedure candidates receive bounded reservation before general source fill, and bundle candidates whose canonical path is already required or explicit are not projected again. Budget trimming may shorten excerpts and remove optional evidence. If that is insufficient, rendering may collapse required items to a deduplicated path-and-section manifest, but it must never remove a required source ref. Full JSON retains the detailed required items; the compact reference projection retains source identity and the source-pack digest.
 
 ## Benchmark Labels
 

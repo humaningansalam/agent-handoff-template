@@ -122,9 +122,10 @@ Repository diagnostics separate stable targets from unbound candidates:
 - They must not infer task scope from natural language.
 - They may include `command` or `path` for the user's next explicit action.
 - Actions that require a user-owned decision may include a stable `kind`, a `source` path into the response data, complete `targets`, and enum `choices`. Commands use placeholders for those choices rather than guessing ownership or scope.
+- Every action with `targets` must point to an agent-visible structured source whose value exactly equals `targets`. Serialization rejects missing, truncated, or mismatched target sources.
 - They are allowed to be incomplete; `problems` remain authoritative.
 
-For example, a baseline conflict action uses `kind: "baseline_ownership_resolution"`, sources paths from `data.repo_changes.baseline_conflicts`, preserves every affected path in `targets`, and offers `task` or `preexisting`. A Chosen-scope action uses `kind: "task_scope_review"`, sources paths from `data.repo_changes.scope.unchosen_actual_paths`, preserves every affected path in `targets`, and offers `add_to_chosen`, `revert_change`, or `move_to_follow_up`.
+Compact domain summaries may remain bounded. When a decision action needs the complete set, `data.action_inputs` carries that untruncated set. A baseline conflict action uses `kind: "baseline_ownership_resolution"`, sources paths from `data.action_inputs.baseline_conflicts`, preserves every affected path in `targets`, and offers `task` or `preexisting`. A Chosen-scope action is emitted only for actual changes outside Chosen; it sources paths from `data.action_inputs.unchosen_actual_paths`, preserves every affected path in `targets`, and offers `add_to_chosen`, `revert_change`, or `move_to_follow_up`. `unused_chosen_paths` remains informational scope data and does not produce a scope-resolution action.
 
 ## MCP implication
 

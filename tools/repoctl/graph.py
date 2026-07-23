@@ -1908,7 +1908,7 @@ def query_graph(
             edges=edges,
             matches=base_result["matches"] if base_result else [],
             paths=paths,
-            query_status="found" if call_edges else "not_found",
+            query_status="found",
         ), []
 
     def impact_walk(

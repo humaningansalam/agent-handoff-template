@@ -624,6 +624,12 @@ def test_graph_query_symbol_callers_and_callees(tmp_path: Path, monkeypatch, cap
     callees_result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(path["edge"] == "CALLS" and path["from"]["qualified_name"] == "caller_00" and path["to"]["qualified_name"] == "validate_token" for path in callees_result["paths"])
 
+    assert main(["graph", "query", "--callers-of", "caller_00", "--in-file", "auth/flow.py", "--json"]) == 0
+    leaf_callers = json.loads(capsys.readouterr().out)["data"]
+    assert leaf_callers["query_status"] == "found"
+    assert leaf_callers["result"]["matches"][0]["qualified_name"] == "caller_00"
+    assert leaf_callers["result"]["paths"] == []
+
 
 def test_graph_query_symbol_ambiguity_fails_closed(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
