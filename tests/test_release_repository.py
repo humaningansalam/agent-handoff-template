@@ -85,6 +85,19 @@ def test_release_manifest_manages_every_public_example() -> None:
     assert example_files <= managed
 
 
+def test_release_manifest_manages_every_repoctl_test() -> None:
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+    manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
+    managed = set(manifest["replace_paths"])
+    repoctl_tests = {
+        path.relative_to(source_root).as_posix()
+        for path in (source_root / "tests/repoctl").rglob("*.py")
+        if path.is_file()
+    }
+
+    assert repoctl_tests <= managed
+
+
 def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))

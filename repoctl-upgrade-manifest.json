@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -105,6 +105,7 @@
     "tests/repoctl/graph/__init__.py",
     "tests/repoctl/graph/test_graph_build.py",
     "tests/repoctl/graph/test_graph_calls.py",
+    "tests/repoctl/graph/test_graph_dart_rpc.py",
     "tests/repoctl/graph/test_graph_import_resolution.py",
     "tests/repoctl/graph/test_graph_query.py",
     "tests/repoctl/graph/test_graph_receipts.py",
