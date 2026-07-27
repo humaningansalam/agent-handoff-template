@@ -40,6 +40,7 @@ Example:
 <!-- For repo work, record candidate-file discovery evidence before editing.
 Record the Candidate query, run compact `repoctl context query`, and inspect suggested files directly. Refine and repeat the query before choosing scope when evidence is insufficient.
 Prefer `./scripts/repoctl task discovery add T-... --query "..." --json`, then add `--reviewed` and `--chosen` after inspection.
+If a particular Context or Graph result was selected, the same command may attach its digest, authority class, and selected ref; this is optional.
 A scoped Context Pack is optional when a durable handoff or relationship summary is useful.
 Each required field may be one line or an indented sub-list; include at least one `repos/...` path under Chosen files.
 This section may be empty for root-only or already-obvious work. -->

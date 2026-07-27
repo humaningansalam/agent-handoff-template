@@ -21,9 +21,9 @@ from .context_retrieval import excerpt_for_query, retrieve_context_balanced
 from .context_sources import collect_context_sources, context_document_paths, context_graph_problems, context_overlay_chunks, current_source_chunks_for_paths
 from .document_roles import AUTHORITY_DOCUMENT_ROLES, DocumentRole, source_document_role
 from .evidence_store import evidence_chunks_for_paths, query_evidence_index
-from .graph import project_context_neighborhood
+from .graph import compact_relationship_candidates, project_context_neighborhood, relationship_candidates_for_paths
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
-from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph
+from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError
 from .knowledge_candidates import (
@@ -169,16 +169,22 @@ def build_context_bundle(
             if isinstance(problem, dict)
         ]
         problems.extend(context_graph_problems([*graph_problems, *receipt_graph_problems]))
-        changed_repo_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
+        stale_repo_paths = graph_stale_paths(freshness)
         stale_workspace_paths = {
-            *{f"{target.display_path.rstrip('/')}/{path}" for path in changed_repo_paths},
+            *{f"{target.display_path.rstrip('/')}/{path}" for path in stale_repo_paths},
             *{str(path) for path in freshness.get("changed_root_paths", []) if str(path)},
         }
-        classifications = freshness.get("changed_path_classifications") if isinstance(freshness.get("changed_path_classifications"), dict) else {}
+        classifications = (
+            freshness.get("stale_path_classifications")
+            if isinstance(freshness.get("stale_path_classifications"), dict)
+            else freshness.get("changed_path_classifications")
+            if isinstance(freshness.get("changed_path_classifications"), dict)
+            else {}
+        )
         overlay_chunks, overlay_problems = current_source_chunks_for_paths(
             root,
             target=target,
-            repo_paths={path for path in changed_repo_paths if str(classifications.get(path) or "") != "excluded"},
+            repo_paths={path for path in stale_repo_paths if str(classifications.get(path) or "") != "excluded"},
         )
         problems.extend(overlay_problems)
         static_overlay_chunks, static_overlay_problems = context_overlay_chunks(
@@ -298,8 +304,8 @@ def build_context_bundle(
     if query_mode in GRAPH_EXPANSION_MODES:
         graph_anchor_resolution = _resolve_graph_anchors(retrieved_candidates, target=target)
         completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
+        stale_paths = graph_stale_paths(freshness)
         if snapshot is not None and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
-            stale_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
             graph_anchors = [
                 candidate.anchor
                 for candidate in graph_anchor_resolution.anchors
@@ -318,6 +324,7 @@ def build_context_bundle(
                     snapshot,
                     anchors=graph_anchors,
                     mode=query_mode,
+                    excluded_candidate_paths=stale_paths,
                 )
             if graph_projection.get("ambiguous_anchors"):
                 graph_anchor_resolution = ContextAnchorResolution(
@@ -333,11 +340,6 @@ def build_context_bundle(
                     candidates=graph_anchor_resolution.candidates,
                 )
                 completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
-            graph_projection = _fresh_graph_projection(
-                graph_projection,
-                stale_paths=stale_paths,
-                task_history_stale=_task_history_stale(freshness),
-            )
             if index_available and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
                 projected_paths = {
                     f"{target.display_path.rstrip('/')}/{path}"
@@ -352,6 +354,47 @@ def build_context_bundle(
                     database_path=evidence_index_path,
                 )
                 problems.extend(chunk_problems)
+        if snapshot is not None:
+            candidate_anchors = (
+                graph_anchor_resolution.anchors
+                if graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED
+                else graph_anchor_resolution.candidates
+            )
+            product_prefix = f"{target.display_path.rstrip('/')}/"
+            exact_relationship_sources = [
+                candidate
+                for candidate in retrieved_candidates
+                if candidate.source_ref.section_kind == ContextSectionKind.PROVIDER_RELATIONSHIP
+                and ContextEvidenceKind.EXACT_RELATIONSHIP in set(candidate.evidence_kinds)
+                and candidate.source_ref.path.startswith(product_prefix)
+            ]
+            if exact_relationship_sources:
+                relationship_paths = list(
+                    dict.fromkeys(
+                        candidate.source_ref.path.removeprefix(product_prefix)
+                        for candidate in exact_relationship_sources
+                    )
+                )
+                relationship_source_fact_ids: dict[str, set[str]] = {}
+                for candidate in exact_relationship_sources:
+                    path = candidate.source_ref.path.removeprefix(product_prefix)
+                    relationship_source_fact_ids.setdefault(path, set())
+                    if candidate.source_ref.source_fact_id:
+                        relationship_source_fact_ids[path].add(candidate.source_ref.source_fact_id)
+            else:
+                relationship_paths = list(dict.fromkeys(candidate.anchor.path for candidate in candidate_anchors))
+                relationship_source_fact_ids = None
+            graph_projection["relationship_candidates"] = relationship_candidates_for_paths(
+                snapshot,
+                relationship_paths,
+                source_fact_ids=relationship_source_fact_ids,
+                excluded_paths=stale_paths,
+            )
+        graph_projection = _fresh_graph_projection(
+            graph_projection,
+            stale_paths=stale_paths,
+            task_history_stale=_task_history_stale(freshness),
+        )
         if graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
             graph_candidates, graph_warnings, graph_projection = _graph_context_candidates(
                 snapshot,
@@ -457,6 +500,11 @@ def build_context_bundle(
         selection=selection,
         knowledge_results=knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else [],
         groups=groups,
+        relationship_candidates=[
+            item
+            for item in graph_projection.get("relationship_candidates", [])
+            if isinstance(item, dict)
+        ] if isinstance(graph_projection.get("relationship_candidates"), list) else [],
     ).with_digest()
     meta = {"repository": target.to_dict(), "graph": graph_meta}
     return bundle, problems, meta
@@ -543,7 +591,7 @@ def _merge_retrieval_chunks(
     *,
     replaced_paths: set[str],
 ) -> list[Any]:
-    merged: dict[tuple[str, str, str, str, int, int], Any] = {}
+    merged: dict[tuple[str, str, str, str, int, int, str], Any] = {}
     for chunk in indexed_chunks:
         if chunk.source_ref.path not in replaced_paths:
             merged[chunk.source_ref.key()] = chunk
@@ -566,11 +614,17 @@ def _fresh_graph_projection(
         and str(relation.get("from_path") or "") not in stale_paths
         and str(relation.get("to_path") or "") not in stale_paths
     ]
+    fresh_relationship_candidates = (
+        projection.get("relationship_candidates")
+        if isinstance(projection.get("relationship_candidates"), list)
+        else []
+    )
     return {
         **projection,
         "seed_paths": [path for path in projection.get("seed_paths", []) if str(path) not in stale_paths],
         "related_paths": [path for path in projection.get("related_paths", []) if str(path) not in stale_paths],
         "relations": fresh_relations,
+        "relationship_candidates": fresh_relationship_candidates,
         "history": [] if task_history_stale else projection.get("history", []),
     }
 
@@ -658,6 +712,25 @@ def render_context_markdown(bundle: ContextBundle) -> str:
         "supporting_evidence": "Supporting Evidence",
         "warnings_and_completeness": "Warnings And Completeness",
     }
+    lines.extend(["## Relationship Candidates", ""])
+    if not bundle.relationship_candidates:
+        lines.extend(["- No non-authoritative relationship candidates selected.", ""])
+    else:
+        for candidate in bundle.relationship_candidates[:5]:
+            source = candidate.get("source") if isinstance(candidate.get("source"), dict) else {}
+            runtime_identity = source.get("runtime_identity") if isinstance(source.get("runtime_identity"), dict) else {}
+            resolution = candidate.get("resolution") if isinstance(candidate.get("resolution"), dict) else {}
+            target_labels = [
+                f"{str(target.get('path') or '')}:{int((target.get('location') or {}).get('line') or 0)}"
+                for target in candidate.get("targets", [])
+                if isinstance(target, dict) and isinstance(target.get("location"), dict)
+            ]
+            lines.append(
+                f"- `{source.get('path', '')}` `{runtime_identity.get('value', '')}` -> "
+                f"{', '.join(f'`{label}`' for label in target_labels)} "
+                f"(candidate: `{resolution.get('reason_code', '')}`)"
+            )
+        lines.append("")
     for group in CONTEXT_GROUPS:
         items = data.get("groups", {}).get(group, [])
         lines.extend([f"## {titles[group]}", ""])
@@ -692,6 +765,7 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         group: [_compact_group_item(item, excerpt_chars=excerpt_chars) for item in items]
         for group, items in displayed_items.items()
     }
+    relationship_candidate_projection = compact_relationship_candidates(bundle.relationship_candidates)
     return {
         "schema": bundle.schema,
         "schema_version": bundle.schema_version,
@@ -701,6 +775,9 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "query": bundle.query,
         "completeness": _compact_completeness(bundle.completeness),
         "groups": groups,
+        "relationship_candidates": relationship_candidate_projection["items"],
+        "relationship_candidate_count": relationship_candidate_projection["total_count"],
+        "relationship_candidates_truncated": relationship_candidate_projection["truncated"],
         "continuations": continuations,
         "bundle_digest": bundle.bundle_digest,
     }
@@ -1359,6 +1436,7 @@ def _graph_context_candidates(
                     ContextEvidenceKind.EXACT_PATH,
                     ContextEvidenceKind.EXACT_FILENAME,
                     ContextEvidenceKind.EXACT_SYMBOL,
+                    ContextEvidenceKind.EXACT_RELATIONSHIP,
                     ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH,
                 }
             )
@@ -1431,10 +1509,12 @@ _EXACT_GRAPH_ANCHOR_KINDS = {
     ContextEvidenceKind.EXACT_PATH,
     ContextEvidenceKind.EXACT_FILENAME,
     ContextEvidenceKind.EXACT_SYMBOL,
+    ContextEvidenceKind.EXACT_RELATIONSHIP,
 }
 _EXACT_FILE_ANCHOR_KINDS = {
     ContextEvidenceKind.EXACT_PATH,
     ContextEvidenceKind.EXACT_FILENAME,
+    ContextEvidenceKind.EXACT_RELATIONSHIP,
 }
 
 
@@ -1667,7 +1747,7 @@ def _relation_reason(relation: dict[str, Any]) -> str:
 
 
 def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
-    best: dict[tuple[str, str, str, str, int, int], ContextCandidate] = {}
+    best: dict[tuple[str, str, str, str, int, int, str], ContextCandidate] = {}
     for candidate in candidates:
         key = candidate.source_ref.key()
         previous = best.get(key)

@@ -330,7 +330,7 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert bundle["schema"] == "repoctl.context.bundle"
     assert bundle["authoritative"] is False
     assert bundle["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
-    assert bundle["schema_version"] == 9
+    assert bundle["schema_version"] == 11
     assert bundle["view"] == "compact"
     grouped_items = [item for items in bundle["groups"].values() for item in items if isinstance(item.get("source_ref"), dict)]
     refs = [item["source_ref"] for item in grouped_items]

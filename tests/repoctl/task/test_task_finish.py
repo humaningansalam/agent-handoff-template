@@ -40,6 +40,8 @@ def test_task_finish_uses_task_start_dirty_baseline_for_root_only_task(tmp_path:
     assert payload["data"]["meta_gate"]["status"] == "skipped"
     assert payload["data"]["meta_gate"]["reason"] == "no_task_repo_changes"
     assert payload["data"]["meta_gate"]["preexisting_dirty_files"] == 1
+    receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    assert receipt["repo_id"] == ""
     archived = (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "non-product update verified" in archived
 
@@ -120,7 +122,12 @@ def test_task_finish_still_blocks_repo_changes_after_dirty_baseline(tmp_path: Pa
 
 def test_task_finish_treats_modified_dirty_baseline_file_as_task_change(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "docs"'))
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     repo = tmp_path / "repos"
     verification = write_verification(tmp_path, "verified\n")
     init_product_repo(repo)
@@ -130,6 +137,13 @@ def test_task_finish_treats_modified_dirty_baseline_file_as_task_change(tmp_path
 
     assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
     capsys.readouterr()
+    record_discovery(
+        tmp_path,
+        "T-20260609184046Z",
+        query="update preexisting file",
+        reviewed="repos/preexisting.txt",
+        chosen="repos/preexisting.txt",
+    )
     (repo / "preexisting.txt").write_text("dirty before task start\nchanged during task\n", encoding="utf-8")
 
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
@@ -137,6 +151,102 @@ def test_task_finish_treats_modified_dirty_baseline_file_as_task_change(tmp_path
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "baseline_conflict"
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
+
+
+def test_repo_task_detects_task_start_dirty_paths_that_disappear_from_git_status(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace("- pending", "- Command: pytest\n- Result: pass")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    repo = tmp_path / "repos"
+    init_product_repo(repo)
+    (repo / "tracked.txt").write_text("committed\n", encoding="utf-8")
+    commit_all(repo)
+    (repo / "tracked.txt").write_text("dirty before task start\n", encoding="utf-8")
+    (repo / "untracked.txt").write_text("dirty before task start\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    subprocess.run(["git", "restore", "tracked.txt"], cwd=repo, check=True)
+    (repo / "untracked.txt").unlink()
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["problems"][0]["code"] == "baseline_conflict"
+    assert doctor["data"]["action_inputs"]["baseline_conflicts"] == ["tracked.txt", "untracked.txt"]
+
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
+    finish = json.loads(capsys.readouterr().out)
+    assert finish["problems"][0]["code"] == "baseline_conflict"
+
+    assert main(
+        [
+            "task",
+            "baseline",
+            "resolve",
+            "T-20260609184046Z",
+            "--resolution",
+            "tracked.txt=task",
+            "--resolution",
+            "untracked.txt=task",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 0
+
+
+def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_lost(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "ops"')
+        .replace("- pending", "- Command: pytest\n- Result: pass")
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    repo = tmp_path / "repos"
+    init_product_repo(repo)
+    (repo / "tracked.txt").write_text("committed\n", encoding="utf-8")
+    commit_all(repo)
+    (repo / "tracked.txt").write_text("dirty before task start\n", encoding="utf-8")
+    verification = write_verification(tmp_path, "explicit cancel evidence\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    subprocess.run(["git", "restore", "tracked.txt"], cwd=repo, check=True)
+
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["problems"][0]["code"] == "workspace_baseline_conflict"
+    assert doctor["data"]["action_inputs"]["baseline_conflicts"] == ["repos/tracked.txt"]
+    assert not any("task baseline resolve" in action.get("command", "") for action in doctor["next_actions"])
+
+    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
+    finish = json.loads(capsys.readouterr().out)
+    assert finish["problems"][0]["code"] == "workspace_baseline_conflict"
+    assert not any("task baseline resolve" in action.get("command", "") for action in finish["next_actions"])
+
+    assert main(["task", "cancel", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+    canceled = json.loads(capsys.readouterr().out)
+    assert canceled["problems"][0]["code"] == "workspace_baseline_conflict"
+
+    assert main(
+        [
+            "task",
+            "cancel",
+            "T-20260609184046Z",
+            "--verification-file",
+            str(verification),
+            "--allow-dirty-cancel",
+            "--json",
+        ]
+    ) == 0
 
 
 def test_task_doctor_and_finish_share_baseline_conflict_preflight(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -289,13 +399,28 @@ def test_task_finish_strips_verification_artifact_title(tmp_path: Path, monkeypa
 
 def test_task_finish_blocks_on_changed_file_meta_errors(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+    )
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     verification = write_verification(tmp_path)
     repo = tmp_path / "repos"
     init_committed_product_repo(repo, coverage=["src/**"])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(
+        tmp_path,
+        "T-20260609184046Z",
+        query="add service",
+        reviewed="repos/src/service.py",
+        chosen="repos/src/service.py",
+    )
     (repo / "src").mkdir()
     (repo / "src/service.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "finish", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
 

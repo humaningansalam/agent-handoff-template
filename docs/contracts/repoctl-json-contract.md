@@ -121,11 +121,13 @@ Repository diagnostics separate stable targets from unbound candidates:
 - They never perform recovery automatically.
 - They must not infer task scope from natural language.
 - They may include `command` or `path` for the user's next explicit action.
-- Actions that require a user-owned decision may include a stable `kind`, a `source` path into the response data, complete `targets`, and enum `choices`. Commands use placeholders for those choices rather than guessing ownership or scope.
-- Every action with `targets` must point to an agent-visible structured source whose value exactly equals `targets`. Serialization rejects missing, truncated, or mismatched target sources.
+- Actions that require a user-owned decision may include a stable `kind`, a `source` evidence path, a `target_ref` path to one complete response-owned string list, and enum `choices`. Commands use placeholders for those choices rather than guessing ownership or scope.
+- Every `target_ref` must resolve to a non-empty, untruncated string list in the same envelope. Actions do not duplicate that list under `targets` or expand every path into the command string.
 - They are allowed to be incomplete; `problems` remain authoritative.
 
-Compact domain summaries may remain bounded. When a decision action needs the complete set, `data.action_inputs` carries that untruncated set. A baseline conflict action uses `kind: "baseline_ownership_resolution"`, sources paths from `data.action_inputs.baseline_conflicts`, preserves every affected path in `targets`, and offers `task` or `preexisting`. A Chosen-scope action is emitted only for actual changes outside Chosen; it sources paths from `data.action_inputs.unchosen_actual_paths`, preserves every affected path in `targets`, and offers `add_to_chosen`, `revert_change`, or `move_to_follow_up`. `unused_chosen_paths` remains informational scope data and does not produce a scope-resolution action.
+Compact domain summaries may remain bounded. When a decision action needs the complete set, `data.action_inputs` is the single untruncated owner. A baseline conflict action uses `kind: "baseline_ownership_resolution"`, `target_ref: "data.action_inputs.baseline_conflicts"`, and choices `task | preexisting`. A Chosen-scope action is emitted only for actual changes outside Chosen and uses `target_ref: "data.action_inputs.unchosen_actual_paths"` with choices `add_to_chosen | revert_change | move_to_follow_up`. `unused_chosen_paths` remains informational scope data and does not produce a scope-resolution action.
+
+Compact task change summaries use typed temporal state. `repo_head_state` is `commit | unborn | unavailable | not_applicable`; `repo_head` exists only for a commit. `observed_since_baseline` is `observed | baseline_missing | unavailable | not_applicable`. These fields replace ambiguous public booleans for baseline availability and unborn repositories; internal finish evidence may still store exact baseline facts in completion receipts.
 
 ## MCP implication
 

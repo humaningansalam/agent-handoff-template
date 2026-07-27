@@ -19,9 +19,9 @@ from .context import build_context_bundle, compact_context_bundle, render_contex
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
-from .graph import query_graph
+from .graph import compact_relationship_candidates, query_graph
 from .graph_model import digest_data
-from .graph_store import compact_graph_freshness, graph_materialization_freshness, load_materialized_graph, materialize_graph
+from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph, materialize_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import KnowledgeArtifactErrorCode, approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, prepare_knowledge_candidate_from_completion, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
@@ -127,21 +127,18 @@ def _validate_targeted_next_actions(envelope: dict[str, Any]) -> None:
     if not isinstance(actions, list):
         raise RepoctlError("JSON envelope next_actions must be a list", code="invalid_json_envelope")
     for action in actions:
-        if not isinstance(action, dict) or "targets" not in action:
+        if not isinstance(action, dict) or "target_ref" not in action:
             continue
-        targets = action.get("targets")
-        if not isinstance(targets, list) or not targets or any(not isinstance(target, str) or not target for target in targets):
-            raise RepoctlError("targeted next_action must contain non-empty string targets", code="invalid_json_envelope")
-        source = str(action.get("source") or "")
+        target_ref = str(action.get("target_ref") or "")
         source_value: Any = envelope
-        for segment in source.split(".") if source else []:
+        for segment in target_ref.split(".") if target_ref else []:
             if not isinstance(source_value, dict) or segment not in source_value:
                 source_value = None
                 break
             source_value = source_value[segment]
-        if source_value != targets:
+        if not isinstance(source_value, list) or not source_value or any(not isinstance(target, str) or not target for target in source_value):
             raise RepoctlError(
-                "targeted next_action source must resolve to exactly its targets",
+                "targeted next_action target_ref must resolve to a non-empty string list",
                 code="invalid_json_envelope",
             )
 
@@ -264,7 +261,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         kind: NextActionKind | None = None,
         source: str = "",
         choices: list[StrEnum] | None = None,
-        targets: list[str] | None = None,
+        target_ref: str = "",
     ) -> None:
         action: dict[str, Any] = {"label": label}
         if command:
@@ -277,8 +274,8 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             action["source"] = source
         if choices:
             action["choices"] = list(choices)
-        if targets:
-            action["targets"] = list(targets)
+        if target_ref:
+            action["target_ref"] = target_ref
         key = json.dumps(action, ensure_ascii=False, sort_keys=True)
         if key not in seen:
             seen.add(key)
@@ -347,7 +344,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                         TaskScopeResolution.REVERT_CHANGE,
                         TaskScopeResolution.MOVE_TO_FOLLOW_UP,
                     ],
-                    targets=unchosen,
+                    target_ref="data.action_inputs.unchosen_actual_paths",
                 )
             add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
@@ -358,20 +355,27 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "baseline_conflict":
             action_inputs = _mapping_at(data, "action_inputs")
             conflicts = _string_list(action_inputs.get("baseline_conflicts"))
-            resolution_args = " ".join(
-                f"--resolution {shlex.quote(f'{conflict}=<task|preexisting>')}"
-                for conflict in conflicts
-            ) or "--resolution '<path>=<task|preexisting>'"
             if conflicts:
                 add(
                     "Preview baseline ownership resolutions",
-                    command=f"./scripts/repoctl task baseline resolve {task_id} {resolution_args} --preview --json",
+                    command=f"./scripts/repoctl task baseline resolve {task_id} --resolution '<path>=<task|preexisting>' --preview --json",
                     kind=NextActionKind.BASELINE_OWNERSHIP_RESOLUTION,
                     source="data.action_inputs.baseline_conflicts",
                     choices=[BaselineOwnership.TASK, BaselineOwnership.PREEXISTING],
-                    targets=conflicts,
+                    target_ref="data.action_inputs.baseline_conflicts",
                 )
             add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
+        elif code == "workspace_baseline_conflict":
+            action_inputs = _mapping_at(data, "action_inputs")
+            conflicts = _string_list(action_inputs.get("baseline_conflicts"))
+            if conflicts:
+                add(
+                    "Restore task-start product state or move ownership to a repo-scoped child task",
+                    kind=NextActionKind.TASK_SCOPE_REVIEW,
+                    source="data.action_inputs.baseline_conflicts",
+                    target_ref="data.action_inputs.baseline_conflicts",
+                )
+            add("Inspect workspace task repository state", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code == "repo_history_rewritten":
             add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
             add("Create a new task with a fresh baseline", command="./scripts/repoctl task create --slug <slug> --area repo --repo-id main <title> --start --json")
@@ -441,6 +445,11 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add_context_graph_recovery(
                 NextActionKind.GRAPH_REFRESH,
                 source="problems[].code",
+            )
+        elif code == "graph_snapshot_stale":
+            add_context_graph_recovery(
+                NextActionKind.GRAPH_REFRESH,
+                source="warnings[].code",
             )
         elif code in {
             "graph_materialization_incomplete",
@@ -1721,10 +1730,15 @@ def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[st
     conflicts = _string_list(delta.get("baseline_conflicts"))
     if not conflicts:
         return None
+    workspace_task = not _repo_scoped_frontmatter(task)
     return {
         "severity": "warning",
-        "code": "baseline_conflict",
-        "message": "task changes overlap paths that were dirty at task start; resolve ownership before finish",
+        "code": "workspace_baseline_conflict" if workspace_task else "baseline_conflict",
+        "message": (
+            "workspace task changed product paths that were dirty at task start; restore them or move ownership to a repo-scoped child task"
+            if workspace_task
+            else "task-start dirty paths no longer match their baseline; resolve ownership before finish"
+        ),
         "path": conflicts[0],
     }
 
@@ -1732,6 +1746,10 @@ def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[st
 def cmd_task_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task = resolve_task(root, args.task_id)
+    try:
+        target = _repo_target_for_task_command(root, task)
+    except RepoctlError:
+        target = None
     delta = repo_changes_since_task_start(root, task.id) if task.status in {"todo", "doing", "blocked"} else None
     warnings: list[dict[str, Any]] = []
     if delta:
@@ -1741,7 +1759,15 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         scope_warning = _task_scope_drift_warning(root, task, delta)
         if scope_warning is not None:
             warnings.append(scope_warning)
-    repo_changes = _repo_change_summary(delta, compact=bool(args.summary or args.section)) if delta else None
+    repo_changes = (
+        _repo_change_summary(
+            delta,
+            compact=bool(args.summary or args.section),
+            observation=_task_repo_observation(root, task, target, delta),
+        )
+        if delta
+        else None
+    )
     summary = {"task": task.to_list_dict(), "path": task.rel_path, "repo_changes": repo_changes}
     if delta:
         action_inputs = _task_action_inputs(delta)
@@ -1812,6 +1838,10 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
             replace_chosen=args.replace_chosen or [],
             reason=args.reason or "",
             note=args.note or "",
+            result_producer=args.result_producer or "",
+            result_id=args.result_id or "",
+            result_authority=args.result_authority or "",
+            result_refs=args.result_ref or [],
         )
         atomic_write(result["task"].path, result["text"])
     next_actions: list[dict[str, str]] = []
@@ -1969,7 +1999,10 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "finish_ready": finish_ready,
         "blocked_by": blockers,
         "advisory": advisory,
-        "repo_changes": _repo_change_summary(delta),
+        "repo_changes": _repo_change_summary(
+            delta,
+            observation=_task_repo_observation(root, task, target, delta),
+        ),
         "repository": repository,
         "evidence_mode": "committed_range" if use_committed_diff else "working_tree_diff",
         "verification": {
@@ -2027,7 +2060,42 @@ def _task_action_inputs(delta: dict[str, Any]) -> dict[str, list[str]]:
     return inputs
 
 
-def _repo_change_summary(delta: dict[str, Any], *, compact: bool = True) -> dict[str, Any]:
+def _task_repo_observation(
+    root: Path,
+    task: Any,
+    target: RepoTarget | None,
+    delta: dict[str, Any],
+) -> dict[str, str]:
+    if target is None:
+        return {
+            "repo_head_state": "not_applicable",
+            "observed_since_baseline": "observed" if bool(delta.get("baseline_available")) else "not_applicable",
+        }
+    current_head, head_state = repo_git_head(root, target)
+    if not head_state.available:
+        return {
+            "repo_head_state": "unavailable",
+            "observed_since_baseline": "unavailable",
+            "repo_git_reason": head_state.reason,
+        }
+    observation = {
+        "repo_head_state": "unborn" if current_head == "<unborn>" else "commit",
+        "observed_since_baseline": "observed" if bool(delta.get("baseline_available")) else "baseline_missing",
+    }
+    if current_head != "<unborn>":
+        observation["repo_head"] = current_head
+    start_head = task_repo_head_at_start(root, task.id)
+    if start_head and start_head != "<unborn>":
+        observation["baseline_head"] = start_head
+    return observation
+
+
+def _repo_change_summary(
+    delta: dict[str, Any],
+    *,
+    compact: bool = True,
+    observation: dict[str, str] | None = None,
+) -> dict[str, Any]:
     task_new_files = [entry[1] for entry in delta.get("changes", [])]
     visible_task_new, _task_new_count, task_new_truncated = _project_string_collection(task_new_files, compact=compact)
     visible_conflicts, conflict_count, conflicts_truncated = _project_string_collection(delta.get("baseline_conflicts"), compact=compact)
@@ -2036,12 +2104,10 @@ def _repo_change_summary(delta: dict[str, Any], *, compact: bool = True) -> dict
         "task_new_files": visible_task_new,
         "task_new_files_truncated": task_new_truncated,
         "preexisting_dirty": delta.get("preexisting_count", 0),
-        "baseline_available": bool(delta.get("baseline_available")),
         "baseline_conflicts": visible_conflicts,
         "baseline_conflict_count": conflict_count,
         "baseline_conflicts_truncated": conflicts_truncated,
-        "repo_git_available": bool(delta.get("repo_git") and delta["repo_git"].available),
-        "repo_git_reason": str(delta.get("repo_git").reason) if delta.get("repo_git") and not delta["repo_git"].available else "",
+        **(observation or {}),
     }
     if isinstance(delta.get("scope"), dict):
         summary["scope"] = _scope_summary(delta["scope"], compact=compact)
@@ -2130,6 +2196,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             raise
     status = "doing" if start_result else task.status
     next_actions: list[dict[str, str]] = []
+    target: RepoTarget | None = None
     if _repo_scoped_frontmatter(task):
         repo_path = "repos"
         repo_id = str(task.frontmatter.get("repo_id") or "main")
@@ -2141,6 +2208,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         except RepoctlError:
             pass
         next_actions = _discovery_guidance_actions(task.id, repo_id=repo_id, repo_path=repo_path)
+    start_delta = repo_changes_since_task_start(root, task.id) if start_result else None
     payload = {
         "ok": True,
         "command": "task.create",
@@ -2151,7 +2219,14 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             "backlog_id": args.backlog_id or "",
             "backlog_removed": bool(args.backlog_id),
             "started": bool(start_result),
-            "repo_changes": _repo_change_summary(repo_changes_since_task_start(root, task.id)) if start_result else None,
+            "repo_changes": (
+                _repo_change_summary(
+                    start_delta,
+                    observation=_task_repo_observation(root, task, target, start_delta),
+                )
+                if start_delta is not None
+                else None
+            ),
         },
         "problems": [],
         "warnings": [problem.to_dict() for problem in (start_result or {}).get("warnings", [])],
@@ -2250,6 +2325,10 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         result = start_task(root, task_id, force_dirty=args.force_dirty)
         atomic_write(result["task"].path, result["text"])
     delta = repo_changes_since_task_start(root, task_id)
+    try:
+        target = _repo_target_for_task_command(root, result["task"])
+    except RepoctlError:
+        target = None
     visible_dirty, dirty_count, dirty_truncated = _project_string_collection(result["dirty"], compact=True)
     data = {
         "task_id": task_id,
@@ -2257,7 +2336,10 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         "dirty": visible_dirty,
         "dirty_count": dirty_count,
         "dirty_truncated": dirty_truncated,
-        "repo_changes": _repo_change_summary(delta),
+        "repo_changes": _repo_change_summary(
+            delta,
+            observation=_task_repo_observation(root, result["task"], target, delta),
+        ),
     }
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(result["task"]):
@@ -2331,10 +2413,7 @@ def _repo_target_for_task_command(root: Path, task: Any) -> RepoTarget | None:
         return require_repo_target(root, repo_id=repo_id)
     if area in REPO_REQUIRED_AREAS:
         return default_repo_target(root)
-    layout = repo_layout(root)
-    if not layout.registry_ready:
-        return None
-    return layout.targets[0] if len(layout.targets) == 1 else None
+    return None
 
 
 def _task_finish_repo_delta(
@@ -2413,6 +2492,14 @@ def _finish_meta_gate(
         raise RepoctlError("committed diff finish requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
     if target is None:
         delta = repo_changes_since_task_start(root, task_id)
+        if delta.get("baseline_conflicts"):
+            conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
+            suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
+            raise RepoctlError(
+                f"workspace task changed product paths that were dirty at task start: {conflicts}{suffix}; restore the task-start state or move ownership to a repo-scoped child task",
+                code="workspace_baseline_conflict",
+                path=str(delta["baseline_conflicts"][0]),
+            )
         if delta.get("changes"):
             first_changed = str(delta["changes"][0][1])
             changed = ", ".join(str(entry[1]) for entry in delta["changes"][:8])
@@ -2431,13 +2518,21 @@ def _finish_meta_gate(
                 code=first.get("code") or "repository_topology_invalid",
                 path=first.get("path") or "",
             )
-        reason = "no_repo_directory" if not (root / "repos").exists() else "root_workspace_no_repo_target"
-        return {"status": "skipped", "reason": reason}, {
-            "changes": [],
-            "baseline_available": False,
-            "preexisting_count": 0,
-            "baseline_conflicts": [],
-        }
+        if not (root / "repos").exists():
+            reason = "no_repo_directory"
+        elif delta.get("current_count"):
+            reason = "no_task_repo_changes"
+        else:
+            reason = "no_repo_changes"
+        meta_gate = {"status": "skipped", "reason": reason}
+        if reason == "no_task_repo_changes":
+            meta_gate.update(
+                {
+                    "baseline_available": bool(delta.get("baseline_available")),
+                    "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
+                }
+            )
+        return meta_gate, delta
     delta = prepared_delta if prepared_delta is not None else _task_finish_repo_delta(
         root,
         task,
@@ -2448,7 +2543,7 @@ def _finish_meta_gate(
         conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
         suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
         raise RepoctlError(
-            f"task changes overlap paths that were dirty at task start: {conflicts}{suffix}; resolve each path with repoctl task baseline resolve",
+            f"task-start dirty paths no longer match their baseline: {conflicts}{suffix}; resolve each path with repoctl task baseline resolve",
             code="baseline_conflict",
             path=str(delta["baseline_conflicts"][0]),
         )
@@ -2561,6 +2656,7 @@ def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[st
         "task_new_files_truncated": task_new_truncated,
         "current_dirty_files": int(delta.get("current_count") or 0),
         "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
+        "child_attributed_changes": int(delta.get("child_attributed_count") or 0),
         "baseline_available": bool(delta.get("baseline_available")),
         "baseline_conflicts": visible_conflicts,
         "baseline_conflict_count": conflict_count,
@@ -2579,7 +2675,21 @@ def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[st
 
 
 def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) -> dict[str, Any]:
+    task = resolve_task(root, task_id)
     delta = repo_changes_since_task_start(root, task_id)
+    if delta.get("baseline_conflicts") and not allow_dirty_cancel:
+        conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:5])
+        suffix = " ..." if len(delta["baseline_conflicts"]) > 5 else ""
+        workspace_task = not _repo_scoped_frontmatter(task)
+        raise RepoctlError(
+            (
+                f"workspace task changed product paths that were dirty at task start: {conflicts}{suffix}; restore them, move ownership to a repo-scoped child task, or cancel with explicit dirty-state evidence"
+                if workspace_task
+                else f"task-start dirty paths no longer match their baseline: {conflicts}{suffix}; resolve ownership or cancel with explicit dirty-state evidence"
+            ),
+            code="workspace_baseline_conflict" if workspace_task else "baseline_conflict",
+            path=str(delta["baseline_conflicts"][0]),
+        )
     if delta["changes"] and not allow_dirty_cancel:
         changed = ", ".join(entry[1] for entry in delta["changes"][:5])
         suffix = " ..." if len(delta["changes"]) > 5 else ""
@@ -3242,6 +3352,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         return 1 if _has_errors(build_problems) else 0
 
     freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
+    stale_paths = graph_stale_paths(freshness)
 
     result, query_problems = query_graph(
         snapshot,
@@ -3257,6 +3368,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         artifact=args.artifact or "",
         in_file=args.in_file or "",
         depth=args.depth,
+        stale_paths=stale_paths,
     )
     query_status = str((result or {}).get("query_status") or "unavailable")
     outcome_ok = query_status in {"found", "not_found"}
@@ -3272,6 +3384,8 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         stale_warning["changed_path_count"] = int(freshness.get("changed_path_count") or 0)
         stale_warning["changed_root_path_count"] = int(freshness.get("changed_root_path_count") or 0)
         stale_warning["changed_paths"] = freshness.get("changed_paths", [])
+        stale_warning["stale_path_count"] = int(freshness.get("stale_path_count") or 0)
+        stale_warning["stale_paths"] = freshness.get("stale_paths", [])
         stale_warning["changed_root_paths"] = freshness.get("changed_root_paths", [])
     payload = {
         "ok": result is not None and outcome_ok and not _has_errors(query_problems),
@@ -3317,6 +3431,16 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
                 source_label = source.get("qualified_name") or source.get("path") or source.get("id")
                 target_label = target_node.get("qualified_name") or target_node.get("path") or target_node.get("id")
                 print(f"path {source_label} --{path.get('edge')}--> {target_label} ({path.get('reason')})")
+            for candidate in result.get("relationship_candidates", [])[:5]:
+                source = candidate.get("source") if isinstance(candidate, dict) and isinstance(candidate.get("source"), dict) else {}
+                runtime_identity = source.get("runtime_identity") if isinstance(source.get("runtime_identity"), dict) else {}
+                resolution = candidate.get("resolution") if isinstance(candidate, dict) and isinstance(candidate.get("resolution"), dict) else {}
+                targets = candidate.get("targets") if isinstance(candidate, dict) and isinstance(candidate.get("targets"), list) else []
+                target_labels = [str(target.get("path") or "") for target in targets if isinstance(target, dict) and str(target.get("path") or "")]
+                print(
+                    f"candidate {source.get('path', '')} rpc={runtime_identity.get('value', '')} "
+                    f"targets={','.join(target_labels)} reason={resolution.get('reason_code', '')}"
+                )
         for problem in query_problems:
             print(problem.message)
     return 1 if _has_errors(query_problems) or query_status in {"unsupported", "unavailable"} else 0
@@ -3329,6 +3453,7 @@ def _compact_graph_query_result(result: dict[str, Any], *, freshness: dict[str, 
     paths = result.get("paths") if isinstance(result.get("paths"), list) else []
     candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
     continuations = result.get("continuations") if isinstance(result.get("continuations"), list) else []
+    relationship_candidate_projection = compact_relationship_candidates(result.get("relationship_candidates"))
     node_summaries = {
         str(node.get("id") or ""): _compact_graph_node(node, include_id=False)
         for node in nodes
@@ -3390,8 +3515,12 @@ def _compact_graph_query_result(result: dict[str, Any], *, freshness: dict[str, 
     compact = {
         "query": result.get("query", {}),
         "query_status": result.get("query_status", "unavailable"),
+        "result_digest": result.get("result_digest", ""),
         "matches": displayed_matches[:3],
         "candidates": [candidate for candidate in candidates[:3] if isinstance(candidate, dict)],
+        "relationship_candidates": relationship_candidate_projection["items"],
+        "relationship_candidate_count": relationship_candidate_projection["total_count"],
+        "relationship_candidates_truncated": relationship_candidate_projection["truncated"],
         "paths": displayed_paths,
         "continuations": displayed_continuations,
     }
@@ -3811,14 +3940,14 @@ def _compact_relation_evidence(
     }
     capabilities = completeness.get("capabilities") if isinstance(completeness.get("capabilities"), dict) else {}
     confidence = str(facts.get("confidence") or "unknown")
-    changed_paths = {str(path) for path in freshness.get("changed_paths", []) if str(path)}
+    stale_paths = graph_stale_paths(freshness)
     changed_root_paths = {str(path) for path in freshness.get("changed_root_paths", []) if str(path)}
     endpoint_paths = {
         str(endpoint.get("path") or "")
         for endpoint in endpoints
         if isinstance(endpoint, dict) and str(endpoint.get("path") or "")
     }
-    freshness_status = "stale" if endpoint_paths & changed_paths else "current"
+    freshness_status = "stale" if endpoint_paths & stale_paths else "current"
     root_evidence_edges = {
         "HAS_TOPIC",
         "TASK_RECORDED_CHANGE",
@@ -5554,6 +5683,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add.add_argument("--replace-chosen", action="append", default=[], help="replace the active chosen-file set; repeat for multiple files")
     task_discovery_add.add_argument("--reason", help="required rationale when replacing the active chosen-file set")
     task_discovery_add.add_argument("--note", help="short rationale for the chosen scope")
+    task_discovery_add.add_argument("--result-producer", choices=["context", "graph"], help="producer of an explicitly selected query result")
+    task_discovery_add.add_argument("--result-id", help="bundle_digest or graph result_digest for the selected result")
+    task_discovery_add.add_argument(
+        "--result-authority",
+        choices=["source", "graph", "document", "task_history", "knowledge"],
+        help="authority class of the selected result reference",
+    )
+    task_discovery_add.add_argument("--result-ref", action="append", default=[], help="selected structured result reference; repeat for multiple refs sharing one authority")
     task_discovery_add.add_argument("--full", action="store_true", help="include the full cumulative Discovery state")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)

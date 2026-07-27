@@ -26,7 +26,6 @@
 {"id":"Q-026","category":"structured-workflow","repo_id":"main","question":"What script does .github/workflows/release.yml run?"}
 {"id":"Q-027","category":"structured-shell","repo_id":"main","question":"What file does scripts/start.sh source?"}
 {"id":"Q-028","category":"structured-sql-seed","repo_id":"main","question":"Which migration defines the jobs table seeded by supabase/seed.sql?"}
-{"id":"Q-029","category":"structured-sql-rpc-dart","repo_id":"main","question":"Which SQL migration defines the RPC called from app/lib/jobs.dart?"}
 {"id":"Q-030","category":"structured-sql-rpc-typescript","repo_id":"main","question":"Which SQL migration defines the RPC called from frontend/src/jobs.ts?"}
 {"id":"Q-031","category":"structured-docker","repo_id":"main","question":"What source file does Dockerfile copy to start the runtime?"}
 {"id":"Q-032","category":"structured-compose-env","repo_id":"main","question":"Which runtime env file is loaded by compose.yml?"}

@@ -9,7 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from .code_index import CodeIndexEntry
-from .graph_semantic_model import PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
+from .graph_semantic_model import (
+    PreciseCall,
+    PreciseSymbol,
+    ProviderFailure,
+    RpcInvocationContract,
+    RpcInvocationFact,
+    RpcParamsReasonCode,
+    RpcParamsStatus,
+    RpcRoutineReasonCode,
+    RpcRoutineStatus,
+    RpcSchemaSelection,
+    SemanticProviderResult,
+    SourceAnchor,
+)
 from .io import atomic_write
 from .repositories import RepoTarget
 
@@ -23,7 +36,6 @@ environment:
 dependencies:
   analyzer: 8.2.0
   path: '>=1.9.0 <2.0.0'
-  yaml: '>=3.1.0 <4.0.0'
 """
 
 
@@ -187,15 +199,142 @@ def _calls(data: Any, *, eligible_paths: set[str], symbol_ids: set[str]) -> list
     return sorted(calls, key=lambda item: (item.caller_provider_symbol_id, item.callee_provider_symbol_id, item.anchor.start_line, item.anchor.start_col))
 
 
+def _rpc_invocations(
+    data: Any,
+    *,
+    repo_id: str,
+    repo: Path,
+    selected_paths: set[str],
+) -> tuple[list[RpcInvocationFact] | None, str]:
+    if not isinstance(data, list):
+        return None, "rpc_invocations must be a list"
+    content_identities: dict[str, str] = {}
+    facts: list[RpcInvocationFact] = []
+    seen_ids: set[str] = set()
+    for raw in data:
+        if not isinstance(raw, dict):
+            return None, "rpc invocation must be an object"
+        anchor = _anchor(raw.get("anchor"), eligible_paths=selected_paths)
+        path = str(raw.get("path") or "")
+        if anchor is None or path != anchor.path or path not in selected_paths:
+            return None, "rpc invocation path or anchor is outside the selected analysis set"
+        try:
+            start_offset = int(raw["start_offset"])
+            end_offset = int(raw["end_offset"])
+            syntactic_argument_count = int(raw["syntactic_argument_count"])
+        except (KeyError, TypeError, ValueError):
+            return None, "rpc invocation offsets and argument count must be integers"
+        if start_offset < 0 or end_offset <= start_offset or syntactic_argument_count < 0:
+            return None, "rpc invocation offsets or argument count are invalid"
+        resolved_callee_identity = str(raw.get("resolved_callee_identity") or "")
+        if not resolved_callee_identity:
+            return None, "rpc invocation is missing resolved callee identity"
+        routine = raw.get("routine")
+        params = raw.get("params")
+        invocation = RpcInvocationContract.from_dict(raw.get("invocation"))
+        schema_selection = RpcSchemaSelection.from_dict(raw.get("schema_selection"))
+        if not isinstance(routine, dict) or not isinstance(params, dict) or invocation is None or schema_selection is None:
+            return None, "rpc invocation contract, schema, routine, and params evidence must be valid objects"
+        try:
+            routine_status = RpcRoutineStatus(str(routine.get("status") or ""))
+            params_status = RpcParamsStatus(str(params.get("status") or ""))
+        except ValueError:
+            return None, "rpc invocation evidence status is invalid"
+        raw_routine_value = routine.get("value")
+        raw_routine_reason = routine.get("reason_code")
+        if routine_status == RpcRoutineStatus.KNOWN:
+            if "value" not in routine or not isinstance(raw_routine_value, str) or raw_routine_reason not in (None, ""):
+                return None, "rpc invocation routine evidence is incomplete"
+            routine_value = raw_routine_value
+            routine_reason = None
+        else:
+            if not isinstance(raw_routine_reason, str) or not raw_routine_reason or raw_routine_value not in (None, ""):
+                return None, "rpc invocation routine evidence is incomplete"
+            routine_value = ""
+            try:
+                routine_reason = RpcRoutineReasonCode(raw_routine_reason)
+            except ValueError:
+                return None, "rpc invocation routine reason code is invalid"
+        raw_names = params.get("known_names")
+        if not isinstance(raw_names, list) or any(not isinstance(value, str) for value in raw_names):
+            return None, "rpc invocation parameter names are invalid"
+        param_names = tuple(sorted(set(raw_names)))
+        if len(param_names) != len(raw_names):
+            return None, "rpc invocation parameter names contain duplicates"
+        raw_params_reason = str(params.get("reason_code") or "")
+        if params_status == RpcParamsStatus.COMPLETE:
+            if raw_params_reason:
+                return None, "complete rpc parameter evidence must not contain a reason code"
+            params_reason = None
+        else:
+            try:
+                params_reason = RpcParamsReasonCode(raw_params_reason)
+            except ValueError:
+                return None, "non-complete rpc parameter evidence requires a valid reason code"
+        try:
+            content_sha256 = content_identities[path]
+        except KeyError:
+            try:
+                content_sha256 = "sha256:" + hashlib.sha256((repo / path).read_bytes()).hexdigest()
+            except OSError as exc:
+                return None, f"rpc invocation source could not be read: {exc}"
+            content_identities[path] = content_sha256
+        identity = json.dumps(
+            {
+                "repository_id": repo_id,
+                "path": path,
+                "content_sha256": content_sha256,
+                "start_offset": start_offset,
+                "end_offset": end_offset,
+                "resolved_callee_identity": resolved_callee_identity,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        fact_id = "rpc:" + hashlib.sha256(identity).hexdigest()
+        if fact_id in seen_ids:
+            return None, "rpc invocation facts contain a duplicate identity"
+        seen_ids.add(fact_id)
+        try:
+            fact = RpcInvocationFact(
+                fact_id=fact_id,
+                repository_id=repo_id,
+                path=path,
+                provider=PROVIDER,
+                language="dart",
+                content_sha256=content_sha256,
+                start_offset=start_offset,
+                end_offset=end_offset,
+                resolved_callee_identity=resolved_callee_identity,
+                receiver_type=str(raw.get("receiver_type") or ""),
+                invocation=invocation,
+                schema_selection=schema_selection,
+                routine_status=routine_status,
+                routine=routine_value,
+                routine_reason_code=routine_reason,
+                params_status=params_status,
+                param_names=param_names,
+                params_reason_code=params_reason,
+                syntactic_argument_count=syntactic_argument_count,
+                anchor=anchor,
+            )
+        except ValueError as exc:
+            return None, f"rpc invocation evidence is incoherent: {exc}"
+        facts.append(fact)
+    return sorted(facts, key=lambda item: item.fact_id), ""
+
+
 def _unavailable(paths: tuple[str, ...], *, code: str, message: str) -> SemanticProviderResult:
     failures: tuple[ProviderFailure, ...] = ()
     if paths:
-        failures = (ProviderFailure(PROVIDER, "symbols,calls", code, message, paths),)
+        failures = (ProviderFailure(PROVIDER, "symbols,calls,rpc", code, message, paths),)
     return SemanticProviderResult(
         provider=PROVIDER,
         languages=("dart",),
         symbol_failed_paths=paths,
         call_failed_paths=paths,
+        rpc_failed_paths=paths,
         failures=failures,
     )
 
@@ -220,7 +359,6 @@ def build_dart_semantics(
     if helper is None:
         return _unavailable(selected, code="dart_provider_unavailable", message=f"package:analyzer helper is unavailable offline: {helper_error}")
 
-    product_package_config = target.root_path / ".dart_tool/package_config.json"
     try:
         completed = subprocess.run(
             [str(helper)],
@@ -229,7 +367,6 @@ def build_dart_semantics(
                     "repo_root": str(target.root_path),
                     "paths": list(paths),
                     "analysis_paths": list(selected),
-                    "product_package_config": str(product_package_config) if product_package_config.is_file() else "",
                     "sdk_path": _dart_sdk_path(dart),
                 },
                 separators=(",", ":"),
@@ -254,20 +391,45 @@ def build_dart_semantics(
     selected_paths = set(selected)
     analyzed = tuple(sorted({str(path) for path in data.get("analyzed_paths", []) if str(path) in selected_paths}))
     failed = tuple(sorted(selected_paths - set(analyzed)))
+    rpc_analyzed = tuple(sorted({str(path) for path in data.get("rpc_analyzed_paths", []) if str(path) in selected_paths}))
+    rpc_failed = tuple(sorted({str(path) for path in data.get("rpc_failed_paths", []) if str(path) in selected_paths}))
+    if set(rpc_analyzed) & set(rpc_failed) or set(rpc_analyzed) | set(rpc_failed) != selected_paths:
+        return _unavailable(selected, code="dart_provider_invalid_output", message="Dart analyzer RPC coverage did not account for every selected path")
     symbols, symbol_ids = _symbols(data.get("symbols"), eligible_paths=eligible_paths)
     calls = _calls(data.get("calls"), eligible_paths=eligible_paths, symbol_ids=symbol_ids)
-    failures: tuple[ProviderFailure, ...] = ()
+    rpc_invocations, rpc_error = _rpc_invocations(
+        data.get("rpc_invocations"),
+        repo_id=target.id,
+        repo=target.root_path,
+        selected_paths=selected_paths,
+    )
+    if rpc_invocations is None:
+        return _unavailable(selected, code="dart_provider_invalid_output", message=f"Dart analyzer RPC output is invalid: {rpc_error}")
+    failure_items: list[ProviderFailure] = []
     if failed:
-        failures = (ProviderFailure(PROVIDER, "symbols,calls", "dart_analysis_failed", "Dart analyzer failed for one or more source files", failed),)
+        failure_items.append(ProviderFailure(PROVIDER, "symbols,calls", "dart_analysis_failed", "Dart analyzer failed for one or more source files", failed))
+    if rpc_failed:
+        failure_items.append(
+            ProviderFailure(
+                PROVIDER,
+                "rpc",
+                "dart_rpc_enumeration_incomplete",
+                "Dart analyzer could not classify every rpc invocation in one or more source files",
+                rpc_failed,
+            )
+        )
     return SemanticProviderResult(
         provider=PROVIDER,
         languages=("dart",),
         symbols=tuple(symbols),
         calls=tuple(calls),
+        rpc_invocations=tuple(rpc_invocations),
         symbol_analyzed_paths=analyzed,
         call_analyzed_paths=analyzed,
+        rpc_analyzed_paths=rpc_analyzed,
         symbol_failed_paths=failed,
         call_failed_paths=failed,
-        failures=failures,
+        rpc_failed_paths=rpc_failed,
+        failures=tuple(failure_items),
         tool={"kind": "dart_package_analyzer_aot", "source": dart_source},
     )

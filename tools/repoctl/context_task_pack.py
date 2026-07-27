@@ -22,7 +22,7 @@ from .document_roles import (
 )
 from .graph import project_context_neighborhood
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
-from .graph_store import graph_materialization_freshness, load_materialized_graph
+from .graph_store import graph_materialization_freshness, graph_stale_paths, load_materialized_graph
 from .git import normalize_repo_path, repo_git_head
 from .language_profiles import collect_verification_hints
 from .markdown import find_section
@@ -1192,9 +1192,9 @@ def _direct_task_graph_evidence(
     if freshness_status not in {"current", "stale"}:
         return []
     stale_paths = {
-        normalize_repo_path(str(path))
-        for path in freshness.get("changed_paths", [])
-        if normalize_repo_path(str(path))
+        normalized
+        for path in graph_stale_paths(freshness)
+        if (normalized := normalize_repo_path(path))
     }
     prefix = f"{target.display_path.rstrip('/')}/"
     seed_paths: list[str] = []
@@ -1246,7 +1246,7 @@ def _graph_relation_item(relation: dict[str, Any], *, reason: str) -> dict[str, 
 
 def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
     deduped: list[ContextCandidate] = []
-    seen: set[tuple[str, str, str, str, int, int]] = set()
+    seen: set[tuple[str, str, str, str, int, int, str]] = set()
     for candidate in candidates:
         key = candidate.source_ref.key()
         if key in seen:

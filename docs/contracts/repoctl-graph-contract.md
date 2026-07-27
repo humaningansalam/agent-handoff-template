@@ -42,14 +42,14 @@ Incremental invalidation follows semantic boundaries:
 - Python and Dart refresh changed files and their reverse import dependents.
 - TypeScript/JavaScript refresh the affected `tsconfig.json`/`jsconfig.json` unit; unconfigured sources use reverse import dependents.
 - C# refreshes the affected `.csproj` compilation unit.
-- Provider configuration or provider input-version changes refresh that provider.
-- Deleted and renamed files remove their old symbols and calls before updated facts are merged.
+- Provider configuration or provider input-version changes refresh that provider. Dart configuration includes root or nested `pubspec.yaml`, `pubspec.lock`, and the adjacent `.dart_tool/package_config.json`; changing any of them invalidates the affected Dart provider paths even when no indexed source file changed.
+- Deleted and renamed files remove their old symbols, calls, and RPC facts before updated facts are merged.
 
 Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, `--impact-symbol`, `--task`, or `--artifact`. File selectors and `--in-file` accept either canonical repo-relative paths or workspace-relative paths prefixed by the selected repository path; one resolver normalizes both forms against indexed file identities. If both interpretations exist and differ, the selector fails with `graph_query_ambiguous_path` and returns both canonical candidates. A not-found path returns at most three exact basename/suffix candidates and returns none when no canonical identity is related; it never dumps provider inventories or arbitrary fuzzy suggestions.
 
 Default build JSON contains the snapshot digest, node/edge counts, compact capability/provider status, materialization status, and updated-path counts. Provider path inventories and the raw snapshot are available only with `--full`.
 
-Default query JSON contains direct matches, at most three decision-relevant relations, and at most three reusable continuations. Query-specific traversals are returned under `paths`; queries without a traversal projection return their compact edges under `relations`. It omits node/edge counts, displayed/omitted statistics, provider coverage, analyzed-path inventories, freshness counts, and materialization digests. Compact freshness contains only state and the root-evidence drift indicator. File and symbol queries traverse importers/imports, callers/callees, direct tests, related tasks/artifacts/documents, and reviewed Knowledge in both directions. Every compact relation preserves evidence type, assertion/provider, confidence, capability completeness, and per-relation freshness. Use `--full --json` for raw nodes/edges and provider diagnostics.
+Default query JSON contains a stable `result_digest`, direct matches, at most three decision-relevant relations, at most three non-authoritative relationship candidates, and bounded reusable continuations. Query-specific traversals are returned under `paths`; queries without a traversal projection return their compact edges under `relations`. It omits node/edge counts, displayed/omitted statistics, provider coverage, analyzed-path inventories, freshness counts, and materialization digests. Compact freshness contains only state and the root-evidence drift indicator. File and symbol queries traverse importers/imports, callers/callees, direct tests, related tasks/artifacts/documents, and reviewed Knowledge in both directions. Every compact relation preserves evidence type, assertion/provider, confidence, capability completeness, and per-relation freshness. Use `--full --json` for raw nodes/edges and provider diagnostics.
 
 Context projection is a separate internal consumer of the same snapshot. It accepts typed file or provider-symbol anchors and an explicit Context mode policy. Weak lexical text never enters Graph as a selector. Every requested anchor is accounted as resolved, ambiguous, or unresolved; missing file nodes and non-unique provider symbols are never silently dropped. Symbol anchors restrict first-hop call edges to the resolved symbol, ambiguous or unresolved anchors produce no traversal, and each mode fixes relation direction and maximum depth before traversal begins.
 
@@ -72,11 +72,17 @@ Context projection is a separate internal consumer of the same snapshot. It acce
     "artifact",
     "change_event",
     "cross_file_import_calls",
+    "direct_tests",
+    "document",
     "file",
     "import_ref",
     "import_resolution",
+    "knowledge",
+    "language_capabilities",
     "repository",
+    "rpc_resolution",
     "same_file_calls",
+    "structured_file_relations",
     "symbol",
     "task",
     "topic"
@@ -90,16 +96,31 @@ Context projection is a separate internal consumer of the same snapshot. It acce
       "imports": "complete",
       "symbols": "partial",
       "calls": "partial",
-      "task_history": "complete"
+      "rpc_resolution": "complete",
+      "structured_relations": "complete",
+      "task_history": "complete",
+      "knowledge": "complete"
     },
     "provider_coverage": {
       "symbols": {
+        "capability": "symbols",
         "status": "partial",
         "eligible_paths": ["src/app.py", "scripts/run.sh"],
         "analyzed_paths": ["src/app.py"],
         "unsupported_paths": ["scripts/run.sh"],
         "failed_paths": [],
-        "evidence_level": "precise"
+        "evidence_level": "precise",
+        "coverage_gaps": []
+      },
+      "rpc": {
+        "capability": "rpc",
+        "status": "complete",
+        "eligible_paths": ["lib/client.dart"],
+        "analyzed_paths": ["lib/client.dart"],
+        "unsupported_paths": [],
+        "failed_paths": [],
+        "evidence_level": "precise",
+        "coverage_gaps": []
       }
     },
     "inventory_complete": true,
@@ -183,7 +204,13 @@ Python resolution consumes AST-derived import occurrences with explicit `module`
 
 `TESTS_FILE` points from a typed test-role file to a provider-resolved imported file. The import resolution and the test-role classification remain separate facts: an exact import may be high-confidence while a convention-derived test role is explicitly recorded as such. Compact output must not duplicate the same endpoints as both `TESTS_FILE` and `IMPORTS_FILE`. Graph does not infer tests by matching source/test basenames. `TASK_CHANGED_FILE` is recorded receipt evidence. Knowledge edges are created only from approved records; pending candidates never enter Graph. Reviewed and stale records preserve source task, source digest set, and freshness.
 
-`USES_FILE` is the single file-to-file edge for syntax-resolved structured dependencies. Its `facts.relations[]` entries use a closed relation enum and preserve the exact reference, source line, operation, and confidence. The provider recognizes Docker `COPY`/`ADD` sources, Compose `build.dockerfile`/`env_file`/config files, local workflow actions and files executed by `run`, shell `source` and explicit file commands, SQL schema/seed dependencies, and client or SQL RPC calls resolved to a unique SQL routine definition. Client RPC parsing runs only for source entries with a supported static client import; unrelated source files are classified from indexed import facts without being sent through the RPC parser. The provider parses exact format syntax and fails closed on dynamic variables, ambiguous paths, or ambiguous unqualified SQL objects; it does not infer dependencies from prose, filenames alone, or arbitrary command arguments. File and Context traversal consume the same edge in both directions, while impact traversal follows its dependency direction.
+`USES_FILE` is the single file-to-file edge for syntax-resolved structured dependencies. Its `facts.relations[]` entries use a closed relation enum and preserve the exact reference, source line, operation, and confidence. The provider recognizes Docker `COPY`/`ADD` sources, Compose `build.dockerfile`/`env_file`/config files, local workflow actions and files executed by `run`, shell `source` and explicit file commands, SQL schema/seed dependencies, and client or SQL RPC calls resolved to a unique SQL routine definition. Python and JavaScript/TypeScript RPC parsing runs only for source entries with a supported static client import; unrelated source files are classified from indexed import facts without being sent through those bounded parsers. The provider parses exact format syntax and fails closed on dynamic variables, ambiguous paths, or ambiguous unqualified SQL objects; it does not infer dependencies from prose, filenames alone, or arbitrary command arguments. File and Context traversal consume the same edge in both directions, while impact traversal follows its dependency direction.
+
+Dart RPC discovery has a separate analyzer-owned contract and no token-scanner fallback. `package:analyzer` identifies `SupabaseClient.rpc` from its resolved package/library/owner/member identity, preserves receiver type and source anchors, and emits facts only for selected-repository source paths. Normal method invocations and immediately invoked resolved method tear-offs produce the same typed fact. A resolved tear-off that is stored, passed, or otherwise escapes direct invocation makes RPC enumeration incomplete because its later runtime arguments cannot be attributed without guessing. Native package resolution may inspect the nearest package configuration and dependencies outside the repository, including the pub cache; dependency source outside the selected repository is not emitted as project source evidence.
+
+Each analyzer-confirmed Dart RPC invocation is preserved as one source fact even when its arguments are dynamic or invalid. The analyzer's actual-to-formal parameter bindings and required parameter set produce a structured invocation contract: `valid` or `invalid`, with unmatched arguments, missing required parameters, duplicate bindings, and a closed reason code. Routine and `params` evidence are selected from those formal bindings rather than positional counts or label-text fallbacks, and the contract is never inferred from analyzer error text. Routine evidence is `known | unknown`; parameter evidence is `complete | partial | unknown`, with one shared invariant that forbids reasons on `complete` evidence and requires a closed reason on non-complete evidence. Runtime routine strings are matched exactly against SQL catalog names; they are not case-folded as though they were unquoted SQL source identifiers. Schema selection is a separate typed evidence axis and is `unknown/schema_not_observed` unless the source provider proves it. A dotted routine literal remains one opaque routine name and is never split into schema plus function. If schema selection is unknown, exact routine/parameter matches are retained as candidates but the outcome is `incomplete/schema_not_observed` and no edge is created, even when only one candidate exists. Only a proven schema may produce a linked target. An invalid invocation resolves to `incomplete` and never creates an edge. Every fact ID receives exactly one `linked | unresolved | ambiguous | incomplete` resolution, a typed reason, and `candidate_compatibility: none | compatible | unknown | incompatible`. Only `linked` creates `USES_FILE/sql_rpc_dependency`; that relation preserves the originating `source_fact_id`.
+
+Compatible non-linked targets are projected separately as `relationship_candidates`; they never appear under `relations` or `paths`. Each item preserves the source path/range, exact runtime RPC identity, resolution outcome/reason, compatible SQL identities and locations, `authoritative: false`, total/truncation fields, and typed file continuations. Parameter mismatches and unknown-compatibility targets are not presented as compatible candidates. File-node `facts.rpc` retains all source facts, resolutions, compatibility states, and outcome counts so omitted non-candidates remain inspectable with `--full`. `rpc_resolution` completeness is `partial` whenever any preserved fact has an `incomplete` outcome, even if source enumeration itself was complete.
 
 All semantic providers consume the same policy-eligible Code Index entry set. `classification: excluded` files may remain inventory nodes, but they do not produce source parsing, `DEFINES`, `ANCHORS`, `CALLS`, `RESOLVES_TO`, or `IMPORTS_FILE` evidence. `excluded_override` is an annotation-policy exemption and remains eligible for semantic analysis.
 
@@ -191,7 +218,7 @@ Provider support is compiler/analyzer backed:
 
 - Python uses the stdlib AST with an explicit lexical-scope model.
 - TypeScript and JavaScript use the TypeScript compiler API and checker-resolved call targets. A project-local compiler is preferred; an official bundled compiler is used when the repository has none.
-- Dart uses `package:analyzer` resolved ASTs through an AOT helper and restricts package resolution to the selected product repository.
+- Dart uses `package:analyzer` resolved ASTs through an AOT helper. It follows the nearest native package configuration, while emitted project symbols, calls, and RPC facts remain restricted to selected-repository source paths.
 - C# and Unity use Roslyn `SemanticModel` over `.csproj` compilation units.
 
 Structured file relations are a separate bounded provider and do not claim compiler-level language semantics. SQL is indexed as actionable source text, while Dockerfile variants, Compose/workflow YAML, env/config files, and repository dotfiles remain typed config evidence. Kotlin and other inventory-only languages are not promoted to new semantic providers by this change.
@@ -235,7 +262,20 @@ Completion receipt shape:
     "attribution": "range_observed",
     "start_head": "...",
     "observed_head": "...",
-    "diff_fingerprint_sha256": "sha256:..."
+    "diff_fingerprint_sha256": "sha256:...",
+    "fingerprint_manifest": {
+      "mode": "committed_range",
+      "repo_id": "web",
+      "repo_path": "repos/web",
+      "start_head": "...",
+      "observed_head": "...",
+      "changed_entries": [
+        {"change": "modified", "path": "src/app.py"}
+      ],
+      "entry_fingerprints": [
+        {"change": "modified", "path": "src/app.py", "fingerprint_sha256": "sha256:..."}
+      ]
+    }
   },
   "verification": {
     "source": "task_section",
@@ -246,6 +286,16 @@ Completion receipt shape:
   }
 }
 ```
+
+Receipt evidence uses only these closed mode/attribution pairs:
+
+```text
+none              / none
+working_tree_diff / task_working_tree
+committed_range   / range_observed
+```
+
+The receipt filename, `task_id`, and task ID encoded by `task_path_at_completion` must agree. `content_sha256` must bind to exactly one live or archived artifact for that task; a missing artifact, another task's artifact, or simultaneous live/archive matches are invalid. When present, `fingerprint_manifest.entry_fingerprints[]` covers `changed_entries` by exact `change + path + old_path` identity. `committed_range/range_observed` remains observed range evidence and never becomes task or child ownership evidence.
 
 Symbol and anchor edges are produced only by semantic providers. Name-only `facts.index.symbol_names` values must not be treated as symbol identities.
 
@@ -325,6 +375,10 @@ Rules:
   "matches": [],
   "candidates": [],
   "paths": [],
+  "relationship_candidates": [],
+  "relationship_candidate_count": 0,
+  "relationship_candidates_truncated": false,
+  "result_digest": "sha256:...",
   "continuations": [],
   "relations": [],
   "completeness": {},
@@ -334,7 +388,7 @@ Rules:
 
 Query selectors are exact typed selectors. Clients must not pass an `id` string and expect repoctl to split it.
 
-`matches` contains the selector's direct node candidates. `candidates` contains at most three exact canonical path corrections or ambiguity choices. `paths` contains ordered traversal evidence; every compact path includes an `evidence` object with type, assertion, provider, confidence, completeness, and freshness. Missing confidence is `unknown`; it is never synthesized from assertion prose. Stored lifecycle freshness and root-evidence drift take precedence over materialization-level currentness.
+`matches` contains the selector's direct node candidates. `candidates` contains at most three exact canonical path corrections or ambiguity choices and is unrelated to `relationship_candidates`. `paths` contains ordered confirmed traversal evidence; every compact path includes an `evidence` object with type, assertion, provider, confidence, completeness, and freshness. Missing confidence is `unknown`; it is never synthesized from assertion prose. Stored lifecycle freshness and root-evidence drift take precedence over materialization-level currentness. `result_digest` binds the query, snapshot, direct matches, path corrections, relationship candidates, and paths so selected Graph results can be referenced without storing an execution log.
 
 `continuations` makes the displayed compact subgraph traversable without parsing node IDs or provider-specific symbol IDs. Relation/path selection and continuation selection share one budget, so every displayed non-current neighbor has a typed continuation. The current match may be omitted when neighbor actions consume the three-item budget because its selector is already present in `query`. Compact results contain a typed selector with normalized `value` and optional `in_file`, the supported follow-up `query_types`, and stable action enums such as `graph.file`, `graph.callers_of`, `task.show`, or `workspace.open`. The selector supplies identity and the bundle supplies `repo_id`, so actions do not repeat command arguments. `--full` also preserves the source node ID, kind, and label. Clients may repeatedly feed selectors into `graph query`; a continuation remains evidence for the returned `snapshot_digest`, not a durable locator after source changes.
 
@@ -354,7 +408,7 @@ change_event -> owning graph task
 
 `--task` returns the recorded task, its completion artifact, change events, and affected current or historical file identities. Receipt `task_path_at_completion` remains historical evidence; the artifact node and continuation use the task's current canonical path after a parent archive moves it. `--artifact` follows that current artifact back through its task and recorded file evidence. These selectors consume structured completion receipts only; they do not parse task Markdown prose.
 
-Every query payload includes `freshness`. `current` means product file identities and root evidence identities still match the materialized manifest. `stale` includes exact `changed_paths` and `changed_root_paths` and emits `graph_snapshot_stale`; the stored result remains queryable as historical derived evidence but must not be presented as current. Rebuild explicitly before relying on changed relations. Root evidence probes reuse stored content digests when path kind, mode, size, and mtime are unchanged, so freshness checks do not reread every document or receipt body.
+Every query payload includes `freshness`. `current` means product file identities, root evidence identities, provider configuration, and Graph/provider input versions still match the materialized manifest. `stale` emits `graph_snapshot_stale` and a typed `graph_refresh` action; the stored result remains queryable as historical derived evidence but must not be presented as current. Full freshness reports exact `changed_paths`, `changed_root_paths`, `changed_provider_configs`, provider-owned `provider_stale_paths`, their `semantic_stale_paths` union, the canonical relation-level `stale_paths`, `provider_state_changed`, and `graph_input_version_changed`. Source or target paths in `stale_paths` are excluded from Graph relationship candidates and Context Graph projections until rebuild; Context may still return live source text from a stale-path overlay. Rebuild explicitly before relying on changed relations. Root evidence probes reuse stored content digests when path kind, mode, size, and mtime are unchanged, so freshness checks do not reread every document or receipt body.
 
 Simple symbol names are fail-closed. If a symbol selector matches multiple precise symbols, `graph query` exits nonzero with `graph_query_ambiguous_symbol` and returns candidate matches with path, qualified name, symbol kind, provider, and source range so the caller can retry with `--in-file` or a qualified name.
 

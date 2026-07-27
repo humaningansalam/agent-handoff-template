@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +31,17 @@ from .tasks import Problem, collect_completion_receipts, completion_receipt_arti
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
-EVIDENCE_INDEX_SCHEMA_VERSION = 4
+EVIDENCE_INDEX_SCHEMA_VERSION = 5
 STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
+
+
+@dataclass(frozen=True)
+class _SourceChunkRange:
+    section: str
+    line_start: int
+    line_end: int
+    section_kind: ContextSectionKind
+    source_fact_id: str = ""
 
 
 def _evidence_index_schema_is_current(metadata: dict[str, Any]) -> bool:
@@ -81,6 +91,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
             section_kind TEXT NOT NULL,
             line_start INTEGER NOT NULL,
             line_end INTEGER NOT NULL,
+            source_fact_id TEXT NOT NULL,
             content_sha256 TEXT NOT NULL,
             body TEXT NOT NULL,
             title TEXT NOT NULL,
@@ -147,6 +158,7 @@ def _source_key(chunk: DocumentChunk) -> str:
             "section_kind": chunk.source_ref.section_kind.value,
             "line_start": chunk.source_ref.line_start,
             "line_end": chunk.source_ref.line_end,
+            "source_fact_id": chunk.source_ref.source_fact_id,
         }
     )
 
@@ -156,8 +168,8 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
         """
         INSERT INTO chunks(
             source_key, kind, path, section, section_kind, line_start, line_end,
-            content_sha256, body, title, file_fingerprint
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            source_fact_id, content_sha256, body, title, file_fingerprint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_key) DO UPDATE SET
             kind=excluded.kind,
             path=excluded.path,
@@ -165,6 +177,7 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
             section_kind=excluded.section_kind,
             line_start=excluded.line_start,
             line_end=excluded.line_end,
+            source_fact_id=excluded.source_fact_id,
             content_sha256=excluded.content_sha256,
             body=excluded.body,
             title=excluded.title,
@@ -179,6 +192,7 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
                 chunk.source_ref.section_kind.value,
                 chunk.source_ref.line_start,
                 chunk.source_ref.line_end,
+                chunk.source_ref.source_fact_id,
                 chunk.source_ref.content_sha256,
                 chunk.text,
                 chunk.title,
@@ -260,7 +274,7 @@ def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChun
     return chunks, static_paths, problems
 
 
-def _symbol_ranges(snapshot: GraphSnapshot, path: str) -> list[tuple[str, int, int]]:
+def _source_ranges(snapshot: GraphSnapshot, path: str) -> list[_SourceChunkRange]:
     nodes = {node.id: node for node in snapshot.nodes}
     symbol_ids = {
         edge.to_id
@@ -273,7 +287,7 @@ def _symbol_ranges(snapshot: GraphSnapshot, path: str) -> list[tuple[str, int, i
         for edge in snapshot.edges
         if edge.kind == "ANCHORS" and edge.from_id in symbol_ids
     }
-    ranges: list[tuple[str, int, int]] = []
+    ranges: list[_SourceChunkRange] = []
     for symbol_id in sorted(symbol_ids):
         symbol = nodes.get(symbol_id)
         anchor = nodes.get(anchor_ids.get(symbol_id, ""))
@@ -287,8 +301,49 @@ def _symbol_ranges(snapshot: GraphSnapshot, path: str) -> list[tuple[str, int, i
         except (TypeError, ValueError):
             continue
         if start > 0 and end >= start:
-            ranges.append((section, start, end))
-    return sorted(set(ranges), key=lambda item: (item[1], item[2], item[0]))
+            ranges.append(_SourceChunkRange(section, start, end, ContextSectionKind.PROVIDER_SYMBOL))
+    file_node = next(
+        (
+            node
+            for node in snapshot.nodes
+            if node.kind == "file" and str(node.identity.get("path") or "") == path
+        ),
+        None,
+    )
+    rpc = file_node.facts.get("rpc") if file_node is not None and isinstance(file_node.facts.get("rpc"), dict) else {}
+    source_facts = rpc.get("source_facts") if isinstance(rpc.get("source_facts"), list) else []
+    for fact in source_facts:
+        if not isinstance(fact, dict):
+            continue
+        routine = fact.get("routine") if isinstance(fact.get("routine"), dict) else {}
+        anchor = fact.get("anchor") if isinstance(fact.get("anchor"), dict) else {}
+        source_fact_id = str(fact.get("fact_id") or "")
+        section = str(routine.get("value") or "") if routine.get("status") == "known" else ""
+        try:
+            start = int(anchor.get("start_line") or 0)
+            end = int(anchor.get("end_line") or 0)
+        except (TypeError, ValueError):
+            continue
+        if source_fact_id and section and start > 0 and end >= start:
+            ranges.append(
+                _SourceChunkRange(
+                    section,
+                    start,
+                    end,
+                    ContextSectionKind.PROVIDER_RELATIONSHIP,
+                    source_fact_id,
+                )
+            )
+    return sorted(
+        set(ranges),
+        key=lambda item: (
+            item.line_start,
+            item.line_end,
+            item.section,
+            item.section_kind.value,
+            item.source_fact_id,
+        ),
+    )
 
 
 def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot) -> tuple[list[DocumentChunk], Problem | None]:
@@ -324,7 +379,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
         ], None
     lines = text.splitlines()
     digest = sha256_text(text)
-    ranges = _symbol_ranges(snapshot, entry.path)
+    ranges = _source_ranges(snapshot, entry.path)
     if not ranges:
         return [
             chunk_text_source(
@@ -339,9 +394,9 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
 
     chunks: list[DocumentChunk] = []
     covered = [False] * len(lines)
-    for section, start, end in ranges:
-        bounded_start = max(1, start)
-        bounded_end = min(len(lines), end)
+    for source_range in ranges:
+        bounded_start = max(1, source_range.line_start)
+        bounded_end = min(len(lines), source_range.line_end)
         if bounded_end < bounded_start:
             continue
         for index in range(bounded_start - 1, bounded_end):
@@ -354,14 +409,15 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
                 source_ref=ContextSourceRef(
                     kind="current_source",
                     path=entry.workspace_path,
-                    section=section,
-                    section_kind=ContextSectionKind.PROVIDER_SYMBOL,
+                    section=source_range.section,
+                    section_kind=source_range.section_kind,
                     line_start=bounded_start,
                     line_end=bounded_end,
+                    source_fact_id=source_range.source_fact_id,
                     content_sha256=digest,
                 ),
                 text=body,
-                title=section,
+                title=source_range.section,
             )
         )
     module_body = "\n".join(line for index, line in enumerate(lines) if not covered[index]).strip()
@@ -387,7 +443,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
 def _source_manifest(connection: sqlite3.Connection, kinds: set[str]) -> str:
     placeholders = ",".join("?" for _ in kinds)
     rows = connection.execute(
-        f"SELECT kind, path, section, section_kind, line_start, line_end, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end",
+        f"SELECT kind, path, section, section_kind, line_start, line_end, source_fact_id, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end, source_fact_id",
         tuple(sorted(kinds)),
     ).fetchall()
     return digest_data([dict(row) for row in rows])
@@ -567,6 +623,7 @@ def _row_chunk(row: sqlite3.Row, *, repository_path: str) -> DocumentChunk:
             section_kind=ContextSectionKind(str(row["section_kind"])),
             line_start=int(row["line_start"]),
             line_end=int(row["line_end"]),
+            source_fact_id=str(row["source_fact_id"]),
             content_sha256=str(row["content_sha256"]),
         ),
         text=str(row["body"]),

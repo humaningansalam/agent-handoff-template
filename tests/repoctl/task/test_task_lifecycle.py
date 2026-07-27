@@ -120,7 +120,9 @@ def test_task_show_reports_current_chosen_scope_drift_as_advisory(tmp_path: Path
     scope_action = next(action for action in payload["next_actions"] if action.get("kind") == "task_scope_review")
     assert scope_action["source"] == "data.action_inputs.unchosen_actual_paths"
     assert scope_action["choices"] == ["add_to_chosen", "revert_change", "move_to_follow_up"]
-    assert scope_action["targets"] == payload["data"]["action_inputs"]["unchosen_actual_paths"] == ["other.py"]
+    assert scope_action["target_ref"] == "data.action_inputs.unchosen_actual_paths"
+    assert "targets" not in scope_action
+    assert payload["data"]["action_inputs"]["unchosen_actual_paths"] == ["other.py"]
 
 
 def test_task_show_keeps_unused_chosen_paths_informational(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -175,8 +177,9 @@ def test_task_show_exposes_complete_scope_action_inputs_when_summary_is_truncate
     assert scope["unchosen_actual_paths_truncated"] is True
     action = next(action for action in payload["next_actions"] if action.get("kind") == "task_scope_review")
     assert action["source"] == "data.action_inputs.unchosen_actual_paths"
-    assert action["targets"] == payload["data"]["action_inputs"]["unchosen_actual_paths"]
-    assert len(action["targets"]) == 25
+    assert action["target_ref"] == "data.action_inputs.unchosen_actual_paths"
+    assert "targets" not in action
+    assert len(payload["data"]["action_inputs"]["unchosen_actual_paths"]) == 25
 
 
 def test_task_start_and_summary_bound_large_path_collections(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -210,14 +213,30 @@ def test_task_start_and_summary_bound_large_path_collections(tmp_path: Path, mon
     assert summary["baseline_conflicts_truncated"] is True
     action = next(action for action in payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution")
     assert action["source"] == "data.action_inputs.baseline_conflicts"
-    assert action["targets"] == payload["data"]["action_inputs"]["baseline_conflicts"]
-    assert len(action["targets"]) == 25
+    assert action["target_ref"] == "data.action_inputs.baseline_conflicts"
+    assert "targets" not in action
+    assert len(payload["data"]["action_inputs"]["baseline_conflicts"]) == 25
 
     assert main(["task", "show", "T-20260609184046Z", "--json"]) == 0
     full_summary = json.loads(capsys.readouterr().out)["data"]["repo_changes"]
     assert full_summary["baseline_conflict_count"] == 25
     assert len(full_summary["baseline_conflicts"]) == 25
     assert full_summary["baseline_conflicts_truncated"] is False
+
+
+def test_task_start_types_unborn_repository_observation(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["data"]["repo_changes"]
+    assert summary["repo_head_state"] == "unborn"
+    assert summary["observed_since_baseline"] == "observed"
+    assert "repo_head" not in summary
+    assert "baseline_available" not in summary
 
 
 def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -265,10 +284,12 @@ def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tm
     action = next(action for action in payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution")
     assert action["source"] == "data.action_inputs.baseline_conflicts"
     assert action["choices"] == ["task", "preexisting"]
-    assert action["targets"] == payload["data"]["action_inputs"]["baseline_conflicts"] == ["a.py", "b.py"]
+    assert action["target_ref"] == "data.action_inputs.baseline_conflicts"
+    assert "targets" not in action
+    assert payload["data"]["action_inputs"]["baseline_conflicts"] == ["a.py", "b.py"]
     command = shlex.split(action["command"])
     resolutions = [command[index + 1] for index, token in enumerate(command) if token == "--resolution"]
-    assert resolutions == ["a.py=<task|preexisting>", "b.py=<task|preexisting>"]
+    assert resolutions == ["<path>=<task|preexisting>"]
     assert "--preview" in command
     assert "--ownership" not in command
 
@@ -361,6 +382,62 @@ def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reas
     assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "scope changed: removed repos/a.py; added repos/b.py; reason=implementation moved" in task_body
+
+
+def test_task_discovery_records_only_explicit_selected_result_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    result_id = "sha256:" + "a" * 64
+
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            "T-20260609184046Z",
+            "--result-producer",
+            "context",
+            "--result-id",
+            result_id,
+            "--result-authority",
+            "source",
+            "--result-ref",
+            "repos/lib/client.dart",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["discovery"]["selected_result_evidence"] == [
+        {
+            "producer": "context",
+            "result_id": result_id,
+            "authority": "source",
+            "ref": "repos/lib/client.dart",
+        }
+    ]
+    body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
+    assert "Selected result evidence" in body
+    assert '"authority":"source"' in body
+
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            "T-20260609184046Z",
+            "--result-producer",
+            "graph",
+            "--result-id",
+            result_id,
+            "--json",
+        ]
+    ) == 2
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["problems"][0]["code"] == "incomplete_discovery_result_evidence"
 
 
 def test_task_discovery_query_returns_compact_context_next_action(tmp_path: Path, monkeypatch, capsys) -> None:

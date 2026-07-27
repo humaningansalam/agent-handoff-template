@@ -12,6 +12,7 @@ class ContextSectionKind(StrEnum):
     UNSPECIFIED = "unspecified"
     FILE = "file"
     PROVIDER_SYMBOL = "provider_symbol"
+    PROVIDER_RELATIONSHIP = "provider_relationship"
     DOCUMENT = "document"
     CONFIG = "config"
     TASK = "task"
@@ -22,6 +23,7 @@ class ContextEvidenceKind(StrEnum):
     EXACT_PATH = "exact_path"
     EXACT_FILENAME = "exact_filename"
     EXACT_SYMBOL = "exact_symbol"
+    EXACT_RELATIONSHIP = "exact_relationship"
     PATH_TERMS = "path_terms"
     SECTION_TERMS = "section_terms"
     BODY_TERMS = "body_terms"
@@ -68,10 +70,19 @@ class ContextSourceRef:
     section_kind: ContextSectionKind = ContextSectionKind.UNSPECIFIED
     line_start: int = 0
     line_end: int = 0
+    source_fact_id: str = ""
     content_sha256: str = ""
 
-    def key(self) -> tuple[str, str, str, str, int, int]:
-        return (self.kind, self.path, self.section, self.section_kind.value, self.line_start, self.line_end)
+    def key(self) -> tuple[str, str, str, str, int, int, str]:
+        return (
+            self.kind,
+            self.path,
+            self.section,
+            self.section_kind.value,
+            self.line_start,
+            self.line_end,
+            self.source_fact_id,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -87,6 +98,8 @@ class ContextSourceRef:
             data["line_start"] = self.line_start
         if self.line_end:
             data["line_end"] = self.line_end
+        if self.source_fact_id:
+            data["source_fact_id"] = self.source_fact_id
         return data
 
 
@@ -164,8 +177,9 @@ class ContextBundle:
     selection: dict[str, Any]
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    relationship_candidates: list[dict[str, Any]] = field(default_factory=list)
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 9
+    schema_version: int = 11
     authoritative: bool = False
     bundle_digest: str = ""
 
@@ -181,6 +195,9 @@ class ContextBundle:
             "evidence": [candidate.to_dict() for candidate in self.evidence],
             "knowledge_results": sorted(self.knowledge_results, key=_knowledge_sort_key),
             "groups": {key: value for key, value in sorted(self.groups.items())},
+            "relationship_candidates": self.relationship_candidates,
+            "relationship_candidate_count": len(self.relationship_candidates),
+            "relationship_candidates_truncated": False,
             "selection": self.selection,
         }
         if include_digest:
@@ -197,6 +214,7 @@ class ContextBundle:
             selection=self.selection,
             knowledge_results=self.knowledge_results,
             groups=self.groups,
+            relationship_candidates=self.relationship_candidates,
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,

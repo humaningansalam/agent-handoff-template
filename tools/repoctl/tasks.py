@@ -6,11 +6,12 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from .io import LOCK_REL, RepoctlError, atomic_write
-from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_changed_entries, repo_git_head, repo_git_status, repo_path_fingerprints
+from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_change_fingerprint_records, repo_changed_entries, repo_git_head, repo_git_status, repo_path_fingerprints
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoSelectorStatus, RepoTarget, default_repo_target, repo_layout, resolve_repo_selector_path
 from .settings import document_language, validate_document_language
@@ -26,6 +27,81 @@ SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
 TASK_STATE_SCHEMA_VERSION = 3
 COMPLETION_RECEIPT_SCHEMA_VERSION = 2
+
+
+class _CompletionEvidenceMode(StrEnum):
+    NONE = "none"
+    WORKING_TREE_DIFF = "working_tree_diff"
+    COMMITTED_RANGE = "committed_range"
+
+
+class DiscoveryResultProducer(StrEnum):
+    CONTEXT = "context"
+    GRAPH = "graph"
+
+
+class DiscoveryResultAuthority(StrEnum):
+    SOURCE = "source"
+    GRAPH = "graph"
+    DOCUMENT = "document"
+    TASK_HISTORY = "task_history"
+    KNOWLEDGE = "knowledge"
+
+
+@dataclass(frozen=True)
+class DiscoveryResultSelection:
+    producer: DiscoveryResultProducer
+    result_id: str
+    authority: DiscoveryResultAuthority
+    ref: str
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", self.result_id):
+            raise ValueError("selected result identity must be a sha256 digest")
+        if not self.ref.strip() or any(value in self.ref for value in ("\n", "\r", "`")):
+            raise ValueError("selected result reference must be a non-empty single-line value")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "producer": self.producer.value,
+            "result_id": self.result_id,
+            "authority": self.authority.value,
+            "ref": self.ref,
+        }
+
+    def to_text(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+    @classmethod
+    def from_text(cls, value: str) -> "DiscoveryResultSelection":
+        try:
+            data = json.loads(_strip_ticks(value))
+            if not isinstance(data, dict) or set(data) != {"producer", "result_id", "authority", "ref"}:
+                raise ValueError
+            return cls(
+                producer=DiscoveryResultProducer(str(data["producer"])),
+                result_id=str(data["result_id"]),
+                authority=DiscoveryResultAuthority(str(data["authority"])),
+                ref=str(data["ref"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RepoctlError(
+                "Selected result evidence must be canonical structured data produced by repoctl",
+                code="invalid_discovery_result_evidence",
+            ) from exc
+
+
+class _CompletionEvidenceAttribution(StrEnum):
+    NONE = "none"
+    TASK_WORKING_TREE = "task_working_tree"
+    RANGE_OBSERVED = "range_observed"
+
+
+_COMPLETION_ATTRIBUTION_BY_MODE = {
+    _CompletionEvidenceMode.NONE: _CompletionEvidenceAttribution.NONE,
+    _CompletionEvidenceMode.WORKING_TREE_DIFF: _CompletionEvidenceAttribution.TASK_WORKING_TREE,
+    _CompletionEvidenceMode.COMMITTED_RANGE: _CompletionEvidenceAttribution.RANGE_OBSERVED,
+}
 
 TASK_DOC_COPY: dict[str, dict[str, Any]] = {
     "en": {
@@ -366,11 +442,18 @@ def task_discovery_values(task: Task) -> dict[str, list[str]]:
         fields = parse_labeled_list_section(
             task.body,
             "Discovery",
-            ("Candidate query", "Candidate files reviewed", "Chosen files", "Notes"),
+            ("Candidate query", "Candidate files reviewed", "Chosen files", "Selected result evidence", "Notes"),
         )
     except RepoctlError:
         return {}
     return {key: _dedupe_preserve(values) for key, values in fields.items()}
+
+
+def task_discovery_result_selections(task: Task) -> list[DiscoveryResultSelection]:
+    return [
+        DiscoveryResultSelection.from_text(value)
+        for value in task_discovery_values(task).get("Selected result evidence", [])
+    ]
 
 
 def _format_discovery_scalar(value: str) -> str:
@@ -397,6 +480,10 @@ def update_task_discovery(
     replace_chosen: list[str] | None = None,
     reason: str = "",
     note: str = "",
+    result_producer: str = "",
+    result_id: str = "",
+    result_authority: str = "",
+    result_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     if task.status not in LIVE:
@@ -404,12 +491,20 @@ def update_task_discovery(
     reviewed = reviewed or []
     chosen = chosen or []
     replace_chosen = replace_chosen or []
+    result_refs = result_refs or []
     if chosen and replace_chosen:
         raise RepoctlError("task discovery add accepts --chosen or --replace-chosen, not both", code="ambiguous_chosen_update", path=task.rel_path)
     if replace_chosen and not reason.strip():
         raise RepoctlError("--replace-chosen requires --reason", code="missing_scope_change_reason", path=task.rel_path)
-    if not any([query.strip(), reviewed, chosen, replace_chosen, note.strip()]):
-        raise RepoctlError("task discovery add requires --query, --reviewed, --chosen, --replace-chosen, or --note", code="missing_discovery_input", path=task.rel_path)
+    result_fields_present = [bool(result_producer), bool(result_id), bool(result_authority), bool(result_refs)]
+    if any(result_fields_present) and not all(result_fields_present):
+        raise RepoctlError(
+            "selected result evidence requires --result-producer, --result-id, --result-authority, and --result-ref",
+            code="incomplete_discovery_result_evidence",
+            path=task.rel_path,
+        )
+    if not any([query.strip(), reviewed, chosen, replace_chosen, note.strip(), result_refs]):
+        raise RepoctlError("task discovery add requires scope evidence, a note, or selected result evidence", code="missing_discovery_input", path=task.rel_path)
 
     fields = task_discovery_values(task)
     placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
@@ -421,6 +516,10 @@ def update_task_discovery(
     previous_reviewed = _dedupe_preserve(without_placeholders(fields.get("Candidate files reviewed", [])))
     previous_chosen = _dedupe_preserve(without_placeholders(fields.get("Chosen files", [])))
     previous_notes = _dedupe_preserve(without_placeholders(fields.get("Notes", [])))
+    previous_result_selections = [
+        DiscoveryResultSelection.from_text(value)
+        for value in without_placeholders(fields.get("Selected result evidence", []))
+    ]
 
     query_values = list(previous_queries)
     if query.strip():
@@ -428,6 +527,25 @@ def update_task_discovery(
     reviewed_values = _dedupe_preserve([*previous_reviewed, *reviewed])
     chosen_values = _dedupe_preserve(replace_chosen) if replace_chosen else _dedupe_preserve([*previous_chosen, *chosen])
     note_values = _dedupe_preserve([*previous_notes, *([note] if note.strip() else [])])
+    incoming_result_selections: list[DiscoveryResultSelection] = []
+    if result_refs:
+        try:
+            incoming_result_selections = [
+                DiscoveryResultSelection(
+                    producer=DiscoveryResultProducer(result_producer),
+                    result_id=result_id,
+                    authority=DiscoveryResultAuthority(result_authority),
+                    ref=ref,
+                )
+                for ref in result_refs
+            ]
+        except ValueError as exc:
+            raise RepoctlError(str(exc), code="invalid_discovery_result_evidence", path=task.rel_path) from exc
+    result_selection_by_text = {
+        selection.to_text(): selection
+        for selection in [*previous_result_selections, *incoming_result_selections]
+    }
+    result_selections = [result_selection_by_text[key] for key in sorted(result_selection_by_text)]
     target = _target_for_task(root, task)
     if target is not None:
         for label, values in (("reviewed", reviewed_values), ("chosen", chosen_values)):
@@ -469,6 +587,8 @@ def update_task_discovery(
     lines.extend(_format_discovery_list("Candidate query", query_values))
     lines.extend(_format_discovery_list("Candidate files reviewed", reviewed_values))
     lines.extend(_format_discovery_list("Chosen files", chosen_values))
+    if result_selections:
+        lines.extend(_format_discovery_list("Selected result evidence", [selection.to_text() for selection in result_selections]))
     if note_values:
         lines.extend(_format_discovery_list("Notes", note_values))
     current_text = task.path.read_text(encoding="utf-8")
@@ -497,6 +617,7 @@ def update_task_discovery(
             "candidate_files_reviewed": reviewed_values,
             "chosen_files": chosen_values,
             "notes": note_values,
+            "selected_result_evidence": [selection.to_dict() for selection in result_selections],
         },
         "update": {
             "candidate_queries": {
@@ -517,12 +638,25 @@ def update_task_discovery(
                 "added": [value for value in note_values if value not in previous_notes],
                 "already_present": [note] if note.strip() and note in previous_notes else [],
             },
+            "selected_result_evidence": {
+                "added": [
+                    selection.to_dict()
+                    for selection in result_selections
+                    if selection.to_text() not in {value.to_text() for value in previous_result_selections}
+                ],
+                "already_present": [
+                    selection.to_dict()
+                    for selection in incoming_result_selections
+                    if selection.to_text() in {value.to_text() for value in previous_result_selections}
+                ],
+            },
         },
         "totals": {
             "candidate_query_count": len(query_values),
             "reviewed_file_count": len(reviewed_values),
             "chosen_file_count": len(chosen_values),
             "note_count": len(note_values),
+            "selected_result_evidence_count": len(result_selections),
         },
     }
 
@@ -599,7 +733,7 @@ def _valid_sha256(value: str) -> bool:
     return bool(re.fullmatch(r"sha256:[0-9a-f]{64}", value))
 
 
-def _valid_receipt_task_path(value: str, *, allow_empty: bool = False) -> bool:
+def _valid_receipt_task_path(value: str, *, task_id: str = "", allow_empty: bool = False) -> bool:
     if not value:
         return allow_empty
     normalized = value.strip().replace("\\", "/")
@@ -611,20 +745,31 @@ def _valid_receipt_task_path(value: str, *, allow_empty: bool = False) -> bool:
     filename = normalized.removeprefix(prefix)
     if "/" in filename or not filename.endswith(".md"):
         return False
-    return bool(TASK_RE.match(filename))
+    match = TASK_RE.match(filename)
+    return bool(match and (not task_id or match.group(1) == task_id))
 
 
 def completion_receipt_task_path(receipt: dict[str, Any]) -> str:
+    task_id = str(receipt.get("task_id") or "")
     value = str(receipt.get("task_path_at_completion") or "")
-    return value if _valid_receipt_task_path(value) else ""
+    return value if ID_RE.match(task_id) and _valid_receipt_task_path(value, task_id=task_id) else ""
 
 
 def _completion_receipt_artifact_candidates(root: Path, task_id: str, task_path: str) -> list[Path]:
-    return [
+    if not ID_RE.match(task_id) or not _valid_receipt_task_path(task_path, task_id=task_id):
+        return []
+    candidates = [
         root / task_path,
         *sorted((root / "docs/tasks").glob(f"{task_id}--*.md")),
         *sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")),
     ]
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
 
 
 def completion_receipt_artifact_path(root: Path, receipt: dict[str, Any]) -> str:
@@ -632,10 +777,10 @@ def completion_receipt_artifact_path(root: Path, receipt: dict[str, Any]) -> str
     task_path = completion_receipt_task_path(receipt)
     if not ID_RE.match(task_id) or not task_path:
         return ""
-    artifact = next(
-        (candidate for candidate in _completion_receipt_artifact_candidates(root, task_id, task_path) if candidate.is_file()),
-        root / task_path,
-    )
+    existing = [candidate for candidate in _completion_receipt_artifact_candidates(root, task_id, task_path) if candidate.is_file()]
+    if len(existing) != 1:
+        return ""
+    artifact = existing[0]
     try:
         return artifact.relative_to(root).as_posix()
     except ValueError:
@@ -643,11 +788,15 @@ def completion_receipt_artifact_path(root: Path, receipt: dict[str, Any]) -> str
 
 
 def _read_receipt_artifact(root: Path, task_id: str, value: str) -> str:
-    existing = next(
-        (candidate for candidate in _completion_receipt_artifact_candidates(root, task_id, value) if candidate.is_file()),
-        None,
-    )
-    path = existing or (root / value)
+    candidates = _completion_receipt_artifact_candidates(root, task_id, value)
+    if not candidates:
+        raise RepoctlError(f"task completion receipt artifact does not match task_id: {value}", code="invalid_completion_receipt", path=value)
+    existing = [candidate for candidate in candidates if candidate.is_file()]
+    if not existing:
+        raise RepoctlError(f"task completion receipt artifact is missing: {value}", code="invalid_completion_receipt", path=value)
+    if len(existing) != 1:
+        raise RepoctlError(f"task completion receipt artifact is ambiguous: {value}", code="invalid_completion_receipt", path=value)
+    path = existing[0]
     try:
         resolved = path.resolve()
         root_resolved = root.resolve()
@@ -658,7 +807,7 @@ def _read_receipt_artifact(root: Path, task_id: str, value: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise RepoctlError(f"task completion receipt artifact is missing: {value}", code="invalid_completion_receipt", path=value) from exc
+        raise RepoctlError(f"task completion receipt artifact is unreadable: {value}", code="invalid_completion_receipt", path=value) from exc
 
 
 def _completion_receipt_repo_id(path: Path, root: Path, data: dict[str, Any]) -> str:
@@ -677,6 +826,104 @@ def _completion_receipt_repo_id(path: Path, root: Path, data: dict[str, Any]) ->
     return repo_id
 
 
+def _receipt_changed_entry(item: Any, *, rel: str, label: str = "changed entry") -> ChangedEntry:
+    if not isinstance(item, dict):
+        raise RepoctlError(f"task completion receipt has invalid {label}: {rel}", code="invalid_completion_receipt", path=rel)
+    allowed = {"change", "path", "old_path"}
+    if set(item) - allowed:
+        raise RepoctlError(f"task completion receipt has invalid {label}: {rel}", code="invalid_completion_receipt", path=rel)
+    change = str(item.get("change") or "")
+    path_value = str(item.get("path") or "")
+    old_path = str(item.get("old_path") or "")
+    if (
+        change not in {"added", "modified", "deleted", "renamed", "copied", "untracked"}
+        or not path_value
+        or normalize_repo_path(path_value) != path_value
+    ):
+        raise RepoctlError(f"task completion receipt has invalid {label}: {rel}", code="invalid_completion_receipt", path=rel)
+    if old_path and normalize_repo_path(old_path) != old_path:
+        raise RepoctlError(f"task completion receipt has invalid {label} old_path: {rel}", code="invalid_completion_receipt", path=rel)
+    if (change in {"renamed", "copied"}) != bool(old_path):
+        raise RepoctlError(f"task completion receipt has invalid {label} old_path: {rel}", code="invalid_completion_receipt", path=rel)
+    return change, path_value, old_path
+
+
+def _validate_receipt_fingerprint_manifest(
+    *,
+    rel: str,
+    data: dict[str, Any],
+    repo_evidence: dict[str, Any],
+    entries: list[ChangedEntry],
+) -> None:
+    manifest = repo_evidence.get("fingerprint_manifest")
+    if manifest in (None, {}):
+        return
+    if not isinstance(manifest, dict):
+        raise RepoctlError(f"task completion receipt has invalid fingerprint manifest: {rel}", code="invalid_completion_receipt", path=rel)
+    mode = str(repo_evidence.get("mode") or "")
+    repo_id = str(data.get("repo_id") or "")
+    repo_path = str(manifest.get("repo_path") or "")
+    if (
+        mode == "none"
+        or str(manifest.get("mode") or "") != mode
+        or str(manifest.get("repo_id") or "") != repo_id
+        or not repo_path
+        or normalize_repo_path(repo_path) != repo_path
+        or not (repo_path == "repos" or repo_path.startswith("repos/"))
+        or str(manifest.get("start_head") or "") != str(repo_evidence.get("start_head") or "")
+        or str(manifest.get("observed_head") or "") != str(repo_evidence.get("observed_head") or "")
+    ):
+        raise RepoctlError(f"task completion receipt fingerprint manifest does not match repo evidence: {rel}", code="invalid_completion_receipt", path=rel)
+
+    manifest_entries_raw = manifest.get("changed_entries")
+    if not isinstance(manifest_entries_raw, list):
+        raise RepoctlError(f"task completion receipt has invalid fingerprint manifest entries: {rel}", code="invalid_completion_receipt", path=rel)
+    manifest_entries = [_receipt_changed_entry(item, rel=rel, label="fingerprint manifest entry") for item in manifest_entries_raw]
+    if len(set(manifest_entries)) != len(manifest_entries) or sorted(manifest_entries) != sorted(entries):
+        raise RepoctlError(f"task completion receipt fingerprint manifest entries do not match changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
+
+    raw_fingerprints = manifest.get("entry_fingerprints")
+    if raw_fingerprints is not None:
+        if not isinstance(raw_fingerprints, list):
+            raise RepoctlError(f"task completion receipt has invalid entry fingerprints: {rel}", code="invalid_completion_receipt", path=rel)
+        fingerprint_entries: list[ChangedEntry] = []
+        for item in raw_fingerprints:
+            if not isinstance(item, dict) or set(item) - {"change", "path", "old_path", "fingerprint_sha256"}:
+                raise RepoctlError(f"task completion receipt has invalid entry fingerprint: {rel}", code="invalid_completion_receipt", path=rel)
+            entry = _receipt_changed_entry(
+                {key: item[key] for key in ("change", "path", "old_path") if key in item},
+                rel=rel,
+                label="entry fingerprint",
+            )
+            if not _valid_sha256(str(item.get("fingerprint_sha256") or "")):
+                raise RepoctlError(f"task completion receipt has invalid entry fingerprint digest: {rel}", code="invalid_completion_receipt", path=rel)
+            fingerprint_entries.append(entry)
+        if len(set(fingerprint_entries)) != len(fingerprint_entries) or sorted(fingerprint_entries) != sorted(entries):
+            raise RepoctlError(f"task completion receipt entry fingerprints do not cover changed_entries exactly: {rel}", code="invalid_completion_receipt", path=rel)
+
+    encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if _sha256_text(encoded) != str(repo_evidence.get("diff_fingerprint_sha256") or ""):
+        raise RepoctlError(f"task completion receipt fingerprint manifest hash does not match repo evidence: {rel}", code="invalid_completion_receipt", path=rel)
+
+
+def _completion_evidence_pair(
+    repo_evidence: dict[str, Any],
+    *,
+    rel: str,
+) -> tuple[_CompletionEvidenceMode, _CompletionEvidenceAttribution]:
+    try:
+        mode = _CompletionEvidenceMode(str(repo_evidence.get("mode") or ""))
+    except ValueError as exc:
+        raise RepoctlError(f"task completion receipt has invalid repo evidence mode: {rel}", code="invalid_completion_receipt", path=rel) from exc
+    try:
+        attribution = _CompletionEvidenceAttribution(str(repo_evidence.get("attribution") or ""))
+    except ValueError as exc:
+        raise RepoctlError(f"task completion receipt has invalid repo evidence attribution: {rel}", code="invalid_completion_receipt", path=rel) from exc
+    if _COMPLETION_ATTRIBUTION_BY_MODE[mode] is not attribution:
+        raise RepoctlError(f"task completion receipt has incoherent repo evidence: {rel}", code="invalid_completion_receipt", path=rel)
+    return mode, attribution
+
+
 def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -> None:
     rel = path.relative_to(root).as_posix()
     task_id = str(data.get("task_id") or "")
@@ -684,7 +931,7 @@ def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -
     if data.get("status") != "done":
         raise RepoctlError(f"task completion receipt has invalid status: {rel}", code="invalid_completion_receipt", path=rel)
     task_path = str(data.get("task_path_at_completion") or "")
-    if not _valid_receipt_task_path(task_path):
+    if not _valid_receipt_task_path(task_path, task_id=task_id):
         raise RepoctlError(f"task completion receipt has invalid task path: {rel}", code="invalid_completion_receipt", path=rel)
     content_sha256 = str(data.get("content_sha256") or "")
     if not _valid_sha256(content_sha256):
@@ -704,28 +951,17 @@ def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -
     repo_evidence = data.get("repo_evidence")
     if not isinstance(repo_evidence, dict):
         raise RepoctlError(f"task completion receipt has invalid repo evidence: {rel}", code="invalid_completion_receipt", path=rel)
-    mode = str(repo_evidence.get("mode") or "")
-    if mode not in {"none", "working_tree_diff", "committed_range"}:
-        raise RepoctlError(f"task completion receipt has invalid repo evidence mode: {rel}", code="invalid_completion_receipt", path=rel)
-    attribution = str(repo_evidence.get("attribution") or "")
-    if attribution not in {"none", "task_working_tree", "range_observed"}:
-        raise RepoctlError(f"task completion receipt has invalid repo evidence attribution: {rel}", code="invalid_completion_receipt", path=rel)
+    mode, _attribution = _completion_evidence_pair(repo_evidence, rel=rel)
     fingerprint = str(repo_evidence.get("diff_fingerprint_sha256") or "")
-    if mode != "none" and not _valid_sha256(fingerprint):
+    if mode is not _CompletionEvidenceMode.NONE and not _valid_sha256(fingerprint):
         raise RepoctlError(f"task completion receipt has invalid repo evidence fingerprint: {rel}", code="invalid_completion_receipt", path=rel)
     raw_entries = data.get("changed_entries")
     if not isinstance(raw_entries, list):
         raise RepoctlError(f"task completion receipt has invalid changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
-    for item in raw_entries:
-        if not isinstance(item, dict):
-            raise RepoctlError(f"task completion receipt has invalid changed entry: {rel}", code="invalid_completion_receipt", path=rel)
-        change = str(item.get("change") or "")
-        path_value = str(item.get("path") or "")
-        old_path = str(item.get("old_path") or "")
-        if change not in {"added", "modified", "deleted", "renamed", "copied", "untracked"} or normalize_repo_path(path_value) != path_value:
-            raise RepoctlError(f"task completion receipt has invalid changed entry: {rel}", code="invalid_completion_receipt", path=rel)
-        if old_path and normalize_repo_path(old_path) != old_path:
-            raise RepoctlError(f"task completion receipt has invalid changed entry old_path: {rel}", code="invalid_completion_receipt", path=rel)
+    entries = [_receipt_changed_entry(item, rel=rel) for item in raw_entries]
+    if len(set(entries)) != len(entries):
+        raise RepoctlError(f"task completion receipt has duplicate changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
+    _validate_receipt_fingerprint_manifest(rel=rel, data=data, repo_evidence=repo_evidence, entries=entries)
 
 
 def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tuple[list[dict[str, Any]], list[Problem]]:
@@ -782,9 +1018,7 @@ def _target_for_task(root: Path, task: "Task") -> RepoTarget | None:
         raise RepoctlError(f"repository not found for task repo_id: {repo_id}", code="repository_not_found", path=task.rel_path)
     if repo_scoped:
         return default_repo_target(root)
-    if not layout.registry_ready:
-        return None
-    return layout.targets[0] if len(layout.targets) == 1 else None
+    return None
 
 
 def _root_task_product_surfaces(root: Path) -> tuple[RepoTarget, ...]:
@@ -950,6 +1184,27 @@ def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
     }
 
 
+def _root_baseline_repository_records(baseline: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if baseline is None:
+        return []
+    records = baseline.get("repositories")
+    if isinstance(records, list) and records:
+        return records
+    repo_path = str(baseline.get("repo_path") or "")
+    if not repo_path:
+        return []
+    return [
+        {
+            "repo_id": str(baseline.get("repo_id") or ""),
+            "repo_path": repo_path,
+            "git_toplevel": str(baseline.get("git_toplevel") or ""),
+            "start_head": str(baseline.get("head") or ""),
+            "dirty_entries": [_entry_to_dict(entry) for entry in baseline.get("entries", [])],
+            "dirty_path_fingerprints": dict(baseline.get("path_fingerprints") or {}),
+        }
+    ]
+
+
 def _parse_baseline_entries(raw_entries: Any, state_path: Path, root: Path) -> list[ChangedEntry]:
     if not isinstance(raw_entries, list):
         raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
@@ -1107,24 +1362,298 @@ def task_baseline_ownership_evidence(root: Path, task_id: str) -> dict[str, dict
     return evidence
 
 
+def _workspace_receipt_has_repository_claim(receipt: dict[str, Any], *, rel: str) -> bool:
+    repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
+    mode, attribution = _completion_evidence_pair(repo_evidence, rel=rel)
+    manifest = repo_evidence.get("fingerprint_manifest")
+    return bool(
+        mode is not _CompletionEvidenceMode.NONE
+        or attribution is not _CompletionEvidenceAttribution.NONE
+        or receipt.get("changed_entries")
+        or manifest not in (None, {})
+        or str(repo_evidence.get("diff_fingerprint_sha256") or "")
+    )
+
+
+def _done_descendant_completion_receipts(root: Path, task: Task) -> list[tuple[Task, dict[str, Any]]]:
+    if _repo_scoped_task(task):
+        return []
+    children = children_by_parent(load_tasks(root))
+    stack = list(children.get(task.id, []))
+    seen = {task.id}
+    done: list[tuple[Task, dict[str, Any]]] = []
+    while stack:
+        child = stack.pop()
+        if child.id in seen:
+            raise RepoctlError(
+                "parent task contains a duplicate or cyclic descendant identity",
+                code="child_completion_task_duplicate",
+                path=child.rel_path,
+            )
+        seen.add(child.id)
+        stack.extend(children.get(child.id, []))
+        if child.status != "done":
+            continue
+        receipt_path = _completion_receipt_path(root, child.id)
+        receipt_rel = receipt_path.relative_to(root).as_posix()
+        if not receipt_path.is_file():
+            raise RepoctlError(
+                "done child task is missing its completion receipt",
+                code="child_completion_receipt_missing",
+                path=child.rel_path,
+            )
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RepoctlError(
+                "done child task completion receipt is unreadable",
+                code="child_completion_receipt_invalid",
+                path=receipt_rel,
+            ) from exc
+        if not isinstance(receipt, dict):
+            raise RepoctlError(
+                "done child task completion receipt is not an object",
+                code="child_completion_receipt_invalid",
+                path=receipt_rel,
+            )
+        try:
+            _validate_completion_receipt(receipt_path, root, receipt)
+        except RepoctlError as exc:
+            raise RepoctlError(
+                f"done child task completion receipt is invalid: {exc}",
+                code="child_completion_receipt_invalid",
+                path=receipt_rel,
+            ) from exc
+
+        child_repo_scoped = _repo_scoped_task(child)
+        try:
+            expected_target = _target_for_task(root, child)
+        except RepoctlError as exc:
+            raise RepoctlError(
+                "done child task repository identity cannot be resolved",
+                code="child_completion_receipt_wrong_repository",
+                path=child.rel_path,
+            ) from exc
+        receipt_repo_id = str(receipt.get("repo_id") or "")
+        repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
+        manifest = repo_evidence.get("fingerprint_manifest") if isinstance(repo_evidence.get("fingerprint_manifest"), dict) else {}
+        if child_repo_scoped:
+            if expected_target is None or receipt_repo_id != expected_target.id:
+                raise RepoctlError(
+                    "done child task completion receipt belongs to the wrong repository",
+                    code="child_completion_receipt_wrong_repository",
+                    path=receipt_rel,
+                )
+            if manifest and (
+                str(manifest.get("repo_id") or "") != expected_target.id
+                or str(manifest.get("repo_path") or "") != expected_target.display_path
+            ):
+                raise RepoctlError(
+                    "done child task completion receipt repository manifest does not match the selected repository",
+                    code="child_completion_receipt_wrong_repository",
+                    path=receipt_rel,
+                )
+        else:
+            has_repository_claim = _workspace_receipt_has_repository_claim(receipt, rel=receipt_rel)
+            if has_repository_claim or receipt_repo_id:
+                raise RepoctlError(
+                    "workspace child task completion receipt must not claim product repository ownership",
+                    code="child_completion_receipt_wrong_repository",
+                    path=receipt_rel,
+                )
+        done.append((child, receipt))
+    return sorted(done, key=lambda item: item[0].id)
+
+
+def _entry_fingerprint_claims(
+    *,
+    descendant_receipts: list[tuple[Task, dict[str, Any]]],
+    target: RepoTarget,
+) -> tuple[dict[ChangedEntry, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    by_entry: dict[ChangedEntry, list[dict[str, Any]]] = {}
+    by_path: dict[str, list[dict[str, Any]]] = {}
+    for child, receipt in descendant_receipts:
+        if str(receipt.get("repo_id") or "") != target.id:
+            continue
+        receipt_rel = child.rel_path
+        entries = [
+            _receipt_changed_entry(item, rel=receipt_rel)
+            for item in receipt.get("changed_entries", [])
+        ]
+        repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
+        mode, attribution = _completion_evidence_pair(repo_evidence, rel=receipt_rel)
+        manifest = repo_evidence.get("fingerprint_manifest") if isinstance(repo_evidence.get("fingerprint_manifest"), dict) else {}
+        raw_fingerprints = manifest.get("entry_fingerprints") if isinstance(manifest.get("entry_fingerprints"), list) else []
+        fingerprints: dict[ChangedEntry, str] = {}
+        for item in raw_fingerprints:
+            entry = _receipt_changed_entry(
+                {key: item[key] for key in ("change", "path", "old_path") if key in item},
+                rel=receipt_rel,
+                label="entry fingerprint",
+            )
+            fingerprints[entry] = str(item.get("fingerprint_sha256") or "")
+        ownership_claim = (
+            mode is _CompletionEvidenceMode.WORKING_TREE_DIFF
+            and attribution is _CompletionEvidenceAttribution.TASK_WORKING_TREE
+        )
+        if not ownership_claim:
+            continue
+        eligible = ownership_claim and bool(raw_fingerprints or not entries)
+        for entry in entries:
+            claim = {
+                "task_id": child.id,
+                "fingerprint_sha256": fingerprints.get(entry, ""),
+                "ownership_claim": ownership_claim,
+                "eligible": eligible and entry in fingerprints,
+            }
+            by_entry.setdefault(entry, []).append(claim)
+            for path in _entry_paths([entry]):
+                by_path.setdefault(path, []).append(claim)
+    return by_entry, by_path
+
+
+def _validate_duplicate_descendant_claims(
+    root: Path,
+    descendant_receipts: list[tuple[Task, dict[str, Any]]],
+) -> None:
+    if not descendant_receipts:
+        return
+    for target in _root_task_product_surfaces(root):
+        claims_by_entry, _claims_by_path = _entry_fingerprint_claims(
+            descendant_receipts=descendant_receipts,
+            target=target,
+        )
+        for claimed_entry, claims in sorted(claims_by_entry.items()):
+            ownership_claims = [claim for claim in claims if claim.get("ownership_claim") is True]
+            if len(ownership_claims) > 1:
+                raise RepoctlError(
+                    "multiple completed child receipts claim the same repository entry",
+                    code="child_completion_attribution_duplicate",
+                    path=claimed_entry[1],
+                )
+
+
+def _exclude_exact_descendant_changes(
+    root: Path,
+    *,
+    target: RepoTarget,
+    entries: list[ChangedEntry],
+    descendant_receipts: list[tuple[Task, dict[str, Any]]],
+) -> tuple[list[ChangedEntry], list[dict[str, str]]]:
+    if not descendant_receipts:
+        return entries, []
+    claims_by_entry, _claims_by_path = _entry_fingerprint_claims(
+        descendant_receipts=descendant_receipts,
+        target=target,
+    )
+    for claimed_entry, claims in sorted(claims_by_entry.items()):
+        ownership_claims = [claim for claim in claims if claim.get("ownership_claim") is True]
+        if len(ownership_claims) > 1:
+            raise RepoctlError(
+                "multiple completed child receipts claim the same repository entry",
+                code="child_completion_attribution_duplicate",
+                path=claimed_entry[1],
+            )
+    if not claims_by_entry:
+        return entries, []
+    current_records, git_state = repo_change_fingerprint_records(root, entries, target)
+    if not git_state.available:
+        raise RepoctlError(
+            f"cannot verify completed child repository evidence: {git_state.reason}",
+            code="child_completion_attribution_unavailable",
+            path=git_state.repo_path or target.display_path,
+        )
+    current_by_entry = {
+        _receipt_changed_entry(
+            {key: item[key] for key in ("change", "path", "old_path") if key in item},
+            rel=target.display_path,
+            label="current repository entry",
+        ): str(item.get("fingerprint_sha256") or "")
+        for item in current_records
+    }
+    attributed: list[dict[str, str]] = []
+    attributed_entries: set[ChangedEntry] = set()
+    for entry, entry_claims in sorted(claims_by_entry.items()):
+        eligible_claims = [claim for claim in entry_claims if claim.get("eligible") is True]
+        if len(eligible_claims) != 1:
+            raise RepoctlError(
+                "completed child receipt lacks exact per-entry working-tree evidence",
+                code="child_completion_evidence_missing",
+                path=entry[1],
+            )
+        fingerprint = current_by_entry.get(entry, "")
+        claim = eligible_claims[0]
+        if not fingerprint or claim.get("fingerprint_sha256") != fingerprint:
+            raise RepoctlError(
+                "current repository entry no longer matches completed child evidence",
+                code="child_completion_evidence_drift",
+                path=entry[1],
+            )
+        change, path, old_path = entry
+        record = {
+            "task_id": claim["task_id"],
+            "repo_id": target.id,
+            "change": change,
+            "path": path,
+            "fingerprint_sha256": fingerprint,
+        }
+        if old_path:
+            record["old_path"] = old_path
+        attributed.append(record)
+        attributed_entries.add(entry)
+    remaining = [entry for entry in entries if entry not in attributed_entries]
+    return remaining, attributed
+
+
+def _baseline_conflicting_paths(
+    *,
+    baseline_paths: set[str],
+    baseline_fingerprints: dict[str, Any],
+    current_fingerprints: dict[str, str],
+    ownership: dict[str, Any] | None = None,
+) -> set[str]:
+    conflicts: set[str] = set()
+    ownership = ownership or {}
+    for path in baseline_paths:
+        baseline_fingerprint = str(baseline_fingerprints.get(path) or "")
+        current_fingerprint = str(current_fingerprints.get(path) or "")
+        if baseline_fingerprint and current_fingerprint == baseline_fingerprint:
+            continue
+        decision = ownership.get(path) if isinstance(ownership.get(path), dict) else {}
+        if str(decision.get("ownership") or "") == "task":
+            continue
+        conflicts.add(path)
+    return conflicts
+
+
 def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     task_id = task.id
     target = _target_for_task(root, task)
+    descendant_receipts = _done_descendant_completion_receipts(root, task)
+    _validate_duplicate_descendant_claims(root, descendant_receipts)
     if target is None:
         baseline = _read_repo_baseline(root, task_id)
-        if baseline and baseline.get("repositories"):
+        baseline_records = _root_baseline_repository_records(baseline)
+        if baseline_records:
             changes: list[ChangedEntry] = []
+            attributed_changes: list[dict[str, str]] = []
+            current_task_change_count = 0
             baseline_count = 0
             current_count = 0
             baseline_conflicts: list[str] = []
-            for record in baseline["repositories"]:
+            current_targets = _root_task_product_surfaces(root)
+            matched_current_paths: set[str] = set()
+            for record in baseline_records:
                 repo_id = str(record.get("repo_id") or "")
                 repo_path = str(record.get("repo_path") or "")
+                state_path = _baseline_path(root, task_id)
+                baseline_entries = _parse_baseline_entries(record.get("dirty_entries", []), state_path, root)
+                baseline_count += len(baseline_entries)
                 matched = next(
                     (
                         candidate
-                        for candidate in _root_task_product_surfaces(root)
+                        for candidate in current_targets
                         if candidate.display_path == repo_path and (not repo_id or candidate.id == repo_id)
                     ),
                     None,
@@ -1132,24 +1661,30 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
                 if matched is None:
                     if repo_path:
                         changes.append(("deleted", repo_path, ""))
-                        baseline_conflicts.append(repo_path)
+                        baseline_conflicts.extend(
+                            f"{repo_path}/{path}"
+                            for path in _entry_paths(baseline_entries)
+                        )
                     continue
+                matched_current_paths.add(matched.display_path)
                 current, _git_state = repo_changed_entries(root, matched)
-                current_fingerprints, _fingerprint_state = repo_path_fingerprints(root, _entry_paths(current), matched)
-                state_path = _baseline_path(root, task_id)
-                baseline_entries = _parse_baseline_entries(record.get("dirty_entries", []), state_path, root)
                 baseline_fingerprints = record.get("dirty_path_fingerprints", {})
                 if not isinstance(baseline_fingerprints, dict):
                     raise RepoctlError(f"task repo dirty baseline is invalid: {state_path.relative_to(root).as_posix()}")
-                baseline_count += len(baseline_entries)
                 current_count += len(current)
                 baseline_paths = set(_entry_paths(baseline_entries))
+                current_paths = set(_entry_paths(current))
+                current_fingerprints, _fingerprint_state = repo_path_fingerprints(
+                    root,
+                    sorted(baseline_paths | current_paths),
+                    matched,
+                )
+                repo_changes: list[ChangedEntry] = []
                 for entry in current:
-                    prefixed_entry = (entry[0], f"{repo_path}/{entry[1]}", f"{repo_path}/{entry[2]}" if entry[2] else "")
                     paths = set(_entry_paths([entry]))
                     overlap = paths & baseline_paths
                     if not overlap:
-                        changes.append(prefixed_entry)
+                        repo_changes.append(entry)
                         continue
                     unchanged = paths <= baseline_paths and all(
                         str(baseline_fingerprints.get(path) or "") and current_fingerprints.get(path) == str(baseline_fingerprints.get(path) or "")
@@ -1157,45 +1692,136 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
                     )
                     if unchanged:
                         continue
-                    baseline_conflicts.extend(f"{repo_path}/{path}" for path in overlap)
-                    changes.append(prefixed_entry)
+                    repo_changes.append(entry)
+                repo_conflicts = _baseline_conflicting_paths(
+                    baseline_paths=baseline_paths,
+                    baseline_fingerprints=baseline_fingerprints,
+                    current_fingerprints=current_fingerprints,
+                )
+                current_task_change_count += len(repo_changes)
+                remaining, attributed = _exclude_exact_descendant_changes(
+                    root,
+                    target=matched,
+                    entries=repo_changes,
+                    descendant_receipts=descendant_receipts,
+                )
+                attributed_changes.extend(attributed)
+                remaining_paths = set(_entry_paths(remaining))
+                baseline_only_conflicts = repo_conflicts - current_paths
+                entry_conflicts = repo_conflicts & current_paths & remaining_paths
+                baseline_conflicts.extend(
+                    f"{repo_path}/{path}"
+                    for path in sorted(baseline_only_conflicts | entry_conflicts)
+                )
+                changes.extend(
+                    (entry[0], f"{repo_path}/{entry[1]}", f"{repo_path}/{entry[2]}" if entry[2] else "")
+                    for entry in remaining
+                )
+            for current_only in current_targets:
+                if current_only.display_path in matched_current_paths:
+                    continue
+                current, _git_state = repo_changed_entries(root, current_only)
+                current_count += len(current)
+                current_task_change_count += len(current)
+                remaining, attributed = _exclude_exact_descendant_changes(
+                    root,
+                    target=current_only,
+                    entries=current,
+                    descendant_receipts=descendant_receipts,
+                )
+                attributed_changes.extend(attributed)
+                changes.extend(
+                    (
+                        entry[0],
+                        f"{current_only.display_path}/{entry[1]}",
+                        f"{current_only.display_path}/{entry[2]}" if entry[2] else "",
+                    )
+                    for entry in remaining
+                )
             git_state = RepoGitState(True, repo_id="", repo_path="repos")
             return {
                 "changes": changes,
                 "baseline_available": True,
                 "baseline_count": baseline_count,
                 "current_count": current_count,
-                "preexisting_count": max(0, current_count - len(changes)),
+                "preexisting_count": max(0, current_count - current_task_change_count),
                 "baseline_conflicts": sorted(set(baseline_conflicts)),
                 "initial_dirty_paths": sorted(
                     f"{str(record.get('repo_path') or '')}/{path}".strip("/")
-                    for record in baseline["repositories"]
+                    for record in baseline_records
                     for path in _entry_paths(_parse_baseline_entries(record.get("dirty_entries", []), _baseline_path(root, task_id), root))
                 ),
                 "ownership": dict(baseline.get("ownership") or {}),
+                "child_attributed_changes": attributed_changes,
+                "child_attributed_count": len(attributed_changes),
                 "repo_git": git_state,
             }
         git_state = _no_product_repo_state()
         changes: list[ChangedEntry] = []
+        attributed_changes: list[dict[str, str]] = []
         current_count = 0
         for product_target in _root_task_product_surfaces(root):
             current, _target_state = repo_changed_entries(root, product_target)
             current_count += len(current)
-            changes.extend((entry[0], f"{product_target.display_path}/{entry[1]}", f"{product_target.display_path}/{entry[2]}" if entry[2] else "") for entry in current)
-        if changes:
+            remaining, attributed = _exclude_exact_descendant_changes(
+                root,
+                target=product_target,
+                entries=current,
+                descendant_receipts=descendant_receipts,
+            )
+            attributed_changes.extend(attributed)
+            changes.extend(
+                (entry[0], f"{product_target.display_path}/{entry[1]}", f"{product_target.display_path}/{entry[2]}" if entry[2] else "")
+                for entry in remaining
+            )
+        if current_count:
             git_state = RepoGitState(True, repo_id="", repo_path="repos")
-        return {"changes": changes, "baseline_available": False, "baseline_count": 0, "current_count": current_count, "preexisting_count": 0, "baseline_conflicts": [], "initial_dirty_paths": [], "ownership": {}, "repo_git": git_state}
+        return {
+            "changes": changes,
+            "baseline_available": False,
+            "baseline_count": 0,
+            "current_count": current_count,
+            "preexisting_count": 0,
+            "baseline_conflicts": [],
+            "initial_dirty_paths": [],
+            "ownership": {},
+            "child_attributed_changes": attributed_changes,
+            "child_attributed_count": len(attributed_changes),
+            "repo_git": git_state,
+        }
     current, git_state = repo_changed_entries(root, target)
     baseline = _read_repo_baseline(root, task_id) if git_state.available else None
     if baseline is None:
-        return {"changes": current, "baseline_available": False, "baseline_count": 0, "current_count": len(current), "preexisting_count": 0, "baseline_conflicts": [], "initial_dirty_paths": [], "ownership": {}, "repo_git": git_state}
+        changes, attributed_changes = _exclude_exact_descendant_changes(
+            root,
+            target=target,
+            entries=current,
+            descendant_receipts=descendant_receipts,
+        )
+        return {
+            "changes": changes,
+            "baseline_available": False,
+            "baseline_count": 0,
+            "current_count": len(current),
+            "preexisting_count": 0,
+            "baseline_conflicts": [],
+            "initial_dirty_paths": [],
+            "ownership": {},
+            "child_attributed_changes": attributed_changes,
+            "child_attributed_count": len(attributed_changes),
+            "repo_git": git_state,
+        }
     baseline_entries = baseline["entries"]
     baseline_fingerprints = baseline["path_fingerprints"]
-    current_fingerprints, _fingerprint_state = repo_path_fingerprints(root, _entry_paths(current), target)
     baseline_paths = set(_entry_paths(baseline_entries))
+    current_paths = set(_entry_paths(current))
+    current_fingerprints, _fingerprint_state = repo_path_fingerprints(
+        root,
+        sorted(baseline_paths | current_paths),
+        target,
+    )
     ownership = baseline.get("ownership") if isinstance(baseline.get("ownership"), dict) else {}
     changes: list[ChangedEntry] = []
-    baseline_conflicts: list[str] = []
     for entry in current:
         paths = set(_entry_paths([entry]))
         overlap = paths & baseline_paths
@@ -1209,24 +1835,35 @@ def repo_changes_since_task_start(root: Path, task_id: str) -> dict[str, Any]:
         if unchanged:
             continue
         changes.append(entry)
-        for path in overlap:
-            decision = ownership.get(path) if isinstance(ownership.get(path), dict) else {}
-            if str(decision.get("ownership") or "") == "task":
-                continue
-            if str(decision.get("ownership") or "") == "preexisting" and current_fingerprints.get(path) == baseline_fingerprints.get(path):
-                continue
-            baseline_conflicts.append(path)
+    baseline_conflicts = _baseline_conflicting_paths(
+        baseline_paths=baseline_paths,
+        baseline_fingerprints=baseline_fingerprints,
+        current_fingerprints=current_fingerprints,
+        ownership=ownership,
+    )
+    raw_changes = list(changes)
+    changes, attributed_changes = _exclude_exact_descendant_changes(
+        root,
+        target=target,
+        entries=raw_changes,
+        descendant_receipts=descendant_receipts,
+    )
+    remaining_paths = set(_entry_paths(changes))
+    baseline_only_conflicts = baseline_conflicts - current_paths
+    entry_conflicts = baseline_conflicts & current_paths & remaining_paths
     return {
         "changes": changes,
         "baseline_available": True,
         "baseline_count": len(baseline_entries),
         "current_count": len(current),
-        "preexisting_count": max(0, len(current) - len(changes)),
-        "baseline_conflicts": sorted(set(baseline_conflicts)),
+        "preexisting_count": max(0, len(current) - len(raw_changes)),
+        "baseline_conflicts": sorted(baseline_only_conflicts | entry_conflicts),
         "initial_dirty_paths": sorted(baseline_paths),
         "ownership": ownership,
         "baseline_path_fingerprints": baseline_fingerprints,
         "current_path_fingerprints": current_fingerprints,
+        "child_attributed_changes": attributed_changes,
+        "child_attributed_count": len(attributed_changes),
         "repo_git": git_state,
     }
 
@@ -1457,15 +2094,19 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
                     child_text = child.path.read_text(encoding="utf-8")
                     archive_texts[child_archive_target] = child_text
                     moves.append((child.path, child_archive_target))
-    evidence_mode = str((repo_delta or {}).get("evidence_mode") or "none")
+    try:
+        evidence_mode = _CompletionEvidenceMode(str((repo_delta or {}).get("evidence_mode") or "none"))
+    except ValueError as exc:
+        raise RepoctlError("task finish produced an invalid repository evidence mode", code="invalid_repo_evidence_mode") from exc
+    evidence_attribution = _COMPLETION_ATTRIBUTION_BY_MODE[evidence_mode]
     receipt_rel = receipt_path.relative_to(root).as_posix()
-    text = _finalize_handoff(text, status="done", new_path=new_path, receipt_path=receipt_rel, evidence_mode=evidence_mode, copy=copy)
+    text = _finalize_handoff(text, status="done", new_path=new_path, receipt_path=receipt_rel, evidence_mode=evidence_mode.value, copy=copy)
     if moves:
         archive_texts[root / new_path] = text
     changed_entries = [_entry_to_dict(entry) for entry in (repo_delta or {}).get("changes", [])]
     repo_evidence = {
-        "mode": evidence_mode,
-        "attribution": "range_observed" if evidence_mode == "committed_range" else "task_working_tree" if evidence_mode == "working_tree_diff" else "none",
+        "mode": evidence_mode.value,
+        "attribution": evidence_attribution.value,
         "start_head": start_head,
         "observed_head": current_head,
         "git_available": bool(current_head_state.available),
@@ -1487,7 +2128,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         "schema": "repoctl.task.completion",
         "schema_version": COMPLETION_RECEIPT_SCHEMA_VERSION,
         "task_id": task.id,
-        "repo_id": target.id if target is not None else "",
+        "repo_id": target.id if target is not None and _repo_scoped_task(task) else "",
         "status": "done",
         "completed_at": finish_timestamp,
         "task_path_at_completion": new_path,
@@ -1774,16 +2415,26 @@ def _assert_repo_baseline_matches(root: Path, task: Task, target: RepoTarget | N
     baseline = _read_repo_baseline(root, task.id)
     if baseline is None or not baseline.get("repo_id"):
         return
-    if target is None:
-        raise RepoctlError("task started with a product repository baseline, but no product repository is currently selected", code="repo_target_changed_since_start", path=task.rel_path)
-    if baseline.get("repo_id") != target.id or baseline.get("repo_path") != target.display_path:
+    matched_target = target
+    if matched_target is None:
+        matched_target = next(
+            (
+                candidate
+                for candidate in _root_task_product_surfaces(root)
+                if candidate.id == baseline.get("repo_id") and candidate.display_path == baseline.get("repo_path")
+            ),
+            None,
+        )
+    if matched_target is None:
+        raise RepoctlError("task started with a product repository baseline, but that repository is no longer present", code="repo_target_changed_since_start", path=task.rel_path)
+    if baseline.get("repo_id") != matched_target.id or baseline.get("repo_path") != matched_target.display_path:
         raise RepoctlError("task product repository target changed since start; review repo_id/repo_path before finishing", code="repo_target_changed_since_start", path=task.rel_path)
     expected_top = str(baseline.get("git_toplevel") or "")
     if expected_top:
         try:
-            current_top = target.root_path.resolve().as_posix()
+            current_top = matched_target.root_path.resolve().as_posix()
         except OSError:
-            current_top = target.root_path.as_posix()
+            current_top = matched_target.root_path.as_posix()
         if current_top != expected_top:
             raise RepoctlError("task product repository git root changed since start; restart the task baseline", code="repo_target_changed_since_start", path=task.rel_path)
 
@@ -2099,6 +2750,10 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
                 "missing_discovery_evidence",
                 "repo-scoped task needs structured Discovery fields: Candidate query, Candidate files reviewed, and Chosen files. Prefer `repoctl task discovery add`; free-form prose is not enough.",
             )
+        try:
+            task_discovery_result_selections(task)
+        except RepoctlError as exc:
+            problems.append(Problem("error", exc.code, str(exc), task.rel_path))
         root = _task_workspace_root(task)
         if task.status in LIVE and not task.archived:
             problems.extend(_live_handoff_problems(task, root))

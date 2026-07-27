@@ -147,7 +147,7 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - `repoctl meta query` and `repoctl meta suggest` are read-only discovery hints. Inspect files directly before choosing scope.
 - Repo-scoped live tasks should fill `## Discovery` with structured candidate query, reviewed files, and chosen files. Prefer `./scripts/repoctl task discovery add ...`; hand-written prose is not enough unless it uses the exact structured fields.
 - When a task changes a product repo, `repoctl task finish` runs the changed-file metadata gate. If `repos/` exists but its git repository is missing/unusable, finish blocks.
-- If a task started with pre-existing dirty product repo state, finish separates baseline dirty files from task-new changes; pre-existing dirty state is not task scope.
+- Pre-existing dirty product state remains outside task scope; finish and cancel preserve it or require explicit ownership resolution.
 
 ## Adapter Policy
 

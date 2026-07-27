@@ -78,13 +78,6 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
         "export const claim = () => client.rpc('claim_job');\n",
         encoding="utf-8",
     )
-    (repo / "src/jobs.dart").write_text(
-        "import 'package:supabase/supabase.dart';\n"
-        "final SupabaseClient client = SupabaseClient('url', 'key');\n"
-        "Future<void> claim() => client.rpc('claim_job');\n",
-        encoding="utf-8",
-    )
-
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -105,7 +98,6 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
         ("supabase/migrations/20240201000000_claim_job.sql", "supabase/migrations/20240101000000_initial.sql"),
         ("supabase/seed.sql", "supabase/migrations/20240101000000_initial.sql"),
         ("src/jobs.ts", "supabase/migrations/20240201000000_claim_job.sql"),
-        ("src/jobs.dart", "supabase/migrations/20240201000000_claim_job.sql"),
     }
     all_edges = {
         (
@@ -148,7 +140,7 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
     }
     assert any(item["selector"] == {"kind": "file", "value": "supabase/migrations/20240101000000_initial.sql"} for item in compact["continuations"])
 
-    assert main(["context", "query", "src/jobs.dart", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "src/jobs.ts", "--repo-id", "main", "--json"]) == 0
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     visible_paths = {
         item.get("source_ref", {}).get("path")
@@ -156,7 +148,7 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
         for item in items
         if isinstance(item, dict)
     }
-    assert "repos/src/jobs.dart" in visible_paths
+    assert "repos/src/jobs.ts" in visible_paths
     assert "repos/supabase/migrations/20240201000000_claim_job.sql" in visible_paths
     assert any(
         item.get("source_ref", {}).get("kind") == "graph_relation" and "--USES_FILE-->" in item.get("excerpt", "")
@@ -251,6 +243,45 @@ def _structured_edge_rows(root: Path) -> list[tuple[str, str, set[str]]]:
     ]
 
 
+def test_client_rpc_runtime_name_matches_sql_catalog_name_exactly(tmp_path: Path) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    migrations = repo / "supabase/migrations"
+    migrations.mkdir(parents=True)
+    (migrations / "20240101000000_lower.sql").write_text(
+        "CREATE FUNCTION public.foo() RETURNS void LANGUAGE sql AS $$ SELECT 1; $$;\n",
+        encoding="utf-8",
+    )
+    (migrations / "20240102000000_quoted.sql").write_text(
+        'CREATE FUNCTION public."Foo"() RETURNS void LANGUAGE sql AS $$ SELECT 1; $$;\n',
+        encoding="utf-8",
+    )
+    client = repo / "src/client.ts"
+    client.parent.mkdir(parents=True)
+    client.write_text(
+        "import { createClient } from '@supabase/supabase-js';\n"
+        "const client = createClient(url, key);\n"
+        "client.rpc('Foo');\n",
+        encoding="utf-8",
+    )
+
+    _materialize(tmp_path)
+
+    rows = _structured_edge_rows(tmp_path)
+    assert (
+        "src/client.ts",
+        "supabase/migrations/20240102000000_quoted.sql",
+        {"sql_rpc_dependency"},
+    ) in rows
+    assert not [
+        row
+        for row in rows
+        if row[0] == "src/client.ts" and row[1] == "supabase/migrations/20240101000000_lower.sql"
+    ]
+
+
 def test_structured_rpc_relations_require_proven_receiver_and_complete_literal(tmp_path: Path) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -272,12 +303,6 @@ def test_structured_rpc_relations_require_proven_receiver_and_complete_literal(t
         encoding="utf-8",
     )
     (repo / "src/dynamic.ts").write_text("client.rpc('claim_' + suffix);\n", encoding="utf-8")
-    (repo / "src/dynamic.dart").write_text(
-        "import 'package:supabase/supabase.dart';\n"
-        "final client = SupabaseClient('url', 'key');\n"
-        "client.rpc('claim_$suffix');\n",
-        encoding="utf-8",
-    )
     (repo / "src/client.ts").write_text(
         "import { createClient } from '@supabase/supabase-js';\n"
         "const client = createClient(url, key);\n"
@@ -299,13 +324,6 @@ def test_structured_rpc_relations_require_proven_receiver_and_complete_literal(t
         "const nestedClaim = (client: LocalBus) => (() => client.rpc('claim_job'));\n",
         encoding="utf-8",
     )
-    (repo / "src/shadow.dart").write_text(
-        "import 'package:supabase/supabase.dart';\n"
-        "final client = SupabaseClient('url', 'key');\n"
-        "void claim(LocalBus client) { client.rpc('claim_job'); }\n"
-        "void claimAgain(LocalBus client) => client.rpc('claim_job');\n",
-        encoding="utf-8",
-    )
 
     _materialize(tmp_path)
     rows = _structured_edge_rows(tmp_path)
@@ -317,10 +335,8 @@ def test_structured_rpc_relations_require_proven_receiver_and_complete_literal(t
         if row[0] in {
             "src/local.py",
             "src/dynamic.ts",
-            "src/dynamic.dart",
             "src/shadow.py",
             "src/shadow.ts",
-            "src/shadow.dart",
         }
     ]
 

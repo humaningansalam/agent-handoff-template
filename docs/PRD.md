@@ -42,6 +42,8 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
 - Task finish leaves auditable verification evidence and stable completion receipts.
 - Graph and Context answers preserve source refs, repo IDs, digests, freshness, typed continuations, and completeness warnings.
+- Compatible but unresolved relationships remain agent-visible as explicitly non-authoritative candidates without being promoted to Graph edges.
+- A task may retain only the Context or Graph result references that actually informed Reviewed or Chosen files, without mandatory feature-use logging.
 - For an ambiguous repository question or task startup, compact Context surfaces the applicable authority or procedure and the likely source, relation, and test surfaces ahead of generic indexes and templates.
 - Document meaning remains consistent across materialized-index and live-fallback retrieval, compact grouping, and Task Pack projection; split `docs/prd/**` documents retain product-authority semantics.
 - Current project documents, task history, and explicitly reviewed reusable records are reported as distinct project-knowledge lanes; zero Reviewed Knowledge records never means that project knowledge is empty.
@@ -75,6 +77,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Materialize Graph and its persistent evidence index as one deterministic boundary over source facts, metadata, documents, receipts, imports, symbols, calls, and artifacts; queries read it without hidden rebuilds or unchanged-source rescans.
 - Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays and typed continuations for iterative exploration.
 - Preserve source refs, digests, repo namespaces, and completeness diagnostics.
+- Keep confirmed relations and compatible unresolved relationship candidates as separate typed lanes; candidates must preserve their structured resolution reason and never imply task scope.
 - Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.
 - Keep active authority and procedures eligible for ordinary retrieval, keep templates from consuming ordinary recall unless explicitly addressed, and never ingest generated views as source evidence.
 - Treat current project documents, task history, and Reviewed Knowledge as separate complementary evidence lanes rather than one interchangeable corpus.

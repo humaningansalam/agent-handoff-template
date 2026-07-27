@@ -199,6 +199,8 @@ def test_graph_query_reports_snapshot_freshness(tmp_path: Path, monkeypatch, cap
     stale_warning = next(warning for warning in payload["warnings"] if warning["code"] == "graph_snapshot_stale")
     assert "changed_path_count" not in stale_warning
     assert "changed_root_path_count" not in stale_warning
+    graph_refresh = next(action for action in payload["next_actions"] if action["kind"] == "graph_refresh")
+    assert graph_refresh["command"] == "./scripts/repoctl graph build --repo-id main --json"
 
     assert main(["graph", "query", "--file", "app.py", "--full", "--json"]) == 0
     full = json.loads(capsys.readouterr().out)

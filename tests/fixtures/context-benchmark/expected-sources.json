@@ -427,24 +427,6 @@
       {"path": "repos/supabase/migrations/20240101000000_jobs.sql"}
     ]
   },
-  "Q-029": {
-    "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
-    "required_graph_edges": [
-      {
-        "assertion": "resolved",
-        "from": "repo:main:file:app%2Flib%2Fjobs.dart",
-        "kind": "USES_FILE",
-        "source": "structured_file_relations",
-        "to": "repo:main:file:supabase%2Fmigrations%2F20240201000000_claim_job.sql"
-      }
-    ],
-    "must_find": [
-      {"path": "repos/app/lib/jobs.dart"},
-      {"path": "repos/supabase/migrations/20240201000000_claim_job.sql"}
-    ]
-  },
   "Q-030": {
     "acceptable": [],
     "noise": [],

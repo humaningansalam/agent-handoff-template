@@ -503,16 +503,22 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    commit_all(repo)
     long_goal = (
         "Persist retry scheduling as a durable invariant while preserving source-linked evidence and explicit review. "
         "The generated claim must remain a complete statement rather than a character-truncated fragment, and agents "
         "must be able to replace an overlong derived claim without directly editing machine-owned candidate JSON. "
         "This extra sentence intentionally pushes the derived claim beyond the quality limit."
     )
-    task_body = task_text("T-20260609184047Z", status="todo").replace(
-        "## Execution Log",
-        f"## Goal\n\n{long_goal}\n\n## Execution Log",
-        1,
+    task_body = (
+        task_text("T-20260609184047Z", status="todo")
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace('area: ""', 'area: "repo"')
+        .replace(
+            "## Execution Log",
+            f"## Goal\n\n{long_goal}\n\n## Execution Log",
+            1,
+        )
     )
     add_task(tmp_path, "T-20260609184047Z--task-pack-invariant.md", task_body)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184047Z--task-pack-invariant.md\n\n## Backlog\n", encoding="utf-8")

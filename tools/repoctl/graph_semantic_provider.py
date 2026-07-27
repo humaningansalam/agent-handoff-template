@@ -24,7 +24,7 @@ PROVIDER_LANGUAGES = {
 PROVIDER_INPUT_VERSIONS = {
     "python_ast": PYTHON_PROVIDER_INPUT_VERSION,
     "typescript_compiler": 2,
-    "dart_analyzer": 1,
+    "dart_analyzer": 3,
     "csharp_roslyn": 2,
 }
 

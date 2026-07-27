@@ -65,10 +65,6 @@
           "content": "INSERT INTO public.jobs (id) VALUES (2);\n"
         },
         {
-          "path": "app/lib/jobs.dart",
-          "content": "import 'package:supabase/supabase.dart';\nfinal SupabaseClient client = SupabaseClient('url', 'key');\nFuture<void> claimJob() => client.rpc('claim_job');\n"
-        },
-        {
           "path": "frontend/src/jobs.ts",
           "content": "import { createClient } from '@supabase/supabase-js';\nconst client = createClient(url, key);\nexport const claimJob = () => client.rpc('claim_job');\n"
         },

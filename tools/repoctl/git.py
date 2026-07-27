@@ -210,38 +210,6 @@ def repo_changed_entries(root: Path, target: RepoTarget | None = None) -> tuple[
     return changes, state
 
 
-def repo_change_fingerprints(root: Path, entries: list[ChangedEntry], target: RepoTarget | None = None) -> tuple[dict[str, str], RepoGitState]:
-    selected = _target(root, target)
-    state = repo_git_state(root, selected)
-    if not state.available:
-        return {}, state
-    assert selected is not None
-    repo = selected.root_path
-    fingerprints: dict[str, str] = {}
-    for entry in entries:
-        _change, path, old_path = entry
-        digest = hashlib.sha256()
-        for rel in [old_path, path]:
-            if not rel:
-                continue
-            digest.update(rel.encode("utf-8"))
-            for args in (["diff", "--binary", "--", rel], ["diff", "--cached", "--binary", "--", rel]):
-                result = subprocess.run(["git", *args], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
-                digest.update(result.stdout)
-            file_path = repo / rel
-            if file_path.is_file():
-                try:
-                    digest.update(file_path.read_bytes())
-                except OSError:
-                    digest.update(b"<unreadable>")
-            elif file_path.exists():
-                digest.update(b"<non-file>")
-            else:
-                digest.update(b"<missing>")
-        fingerprints[_changed_entry_key(entry)] = digest.hexdigest()
-    return fingerprints, state
-
-
 def _sha256_bytes(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -286,6 +254,36 @@ def _path_state_manifest(repo: Path, path: str) -> dict[str, Any]:
     else:
         manifest["kind"] = "other"
     return manifest
+
+
+def repo_change_fingerprint_records(
+    root: Path,
+    entries: list[ChangedEntry],
+    target: RepoTarget | None = None,
+) -> tuple[list[dict[str, str]], RepoGitState]:
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    if not state.available:
+        return [], state
+    assert selected is not None
+    records: list[dict[str, str]] = []
+    for change, path, old_path in sorted(set(entries), key=lambda item: (item[1], item[2], item[0])):
+        identity = {"change": change, "path": path}
+        if old_path:
+            identity["old_path"] = old_path
+        path_states = [
+            _path_state_manifest(selected.root_path, rel)
+            for rel in (old_path, path)
+            if rel
+        ]
+        encoded = json.dumps(
+            {"entry": identity, "path_states": path_states},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        records.append({**identity, "fingerprint_sha256": _sha256_bytes(encoded)})
+    return records, state
 
 
 def repo_path_fingerprints(root: Path, paths: list[str], target: RepoTarget | None = None) -> tuple[dict[str, str], RepoGitState]:
@@ -434,6 +432,9 @@ def repo_evidence_fingerprint(
         return {}, "", state
     assert selected is not None
     repo = selected.root_path
+    entry_fingerprints, entry_state = repo_change_fingerprint_records(root, entries, selected)
+    if not entry_state.available:
+        return {}, "", entry_state
     untracked_paths = [
         normalize_repo_path(token.decode("utf-8", errors="surrogateescape"))
         for token in _git_bytes(repo, ["ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
@@ -457,6 +458,7 @@ def repo_evidence_fingerprint(
         "start_head": start_head,
         "observed_head": observed_head,
         "changed_entries": _sorted_changed_entries(entries),
+        "entry_fingerprints": entry_fingerprints,
         "staged_binary_diff_sha256": _sha256_bytes(_git_bytes(repo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])),
         "unstaged_binary_diff_sha256": _sha256_bytes(_git_bytes(repo, ["diff", "--binary", "--full-index", "--no-ext-diff"])),
         "untracked": untracked,
@@ -469,8 +471,3 @@ def repo_evidence_fingerprint(
         )
     encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return manifest, _sha256_bytes(encoded), state
-
-
-def _changed_entry_key(entry: ChangedEntry) -> str:
-    change, path, old_path = entry
-    return "\0".join([change, path, old_path])

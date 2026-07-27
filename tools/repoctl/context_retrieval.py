@@ -118,7 +118,7 @@ def retrieve_context_balanced(
         )
         by_lane[lane].append(candidate)
 
-    selected: dict[tuple[str, str, str, str, int, int], ContextCandidate] = {}
+    selected: dict[tuple[str, str, str, str, int, int, str], ContextCandidate] = {}
 
     def add(candidate: ContextCandidate) -> None:
         if len(selected) < limit:
@@ -268,6 +268,8 @@ def rank_context_chunks(
             reasons.append("exact filename match")
         if ContextEvidenceKind.EXACT_SYMBOL in identity_kinds:
             reasons.append("exact provider symbol/section match")
+        if ContextEvidenceKind.EXACT_RELATIONSHIP in identity_kinds:
+            reasons.append("exact provider relationship identity match")
         if path_coverage > 0:
             evidence_kinds.add(ContextEvidenceKind.PATH_TERMS)
             reasons.append("path term coverage")
@@ -367,11 +369,15 @@ def context_identity_evidence(
         elif selector == path_identity:
             kinds.add(ContextEvidenceKind.EXACT_PATH)
         if (
-            section_kind == ContextSectionKind.PROVIDER_SYMBOL
+            section_kind in {ContextSectionKind.PROVIDER_SYMBOL, ContextSectionKind.PROVIDER_RELATIONSHIP}
             and section_identity
             and selector == section_identity
         ):
-            kinds.add(ContextEvidenceKind.EXACT_SYMBOL)
+            kinds.add(
+                ContextEvidenceKind.EXACT_SYMBOL
+                if section_kind == ContextSectionKind.PROVIDER_SYMBOL
+                else ContextEvidenceKind.EXACT_RELATIONSHIP
+            )
     return tuple(sorted(kinds, key=lambda kind: kind.value))
 
 
@@ -390,6 +396,8 @@ def _identity_score_from_kinds(kinds: tuple[ContextEvidenceKind, ...]) -> tuple[
         return 1.5, "exact path match"
     if ContextEvidenceKind.EXACT_SYMBOL in kinds:
         return 1.35, "exact symbol/section match"
+    if ContextEvidenceKind.EXACT_RELATIONSHIP in kinds:
+        return 1.35, "exact relationship identity match"
     if ContextEvidenceKind.EXACT_FILENAME in kinds:
         return 1.2, "exact filename match"
     return 0.0, ""
@@ -435,7 +443,7 @@ def _anchor_strength(
 ) -> ContextAnchorStrength:
     if identity_kinds:
         return ContextAnchorStrength.EXACT
-    if section_kind == ContextSectionKind.PROVIDER_SYMBOL and section_coverage == 1.0:
+    if section_kind in {ContextSectionKind.PROVIDER_SYMBOL, ContextSectionKind.PROVIDER_RELATIONSHIP} and section_coverage == 1.0:
         return ContextAnchorStrength.STRONG
     return ContextAnchorStrength.WEAK
 
@@ -498,7 +506,7 @@ def _authority_score(
     return 0.1
 
 
-def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str, str, str, int, int], float]:
+def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str, str, str, int, int, str], float]:
     if not query.strip() or not chunks:
         return {}
     connection = sqlite3.connect(":memory:")
@@ -511,7 +519,7 @@ def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str,
         phrase = " OR ".join(_escape_fts(token) for token in sorted(context_query_terms(query)))
         if not phrase:
             return {}
-        result: dict[tuple[str, str, str, str, int, int], float] = {}
+        result: dict[tuple[str, str, str, str, int, int, str], float] = {}
         cursor = connection.execute(
             "SELECT rowid, bm25(chunks, ?, ?, ?) AS rank FROM chunks WHERE chunks MATCH ? ORDER BY rank, rowid",
             (*FTS_FIELD_WEIGHTS, phrase),

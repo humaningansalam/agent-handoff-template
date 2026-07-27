@@ -11,19 +11,12 @@ from typing import Generic, Iterable, TypeVar
 from urllib.parse import urlparse
 
 from .code_index import CodeIndexEntry
+from .graph_semantic_model import RpcInvocationFact, RpcInvocationStatus, RpcParamsStatus, RpcRoutineStatus, RpcSchemaStatus
 from .tasks import Problem
 
 
-STRUCTURED_RELATION_INPUT_VERSION = 4
+STRUCTURED_RELATION_INPUT_VERSION = 6
 STRUCTURED_EDGE_KIND = "USES_FILE"
-_DART_SUPABASE_MODULES = frozenset(
-    {
-        "package:supabase/supabase.dart",
-        "package:supabase_flutter/supabase_flutter.dart",
-    }
-)
-
-
 class StructuredRelationType(StrEnum):
     DOCKER_COPY_SOURCE = "docker_copy_source"
     COMPOSE_DOCKERFILE = "compose_dockerfile"
@@ -45,6 +38,7 @@ class StructuredRelationEvidence:
     line: int
     confidence: str = "high"
     operation: str = ""
+    source_fact_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -55,6 +49,8 @@ class StructuredRelationEvidence:
         }
         if self.operation:
             data["operation"] = self.operation
+        if self.source_fact_id:
+            data["source_fact_id"] = self.source_fact_id
         return data
 
 
@@ -79,6 +75,7 @@ class StructuredRelationResult:
     analyzed_paths: tuple[str, ...]
     failed_paths: tuple[str, ...]
     problems: tuple[Problem, ...]
+    rpc_resolutions: tuple[RpcResolution, ...] = ()
 
     def to_meta(self) -> dict[str, object]:
         return {
@@ -87,6 +84,11 @@ class StructuredRelationResult:
             "analyzed_paths": list(self.analyzed_paths),
             "failed_paths": list(self.failed_paths),
             "relation_count": len(self.relations),
+            "rpc_fact_count": len(self.rpc_resolutions),
+            "rpc_outcome_counts": {
+                outcome.value: sum(1 for resolution in self.rpc_resolutions if resolution.outcome == outcome)
+                for outcome in RpcResolutionOutcome
+            },
         }
 
 
@@ -183,9 +185,15 @@ class _SqlObjectKind(StrEnum):
     ROUTINE = "routine"
 
 
+class _SqlRoutineKind(StrEnum):
+    FUNCTION = "function"
+    PROCEDURE = "procedure"
+
+
 class _SqlOperation(StrEnum):
     CREATE = "create"
     REPLACE = "replace"
+    DROP = "drop"
     ALTER = "alter"
     INSERT = "insert"
     UPDATE = "update"
@@ -225,8 +233,32 @@ class _SqlIdentifier:
 
 
 @dataclass(frozen=True, order=True)
+class _SqlRoutineParameter:
+    name: str
+    type_name: str
+    mode: str = "in"
+    has_default: bool = False
+
+    @property
+    def is_input(self) -> bool:
+        return self.mode in {"in", "inout", "variadic"}
+
+
+@dataclass(frozen=True, order=True)
 class _SqlRoutineSignature:
-    parameter_types: tuple[str, ...]
+    parameters: tuple[_SqlRoutineParameter, ...]
+
+    @property
+    def input_parameters(self) -> tuple[_SqlRoutineParameter, ...]:
+        return tuple(parameter for parameter in self.parameters if parameter.is_input)
+
+    @property
+    def parameter_types(self) -> tuple[str, ...]:
+        return tuple(parameter.type_name for parameter in self.input_parameters)
+
+    @property
+    def parameter_names(self) -> tuple[str, ...]:
+        return tuple(parameter.name for parameter in self.input_parameters)
 
     @property
     def arity(self) -> int:
@@ -242,8 +274,67 @@ class _SqlFact:
     operation: _SqlOperation
     definition: bool = False
     replace: bool = False
+    routine_kind: _SqlRoutineKind | None = None
     routine_signature: _SqlRoutineSignature | None = None
     argument_count: int | None = None
+
+
+class RpcResolutionOutcome(StrEnum):
+    LINKED = "linked"
+    UNRESOLVED = "unresolved"
+    AMBIGUOUS = "ambiguous"
+    INCOMPLETE = "incomplete"
+
+
+class RpcCandidateCompatibility(StrEnum):
+    NONE = "none"
+    COMPATIBLE = "compatible"
+    UNKNOWN = "unknown"
+    INCOMPATIBLE = "incompatible"
+
+
+@dataclass(frozen=True)
+class RpcResolutionCandidate:
+    path: str
+    line: int
+    routine: str
+    parameter_names: tuple[str, ...]
+    parameter_types: tuple[str, ...]
+    required_parameter_names: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "line": self.line,
+            "routine": self.routine,
+            "parameter_names": list(self.parameter_names),
+            "parameter_types": list(self.parameter_types),
+            "required_parameter_names": list(self.required_parameter_names),
+        }
+
+
+@dataclass(frozen=True)
+class RpcResolution:
+    fact_id: str
+    path: str
+    outcome: RpcResolutionOutcome
+    reason_code: str
+    candidates: tuple[RpcResolutionCandidate, ...] = ()
+    linked_target: RpcResolutionCandidate | None = None
+    candidate_compatibility: RpcCandidateCompatibility = RpcCandidateCompatibility.NONE
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "fact_id": self.fact_id,
+            "path": self.path,
+            "outcome": self.outcome.value,
+            "reason_code": self.reason_code,
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "candidate_compatibility": self.candidate_compatibility.value,
+        }
+        if self.linked_target is not None:
+            data["linked_target"] = self.linked_target.to_dict()
+        return data
 
 
 class _TokenKind(StrEnum):
@@ -302,7 +393,14 @@ class _ShellCommand:
     line: int
 
 
-def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -> StructuredRelationResult:
+def build_structured_file_relations(
+    repo: Path,
+    entries: list[CodeIndexEntry],
+    *,
+    dart_rpc_invocations: tuple[RpcInvocationFact, ...] = (),
+    dart_rpc_analyzed_paths: tuple[str, ...] = (),
+    dart_rpc_failed_paths: tuple[str, ...] = (),
+) -> StructuredRelationResult:
     entry_by_path = {entry.path: entry for entry in entries}
     known_paths = {
         entry.path
@@ -322,7 +420,9 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
     rpc_candidate_paths = {
         path
         for path in rpc_source_paths
-        if entry_by_path[path].parse_status == "ok" and _entry_has_supported_rpc_client_import(entry_by_path[path])
+        if entry_by_path[path].language != "dart"
+        and entry_by_path[path].parse_status == "ok"
+        and _entry_has_supported_rpc_client_import(entry_by_path[path])
     }
     eligible_paths = supported_paths | rpc_source_paths
     analyzed_paths: set[str] = set()
@@ -331,6 +431,7 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
     relation_evidence: dict[tuple[str, str], set[StructuredRelationEvidence]] = {}
     sql_definitions: list[_SqlFact] = []
     sql_references: list[_SqlFact] = []
+    sql_lifecycle: list[_SqlFact] = []
     docker_sources: dict[str, tuple[_DockerSource, ...]] = {}
     docker_contexts: dict[str, set[str]] = {}
     texts: dict[str, str] = {}
@@ -398,12 +499,15 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
         elif kind == "sql":
             value = accept(path, _sql_facts(text, path=path))
             if value is not None:
-                definitions, references = value
+                definitions, references, lifecycle = value
                 sql_definitions.extend(definitions)
                 sql_references.extend(references)
+                sql_lifecycle.extend(lifecycle)
 
     for path in sorted(rpc_source_paths):
         entry = entry_by_path[path]
+        if entry.language == "dart":
+            continue
         if entry.parse_status != "ok":
             accept(
                 path,
@@ -430,6 +534,25 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
                     object_kind=_SqlObjectKind.ROUTINE,
                     identity=call.routine,
                     operation=_SqlOperation.CLIENT_RPC,
+                )
+            )
+
+    dart_paths = {path for path in rpc_source_paths if entry_by_path[path].language == "dart"}
+    declared_dart_analyzed = set(dart_rpc_analyzed_paths) & dart_paths
+    declared_dart_failed = set(dart_rpc_failed_paths) & dart_paths
+    for path in sorted(dart_paths):
+        if path in declared_dart_analyzed:
+            analyzed_paths.add(path)
+        elif path in declared_dart_failed:
+            failed_paths.add(path)
+        else:
+            failed_paths.add(path)
+            problems.append(
+                Problem(
+                    "warning",
+                    "graph_structured_dart_rpc_coverage_unavailable",
+                    "Dart RPC source coverage is unavailable from the analyzer provider",
+                    path,
                 )
             )
 
@@ -471,6 +594,29 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
     for source, target, evidence in _resolve_sql_relations(sql_definitions, sql_references):
         add_relation(source, target, evidence)
 
+    sql_paths = {path for path in supported_paths if _structured_file_kind(path) == "sql"}
+    rpc_resolutions = _resolve_dart_rpc_invocations(
+        sql_lifecycle,
+        dart_rpc_invocations,
+        source_complete_paths=declared_dart_analyzed,
+        sql_lifecycle_complete=not bool(sql_paths & failed_paths),
+    )
+    for fact, resolution in zip(dart_rpc_invocations, rpc_resolutions, strict=True):
+        if resolution.outcome != RpcResolutionOutcome.LINKED or resolution.linked_target is None:
+            continue
+        add_relation(
+            fact.path,
+            resolution.linked_target.path,
+            StructuredRelationEvidence(
+                StructuredRelationType.SQL_RPC_DEPENDENCY,
+                fact.routine,
+                fact.anchor.start_line,
+                confidence="high",
+                operation=_SqlOperation.CLIENT_RPC.value,
+                source_fact_id=fact.fact_id,
+            ),
+        )
+
     relations = tuple(
         StructuredFileRelation(from_path, to_path, tuple(sorted(evidence)))
         for (from_path, to_path), evidence in sorted(relation_evidence.items())
@@ -481,6 +627,7 @@ def build_structured_file_relations(repo: Path, entries: list[CodeIndexEntry]) -
         analyzed_paths=tuple(sorted(analyzed_paths - failed_paths)),
         failed_paths=tuple(sorted(failed_paths)),
         problems=tuple(problems),
+        rpc_resolutions=rpc_resolutions,
     )
 
 
@@ -1302,12 +1449,13 @@ def _option_value(tokens: list[str], *names: str) -> str:
     return ""
 
 
-def _sql_facts(text: str, *, path: str) -> _ParseResult[tuple[list[_SqlFact], list[_SqlFact]]]:
+def _sql_facts(text: str, *, path: str) -> _ParseResult[tuple[list[_SqlFact], list[_SqlFact], list[_SqlFact]]]:
     token_result = _sql_tokens(text)
     if token_result.status == _ParseStatus.FAILED:
         return token_result
     definitions: list[_SqlFact] = []
     references: list[_SqlFact] = []
+    lifecycle: list[_SqlFact] = []
     for statement in _sql_statements(list(token_result.value or ())):
         ctes = _sql_cte_names(statement)
         index = 0
@@ -1323,7 +1471,9 @@ def _sql_facts(text: str, *, path: str) -> _ParseResult[tuple[list[_SqlFact], li
                 while cursor < len(statement) and statement[cursor].value in {"temporary", "temp", "unlogged"}:
                     cursor += 1
                 if cursor < len(statement) and statement[cursor].value in {"table", "function", "procedure"}:
-                    object_kind = _SqlObjectKind.TABLE if statement[cursor].value == "table" else _SqlObjectKind.ROUTINE
+                    object_token = statement[cursor].value
+                    object_kind = _SqlObjectKind.TABLE if object_token == "table" else _SqlObjectKind.ROUTINE
+                    routine_kind = _SqlRoutineKind(object_token) if object_kind == _SqlObjectKind.ROUTINE else None
                     cursor += 1
                     while cursor < len(statement) and statement[cursor].value in {"if", "not", "exists"}:
                         cursor += 1
@@ -1332,18 +1482,20 @@ def _sql_facts(text: str, *, path: str) -> _ParseResult[tuple[list[_SqlFact], li
                     if identity is not None and object_kind == _SqlObjectKind.ROUTINE:
                         signature, cursor = _sql_routine_signature(statement, cursor)
                     if identity is not None:
-                        definitions.append(
-                            _SqlFact(
-                                path,
-                                token.line,
-                                object_kind,
-                                identity,
-                                _SqlOperation.REPLACE if replace else _SqlOperation.CREATE,
-                                definition=True,
-                                replace=replace,
-                                routine_signature=signature,
-                            )
+                        definition = _SqlFact(
+                            path,
+                            token.line,
+                            object_kind,
+                            identity,
+                            _SqlOperation.REPLACE if replace else _SqlOperation.CREATE,
+                            definition=True,
+                            replace=replace,
+                            routine_kind=routine_kind,
+                            routine_signature=signature,
                         )
+                        definitions.append(definition)
+                        if object_kind == _SqlObjectKind.ROUTINE:
+                            lifecycle.append(definition)
                         if replace:
                             references.append(
                                 _SqlFact(
@@ -1352,10 +1504,35 @@ def _sql_facts(text: str, *, path: str) -> _ParseResult[tuple[list[_SqlFact], li
                                     object_kind,
                                     identity,
                                     _SqlOperation.REPLACE,
+                                    routine_kind=routine_kind,
                                     routine_signature=signature,
                                     argument_count=signature.arity if signature is not None else None,
                                 )
                             )
+            elif value == "drop" and index + 1 < len(statement) and statement[index + 1].value in {"function", "procedure"}:
+                routine_kind = _SqlRoutineKind(statement[index + 1].value)
+                cursor = index + 2
+                if _token_values(statement, cursor, 2) == ("if", "exists"):
+                    cursor += 2
+                while cursor < len(statement):
+                    identity, cursor = _sql_identifier(statement, cursor)
+                    if identity is None:
+                        break
+                    signature, cursor = _sql_routine_signature(statement, cursor)
+                    lifecycle.append(
+                        _SqlFact(
+                            path,
+                            token.line,
+                            _SqlObjectKind.ROUTINE,
+                            identity,
+                            _SqlOperation.DROP,
+                            routine_kind=routine_kind,
+                            routine_signature=signature,
+                        )
+                    )
+                    if cursor >= len(statement) or statement[cursor].value != ",":
+                        break
+                    cursor += 1
             elif value == "alter" and index + 1 < len(statement) and statement[index + 1].value == "table":
                 cursor = index + 2
                 while cursor < len(statement) and statement[cursor].value in {"if", "exists", "only"}:
@@ -1383,19 +1560,49 @@ def _sql_facts(text: str, *, path: str) -> _ParseResult[tuple[list[_SqlFact], li
                 identity, cursor = _sql_identifier(statement, index + 1)
                 if identity is not None:
                     count, _cursor = _sql_argument_count(statement, cursor)
-                    references.append(_SqlFact(path, token.line, _SqlObjectKind.ROUTINE, identity, _SqlOperation.CALL, argument_count=count))
+                    references.append(
+                        _SqlFact(
+                            path,
+                            token.line,
+                            _SqlObjectKind.ROUTINE,
+                            identity,
+                            _SqlOperation.CALL,
+                            routine_kind=_SqlRoutineKind.PROCEDURE,
+                            argument_count=count,
+                        )
+                    )
             elif value == "execute" and index + 1 < len(statement) and statement[index + 1].value in {"function", "procedure"}:
                 identity, cursor = _sql_identifier(statement, index + 2)
                 if identity is not None:
                     count, _cursor = _sql_argument_count(statement, cursor)
-                    references.append(_SqlFact(path, token.line, _SqlObjectKind.ROUTINE, identity, _SqlOperation.EXECUTE, argument_count=count))
+                    references.append(
+                        _SqlFact(
+                            path,
+                            token.line,
+                            _SqlObjectKind.ROUTINE,
+                            identity,
+                            _SqlOperation.EXECUTE,
+                            routine_kind=_SqlRoutineKind(statement[index + 1].value),
+                            argument_count=count,
+                        )
+                    )
             elif value in {"select", "perform"}:
                 identity, cursor = _sql_identifier(statement, index + 1)
                 if identity is not None and cursor < len(statement) and statement[cursor].value == "(":
                     count, _cursor = _sql_argument_count(statement, cursor)
-                    references.append(_SqlFact(path, token.line, _SqlObjectKind.ROUTINE, identity, _SqlOperation(value), argument_count=count))
+                    references.append(
+                        _SqlFact(
+                            path,
+                            token.line,
+                            _SqlObjectKind.ROUTINE,
+                            identity,
+                            _SqlOperation(value),
+                            routine_kind=_SqlRoutineKind.FUNCTION,
+                            argument_count=count,
+                        )
+                    )
             index += 1
-    return _parsed((definitions, references))
+    return _parsed((definitions, references, lifecycle))
 
 
 def _sql_tokens(text: str, *, line_offset: int = 0) -> _ParseResult[tuple[_Token, ...]]:
@@ -1560,19 +1767,45 @@ def _sql_routine_signature(tokens: list[_Token], start: int) -> tuple[_SqlRoutin
         return _SqlRoutineSignature(()), end
     inner = tokens[start + 1 : end - 1]
     parameters = _split_top_level(inner, ",")
-    types = tuple(_sql_parameter_type(parameter) for parameter in parameters if parameter)
-    return _SqlRoutineSignature(types), end
+    return _SqlRoutineSignature(tuple(_sql_routine_parameter(parameter) for parameter in parameters if parameter)), end
 
 
-def _sql_parameter_type(tokens: list[_Token]) -> str:
-    values = [token for token in tokens if token.value not in {"in", "out", "inout", "variadic"}]
+def _sql_routine_parameter(tokens: list[_Token]) -> _SqlRoutineParameter:
+    values = list(tokens)
+    mode = "in"
+    if values and values[0].value in {"in", "out", "inout", "variadic"}:
+        mode = values.pop(0).value
+    has_default = False
     for index, token in enumerate(values):
         if token.value in {"default", "="}:
             values = values[:index]
+            has_default = True
             break
-    if len(values) >= 2 and values[0].kind == _TokenKind.IDENTIFIER and values[0].value not in _SQL_TYPE_START:
+    name = ""
+    if (
+        len(values) >= 2
+        and values[0].kind == _TokenKind.IDENTIFIER
+        and values[0].value not in _SQL_TYPE_START
+        and values[1].value != "."
+    ):
+        name = values[0].value if not values[0].quoted else values[0].value
         values = values[1:]
-    return " ".join(token.value for token in values).strip()
+    return _SqlRoutineParameter(name=name, type_name=_sql_type_text(values), mode=mode, has_default=has_default)
+
+
+def _sql_type_text(tokens: list[_Token]) -> str:
+    value = ""
+    previous = ""
+    for token in tokens:
+        current = token.value
+        if not value or current in {".", "]"} or previous in {".", "["}:
+            value += current
+        elif current == "[":
+            value += current
+        else:
+            value += f" {current}"
+        previous = current
+    return value.strip()
 
 
 def _sql_argument_count(tokens: list[_Token], start: int) -> tuple[int | None, int]:
@@ -1622,8 +1855,6 @@ def _rpc_calls(text: str, *, language: str) -> _ParseResult[tuple[_RpcCall, ...]
         return _python_rpc_calls(text)
     if language in {"javascript", "typescript"}:
         return _javascript_rpc_calls(text)
-    if language == "dart":
-        return _dart_rpc_calls(text)
     return _parsed(())
 
 
@@ -1632,8 +1863,6 @@ def _entry_has_supported_rpc_client_import(entry: CodeIndexEntry) -> bool:
         return any(_python_supabase_module(occurrence.module) for occurrence in entry.import_occurrences)
     if entry.language in {"javascript", "typescript"}:
         return any(_javascript_supabase_module(specifier) for specifier in entry.imports)
-    if entry.language == "dart":
-        return any(specifier in _DART_SUPABASE_MODULES for specifier in entry.imports)
     return False
 
 
@@ -1769,7 +1998,7 @@ class _PythonRpcVisitor:
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)
         ):
-            identity = _sql_identifier_from_rpc(node.args[0].value)
+            identity = _sql_identifier_from_runtime_rpc(node.args[0].value)
             if identity is not None:
                 self.calls.append(_RpcCall(identity, int(getattr(node, "lineno", 0) or 0)))
         self.generic_visit(node)
@@ -1947,7 +2176,6 @@ def _parameter_declaration(tokens: list[_Token]) -> list[_Token]:
 def _parameter_bindings(
     tokens: list[_Token],
     *,
-    language: str,
     scopes: list[dict[str, _ClientBinding]],
 ) -> dict[str, _ClientBinding]:
     bindings: dict[str, _ClientBinding] = {}
@@ -1960,16 +2188,12 @@ def _parameter_bindings(
         ]
         if not identifiers:
             continue
-        if language in {"javascript", "typescript"}:
-            colon = next((index for index, token in enumerate(segment) if token.value == ":"), len(segment))
-            names = [value for index, value in identifiers if index < colon]
-            if not names:
-                continue
-            name = names[-1]
-            type_names = [value for index, value in identifiers if index > colon]
-        else:
-            name = identifiers[-1][1]
-            type_names = [value for _index, value in identifiers[:-1]]
+        colon = next((index for index, token in enumerate(segment) if token.value == ":"), len(segment))
+        names = [value for index, value in identifiers if index < colon]
+        if not names:
+            continue
+        name = names[-1]
+        type_names = [value for index, value in identifiers if index > colon]
         binding = _ClientBinding.CLIENT if any(
             _lookup_binding(scopes, type_name) == _ClientBinding.CLIENT_TYPE
             for type_name in type_names
@@ -1999,7 +2223,6 @@ def _callable_parameter_bindings(
     tokens: list[_Token],
     body_index: int,
     *,
-    language: str,
     scopes: list[dict[str, _ClientBinding]],
 ) -> dict[str, _ClientBinding]:
     boundary = body_index - 1
@@ -2008,7 +2231,7 @@ def _callable_parameter_bindings(
     for index in range(body_index - 2, boundary, -1):
         if tokens[index].value == "=" and tokens[index + 1].value == ">":
             start, end = _arrow_parameter_span(tokens, index)
-            return _parameter_bindings(tokens[start:end], language=language, scopes=scopes) if start >= 0 else {}
+            return _parameter_bindings(tokens[start:end], scopes=scopes) if start >= 0 else {}
     close_index = next(
         (index for index in range(body_index - 1, boundary, -1) if tokens[index].value == ")"),
         -1,
@@ -2022,7 +2245,7 @@ def _callable_parameter_bindings(
     if predecessor in _CALLABLE_CONTROL_WORDS:
         return {}
     if predecessor:
-        return _parameter_bindings(tokens[open_index + 1 : close_index], language=language, scopes=scopes)
+        return _parameter_bindings(tokens[open_index + 1 : close_index], scopes=scopes)
     return {}
 
 
@@ -2030,7 +2253,6 @@ def _receiver_binding(
     tokens: list[_Token],
     call_index: int,
     *,
-    language: str,
     scopes: list[dict[str, _ClientBinding]],
 ) -> _ClientBinding:
     receiver = tokens[call_index].value
@@ -2041,14 +2263,14 @@ def _receiver_binding(
         if tokens[index].value == "=" and tokens[index + 1].value == ">":
             start, end = _arrow_parameter_span(tokens, index)
             if start >= 0:
-                arrow_bindings = _parameter_bindings(tokens[start:end], language=language, scopes=scopes)
+                arrow_bindings = _parameter_bindings(tokens[start:end], scopes=scopes)
                 if receiver in arrow_bindings:
                     return arrow_bindings[receiver]
     return _lookup_binding(scopes, receiver)
 
 
 def _javascript_rpc_calls(text: str) -> _ParseResult[tuple[_RpcCall, ...]]:
-    token_result = _code_tokens(text, language="javascript")
+    token_result = _code_tokens(text)
     if token_result.status == _ParseStatus.FAILED:
         return token_result
     tokens = list(token_result.value or ())
@@ -2060,7 +2282,7 @@ def _javascript_rpc_calls(text: str) -> _ParseResult[tuple[_RpcCall, ...]]:
     while index < len(tokens):
         token = tokens[index]
         if token.value == "{":
-            scopes.append(_callable_parameter_bindings(tokens, index, language="typescript", scopes=scopes))
+            scopes.append(_callable_parameter_bindings(tokens, index, scopes=scopes))
         elif token.value == "}" and len(scopes) > 1:
             scopes.pop()
         elif token.value in {"const", "let", "var"} and index + 1 < len(tokens) and tokens[index + 1].kind == _TokenKind.IDENTIFIER:
@@ -2086,7 +2308,7 @@ def _javascript_rpc_calls(text: str) -> _ParseResult[tuple[_RpcCall, ...]]:
             _assign_binding(scopes, token.value, _javascript_expression_binding(tokens, index + 2, scopes))
         if (
             token.kind == _TokenKind.IDENTIFIER
-            and _receiver_binding(tokens, index, language="typescript", scopes=scopes) == _ClientBinding.CLIENT
+            and _receiver_binding(tokens, index, scopes=scopes) == _ClientBinding.CLIENT
             and index + 4 < len(tokens)
             and tokens[index + 1].value == "."
             and tokens[index + 2].value == "rpc"
@@ -2096,7 +2318,7 @@ def _javascript_rpc_calls(text: str) -> _ParseResult[tuple[_RpcCall, ...]]:
             and index + 5 < len(tokens)
             and tokens[index + 5].value in {",", ")"}
         ):
-            identity = _sql_identifier_from_rpc(tokens[index + 4].value)
+            identity = _sql_identifier_from_runtime_rpc(tokens[index + 4].value)
             if identity is not None:
                 calls.append(_RpcCall(identity, tokens[index + 2].line))
         index += 1
@@ -2159,103 +2381,6 @@ def _javascript_expression_binding(tokens: list[_Token], start: int, scopes: lis
     return _ClientBinding.UNKNOWN
 
 
-def _dart_rpc_calls(text: str) -> _ParseResult[tuple[_RpcCall, ...]]:
-    token_result = _code_tokens(text, language="dart")
-    if token_result.status == _ParseStatus.FAILED:
-        return token_result
-    tokens = list(token_result.value or ())
-    if not _dart_has_supabase_import(tokens):
-        return _parsed(())
-    scopes: list[dict[str, _ClientBinding]] = [{"SupabaseClient": _ClientBinding.CLIENT_TYPE}]
-    calls: list[_RpcCall] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token.value == "{":
-            scopes.append(_callable_parameter_bindings(tokens, index, language="dart", scopes=scopes))
-        elif token.value == "}" and len(scopes) > 1:
-            scopes.pop()
-        elif token.value in {"final", "var", "late"}:
-            cursor = index + 1
-            declared_type = ""
-            if (
-                cursor + 1 < len(tokens)
-                and _lookup_binding(scopes, tokens[cursor].value) == _ClientBinding.CLIENT_TYPE
-                and tokens[cursor + 1].kind == _TokenKind.IDENTIFIER
-            ):
-                declared_type = tokens[cursor].value
-                cursor += 1
-            if cursor < len(tokens) and tokens[cursor].kind == _TokenKind.IDENTIFIER:
-                name = tokens[cursor].value
-                binding = _ClientBinding.CLIENT if declared_type else _ClientBinding.UNKNOWN
-                if cursor + 1 < len(tokens) and tokens[cursor + 1].value == "=":
-                    expression = _dart_expression_binding(tokens, cursor + 2, scopes)
-                    if expression != _ClientBinding.UNKNOWN:
-                        binding = expression
-                scopes[-1][name] = binding
-        elif token.value == "class" and index + 1 < len(tokens) and tokens[index + 1].kind == _TokenKind.IDENTIFIER:
-            scopes[-1][tokens[index + 1].value] = _ClientBinding.UNKNOWN
-        elif (
-            _lookup_binding(scopes, token.value) == _ClientBinding.CLIENT_TYPE
-            and index + 2 < len(tokens)
-            and tokens[index + 1].kind == _TokenKind.IDENTIFIER
-            and tokens[index + 2].value in {"=", ";"}
-        ):
-            scopes[-1][tokens[index + 1].value] = _ClientBinding.CLIENT
-        if _dart_direct_supabase_rpc(tokens, index):
-            string_token = tokens[index + 8]
-            identity = _sql_identifier_from_rpc(string_token.value)
-            if identity is not None:
-                calls.append(_RpcCall(identity, tokens[index + 6].line))
-        elif (
-            token.kind == _TokenKind.IDENTIFIER
-            and _receiver_binding(tokens, index, language="dart", scopes=scopes) == _ClientBinding.CLIENT
-            and index + 4 < len(tokens)
-            and tokens[index + 1].value == "."
-            and tokens[index + 2].value == "rpc"
-            and tokens[index + 3].value == "("
-            and tokens[index + 4].kind == _TokenKind.STRING
-            and tokens[index + 4].static
-            and index + 5 < len(tokens)
-            and tokens[index + 5].value in {",", ")"}
-        ):
-            identity = _sql_identifier_from_rpc(tokens[index + 4].value)
-            if identity is not None:
-                calls.append(_RpcCall(identity, tokens[index + 2].line))
-        index += 1
-    return _parsed(tuple(sorted(set(calls), key=lambda call: (call.line, call.routine.key))))
-
-
-def _dart_has_supabase_import(tokens: list[_Token]) -> bool:
-    for index, token in enumerate(tokens[:-1]):
-        if token.value == "import" and tokens[index + 1].kind == _TokenKind.STRING:
-            if tokens[index + 1].value in _DART_SUPABASE_MODULES:
-                return True
-    return False
-
-
-def _dart_expression_binding(tokens: list[_Token], start: int, scopes: list[dict[str, _ClientBinding]]) -> _ClientBinding:
-    if start >= len(tokens):
-        return _ClientBinding.UNKNOWN
-    if _lookup_binding(scopes, tokens[start].value) == _ClientBinding.CLIENT_TYPE and start + 1 < len(tokens) and tokens[start + 1].value == "(":
-        return _ClientBinding.CLIENT
-    if _token_values(tokens, start, 5) == ("Supabase", ".", "instance", ".", "client"):
-        return _ClientBinding.CLIENT
-    if tokens[start].kind == _TokenKind.IDENTIFIER:
-        return _lookup_binding(scopes, tokens[start].value)
-    return _ClientBinding.UNKNOWN
-
-
-def _dart_direct_supabase_rpc(tokens: list[_Token], start: int) -> bool:
-    return (
-        _token_values(tokens, start, 8) == ("Supabase", ".", "instance", ".", "client", ".", "rpc", "(")
-        and start + 9 < len(tokens)
-        and tokens[start + 8].kind == _TokenKind.STRING
-        and tokens[start + 8].static
-        and tokens[start + 9].value in {",", ")"}
-    )
-
-
 def _lookup_binding(scopes: list[dict[str, _ClientBinding]], name: str) -> _ClientBinding:
     if not name:
         return _ClientBinding.UNKNOWN
@@ -2273,7 +2398,7 @@ def _assign_binding(scopes: list[dict[str, _ClientBinding]], name: str, binding:
     scopes[-1][name] = binding
 
 
-def _code_tokens(text: str, *, language: str) -> _ParseResult[tuple[_Token, ...]]:
+def _code_tokens(text: str) -> _ParseResult[tuple[_Token, ...]]:
     tokens: list[_Token] = []
     index = 0
     line = 1
@@ -2295,32 +2420,26 @@ def _code_tokens(text: str, *, language: str) -> _ParseResult[tuple[_Token, ...]
             line += fragment.count("\n")
             index = end + 2
             continue
-        if language == "javascript" and char == "/" and _javascript_regex_can_start(tokens):
+        if char == "/" and _javascript_regex_can_start(tokens):
             start_line = line
             index, line, complete = _read_javascript_regex(text, index, line)
             if not complete:
                 return _parse_failed("graph_structured_client_parse_failed", "code regular expression literal is unterminated", start_line)
             tokens.append(_Token(_TokenKind.SYMBOL, "<regex>", start_line))
             continue
-        if language == "javascript" and char == "`":
+        if char == "`":
             start_line = line
             value, index, line, complete, static = _read_javascript_template(text, index, line)
             if not complete:
                 return _parse_failed("graph_structured_client_parse_failed", "code template literal is unterminated", start_line)
             tokens.append(_Token(_TokenKind.STRING, value, start_line, static=static))
             continue
-        if char in {'"', "'", "`"}:
+        if char in {'"', "'"}:
             start_line = line
-            value, index, line, complete, static = _read_code_string(
-                text,
-                index,
-                line,
-                quote=char,
-                dart_interpolation=language == "dart",
-            )
+            value, index, line, complete = _read_code_string(text, index, line, quote=char)
             if not complete:
                 return _parse_failed("graph_structured_client_parse_failed", "code string literal is unterminated", start_line)
-            tokens.append(_Token(_TokenKind.STRING, value, start_line, static=static))
+            tokens.append(_Token(_TokenKind.STRING, value, start_line))
             continue
         if char.isalpha() or char in {"_", "$"}:
             start = index
@@ -2460,16 +2579,10 @@ def _skip_javascript_template_expression(text: str, index: int, line: int) -> tu
             continue
         if char in {'"', "'"}:
             start_line = line
-            value, index, line, complete, static = _read_code_string(
-                text,
-                index,
-                line,
-                quote=char,
-                dart_interpolation=False,
-            )
+            value, index, line, complete = _read_code_string(text, index, line, quote=char)
             if not complete:
                 return index, line, False
-            tokens.append(_Token(_TokenKind.STRING, value, start_line, static=static))
+            tokens.append(_Token(_TokenKind.STRING, value, start_line))
             continue
         if char.isalpha() or char in {"_", "$"}:
             start = index
@@ -2501,12 +2614,10 @@ def _read_code_string(
     line: int,
     *,
     quote: str,
-    dart_interpolation: bool,
-) -> tuple[str, int, int, bool, bool]:
+) -> tuple[str, int, int, bool]:
     value: list[str] = []
     index += 1
     escaped = False
-    static = True
     while index < len(text):
         char = text[index]
         if char == "\n":
@@ -2516,39 +2627,279 @@ def _read_code_string(
             escaped = False
         elif char == "\\":
             escaped = True
-        elif quote == "`" and text.startswith("${", index):
-            static = False
-            value.append("${")
-            index += 2
-            continue
-        elif (
-            dart_interpolation
-            and quote in {'"', "'"}
-            and char == "$"
-            and index + 1 < len(text)
-            and (text[index + 1] == "{" or text[index + 1].isalpha() or text[index + 1] == "_")
-        ):
-            static = False
-            value.append(char)
         elif char == quote:
-            return "".join(value), index + 1, line, True, static
+            return "".join(value), index + 1, line, True
         else:
             value.append(char)
         index += 1
-    return "".join(value), index, line, False, static
+    return "".join(value), index, line, False
 
 
-def _sql_identifier_from_rpc(value: str) -> _SqlIdentifier | None:
-    raw_parts = value.strip().split(".")
-    if not raw_parts or any(not part for part in raw_parts):
+def _sql_identifier_from_runtime_rpc(routine: str, *, schema: str = "") -> _SqlIdentifier | None:
+    if not routine:
         return None
-    parts: list[_SqlIdentifierPart] = []
-    for part in raw_parts:
-        if not (part[0].isalpha() or part[0] == "_") or not all(char.isalnum() or char in {"_", "$"} for char in part):
+    routine_part = _SqlIdentifierPart(routine, routine, quoted=True)
+    if schema:
+        return _SqlIdentifier((_SqlIdentifierPart(schema, schema, quoted=True), routine_part))
+    return _SqlIdentifier((routine_part,))
+
+
+def _sql_identifier_from_rpc_fact(fact: RpcInvocationFact) -> _SqlIdentifier | None:
+    schema = fact.schema_selection.schema if fact.schema_selection.status is RpcSchemaStatus.KNOWN else ""
+    return _sql_identifier_from_runtime_rpc(fact.routine, schema=schema)
+
+
+@dataclass(frozen=True)
+class _ActiveRoutine:
+    fact: _SqlFact
+    identity_key: tuple[str, ...]
+
+    @property
+    def display(self) -> str:
+        return ".".join(self.identity_key)
+
+
+@dataclass(frozen=True)
+class _ActiveRoutineInventory:
+    routines: tuple[_ActiveRoutine, ...]
+    incomplete_names: frozenset[str]
+
+
+def _active_function_inventory(lifecycle: list[_SqlFact]) -> _ActiveRoutineInventory:
+    explicit_identities: dict[str, set[tuple[str, ...]]] = {}
+    for event in lifecycle:
+        if event.routine_kind != _SqlRoutineKind.FUNCTION or len(event.identity.key) <= 1:
+            continue
+        explicit_identities.setdefault(event.identity.short_key, set()).add(event.identity.key)
+
+    incomplete_names: set[str] = set()
+
+    def canonical_identity(event: _SqlFact) -> tuple[str, ...] | None:
+        if len(event.identity.key) > 1:
+            return event.identity.key
+        explicit = explicit_identities.get(event.identity.short_key, set())
+        if len(explicit) == 1:
+            return next(iter(explicit))
+        if len(explicit) > 1:
+            incomplete_names.add(event.identity.short_key)
             return None
-        canonical = part.casefold()
-        parts.append(_SqlIdentifierPart(canonical, canonical))
-    return _SqlIdentifier(tuple(parts))
+        return event.identity.key
+
+    active: dict[tuple[tuple[str, ...], tuple[str, ...]], _ActiveRoutine] = {}
+    for event in sorted(lifecycle, key=lambda item: (item.path, item.line)):
+        if event.routine_kind != _SqlRoutineKind.FUNCTION:
+            continue
+        identity_key = canonical_identity(event)
+        signature = event.routine_signature
+        if identity_key is None or signature is None:
+            incomplete_names.add(event.identity.short_key)
+            continue
+        key = (identity_key, signature.parameter_types)
+        if event.operation == _SqlOperation.DROP:
+            removed = active.pop(key, None)
+            if removed is None:
+                incomplete_names.add(event.identity.short_key)
+            continue
+        if event.operation == _SqlOperation.REPLACE:
+            active[key] = _ActiveRoutine(event, identity_key)
+            continue
+        if event.operation == _SqlOperation.CREATE:
+            if key in active:
+                incomplete_names.add(event.identity.short_key)
+                continue
+            active[key] = _ActiveRoutine(event, identity_key)
+    return _ActiveRoutineInventory(
+        routines=tuple(sorted(active.values(), key=lambda item: (item.identity_key, item.fact.routine_signature.parameter_types, item.fact.path, item.fact.line))),
+        incomplete_names=frozenset(incomplete_names),
+    )
+
+
+def _rpc_resolution_candidate(routine: _ActiveRoutine) -> RpcResolutionCandidate:
+    signature = routine.fact.routine_signature
+    assert signature is not None
+    parameters = signature.input_parameters
+    return RpcResolutionCandidate(
+        path=routine.fact.path,
+        line=routine.fact.line,
+        routine=routine.display,
+        parameter_names=tuple(parameter.name for parameter in parameters),
+        parameter_types=tuple(parameter.type_name for parameter in parameters),
+        required_parameter_names=tuple(parameter.name for parameter in parameters if not parameter.has_default),
+    )
+
+
+def _rpc_params_compatible(fact: RpcInvocationFact, routine: _ActiveRoutine) -> bool | None:
+    signature = routine.fact.routine_signature
+    assert signature is not None
+    parameters = signature.input_parameters
+    if any(not parameter.name for parameter in parameters):
+        return None
+    declared = {parameter.name for parameter in parameters}
+    required = {parameter.name for parameter in parameters if not parameter.has_default}
+    provided = set(fact.param_names)
+    return provided <= declared and required <= provided
+
+
+def _resolve_dart_rpc_invocations(
+    lifecycle: list[_SqlFact],
+    facts: tuple[RpcInvocationFact, ...],
+    *,
+    source_complete_paths: set[str],
+    sql_lifecycle_complete: bool,
+) -> tuple[RpcResolution, ...]:
+    inventory = _active_function_inventory(lifecycle)
+    resolutions: list[RpcResolution] = []
+    for fact in facts:
+        if fact.path not in source_complete_paths:
+            resolutions.append(RpcResolution(fact.fact_id, fact.path, RpcResolutionOutcome.INCOMPLETE, "source_coverage_incomplete"))
+            continue
+        if fact.invocation.status is RpcInvocationStatus.INVALID:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.INCOMPLETE,
+                    fact.invocation.reason_code.value if fact.invocation.reason_code is not None else "invocation_contract_invalid",
+                )
+            )
+            continue
+        if fact.routine_status != RpcRoutineStatus.KNOWN:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.INCOMPLETE,
+                    fact.routine_reason_code.value if fact.routine_reason_code is not None else "routine_evidence_incomplete",
+                )
+            )
+            continue
+        if fact.params_status != RpcParamsStatus.COMPLETE:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.INCOMPLETE,
+                    fact.params_reason_code.value if fact.params_reason_code is not None else "params_evidence_incomplete",
+                )
+            )
+            continue
+        identity = _sql_identifier_from_rpc_fact(fact)
+        if identity is None:
+            resolutions.append(RpcResolution(fact.fact_id, fact.path, RpcResolutionOutcome.INCOMPLETE, "routine_identifier_invalid"))
+            continue
+        name_candidates = tuple(
+            routine
+            for routine in inventory.routines
+            if (routine.identity_key == identity.key if len(identity.key) > 1 else routine.identity_key[-1] == identity.short_key)
+        )
+        candidate_records = tuple(_rpc_resolution_candidate(routine) for routine in name_candidates)
+        if not sql_lifecycle_complete or identity.short_key in inventory.incomplete_names:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.INCOMPLETE,
+                    "sql_lifecycle_incomplete",
+                    candidates=candidate_records,
+                    candidate_compatibility=RpcCandidateCompatibility.UNKNOWN,
+                )
+            )
+            continue
+        if not name_candidates:
+            resolutions.append(RpcResolution(fact.fact_id, fact.path, RpcResolutionOutcome.UNRESOLVED, "routine_not_found"))
+            continue
+        compatible: list[_ActiveRoutine] = []
+        contract_incomplete = False
+        for routine in name_candidates:
+            match = _rpc_params_compatible(fact, routine)
+            if match is None:
+                contract_incomplete = True
+            elif match:
+                compatible.append(routine)
+        compatible_records = tuple(_rpc_resolution_candidate(routine) for routine in compatible)
+        if fact.schema_selection.status is RpcSchemaStatus.UNKNOWN:
+            if contract_incomplete:
+                resolutions.append(
+                    RpcResolution(
+                        fact.fact_id,
+                        fact.path,
+                        RpcResolutionOutcome.INCOMPLETE,
+                        "sql_parameter_contract_incomplete",
+                        candidates=candidate_records,
+                        candidate_compatibility=RpcCandidateCompatibility.UNKNOWN,
+                    )
+                )
+            elif compatible:
+                assert fact.schema_selection.reason_code is not None
+                resolutions.append(
+                    RpcResolution(
+                        fact.fact_id,
+                        fact.path,
+                        RpcResolutionOutcome.INCOMPLETE,
+                        fact.schema_selection.reason_code.value,
+                        candidates=compatible_records,
+                        candidate_compatibility=RpcCandidateCompatibility.COMPATIBLE,
+                    )
+                )
+            else:
+                resolutions.append(
+                    RpcResolution(
+                        fact.fact_id,
+                        fact.path,
+                        RpcResolutionOutcome.UNRESOLVED,
+                        "parameter_contract_mismatch",
+                        candidates=candidate_records,
+                        candidate_compatibility=RpcCandidateCompatibility.INCOMPATIBLE,
+                    )
+                )
+            continue
+        if len(compatible) == 1 and not contract_incomplete:
+            linked = _rpc_resolution_candidate(compatible[0])
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.LINKED,
+                    "unique_active_signature",
+                    candidates=(linked,),
+                    linked_target=linked,
+                    candidate_compatibility=RpcCandidateCompatibility.COMPATIBLE,
+                )
+            )
+        elif len(compatible) > 1:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.AMBIGUOUS,
+                    "multiple_compatible_signatures",
+                    candidates=compatible_records,
+                    candidate_compatibility=RpcCandidateCompatibility.COMPATIBLE,
+                )
+            )
+        elif contract_incomplete:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.INCOMPLETE,
+                    "sql_parameter_contract_incomplete",
+                    candidates=candidate_records,
+                    candidate_compatibility=RpcCandidateCompatibility.UNKNOWN,
+                )
+            )
+        else:
+            resolutions.append(
+                RpcResolution(
+                    fact.fact_id,
+                    fact.path,
+                    RpcResolutionOutcome.UNRESOLVED,
+                    "parameter_contract_mismatch",
+                    candidates=candidate_records,
+                    candidate_compatibility=RpcCandidateCompatibility.INCOMPATIBLE,
+                )
+            )
+    return tuple(resolutions)
 
 
 def _resolve_sql_relations(

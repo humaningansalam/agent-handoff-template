@@ -7,7 +7,7 @@ import stat
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .code_index import (
@@ -22,7 +22,21 @@ from .evidence_store import evidence_index_binding_problems, load_evidence_index
 from .graph import build_graph
 from .graph_import_resolver import ImportResolution, resolve_code_imports
 from .graph_model import GraphEdge, GraphNode, GraphSnapshot, digest_data
-from .graph_semantic_model import CapabilityEvidence, PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
+from .graph_semantic_model import (
+    CapabilityEvidence,
+    PreciseCall,
+    PreciseSymbol,
+    ProviderFailure,
+    RpcInvocationContract,
+    RpcInvocationFact,
+    RpcParamsReasonCode,
+    RpcParamsStatus,
+    RpcRoutineReasonCode,
+    RpcRoutineStatus,
+    RpcSchemaSelection,
+    SemanticProviderResult,
+    SourceAnchor,
+)
 from .graph_semantic_provider import PROVIDER_INPUT_VERSIONS, PROVIDER_LANGUAGES, build_semantic_provider
 from .graph_structured_relations import STRUCTURED_RELATION_INPUT_VERSION
 from .git import repo_file_state_records
@@ -50,7 +64,14 @@ PROVIDER_CONFIG_PATTERNS = {
         "**/tsconfig.json",
         "**/jsconfig.json",
     ),
-    "dart_analyzer": ("pubspec.yaml", "pubspec.lock", ".dart_tool/package_config.json"),
+    "dart_analyzer": (
+        "pubspec.yaml",
+        "pubspec.lock",
+        "*/pubspec.yaml",
+        "*/pubspec.lock",
+        "**/pubspec.yaml",
+        "**/pubspec.lock",
+    ),
     "csharp_roslyn": ("*.csproj", "*.asmdef", "**/*.csproj", "**/*.asmdef"),
 }
 
@@ -207,10 +228,31 @@ def _config_records(
         if any(fnmatch(str(record.get("path") or ""), pattern) for pattern in patterns)
     ]
     if provider == "dart_analyzer":
-        package_config = target.root_path / ".dart_tool/package_config.json"
-        if package_config.is_file():
-            records.append(_path_record(package_config, logical_path=".dart_tool/package_config.json"))
+        package_roots = {
+            PurePosixPath(str(record.get("path") or "")).parent
+            for record in records
+            if PurePosixPath(str(record.get("path") or "")).name == "pubspec.yaml"
+        }
+        for package_root in sorted(package_roots):
+            logical_path = (package_root / ".dart_tool/package_config.json").as_posix()
+            package_config = target.root_path / logical_path
+            if package_config.is_file():
+                records.append(_path_record(package_config, logical_path=logical_path))
     return sorted(records, key=lambda item: str(item.get("path") or ""))
+
+
+def _provider_config_state(
+    target: RepoTarget,
+    provider: str,
+    inventory_records: list[dict[str, object]],
+) -> tuple[dict[str, str], str]:
+    records = _config_records(target, provider, inventory_records)
+    files = {
+        str(record.get("path") or ""): digest_data(record)
+        for record in records
+        if str(record.get("path") or "")
+    }
+    return files, digest_data(records)
 
 
 def _root_record_fingerprint(record: dict[str, Any]) -> str:
@@ -373,11 +415,12 @@ def collect_graph_inputs(
         ]
         source_records.sort(key=lambda item: str(item.get("path") or ""))
         paths = {str(record["path"]) for record in source_records}
-        configs = _config_records(target, provider, inventory_records)
+        config_files, config_digest = _provider_config_state(target, provider, inventory_records)
         providers[provider] = {
             "input_version": PROVIDER_INPUT_VERSIONS[provider],
             "files": {str(record["path"]): digest_data(record) for record in source_records},
-            "config_digest": digest_data(configs),
+            "config_files": config_files,
+            "config_digest": config_digest,
             "units": _provider_units(provider, target, paths),
         }
 
@@ -496,13 +539,17 @@ def _provider_result_to_dict(result: SemanticProviderResult) -> dict[str, object
         "languages": list(result.languages),
         "symbols": [symbol.to_dict() for symbol in result.symbols],
         "calls": [call.to_dict() for call in result.calls],
+        "rpc_invocations": [fact.to_dict() for fact in result.rpc_invocations],
         "symbol_analyzed_paths": list(result.symbol_analyzed_paths),
         "call_analyzed_paths": list(result.call_analyzed_paths),
+        "rpc_analyzed_paths": list(result.rpc_analyzed_paths),
         "symbol_failed_paths": list(result.symbol_failed_paths),
         "call_failed_paths": list(result.call_failed_paths),
+        "rpc_failed_paths": list(result.rpc_failed_paths),
         "failures": [failure.to_dict() for failure in result.failures],
         "symbol_coverage": result.symbol_coverage.to_dict(),
         "call_coverage": result.call_coverage.to_dict(),
+        "rpc_coverage": result.rpc_coverage.to_dict(),
         "tool": result.tool,
     }
 
@@ -563,6 +610,106 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
                 anchor=anchor,
             )
         )
+    raw_rpc_invocations = data.get("rpc_invocations", [])
+    raw_rpc_analyzed_paths = data.get("rpc_analyzed_paths", [])
+    raw_rpc_failed_paths = data.get("rpc_failed_paths", [])
+    if not isinstance(raw_rpc_invocations, list) or not isinstance(raw_rpc_analyzed_paths, list) or not isinstance(raw_rpc_failed_paths, list):
+        return None
+    rpc_invocations: list[RpcInvocationFact] = []
+    rpc_fact_ids: set[str] = set()
+    for raw in raw_rpc_invocations:
+        if not isinstance(raw, dict):
+            return None
+        anchor = _anchor_from_dict(raw.get("anchor"))
+        invocation = RpcInvocationContract.from_dict(raw.get("invocation"))
+        schema_selection = RpcSchemaSelection.from_dict(raw.get("schema_selection"))
+        routine = raw.get("routine")
+        params = raw.get("params")
+        if anchor is None or invocation is None or schema_selection is None or not isinstance(routine, dict) or not isinstance(params, dict):
+            return None
+        try:
+            routine_status = RpcRoutineStatus(str(routine.get("status") or ""))
+            params_status = RpcParamsStatus(str(params.get("status") or ""))
+            start_offset = int(raw["start_offset"])
+            end_offset = int(raw["end_offset"])
+            syntactic_argument_count = int(raw["syntactic_argument_count"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        raw_names = params.get("known_names")
+        if not isinstance(raw_names, list) or any(not isinstance(value, str) for value in raw_names):
+            return None
+        param_names = tuple(sorted(set(raw_names)))
+        fact_id = str(raw.get("fact_id") or "")
+        path = str(raw.get("path") or "")
+        content_sha256 = str(raw.get("content_sha256") or "")
+        raw_routine_value = routine.get("value")
+        raw_routine_reason = routine.get("reason_code")
+        if routine_status == RpcRoutineStatus.KNOWN:
+            if "value" not in routine or not isinstance(raw_routine_value, str) or raw_routine_reason not in (None, ""):
+                return None
+            routine_value = raw_routine_value
+            routine_reason = None
+        else:
+            if not isinstance(raw_routine_reason, str) or not raw_routine_reason or raw_routine_value not in (None, ""):
+                return None
+            routine_value = ""
+            try:
+                routine_reason = RpcRoutineReasonCode(raw_routine_reason)
+            except ValueError:
+                return None
+        raw_params_reason = str(params.get("reason_code") or "")
+        if params_status == RpcParamsStatus.COMPLETE:
+            if raw_params_reason:
+                return None
+            params_reason = None
+        else:
+            try:
+                params_reason = RpcParamsReasonCode(raw_params_reason)
+            except ValueError:
+                return None
+        if (
+            not fact_id
+            or fact_id in rpc_fact_ids
+            or path != anchor.path
+            or not str(raw.get("repository_id") or "")
+            or str(raw.get("provider") or "") != expected_provider
+            or str(raw.get("language") or "") != "dart"
+            or not content_sha256.startswith("sha256:")
+            or len(content_sha256) != 71
+            or start_offset < 0
+            or end_offset <= start_offset
+            or syntactic_argument_count < 0
+            or not str(raw.get("resolved_callee_identity") or "")
+            or len(param_names) != len(raw_names)
+        ):
+            return None
+        rpc_fact_ids.add(fact_id)
+        try:
+            fact = RpcInvocationFact(
+                fact_id=fact_id,
+                repository_id=str(raw.get("repository_id") or ""),
+                path=path,
+                provider=expected_provider,
+                language="dart",
+                content_sha256=content_sha256,
+                start_offset=start_offset,
+                end_offset=end_offset,
+                resolved_callee_identity=str(raw.get("resolved_callee_identity") or ""),
+                receiver_type=str(raw.get("receiver_type") or ""),
+                invocation=invocation,
+                schema_selection=schema_selection,
+                routine_status=routine_status,
+                routine=routine_value,
+                routine_reason_code=routine_reason,
+                params_status=params_status,
+                param_names=param_names,
+                params_reason_code=params_reason,
+                syntactic_argument_count=syntactic_argument_count,
+                anchor=anchor,
+            )
+        except ValueError:
+            return None
+        rpc_invocations.append(fact)
     failures: list[ProviderFailure] = []
     for raw in data["failures"]:
         if not isinstance(raw, dict) or not isinstance(raw.get("paths"), list):
@@ -578,9 +725,14 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
         )
     raw_symbol_coverage = data.get("symbol_coverage")
     raw_call_coverage = data.get("call_coverage")
-    if not isinstance(raw_symbol_coverage, dict) or not isinstance(raw_call_coverage, dict):
+    raw_rpc_coverage = data.get("rpc_coverage", {"evidence_level": "precise", "coverage_gaps": []})
+    if not isinstance(raw_symbol_coverage, dict) or not isinstance(raw_call_coverage, dict) or not isinstance(raw_rpc_coverage, dict):
         return None
-    if not isinstance(raw_symbol_coverage.get("coverage_gaps"), list) or not isinstance(raw_call_coverage.get("coverage_gaps"), list):
+    if (
+        not isinstance(raw_symbol_coverage.get("coverage_gaps"), list)
+        or not isinstance(raw_call_coverage.get("coverage_gaps"), list)
+        or not isinstance(raw_rpc_coverage.get("coverage_gaps"), list)
+    ):
         return None
     symbol_coverage = CapabilityEvidence(
         evidence_level=str(raw_symbol_coverage.get("evidence_level") or ""),
@@ -590,20 +742,32 @@ def _provider_result_from_dict(data: dict[str, Any], *, expected_provider: str) 
         evidence_level=str(raw_call_coverage.get("evidence_level") or ""),
         coverage_gaps=tuple(sorted(str(value) for value in raw_call_coverage.get("coverage_gaps", []) if str(value))),
     )
-    if symbol_coverage.evidence_level not in {"precise", "conservative"} or call_coverage.evidence_level not in {"precise", "conservative"}:
+    rpc_coverage = CapabilityEvidence(
+        evidence_level=str(raw_rpc_coverage.get("evidence_level") or ""),
+        coverage_gaps=tuple(sorted(str(value) for value in raw_rpc_coverage.get("coverage_gaps", []) if str(value))),
+    )
+    if (
+        symbol_coverage.evidence_level not in {"precise", "conservative"}
+        or call_coverage.evidence_level not in {"precise", "conservative"}
+        or rpc_coverage.evidence_level not in {"precise", "conservative"}
+    ):
         return None
     return SemanticProviderResult(
         provider=expected_provider,
         languages=tuple(sorted(str(value) for value in data["languages"] if str(value))),
         symbols=tuple(symbols),
         calls=tuple(calls),
+        rpc_invocations=tuple(sorted(rpc_invocations, key=lambda item: item.fact_id)),
         symbol_analyzed_paths=tuple(sorted(str(value) for value in data["symbol_analyzed_paths"] if str(value))),
         call_analyzed_paths=tuple(sorted(str(value) for value in data["call_analyzed_paths"] if str(value))),
+        rpc_analyzed_paths=tuple(sorted(str(value) for value in raw_rpc_analyzed_paths if str(value))),
         symbol_failed_paths=tuple(sorted(str(value) for value in data["symbol_failed_paths"] if str(value))),
         call_failed_paths=tuple(sorted(str(value) for value in data["call_failed_paths"] if str(value))),
+        rpc_failed_paths=tuple(sorted(str(value) for value in raw_rpc_failed_paths if str(value))),
         failures=tuple(failures),
         symbol_coverage=symbol_coverage,
         call_coverage=call_coverage,
+        rpc_coverage=rpc_coverage,
         tool=data["tool"],
     )
 
@@ -831,12 +995,14 @@ def graph_materialization_freshness(
     snapshot: GraphSnapshot | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
     state_dir = _state_dir(root, target, state_root=state_root)
+    provider_results: dict[str, SemanticProviderResult]
     if snapshot is None:
         materialized, admission_problems, status = _admit_materialization(root, target=target, state_root=state_root)
         if materialized is None:
             return {"status": status, "changed_paths": []}, admission_problems
         manifest = materialized.manifest
         snapshot = materialized.snapshot
+        provider_results = materialized.provider_results
     else:
         manifest, manifest_status, manifest_problem = _read_materialization_json(root, state_dir / "manifest.json")
         if manifest_problem is not None:
@@ -859,6 +1025,20 @@ def graph_materialization_freshness(
         )
         if admission_problem is not None:
             return {"status": status, "changed_paths": []}, [admission_problem]
+        provider_results, provider_problems = _load_provider_results_strict(
+            root,
+            state_dir=state_dir,
+            manifest=manifest,
+        )
+        if provider_problems:
+            provider_status = (
+                "unavailable"
+                if any(problem.code == "graph_materialization_unavailable" for problem in provider_problems)
+                else "incomplete"
+                if any(problem.code == "graph_materialization_incomplete" for problem in provider_problems)
+                else "invalid"
+            )
+            return {"status": provider_status, "changed_paths": []}, provider_problems
     inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
     previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}
     current_records, git_state = repo_file_state_records(
@@ -880,6 +1060,82 @@ def graph_materialization_freshness(
         for path in set(current_fingerprints) | set(str(value) for value in previous_fingerprints)
         if str(current_fingerprints.get(path) or "") != str(previous_fingerprints.get(path) or "")
     )
+    inventory_records = [
+        {
+            "path": item.path,
+            "language": str(language_for_path(item.path)),
+            "classification": item.classification,
+            "fingerprint": current_fingerprints.get(item.path, ""),
+        }
+        for item in inventory
+    ]
+    previous_entries = {entry.path: entry for entry in _code_index_entries(snapshot)}
+    inventory_stale_paths = sorted(
+        item.path
+        for item in inventory
+        if (
+            (previous := previous_entries.get(item.path)) is not None
+            and (
+                previous.classification != item.classification
+                or previous.language != str(language_for_path(item.path))
+            )
+        )
+    )
+    previous_provider_states = manifest.get("providers") if isinstance(manifest.get("providers"), dict) else {}
+    changed_provider_configs: dict[str, list[str]] = {}
+    provider_stale_paths: dict[str, list[str]] = {}
+    provider_state_changed = False
+    for provider in PROVIDER_LANGUAGES:
+        previous_state = previous_provider_states.get(provider) if isinstance(previous_provider_states.get(provider), dict) else {}
+        current_config_files, current_config_digest = _provider_config_state(target, provider, inventory_records)
+        previous_config_files = previous_state.get("config_files") if isinstance(previous_state.get("config_files"), dict) else {}
+        config_paths = sorted(
+            path
+            for path in set(current_config_files) | set(str(value) for value in previous_config_files)
+            if str(current_config_files.get(path) or "") != str(previous_config_files.get(path) or "")
+        )
+        config_changed = str(previous_state.get("config_digest") or "") != current_config_digest
+        input_version_changed = previous_state.get("input_version") != PROVIDER_INPUT_VERSIONS[provider]
+        if config_changed or input_version_changed:
+            provider_state_changed = True
+            changed_provider_configs[provider] = config_paths
+            result = provider_results[provider]
+            provider_stale_paths[provider] = sorted(
+                {
+                    *result.symbol_analyzed_paths,
+                    *result.call_analyzed_paths,
+                    *result.rpc_analyzed_paths,
+                    *result.symbol_failed_paths,
+                    *result.call_failed_paths,
+                    *result.rpc_failed_paths,
+                }
+            )
+    graph_input_version_changed = (
+        manifest.get("code_index_input_version") != CODE_INDEX_INPUT_VERSION
+        or manifest.get("structured_relation_input_version") != STRUCTURED_RELATION_INPUT_VERSION
+    )
+    semantic_stale_paths = sorted(
+        {
+            path
+            for paths in provider_stale_paths.values()
+            for path in paths
+        }
+    )
+    graph_input_stale_paths = sorted(set(current_fingerprints) | {str(path) for path in previous_fingerprints}) if graph_input_version_changed else []
+    stale_paths = sorted(
+        {
+            *changed_paths,
+            *inventory_stale_paths,
+            *semantic_stale_paths,
+            *graph_input_stale_paths,
+        }
+    )
+    current_classifications = {item.path: item.classification for item in inventory}
+    stale_path_classifications = {
+        path: current_classifications[path]
+        for path in stale_paths
+        if path in current_classifications
+    }
     previous_root_records = manifest.get("root_evidence_records") if isinstance(manifest.get("root_evidence_records"), dict) else {}
     root_records = _root_evidence_records(
         root,
@@ -900,7 +1156,16 @@ def graph_materialization_freshness(
     )
     root_evidence_digest = digest_data(current_root_fingerprints)
     root_evidence_changed = root_evidence_digest != str(manifest.get("root_evidence_digest") or "")
-    status = "current" if not changed_paths and not root_evidence_changed and not any(problem.severity == "error" for problem in problems) else "stale"
+    status = (
+        "current"
+        if not changed_paths
+        and not inventory_stale_paths
+        and not root_evidence_changed
+        and not provider_state_changed
+        and not graph_input_version_changed
+        and not any(problem.severity == "error" for problem in problems)
+        else "stale"
+    )
     return {
         "status": status,
         "changed_paths": changed_paths,
@@ -910,11 +1175,32 @@ def graph_materialization_freshness(
             for item in inventory
             if item.path in changed_paths
         },
+        "inventory_stale_paths": inventory_stale_paths,
         "root_evidence_changed": root_evidence_changed,
         "changed_root_paths": changed_root_paths,
         "changed_root_path_count": len(changed_root_paths),
+        "provider_state_changed": provider_state_changed,
+        "changed_provider_configs": changed_provider_configs,
+        "changed_provider_config_count": sum(len(paths) for paths in changed_provider_configs.values()),
+        "provider_stale_paths": provider_stale_paths,
+        "semantic_stale_paths": semantic_stale_paths,
+        "graph_input_version_changed": graph_input_version_changed,
+        "graph_input_stale_paths": graph_input_stale_paths,
+        "stale_paths": stale_paths,
+        "stale_path_classifications": stale_path_classifications,
+        "stale_path_count": len(stale_paths),
         "materialized_input_digest": str(manifest.get("input_digest") or ""),
     }, problems
+
+
+def graph_stale_paths(freshness: Any) -> set[str]:
+    """Return the canonical repo-relative paths whose Graph evidence is stale."""
+    if not isinstance(freshness, dict):
+        return set()
+    raw_paths = freshness.get("stale_paths")
+    if not isinstance(raw_paths, list):
+        raw_paths = freshness.get("changed_paths", [])
+    return {str(path) for path in raw_paths if str(path)}
 
 
 def compact_graph_freshness(freshness: Any) -> dict[str, Any]:
@@ -1086,6 +1372,18 @@ def _merge_provider_result(
         for key, call in calls.items()
         if call.caller_provider_symbol_id in symbol_ids and call.callee_provider_symbol_id in symbol_ids
     }
+    rpc_invocations = {
+        fact.fact_id: fact
+        for fact in previous.rpc_invocations
+        if fact.path not in replace_paths and fact.path in current_paths
+    }
+    rpc_invocations.update(
+        {
+            fact.fact_id: fact
+            for fact in update.rpc_invocations
+            if fact.path in current_paths
+        }
+    )
 
     def merged_paths(previous_paths: tuple[str, ...], updated_paths: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(sorted(((set(previous_paths) - replace_paths) | set(updated_paths)) & current_paths))
@@ -1095,10 +1393,13 @@ def _merge_provider_result(
         languages=previous.languages or update.languages,
         symbols=tuple(symbols[key] for key in sorted(symbols)),
         calls=tuple(calls[key] for key in sorted(calls)),
+        rpc_invocations=tuple(rpc_invocations[key] for key in sorted(rpc_invocations)),
         symbol_analyzed_paths=merged_paths(previous.symbol_analyzed_paths, update.symbol_analyzed_paths),
         call_analyzed_paths=merged_paths(previous.call_analyzed_paths, update.call_analyzed_paths),
+        rpc_analyzed_paths=merged_paths(previous.rpc_analyzed_paths, update.rpc_analyzed_paths),
         symbol_failed_paths=merged_paths(previous.symbol_failed_paths, update.symbol_failed_paths),
         call_failed_paths=merged_paths(previous.call_failed_paths, update.call_failed_paths),
+        rpc_failed_paths=merged_paths(previous.rpc_failed_paths, update.rpc_failed_paths),
         failures=_merge_failures(previous, update, replace_paths=replace_paths, current_paths=current_paths),
         symbol_coverage=(
             update.symbol_coverage
@@ -1109,6 +1410,11 @@ def _merge_provider_result(
             update.call_coverage
             if update.call_analyzed_paths or update.call_failed_paths
             else previous.call_coverage
+        ),
+        rpc_coverage=(
+            update.rpc_coverage
+            if update.rpc_analyzed_paths or update.rpc_failed_paths
+            else previous.rpc_coverage
         ),
         tool=update.tool or previous.tool,
     )

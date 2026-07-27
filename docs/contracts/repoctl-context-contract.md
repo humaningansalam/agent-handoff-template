@@ -41,7 +41,7 @@ Hyphenated aliases such as `call-impact` are accepted. `authority` and `contract
 
 ## Bundle
 
-The JSON payload is `repoctl.context.bundle` with `authoritative: false`.
+The JSON payload is `repoctl.context.bundle` schema version 11 with `authoritative: false`.
 
 Default `--json` output is the compact agent-facing view. It includes:
 
@@ -49,6 +49,7 @@ Default `--json` output is the compact agent-facing view. It includes:
 query.mode
 completeness
 groups
+relationship_candidates
 continuations
 bundle_digest
 ```
@@ -66,6 +67,8 @@ selection.compact_projection.continuations
 ```
 
 `evidence` contains raw query-matching source/document chunks plus provider-confirmed Graph relations projected from lexical source and test anchors. Retrieval selects the strongest matching chunk from distinct paths before allowing additional sections from the same path, so one large file cannot consume the candidate set. Full evidence exposes typed `evidence_kinds`, `anchor_strength`, `document_role` when applicable, field score diagnostics, and section kind; display-only selection reasons do not drive seed or ranking decisions. Token cost never participates in retrieval or evidence selection.
+
+`relationship_candidates` is a separate non-authoritative lane, not evidence that an edge exists. Analyzer-owned relationship source facts are indexed as `provider_relationship` sections with their `source_fact_id`, so an exact runtime identity selects the corresponding analyzer fact without parsing query prose inside Graph or collapsing identity to a line range. Context projects compatible unresolved candidates selected by that fact ID, or from its bounded typed file-anchor set when no exact relationship identity exists, even when multiple anchors prevent confirmed Graph traversal. Every item keeps the source location, exact runtime identity, structured resolution state/reason, compatible target definitions, target counts/truncation, and typed continuations. Stale source or target paths are excluded. Candidate targets do not receive Graph ranking score, enter `relations`, or become Chosen scope automatically.
 
 Compact groups merge chunks with the same path into one file-level item and preserve their locations in a `sections` list. A global budget returns at most eight actionable items, normally three to eight when enough evidence exists, with small per-lane limits so authority, source, test, history, and Knowledge do not compete in one ranking. When matching authority and procedure documents both exist, compact `must_read` reserves one of each before filling its remaining slots. Each item carries its reason and typed continuation. Selection counts, score diagnostics, provider coverage, and omitted-item statistics are available only with `--full` or `--explain`.
 
@@ -139,7 +142,7 @@ Knowledge source ref or root document -> workspace open
 
 Reviewed Knowledge requires either a lexical query match or an explicit path/source relation to qualify. Reviewed status is a ranking signal after eligibility; it must not make unrelated records appear in every query. Explicit path relation is independently sufficient, so a linked invariant or decision is not lost merely because its prose uses different words.
 
-When product source is stale, Context excludes every Graph relation whose endpoint is stale and overlays only the current file text. When receipt or task-artifact evidence is stale, related history is omitted and `task_history` becomes partial until the next explicit Graph build. Root document changes such as `docs/BOARD.md` do not force a product-wide fallback scan.
+When product source is stale, Context excludes every Graph relation whose endpoint is stale and overlays only the current file text. Provider configuration or Graph/provider input-version drift has no equivalent live relation overlay, so Context reports the materialized Graph as stale and requires an explicit Graph refresh. When receipt or task-artifact evidence is stale, related history is omitted and `task_history` becomes partial until the next explicit Graph build. Root document changes such as `docs/BOARD.md` do not force a product-wide fallback scan.
 
 ## Markdown Output
 
