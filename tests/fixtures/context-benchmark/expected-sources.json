@@ -480,5 +480,51 @@
       {"path": "repos/compose.yml"},
       {"path": "repos/config/runtime.env"}
     ]
+  },
+  "Q-033": {
+    "acceptable": [
+      {"path": "repos/activity.py"}
+    ],
+    "noise": [
+      {"path": "repos/types.py"}
+    ],
+    "required_knowledge_source_refs": [],
+    "must_find": [
+      {"path": "repos/render.py"},
+      {"path": "repos/test_render.py"}
+    ]
+  },
+  "Q-034": {
+    "acceptable": [],
+    "noise": [
+      {"path": "repos/frontend/reconcile.ts"}
+    ],
+    "required_knowledge_source_refs": [],
+    "must_find": [
+      {"path": "repos/backend/reconcile.py"},
+      {"path": "repos/backend/test_reconcile.py"}
+    ]
+  },
+  "Q-035": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:routing%2Fshared.py",
+        "kind": "IMPORTS_FILE",
+        "source": "python_import_resolver",
+        "to": "repo:main:file:routing%2Fleaf.py"
+      }
+    ],
+    "supporting": [
+      {"path": "repos/routing/shared.py"},
+      {"path": "repos/routing/leaf.py"}
+    ],
+    "must_find": [
+      {"path": "repos/routing/settlement_router.py"},
+      {"path": "repos/routing/audit_router.py"}
+    ]
   }
 }

@@ -650,12 +650,21 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
     context_payload = json.loads(capsys.readouterr().out)
     context_bundle = context_payload["data"]["bundle"]
     assert context_bundle["relationship_candidate_count"] == 1
-    assert context_bundle["completeness"]["graph_anchor"] == {
-        "status": "resolved",
-        "code": "context_graph_anchor_resolved",
-        "seed_paths": ["lib/client.dart"],
-        "candidate_paths": ["lib/client.dart"],
-    }
+    graph_anchor = context_bundle["completeness"]["graph_anchor"]
+    assert graph_anchor["status"] == "resolved"
+    assert graph_anchor["code"] == "context_graph_anchor_resolved"
+    assert graph_anchor["seed_paths"] == ["lib/client.dart"]
+    assert graph_anchor["candidate_paths"] == ["lib/client.dart"]
+    assert graph_anchor["seed_anchors"] == [
+        {
+            "path": "lib/client.dart",
+            "provenance": "lexical_file",
+            "anchor_strength": "weak",
+            "kind": "file",
+            "retrieval_lane": "product_source",
+            "lexical_rank": 1,
+        }
+    ]
     context_candidate = next(
         item
         for item in context_bundle["relationship_candidates"]

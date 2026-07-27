@@ -1278,30 +1278,90 @@ _CONTEXT_GRAPH_MODE_POLICIES: dict[str, dict[str, _ContextEdgePolicy]] = {
 }
 
 
-def _context_anchor_symbol_ids(
-    snapshot: GraphSnapshot,
-    *,
-    nodes: dict[str, GraphNode],
-    anchors: list[GraphContextAnchor],
-) -> dict[str, set[str]]:
-    repo_id = str(snapshot.repository.get("id") or "")
+@dataclass(frozen=True)
+class _ContextProjectionIndex:
+    nodes: dict[str, GraphNode]
+    symbols_by_file: dict[str, list[str]]
+    symbol_files: dict[str, str]
+    anchor_nodes_by_symbol: dict[str, GraphNode]
+    file_relations_by_file: dict[str, list[tuple[GraphEdge, str, str, str, str]]]
+    changes_by_file: dict[str, list[str]]
+    tasks_by_change: dict[str, list[tuple[str, GraphEdge]]]
+    artifact_paths_by_task: dict[str, set[str]]
+
+
+def _build_context_projection_index(snapshot: GraphSnapshot) -> _ContextProjectionIndex:
+    nodes = _node_by_id(snapshot)
     symbols_by_file: dict[str, list[str]] = {}
+    symbol_files: dict[str, str] = {}
+    anchor_nodes_by_symbol: dict[str, GraphNode] = {}
+    file_relations: list[tuple[GraphEdge, str, str, str, str]] = []
+    call_edges: list[GraphEdge] = []
+    changes_by_file: dict[str, list[str]] = {}
+    tasks_by_change: dict[str, list[tuple[str, GraphEdge]]] = {}
+    artifact_paths_by_task: dict[str, set[str]] = {}
+
     for edge in snapshot.edges:
         if edge.kind == "DEFINES":
             symbols_by_file.setdefault(edge.from_id, []).append(edge.to_id)
-    anchor_nodes_by_symbol = {
-        edge.from_id: nodes[edge.to_id]
-        for edge in snapshot.edges
-        if edge.kind == "ANCHORS" and edge.to_id in nodes
-    }
+            symbol_files[edge.to_id] = edge.from_id
+        elif edge.kind == "ANCHORS" and edge.to_id in nodes:
+            anchor_nodes_by_symbol[edge.from_id] = nodes[edge.to_id]
+        elif edge.kind in {"IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}:
+            file_relations.append((edge, edge.from_id, edge.to_id, "", ""))
+        elif edge.kind == "CALLS":
+            call_edges.append(edge)
+        elif edge.kind == "CHANGE_AFFECTED_FILE":
+            changes_by_file.setdefault(edge.to_id, []).append(edge.from_id)
+        elif edge.kind == "TASK_RECORDED_CHANGE":
+            tasks_by_change.setdefault(edge.to_id, []).append((edge.from_id, edge))
+        elif edge.kind == "TASK_VERIFIED_BY":
+            artifact_node = nodes.get(edge.to_id)
+            artifact_path = str(artifact_node.identity.get("path") or "") if artifact_node is not None else ""
+            if artifact_node is not None and artifact_node.kind == "artifact" and artifact_path:
+                artifact_paths_by_task.setdefault(edge.from_id, set()).add(artifact_path)
+
+    for edge in call_edges:
+        from_file_id = symbol_files.get(edge.from_id, "")
+        to_file_id = symbol_files.get(edge.to_id, "")
+        if from_file_id and to_file_id:
+            file_relations.append((edge, from_file_id, to_file_id, edge.from_id, edge.to_id))
+
+    file_relations_by_file: dict[str, list[tuple[GraphEdge, str, str, str, str]]] = {}
+    for relation in file_relations:
+        _edge, from_file_id, to_file_id, _from_symbol_id, _to_symbol_id = relation
+        file_relations_by_file.setdefault(from_file_id, []).append(relation)
+        if to_file_id != from_file_id:
+            file_relations_by_file.setdefault(to_file_id, []).append(relation)
+    for relations in file_relations_by_file.values():
+        relations.sort(key=lambda item: _edge_key(item[0]))
+
+    return _ContextProjectionIndex(
+        nodes=nodes,
+        symbols_by_file=symbols_by_file,
+        symbol_files=symbol_files,
+        anchor_nodes_by_symbol=anchor_nodes_by_symbol,
+        file_relations_by_file=file_relations_by_file,
+        changes_by_file=changes_by_file,
+        tasks_by_change=tasks_by_change,
+        artifact_paths_by_task=artifact_paths_by_task,
+    )
+
+
+def _context_anchor_symbol_ids(
+    *,
+    repo_id: str,
+    index: _ContextProjectionIndex,
+    anchors: list[GraphContextAnchor],
+) -> dict[str, set[str]]:
     resolved: dict[str, set[str]] = {}
     for anchor in anchors:
         if anchor.kind != GraphContextAnchorKind.SYMBOL:
             continue
         current_file_id = file_id(repo_id, anchor.path)
-        for symbol_node_id in symbols_by_file.get(current_file_id, []):
-            symbol_node = nodes.get(symbol_node_id)
-            source_anchor = anchor_nodes_by_symbol.get(symbol_node_id)
+        for symbol_node_id in index.symbols_by_file.get(current_file_id, []):
+            symbol_node = index.nodes.get(symbol_node_id)
+            source_anchor = index.anchor_nodes_by_symbol.get(symbol_node_id)
             if symbol_node is None or source_anchor is None:
                 continue
             provider = symbol_node.facts.get("provider") if isinstance(symbol_node.facts.get("provider"), dict) else {}
@@ -1329,7 +1389,8 @@ def project_context_neighborhood(
 ) -> dict[str, Any]:
     """Project bounded, mode-specific relations around typed Context anchors."""
     repo_id = str(snapshot.repository.get("id") or "")
-    nodes = _node_by_id(snapshot)
+    index = _build_context_projection_index(snapshot)
+    nodes = index.nodes
     mode_policy = _CONTEXT_GRAPH_MODE_POLICIES.get(mode)
     if mode_policy is None:
         raise ValueError(f"unsupported Context Graph projection mode: {mode}")
@@ -1352,7 +1413,11 @@ def project_context_neighborhood(
             unresolved_anchors.append(anchor)
             continue
         normalized_anchors.append(anchor)
-    anchored_symbol_ids = _context_anchor_symbol_ids(snapshot, nodes=nodes, anchors=normalized_anchors)
+    anchored_symbol_ids = _context_anchor_symbol_ids(
+        repo_id=repo_id,
+        index=index,
+        anchors=normalized_anchors,
+    )
     resolved_anchors: list[GraphContextAnchor] = []
     ambiguous_anchors: list[GraphContextAnchor] = []
     normalized_seeds: list[str] = []
@@ -1371,19 +1436,14 @@ def project_context_neighborhood(
             normalized_seeds.append(anchor.path)
     seed_ids = {file_id(repo_id, path) for path in normalized_seeds}
 
-    symbol_files: dict[str, str] = {}
-    for edge in snapshot.edges:
-        if edge.kind == "DEFINES":
-            symbol_files[edge.to_id] = edge.from_id
     symbol_paths = {
         symbol_id_value: str(nodes[file_node_id].identity.get("path") or "")
-        for symbol_id_value, file_node_id in symbol_files.items()
+        for symbol_id_value, file_node_id in index.symbol_files.items()
         if file_node_id in nodes and str(nodes[file_node_id].identity.get("path") or "")
     }
 
-    relations: list[dict[str, Any]] = []
+    relations_by_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     related_paths: set[str] = set()
-    seen_relations: set[tuple[str, str, str, str, str]] = set()
 
     def add_relation(
         *,
@@ -1393,24 +1453,49 @@ def project_context_neighborhood(
         from_symbol_id: str = "",
         to_symbol_id: str = "",
         distance: int,
-        origin_file_ids: set[str],
-    ) -> None:
+        origin_file_distances: dict[str, int],
+    ) -> bool:
         from_node = nodes.get(from_file_id)
         to_node = nodes.get(to_file_id)
         if from_node is None or to_node is None:
-            return
+            return False
         from_path = str(from_node.identity.get("path") or "")
         to_path = str(to_node.identity.get("path") or "")
         if not from_path or not to_path:
-            return
+            return False
         key = _edge_key(edge)
-        if key in seen_relations:
-            return
-        seen_relations.add(key)
         if from_file_id not in seed_ids:
             related_paths.add(from_path)
         if to_file_id not in seed_ids:
             related_paths.add(to_path)
+        origin_distances = {
+            str(nodes[origin_id].identity.get("path") or ""): max(1, int(origin_distance))
+            for origin_id, origin_distance in origin_file_distances.items()
+            if origin_id in nodes and str(nodes[origin_id].identity.get("path") or "")
+        }
+        existing = relations_by_key.get(key)
+        if existing is not None:
+            merged_origin_distances = {
+                str(path): max(1, int(origin_distance))
+                for path, origin_distance in (
+                    existing.get("origin_distances")
+                    if isinstance(existing.get("origin_distances"), dict)
+                    else {}
+                ).items()
+            }
+            for path, origin_distance in origin_distances.items():
+                merged_origin_distances[path] = min(
+                    merged_origin_distances.get(path, origin_distance),
+                    origin_distance,
+                )
+            existing["origin_paths"] = sorted(merged_origin_distances)
+            existing["origin_distances"] = {
+                path: merged_origin_distances[path] for path in sorted(merged_origin_distances)
+            }
+            existing["distance"] = min(int(existing.get("distance") or distance), distance)
+            return True
+        if len(relations_by_key) >= max_relations:
+            return False
         relation: dict[str, Any] = {
             "from_path": from_path,
             "edge": edge.kind,
@@ -1420,11 +1505,10 @@ def project_context_neighborhood(
             "assertion": edge.assertion,
             "provider": edge.source,
             "distance": distance,
-            "origin_paths": sorted(
-                str(nodes[origin_id].identity.get("path") or "")
-                for origin_id in origin_file_ids
-                if origin_id in nodes and str(nodes[origin_id].identity.get("path") or "")
-            ),
+            "origin_paths": sorted(origin_distances),
+            "origin_distances": {
+                path: origin_distances[path] for path in sorted(origin_distances)
+            },
         }
         if edge.facts:
             relation["facts"] = edge.facts
@@ -1432,46 +1516,51 @@ def project_context_neighborhood(
             relation["from_symbol"] = _node_summary(nodes.get(from_symbol_id), symbol_paths=symbol_paths)
         if to_symbol_id:
             relation["to_symbol"] = _node_summary(nodes.get(to_symbol_id), symbol_paths=symbol_paths)
-        relations.append(relation)
+        relations_by_key[key] = relation
+        return True
 
-    file_relations: list[tuple[GraphEdge, str, str, str, str]] = []
-    for edge in sorted(snapshot.edges, key=_edge_key):
-        if edge.kind in {"IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}:
-            file_relations.append((edge, edge.from_id, edge.to_id, "", ""))
-            continue
-        if edge.kind == "CALLS":
-            from_file_id = symbol_files.get(edge.from_id, "")
-            to_file_id = symbol_files.get(edge.to_id, "")
-            if from_file_id and to_file_id:
-                file_relations.append((edge, from_file_id, to_file_id, edge.from_id, edge.to_id))
-
-    visited = set(seed_ids)
-    frontier = set(seed_ids)
-    origins_by_file: dict[str, set[str]] = {seed_id: {seed_id} for seed_id in seed_ids}
+    frontier: dict[str, set[str]] = {seed_id: {seed_id} for seed_id in seed_ids}
+    seen_origins_by_file: dict[str, set[str]] = {
+        seed_id: {seed_id} for seed_id in seed_ids
+    }
     relation_priority = {"TESTS_FILE": 0, "IMPORTS_FILE": 1, STRUCTURED_EDGE_KIND: 2, "CALLS": 3}
     max_depth = max((policy.max_depth for policy in mode_policy.values()), default=0)
     for distance in range(1, max_depth + 1):
-        eligible = []
-        for relation in file_relations:
+        candidate_relations: dict[
+            tuple[str, str, str, str, str],
+            tuple[GraphEdge, str, str, str, str],
+        ] = {}
+        for frontier_file_id in frontier:
+            for relation in index.file_relations_by_file.get(frontier_file_id, []):
+                candidate_relations.setdefault(_edge_key(relation[0]), relation)
+
+        eligible: list[
+            tuple[GraphEdge, str, str, str, str, set[str], set[str]]
+        ] = []
+        for relation in candidate_relations.values():
             edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id = relation
             edge_policy = mode_policy.get(edge.kind)
             if edge_policy is None or distance > edge_policy.max_depth:
                 continue
-            outbound = from_file_id in frontier and edge_policy.outbound
-            inbound = to_file_id in frontier and edge_policy.inbound
+            outbound_origins = (
+                set(frontier.get(from_file_id, set())) if edge_policy.outbound else set()
+            )
+            inbound_origins = (
+                set(frontier.get(to_file_id, set())) if edge_policy.inbound else set()
+            )
             if distance == 1:
                 if edge.kind == "CALLS":
-                    if outbound and anchored_symbol_ids.get(from_file_id) and from_symbol_id not in anchored_symbol_ids[from_file_id]:
-                        outbound = False
-                    if inbound and anchored_symbol_ids.get(to_file_id) and to_symbol_id not in anchored_symbol_ids[to_file_id]:
-                        inbound = False
+                    if outbound_origins and anchored_symbol_ids.get(from_file_id) and from_symbol_id not in anchored_symbol_ids[from_file_id]:
+                        outbound_origins.clear()
+                    if inbound_origins and anchored_symbol_ids.get(to_file_id) and to_symbol_id not in anchored_symbol_ids[to_file_id]:
+                        inbound_origins.clear()
                 elif edge.kind in {"IMPORTS_FILE", STRUCTURED_EDGE_KIND}:
-                    if outbound and anchored_symbol_ids.get(from_file_id):
-                        outbound = False
-                    if inbound and anchored_symbol_ids.get(to_file_id):
-                        inbound = False
-            if outbound or inbound:
-                eligible.append((*relation, outbound, inbound))
+                    if outbound_origins and anchored_symbol_ids.get(from_file_id):
+                        outbound_origins.clear()
+                    if inbound_origins and anchored_symbol_ids.get(to_file_id):
+                        inbound_origins.clear()
+            if outbound_origins or inbound_origins:
+                eligible.append((*relation, outbound_origins, inbound_origins))
         eligible.sort(
             key=lambda item: (
                 0 if item[5] else 1,
@@ -1483,37 +1572,36 @@ def project_context_neighborhood(
                 item[0].to_id,
             )
         )
-        next_frontier: set[str] = set()
-        for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id, outbound, inbound in eligible:
-            frontier_origins: set[str] = set()
-            if outbound:
-                frontier_origins.update(origins_by_file.get(from_file_id, {from_file_id}))
-            if inbound:
-                frontier_origins.update(origins_by_file.get(to_file_id, {to_file_id}))
-            add_relation(
+        next_frontier: dict[str, set[str]] = {}
+        for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id, outbound_origins, inbound_origins in eligible:
+            relation_origins = outbound_origins | inbound_origins
+            accepted = add_relation(
                 edge=edge,
                 from_file_id=from_file_id,
                 to_file_id=to_file_id,
                 from_symbol_id=from_symbol_id,
                 to_symbol_id=to_symbol_id,
                 distance=distance,
-                origin_file_ids=frontier_origins,
+                origin_file_distances={origin_id: distance for origin_id in relation_origins},
             )
-            if inbound and from_file_id not in visited:
-                next_frontier.add(from_file_id)
-                origins_by_file.setdefault(from_file_id, set()).update(frontier_origins)
-            if outbound and to_file_id not in visited:
-                next_frontier.add(to_file_id)
-                origins_by_file.setdefault(to_file_id, set()).update(frontier_origins)
-            if len(relations) >= max_relations:
-                break
-        visited.update(next_frontier)
+            if not accepted:
+                continue
+            for destination_file_id, propagating_origins in (
+                (from_file_id, inbound_origins),
+                (to_file_id, outbound_origins),
+            ):
+                seen_origins = seen_origins_by_file.setdefault(destination_file_id, set())
+                new_origins = propagating_origins - seen_origins
+                if not new_origins:
+                    continue
+                seen_origins.update(new_origins)
+                next_frontier.setdefault(destination_file_id, set()).update(new_origins)
         frontier = next_frontier
-        if not frontier or len(relations) >= max_relations:
+        if not frontier:
             break
 
     relations = sorted(
-        relations,
+        relations_by_key.values(),
         key=lambda item: (
             int(item.get("distance") or 0),
             relation_priority.get(str(item.get("edge") or ""), 9),
@@ -1530,23 +1618,11 @@ def project_context_neighborhood(
         visible_paths.add(str(relation.get("to_path") or ""))
 
     visible_file_ids = {file_id(repo_id, path) for path in visible_paths if path}
-    changes_by_file: dict[str, list[str]] = {}
-    for edge in snapshot.edges:
-        if edge.kind == "CHANGE_AFFECTED_FILE" and edge.to_id in visible_file_ids:
-            changes_by_file.setdefault(edge.to_id, []).append(edge.from_id)
-    tasks_by_change: dict[str, list[tuple[str, GraphEdge]]] = {}
-    for edge in snapshot.edges:
-        if edge.kind == "TASK_RECORDED_CHANGE":
-            tasks_by_change.setdefault(edge.to_id, []).append((edge.from_id, edge))
-    artifact_paths_by_task: dict[str, set[str]] = {}
-    for edge in snapshot.edges:
-        if edge.kind != "TASK_VERIFIED_BY":
-            continue
-        artifact_node = nodes.get(edge.to_id)
-        artifact_path = str(artifact_node.identity.get("path") or "") if artifact_node is not None else ""
-        if artifact_node is None or artifact_node.kind != "artifact" or not artifact_path:
-            continue
-        artifact_paths_by_task.setdefault(edge.from_id, set()).add(artifact_path)
+    changes_by_file = {
+        current_file_id: index.changes_by_file[current_file_id]
+        for current_file_id in visible_file_ids
+        if current_file_id in index.changes_by_file
+    }
 
     history_by_task: dict[str, list[dict[str, Any]]] = {}
     seen_history: set[tuple[str, str]] = set()
@@ -1556,7 +1632,7 @@ def project_context_neighborhood(
         for change_id in sorted(changes_by_file[current_file_id]):
             change_node = nodes.get(change_id)
             change_facts = change_node.facts.get("receipt") if change_node is not None and isinstance(change_node.facts.get("receipt"), dict) else {}
-            for task_node_id, task_edge in sorted(tasks_by_change.get(change_id, []), key=lambda item: item[0]):
+            for task_node_id, task_edge in sorted(index.tasks_by_change.get(change_id, []), key=lambda item: item[0]):
                 task_node = nodes.get(task_node_id)
                 if task_node is None:
                     continue
@@ -1566,7 +1642,7 @@ def project_context_neighborhood(
                     continue
                 seen_history.add(key)
                 receipt = task_node.facts.get("receipt") if isinstance(task_node.facts.get("receipt"), dict) else {}
-                artifact_paths = artifact_paths_by_task.get(task_node_id, set())
+                artifact_paths = index.artifact_paths_by_task.get(task_node_id, set())
                 history_by_task.setdefault(task_id_value, []).append(
                     {
                         "task_id": task_id_value,

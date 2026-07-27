@@ -29,3 +29,6 @@
 {"id":"Q-030","category":"structured-sql-rpc-typescript","repo_id":"main","question":"Which SQL migration defines the RPC called from frontend/src/jobs.ts?"}
 {"id":"Q-031","category":"structured-docker","repo_id":"main","question":"What source file does Dockerfile copy to start the runtime?"}
 {"id":"Q-032","category":"structured-compose-env","repo_id":"main","question":"Which runtime env file is loaded by compose.yml?"}
+{"id":"Q-033","category":"integrated-owner-test","repo_id":"main","question":"public search results evidence related activity detail route dead end"}
+{"id":"Q-034","category":"area-isolation","repo_id":"main","question":"backend invoice reconciliation failure handling"}
+{"id":"Q-035","category":"multi-owner-impact","repo_id":"main","mode":"file-impact","question":"settlement audit router behavior"}

@@ -29,6 +29,7 @@ class ContextEvidenceKind(StrEnum):
     BODY_TERMS = "body_terms"
     FTS = "fts"
     STARTUP_READING = "startup_reading"
+    GRAPH_SEED = "graph_seed"
     GRAPH_RELATION = "graph_relation"
     REVIEWED_KNOWLEDGE_PATH = "reviewed_knowledge_path"
 
@@ -39,6 +40,13 @@ class ContextAnchorStrength(StrEnum):
     STRONG = "strong"
     EXACT = "exact"
     EXPLICIT = "explicit"
+
+
+class ContextGraphAnchorProvenance(StrEnum):
+    EXACT_IDENTITY = "exact_identity"
+    PROVIDER_SYMBOL = "provider_symbol"
+    REVIEWED_KNOWLEDGE = "reviewed_knowledge"
+    LEXICAL_FILE = "lexical_file"
 
 
 CONTEXT_ANCHOR_STRENGTH_PRIORITY = {
@@ -109,16 +117,33 @@ class ContextGraphAnchorCandidate:
     source_ref: ContextSourceRef
     evidence_kinds: tuple[ContextEvidenceKind, ...]
     anchor_strength: ContextAnchorStrength
+    anchor_provenance: ContextGraphAnchorProvenance
+    retrieval_lane: str = ""
+    lexical_rank: int = 0
+    retrieval_score: float = 0.0
+    score_breakdown: dict[str, float] = field(default_factory=dict)
     related_record_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "anchor": self.anchor.to_dict(),
             "source_ref": self.source_ref.to_dict(),
             "evidence_kinds": sorted(kind.value for kind in set(self.evidence_kinds)),
             "anchor_strength": self.anchor_strength.value,
+            "anchor_provenance": self.anchor_provenance.value,
             "related_record_ids": sorted(set(self.related_record_ids)),
         }
+        if self.retrieval_lane:
+            data["retrieval_lane"] = self.retrieval_lane
+        if self.lexical_rank:
+            data["lexical_rank"] = self.lexical_rank
+        if self.retrieval_score:
+            data["retrieval_score"] = round(self.retrieval_score, 6)
+        if self.score_breakdown:
+            data["score_breakdown"] = {
+                key: round(value, 6) for key, value in sorted(self.score_breakdown.items())
+            }
+        return data
 
 
 @dataclass(frozen=True)
@@ -179,7 +204,7 @@ class ContextBundle:
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     relationship_candidates: list[dict[str, Any]] = field(default_factory=list)
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 11
+    schema_version: int = 12
     authoritative: bool = False
     bundle_digest: str = ""
 

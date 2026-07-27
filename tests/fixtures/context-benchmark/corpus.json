@@ -91,6 +91,50 @@
         {
           "path": ".github/workflows/release.yml",
           "content": "jobs:\n  release:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./scripts/start.sh\n"
+        },
+        {
+          "path": "types.py",
+          "content": "class Evidence:\n    pass\n"
+        },
+        {
+          "path": "activity.py",
+          "content": "def related_activity_detail():\n    return 'activity detail'\n"
+        },
+        {
+          "path": "render.py",
+          "content": "from activity import related_activity_detail\n\ndef render_public_search_results():\n    return {'route': 'detail', 'activity': related_activity_detail()}\n"
+        },
+        {
+          "path": "test_render.py",
+          "content": "from render import render_public_search_results\n\ndef test_public_search_detail_route():\n    assert render_public_search_results()['route'] == 'detail'\n"
+        },
+        {
+          "path": "backend/reconcile.py",
+          "content": "def reconcile_invoice_failure():\n    return {'area': 'backend', 'status': 'handled'}\n"
+        },
+        {
+          "path": "backend/test_reconcile.py",
+          "content": "from .reconcile import reconcile_invoice_failure\n\ndef test_backend_invoice_reconciliation_failure():\n    assert reconcile_invoice_failure()['status'] == 'handled'\n"
+        },
+        {
+          "path": "frontend/reconcile.ts",
+          "content": "export const renderInvoiceFailure = () => 'invoice reconciliation failure';\n"
+        },
+        {
+          "path": "routing/leaf.py",
+          "content": "VALUE = 'leaf'\n"
+        },
+        {
+          "path": "routing/shared.py",
+          "content": "from .leaf import VALUE\n"
+        },
+        {
+          "path": "routing/settlement_router.py",
+          "content": "from .shared import VALUE\n\ndef route_payment():\n    marker = 'audit behavior'\n    return VALUE\n"
+        },
+        {
+          "path": "routing/audit_router.py",
+          "content": "from .shared import VALUE\n\ndef record_event():\n    marker = 'settlement behavior'\n    return VALUE\n"
         }
       ]
     }

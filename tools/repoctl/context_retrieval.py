@@ -22,6 +22,7 @@ from .path_roles import is_test_path
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]+|[가-힣]+")
+QUOTED_IDENTITY_RE = re.compile(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"")
 IDENTIFIER_PART_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|[0-9]+")
 IDENTIFIER_SEGMENT_RE = re.compile(r"[A-Za-z0-9]+|[가-힣]+")
 FTS_FIELD_WEIGHTS = (4.0, 3.0, 1.0)
@@ -237,10 +238,24 @@ def rank_context_chunks(
             repository_path=repository_path,
             assigned=chunk.document_role,
         )
-        path_terms = set(canonical_identifier_sequence(chunk.source_ref.path))
+        normalized_repository_path = repository_path.replace("\\", "/").strip("/")
+        repository_prefix = f"{normalized_repository_path}/" if normalized_repository_path else ""
+        repository_relative_path = chunk.source_ref.path.replace("\\", "/")
+        if repository_prefix and repository_relative_path.startswith(repository_prefix):
+            repository_relative_path = repository_relative_path.removeprefix(repository_prefix)
+        path_parent, _separator, path_name = repository_relative_path.rpartition("/")
+        path_parent_parts = [part for part in path_parent.split("/") if part]
+        path_area = path_parent_parts[0] if path_parent_parts else ""
+        path_terms = set(canonical_identifier_sequence(repository_relative_path))
+        path_area_terms = set(canonical_identifier_sequence(path_area))
+        path_scope_terms = set(canonical_identifier_sequence(path_parent))
+        path_name_terms = set(canonical_identifier_sequence(path_name or repository_relative_path))
         section_terms = set(canonical_identifier_sequence(chunk.source_ref.section))
         body_terms = set(canonical_identifier_sequence(chunk.text))
         path_coverage = _term_coverage(ordered_terms, path_terms)
+        path_area_coverage = _term_coverage(ordered_terms, path_area_terms)
+        path_scope_coverage = _term_coverage(ordered_terms, path_scope_terms)
+        path_name_coverage = _term_coverage(ordered_terms, path_name_terms)
         section_coverage = _term_coverage(ordered_terms, section_terms)
         body_coverage = _term_coverage(ordered_terms, body_terms)
         identity_kinds = context_identity_evidence(
@@ -304,6 +319,9 @@ def rank_context_chunks(
                 score_breakdown={
                     "identity": identity_score,
                     "path": path_coverage,
+                    "path_area": path_area_coverage,
+                    "path_scope": path_scope_coverage,
+                    "path_name": path_name_coverage,
                     "section": section_coverage,
                     "body": body_coverage,
                     "exact": exact_coverage,
@@ -343,11 +361,27 @@ def context_identity_selectors(query: str) -> tuple[tuple[str, ...], ...]:
     whole = tuple(part for part in canonical_identifier_sequence(stripped) if part not in STOPWORDS)
     if whole:
         selectors.append(whole)
-    for token in TOKEN_RE.findall(query):
-        selector = canonical_identifier_sequence(token.strip("`'\""))
+    for match in QUOTED_IDENTITY_RE.finditer(query):
+        quoted = next((value for value in match.groups() if value is not None), "")
+        selector = canonical_identifier_sequence(quoted)
+        if selector:
+            selectors.append(selector)
+    for raw_token in TOKEN_RE.findall(query):
+        token = raw_token.rstrip(".:")
+        if not _is_explicit_identity_token(token):
+            continue
+        selector = canonical_identifier_sequence(token)
         if selector:
             selectors.append(selector)
     return tuple(dict.fromkeys(sorted(selectors, key=lambda value: (-len(value), value))))
+
+
+def _is_explicit_identity_token(token: str) -> bool:
+    if any(marker in token for marker in ("/", "\\", ".", "_", ":")) or token.startswith("--"):
+        return True
+    if any(character.isalpha() for character in token) and any(character.isdigit() for character in token):
+        return True
+    return len(IDENTIFIER_PART_RE.findall(token)) > 1
 
 
 def context_identity_evidence(

@@ -15,7 +15,7 @@ Coding agents can edit code, but they do not reliably preserve project state acr
 - a new agent repeatedly scans a large repository to rediscover product authority, implementation owners, direct tests, and prior decisions that the workspace already contains
 - semantically different documents compete as generic evidence, allowing indexes, templates, or broad references to displace the applicable authority or procedure and cause avoidable exploration and rework
 
-This template solves workspace coordination and repository-understanding startup around agents. It provides a compact, source-linked starting view over current code, relationships, project authority, procedures, task history, and explicitly reviewed reusable knowledge. It does not replace agent reasoning, exact search, typed Graph traversal, direct source inspection, or the product repository.
+This template solves workspace coordination and repository-understanding startup around agents. For ambiguous work, Context is the natural integrated discovery surface: it provides a compact, source-linked working set over current code, typed relationships, project authority, procedures, task history, and explicitly reviewed reusable knowledge. It narrows where to read and change before the agent spends tokens rescanning a large repository. Exact search, free iterative Graph traversal, and direct source inspection remain available for confirmation and deeper exploration.
 
 ## Target Users
 
@@ -33,6 +33,8 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - capture verification evidence before declaring work done
 - start ambiguous repository work from a compact, high-signal Context bundle that combines current source, provider-confirmed Graph relations, current project documents, task history, and applicable Reviewed Knowledge without merging their authority
 - follow typed continuations toward likely owner, change, dependency, and verification surfaces without repeatedly rescanning the repository
+- keep exploring caller, callee, import, test, task, document, and Knowledge relationships through typed Graph continuations without a mandatory Context -> Graph -> `rg` sequence
+- use narrow exact search and direct reads to confirm a known identity instead of repeating broad discovery that the working set already answered
 - promote only explicitly reviewed, source-linked knowledge into durable records
 - render llmwiki pages as disposable views, not authority
 
@@ -45,6 +47,10 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Compatible but unresolved relationships remain agent-visible as explicitly non-authoritative candidates without being promoted to Graph edges.
 - A task may retain only the Context or Graph result references that actually informed Reviewed or Chosen files, without mandatory feature-use logging.
 - For an ambiguous repository question or task startup, compact Context surfaces the applicable authority or procedure and the likely source, relation, and test surfaces ahead of generic indexes and templates.
+- Context selects likely owner source, direct tests, and immediate impact paths into a bounded working set while keeping unrelated same-word files out of agent-visible slots when typed Graph evidence resolves the area.
+- Generic natural-language words do not become exact symbol identities; explicit paths, quoted/code-shaped identities, and provider-confirmed symbols retain exact behavior and ambiguity fails closed.
+- Compact Context exposes whether each Graph seed came from exact identity, provider symbol, Reviewed Knowledge, or a ranked lexical hypothesis so path resolution is never mistaken for proven semantic ownership.
+- Repository-understanding quality is evaluated by owner/test/impact hit rate, first-correct rank, irrelevant visible slots, repeated broad-discovery behavior, and serialized output/token cost rather than Graph invocation count or `rg` prohibition.
 - Document meaning remains consistent across materialized-index and live-fallback retrieval, compact grouping, and Task Pack projection; split `docs/prd/**` documents retain product-authority semantics.
 - Current project documents, task history, and explicitly reviewed reusable records are reported as distinct project-knowledge lanes; zero Reviewed Knowledge records never means that project knowledge is empty.
 - Reviewed Knowledge records require an explicit approval action and remain separate from generated llmwiki output; the actor may be a human or an authorized agent.
@@ -76,6 +82,8 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 
 - Materialize Graph and its persistent evidence index as one deterministic boundary over source facts, metadata, documents, receipts, imports, symbols, calls, and artifacts; queries read it without hidden rebuilds or unchanged-source rescans.
 - Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays and typed continuations for iterative exploration.
+- Resolve bounded lexical file hypotheses into the existing typed Graph projection so ambiguous natural-language work can include owners, direct tests, callers, callees, imports, and structured dependencies without a hidden rebuild or a second traversal engine.
+- Preserve exact-identity fail-closed behavior, let an explicit match on the first repository-relative path segment constrain the requested product area, rank the remaining field-rich lexical hypotheses by provider strength and filename evidence, and use deeper directory matches only as a secondary preference that cannot discard stronger source/test/config evidence. Keep weak fallback to one top hypothesis, and continue with fresh resolved anchors when another hypothesis is stale or absent.
 - Preserve source refs, digests, repo namespaces, and completeness diagnostics.
 - Keep confirmed relations and compatible unresolved relationship candidates as separate typed lanes; candidates must preserve their structured resolution reason and never imply task scope.
 - Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.
@@ -96,7 +104,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - MCP transport is not included in this template release.
 - Chat/session memory is not project authority.
 - Generated llmwiki pages are not source authority.
-- Context is not a universal replacement for exact symbol search, typed Graph traversal, or direct source inspection.
+- Context is the default integrated discovery surface for ambiguous work, not a ban on exact search, typed Graph traversal, or direct source inspection.
 - Repository Understanding does not require moving the established documentation tree, mandatory per-document frontmatter, embeddings, or a second content-management system.
 
 ## Adoption Rule

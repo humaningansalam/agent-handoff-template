@@ -330,7 +330,7 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert bundle["schema"] == "repoctl.context.bundle"
     assert bundle["authoritative"] is False
     assert bundle["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
-    assert bundle["schema_version"] == 11
+    assert bundle["schema_version"] == 12
     assert bundle["view"] == "compact"
     grouped_items = [item for items in bundle["groups"].values() for item in items if isinstance(item.get("source_ref"), dict)]
     refs = [item["source_ref"] for item in grouped_items]
@@ -388,6 +388,246 @@ def test_context_query_preserves_exact_owner_beyond_body_noise_cutoff(tmp_path: 
     ]
     assert "repos/z_owner.py" in paths
     assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == "repos/z_owner.py"
+
+
+def test_context_query_does_not_promote_generic_natural_language_token_to_exact_symbol(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "types.py").write_text("class Evidence:\n    pass\n", encoding="utf-8")
+    (repo / "activity.py").write_text(
+        "def related_activity_detail():\n    return 'activity detail'\n",
+        encoding="utf-8",
+    )
+    (repo / "render.py").write_text(
+        "from activity import related_activity_detail\n\n"
+        "def render_public_search_results():\n"
+        "    return {'route': 'detail', 'activity': related_activity_detail()}\n",
+        encoding="utf-8",
+    )
+    (repo / "test_render.py").write_text(
+        "from render import render_public_search_results\n\n"
+        "def test_public_search_detail_route():\n"
+        "    assert render_public_search_results()['route'] == 'detail'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "public search results evidence related activity detail route dead end"
+    assert main(["context", "query", query, "--repo-id", "main", "--full", "--json"]) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    assert "render.py" in {item["anchor"]["path"] for item in resolution["anchors"]}
+    assert all(item["anchor_provenance"] != "exact_identity" for item in resolution["anchors"])
+    evidence_symbol = next(
+        item
+        for item in bundle["evidence"]
+        if item["source_ref"]["path"] == "repos/types.py"
+        and item["source_ref"].get("section") == "Evidence"
+    )
+    assert "exact_symbol" not in evidence_symbol["evidence_kinds"]
+    assert any(
+        relation.get("edge") == "TESTS_FILE"
+        and {relation.get("from_path"), relation.get("to_path")} == {"render.py", "test_render.py"}
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+    )
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact_source_paths = {
+        item["source_ref"]["path"]
+        for item in compact["groups"]["likely_change_surface"]
+    }
+    assert "repos/render.py" in compact_source_paths
+    assert "repos/types.py" not in compact_source_paths
+
+    for punctuated_query in (
+        "public search results evidence.",
+        "public search results Evidence:",
+    ):
+        assert main(
+            [
+                "context",
+                "query",
+                punctuated_query,
+                "--repo-id",
+                "main",
+                "--full",
+                "--json",
+            ]
+        ) == 0
+        punctuated = json.loads(capsys.readouterr().out)["data"]["bundle"]
+        punctuated_resolution = punctuated["selection"]["graph_anchor"]
+        assert "render.py" in {
+            item["anchor"]["path"] for item in punctuated_resolution["anchors"]
+        }
+        assert all(
+            item["anchor_provenance"] != "exact_identity"
+            for item in punctuated_resolution["anchors"]
+        )
+
+
+def test_context_query_prefers_connected_test_over_weak_lexical_test_seed(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    billing = repo / "billing"
+    billing.mkdir()
+    tests = repo / "tests"
+    tests.mkdir()
+    (billing / "invoice_service.py").write_text(
+        "def reconcile_invoice_failure():\n"
+        "    return 'reconcile invoice failure handling'\n",
+        encoding="utf-8",
+    )
+    (billing / "route.py").write_text(
+        "from billing.invoice_service import reconcile_invoice_failure\n\n"
+        "def render_error():\n"
+        "    return reconcile_invoice_failure()\n",
+        encoding="utf-8",
+    )
+    (tests / "test_contract.py").write_text(
+        "from billing.invoice_service import reconcile_invoice_failure\n\n"
+        "def test_contract_is_enforced():\n"
+        "    assert reconcile_invoice_failure()\n",
+        encoding="utf-8",
+    )
+    (repo / "unrelated.py").write_text(
+        "def unrelated_dependency():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    (tests / "test_reconcile_invoice_failure_handling.py").write_text(
+        "from unrelated import unrelated_dependency\n\n"
+        "def test_unrelated_copy():\n"
+        "    assert unrelated_dependency()\n"
+        "    assert 'reconcile invoice failure handling'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "reconcile invoice failure handling"
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    seed_paths = {
+        item["anchor"]["path"] for item in full["selection"]["graph_anchor"]["anchors"]
+    }
+    assert "billing/invoice_service.py" in seed_paths
+    assert "tests/test_reconcile_invoice_failure_handling.py" in seed_paths
+    assert "tests/test_contract.py" not in seed_paths
+    assert "billing/route.py" not in seed_paths
+    tests_by_path = {
+        item["source_ref"]["path"]: item
+        for item in full["groups"]["tests_and_verification"]
+        if item["source_ref"]["kind"] == "current_source"
+    }
+    assert "anchor_connected_test" in tests_by_path["repos/tests/test_contract.py"][
+        "evidence_roles"
+    ]
+    assert "anchor_connected_test" not in tests_by_path[
+        "repos/tests/test_reconcile_invoice_failure_handling.py"
+    ]["evidence_roles"]
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert compact["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/test_contract.py"
+    )
+    assert any(
+        item["source_ref"]["path"] == "repos/billing/route.py"
+        for item in compact["groups"]["likely_change_surface"]
+    )
+
+
+def test_context_query_keeps_stronger_test_anchor_when_another_lane_matches_directory_scope(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    backend = repo / "backend/offline/listing"
+    backend.mkdir(parents=True)
+    web_source = repo / "web/src"
+    web_source.mkdir(parents=True)
+    web_tests = repo / "web/test"
+    web_tests.mkdir(parents=True)
+    app_tests = repo / "app/test"
+    app_tests.mkdir(parents=True)
+
+    (backend / "verified_sample_handler.py").write_text(
+        "def render_verified_sample_error():\n"
+        "    return 'buyer offline listing verified sample load error'\n",
+        encoding="utf-8",
+    )
+    (web_source / "gate_policy.py").write_text(
+        "def choose_verified_sample_availability():\n"
+        "    marker = 'offline listing verified sample error'\n"
+        "    return 'blocked'\n",
+        encoding="utf-8",
+    )
+    (web_source / "order_panel.py").write_text(
+        "from web.src.gate_policy import choose_verified_sample_availability\n\n"
+        "def render_order_panel():\n"
+        "    return choose_verified_sample_availability()\n",
+        encoding="utf-8",
+    )
+    (web_tests / "test_render.py").write_text(
+        "from web.src.gate_policy import choose_verified_sample_availability\n\n"
+        "def test_render():\n"
+        "    marker = 'buyer offline listing verified sample load error recovery'\n"
+        "    assert choose_verified_sample_availability() == 'blocked'\n",
+        encoding="utf-8",
+    )
+    (app_tests / "test_buyer_offline_listing.py").write_text(
+        "def test_buyer_offline_listing():\n"
+        "    assert 'buyer offline listing verified sample load error recovery'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "buyer offline listing verified sample load error recovery"
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    anchors = full["selection"]["graph_anchor"]["anchors"]
+    anchor_paths = {item["anchor"]["path"] for item in anchors}
+    assert "web/test/test_render.py" in anchor_paths
+    assert anchors[0]["anchor"]["path"] == "web/test/test_render.py"
+    assert anchors[1]["anchor"]["path"] == "web/src/gate_policy.py"
+    assert any(
+        relation.get("edge") == "TESTS_FILE"
+        and relation.get("from_path") == "web/test/test_render.py"
+        and relation.get("to_path") == "web/src/gate_policy.py"
+        for item in full["evidence"]
+        for relation in item.get("graph_path", [])
+    )
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(
+        item["source_ref"]["path"] == "repos/web/src/gate_policy.py"
+        for item in compact["groups"]["likely_change_surface"]
+    )
+    assert any(
+        continuation["selector"] == {
+            "kind": "file",
+            "value": "web/src/gate_policy.py",
+        }
+        and "graph.impact_file" in continuation["actions"]
+        for continuation in compact["continuations"]
+    )
 
 
 def test_context_query_fts_recall_is_path_diverse_before_candidate_limit(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -837,6 +1077,12 @@ def test_context_query_returns_actionable_groups_for_call_impact(tmp_path: Path,
     assert bundle["repository"]["id"] == "main"
     assert all("repo_id" not in item for items in groups.values() for item in items)
 
+    assert main(["context", "query", "validate_token", "--mode", "call-impact"]) == 0
+    text_output = capsys.readouterr().out
+    assert "login --CALLS--> validate_token" in text_output
+    assert "symbol=validate_token in_file=auth/flow.py actions=graph.symbol" in text_output
+    assert "file=auth/flow.py actions=workspace.open,graph.file,graph.impact_file" in text_output
+
 
 def test_context_query_preserves_ambiguous_exact_symbols_without_graph_expansion(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
@@ -867,6 +1113,7 @@ def test_context_query_preserves_ambiguous_exact_symbols_without_graph_expansion
     assert compact["completeness"]["graph_anchor"] == {
         "status": "ambiguous",
         "code": "context_graph_anchor_ambiguous",
+        "seed_anchors": [],
         "seed_paths": [],
         "candidate_paths": ["alpha.py", "beta.py"],
     }
@@ -939,7 +1186,275 @@ def test_context_graph_modes_apply_bounded_directional_policies(tmp_path: Path, 
     assert ("outer.py", "CALLS", "caller.py", 2) not in file_impact
 
 
-def test_context_graph_requires_complete_strong_provider_section_anchor(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_graph_preserves_all_lexical_seed_origins_for_shared_relation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "leaf.py").write_text("VALUE = 'leaf'\n", encoding="utf-8")
+    (repo / "shared.py").write_text("from leaf import VALUE\n", encoding="utf-8")
+    (repo / "settlement_router.py").write_text(
+        "from shared import VALUE\n\n"
+        "def route_payment():\n"
+        "    marker = 'audit behavior'\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    (repo / "audit_router.py").write_text(
+        "from shared import VALUE\n\n"
+        "def record_event():\n"
+        "    marker = 'settlement behavior'\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "settlement audit router behavior",
+            "--mode",
+            "file-impact",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    assert {item["anchor"]["path"] for item in resolution["anchors"]} == {
+        "audit_router.py",
+        "settlement_router.py",
+    }
+    assert {item["anchor_provenance"] for item in resolution["anchors"]} == {"lexical_file"}
+    shared_relation = next(
+        relation
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+        if item["source_ref"]["kind"] == "graph_relation"
+        and relation.get("from_path") == "shared.py"
+        and relation.get("edge") == "IMPORTS_FILE"
+        and relation.get("to_path") == "leaf.py"
+    )
+    assert shared_relation["origin_paths"] == ["audit_router.py", "settlement_router.py"]
+
+
+def test_context_graph_propagates_each_origin_through_another_seed(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "leaf.py").write_text("VALUE = 'leaf'\n", encoding="utf-8")
+    (repo / "audit_router.py").write_text(
+        "from leaf import VALUE\n\n"
+        "def record_event():\n"
+        "    marker = 'settlement audit router behavior'\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    (repo / "settlement_router.py").write_text(
+        "from audit_router import record_event\n\n"
+        "def route_payment():\n"
+        "    marker = 'settlement audit router behavior'\n"
+        "    return record_event()\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "settlement audit router behavior",
+            "--mode",
+            "file-impact",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    relation = next(
+        relation
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+        if item["source_ref"]["kind"] == "graph_relation"
+        and relation.get("from_path") == "audit_router.py"
+        and relation.get("edge") == "IMPORTS_FILE"
+        and relation.get("to_path") == "leaf.py"
+    )
+    assert relation["origin_paths"] == ["audit_router.py", "settlement_router.py"]
+    assert relation["origin_distances"] == {
+        "audit_router.py": 1,
+        "settlement_router.py": 2,
+    }
+
+
+def test_context_graph_keeps_fresh_lexical_anchor_when_peer_is_stale(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "fresh_dependency.py").write_text("VALUE = 'fresh'\n", encoding="utf-8")
+    (repo / "stale_dependency.py").write_text("VALUE = 'stale'\n", encoding="utf-8")
+    (repo / "fresh_router.py").write_text(
+        "from fresh_dependency import VALUE\n\n"
+        "def route_fresh():\n"
+        "    marker = 'settlement audit behavior'\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    (repo / "stale_router.py").write_text(
+        "from stale_dependency import VALUE\n\n"
+        "def route_stale():\n"
+        "    marker = 'settlement audit behavior'\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    monkeypatch.setattr(context_module, "graph_stale_paths", lambda _freshness: {"stale_router.py"})
+
+    assert main(
+        [
+            "context",
+            "query",
+            "settlement audit router behavior",
+            "--mode",
+            "file-impact",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    assert [item["anchor"]["path"] for item in resolution["anchors"]] == ["fresh_router.py"]
+    assert {item["anchor"]["path"] for item in resolution["candidates"]} == {
+        "fresh_router.py",
+        "stale_router.py",
+    }
+    relations = {
+        (relation.get("from_path"), relation.get("edge"), relation.get("to_path"))
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+        if item["source_ref"]["kind"] == "graph_relation"
+    }
+    assert ("fresh_router.py", "IMPORTS_FILE", "fresh_dependency.py") in relations
+    assert not any("stale_router.py" in {from_path, to_path} for from_path, _edge, to_path in relations)
+
+
+def test_context_graph_prunes_fresh_descendant_behind_stale_bridge(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "workflow.py").write_text(
+        "import middle\n\nVALUE = 'orchestration sentinel'\n",
+        encoding="utf-8",
+    )
+    (repo / "middle.py").write_text(
+        "import leaf\n\nVALUE = 'middle'\n",
+        encoding="utf-8",
+    )
+    (repo / "leaf.py").write_text("VALUE = 'leaf'\n", encoding="utf-8")
+    _materialize(tmp_path)
+    (repo / "middle.py").write_text("VALUE = 'changed bridge'\n", encoding="utf-8")
+
+    assert main(
+        [
+            "context",
+            "query",
+            "orchestration sentinel",
+            "--mode",
+            "file-impact",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    bundle = payload["data"]["bundle"]
+    assert bundle["completeness"]["graph_freshness"]["stale_paths"] == ["middle.py"]
+    change_surface = {
+        item["source_ref"]["path"]
+        for item in bundle["groups"]["likely_change_surface"]
+    }
+    assert "repos/workflow.py" in change_surface
+    assert "repos/middle.py" not in change_surface
+    assert "repos/leaf.py" not in change_surface
+    assert not [
+        relation
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+    ]
+    assert any(action.get("kind") == "graph_refresh" for action in payload["next_actions"])
+
+
+def test_context_graph_expands_only_top_ranked_weak_lexical_file(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for prefix in ("alpha", "beta", "gamma"):
+        (repo / f"{prefix}_dependency.py").write_text(f"VALUE = '{prefix}'\n", encoding="utf-8")
+        (repo / f"{prefix}.py").write_text(
+            f"from {prefix}_dependency import VALUE\n\n"
+            f"def run_{prefix}():\n"
+            "    marker = 'cerulean handshake'\n"
+            "    return VALUE\n",
+            encoding="utf-8",
+        )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "cerulean handshake",
+            "--mode",
+            "file-impact",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    assert len(resolution["anchors"]) == 1
+    selected_path = resolution["anchors"][0]["anchor"]["path"]
+    assert selected_path == "alpha.py"
+    assert resolution["anchors"][0]["anchor_provenance"] == "lexical_file"
+    assert resolution["anchors"][0]["lexical_rank"] == 1
+    relation_sources = {
+        str(relation.get("from_path") or "")
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+        if item["source_ref"]["kind"] == "graph_relation"
+        and relation.get("edge") == "IMPORTS_FILE"
+    }
+    assert relation_sources == {selected_path}
+
+
+def test_context_graph_uses_ranked_lexical_file_when_provider_symbol_is_partial(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "dependency.py").write_text("def dependency():\n    return 'dependency'\n", encoding="utf-8")
     (repo / "owner.py").write_text(
@@ -951,8 +1466,18 @@ def test_context_graph_requires_complete_strong_provider_section_anchor(tmp_path
 
     assert main(["context", "query", "reconcile audit", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
     partial = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    assert partial["selection"]["graph_anchor"]["status"] == "unresolved"
-    assert not any(item["source_ref"]["kind"] == "graph_relation" for item in partial["evidence"])
+    partial_resolution = partial["selection"]["graph_anchor"]
+    assert partial_resolution["status"] == "resolved"
+    assert partial_resolution["anchors"][0]["anchor"] == {"kind": "file", "path": "owner.py"}
+    assert partial_resolution["anchors"][0]["anchor_provenance"] == "lexical_file"
+    assert any(
+        relation.get("from_path") == "owner.py"
+        and relation.get("edge") == "CALLS"
+        and relation.get("to_path") == "dependency.py"
+        for item in partial["evidence"]
+        for relation in item.get("graph_path", [])
+        if item["source_ref"]["kind"] == "graph_relation"
+    )
 
     assert main(["context", "query", "reconcile ledger", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
     complete = json.loads(capsys.readouterr().out)["data"]["bundle"]
@@ -960,6 +1485,7 @@ def test_context_graph_requires_complete_strong_provider_section_anchor(tmp_path
     assert resolution["status"] == "resolved"
     assert resolution["anchors"][0]["anchor"]["kind"] == "symbol"
     assert resolution["anchors"][0]["anchor"]["symbol"] == "reconcile_settlement_ledger"
+    assert resolution["anchors"][0]["anchor_provenance"] == "provider_symbol"
     assert any(
         relation.get("from_path") == "owner.py"
         and relation.get("edge") == "CALLS"
@@ -1053,7 +1579,7 @@ def test_context_graph_accounts_for_anchor_missing_from_snapshot(tmp_path: Path,
     assert not any(item["source_ref"]["kind"] == "graph_relation" for item in bundle["evidence"])
 
 
-def test_context_compact_preserves_direct_anchor_and_does_not_expand_weak_body(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_compact_preserves_direct_anchor_and_expands_one_weak_owner(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "auth_callback.py").write_text(
         "def auth_callback():\n    return 'target'\n",
@@ -1090,12 +1616,13 @@ def test_context_compact_preserves_direct_anchor_and_does_not_expand_weak_body(t
     change_surface = bundle["groups"]["likely_change_surface"]
     assert change_surface[0]["source_ref"]["path"] == "repos/auth_callback.py"
     assert change_surface[0]["evidence_role"] == "change_candidate"
-    assert bundle["completeness"]["graph_anchor"] == {
-        "status": "resolved",
-        "code": "context_graph_anchor_resolved",
-        "seed_paths": ["auth_callback.py"],
-        "candidate_paths": ["auth_callback.py"],
-    }
+    auth_anchor = bundle["completeness"]["graph_anchor"]
+    assert auth_anchor["status"] == "resolved"
+    assert auth_anchor["code"] == "context_graph_anchor_resolved"
+    assert auth_anchor["seed_paths"] == ["auth_callback.py"]
+    assert auth_anchor["candidate_paths"] == ["auth_callback.py"]
+    assert auth_anchor["seed_anchors"][0]["path"] == "auth_callback.py"
+    assert auth_anchor["seed_anchors"][0]["provenance"] == "exact_identity"
     assert not bundle["groups"]["callers_and_dependents"]
     assert any(
         continuation["selector"] == {"kind": "file", "value": "auth_callback.py"}
@@ -1109,8 +1636,20 @@ def test_context_compact_preserves_direct_anchor_and_does_not_expand_weak_body(t
     related_target = related_surface[0]
     assert related_target["source_ref"]["path"] == "repos/handler.py"
     assert related_target["evidence_role"] == "change_candidate"
-    assert all(item["source_ref"]["path"] != "repos/flow.py" for item in related_surface)
-    assert related_bundle["completeness"]["graph_anchor"]["status"] == "unresolved"
+    assert any(item["source_ref"]["path"] == "repos/flow.py" for item in related_surface)
+    related_anchor = related_bundle["completeness"]["graph_anchor"]
+    assert related_anchor["status"] == "resolved"
+    assert related_anchor["code"] == "context_graph_anchor_resolved"
+    assert related_anchor["seed_paths"] == ["handler.py"]
+    assert related_anchor["candidate_paths"] == ["handler.py"]
+    assert related_anchor["seed_anchors"][0] == {
+        "path": "handler.py",
+        "provenance": "lexical_file",
+        "anchor_strength": "weak",
+        "kind": "file",
+        "retrieval_lane": "product_source",
+        "lexical_rank": 1,
+    }
 
 
 def test_context_query_indexes_semantic_source_without_precise_provider(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1168,6 +1707,7 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     assert stale_anchor["completeness"]["graph_anchor"] == {
         "status": "unresolved",
         "code": "context_graph_anchor_unresolved",
+        "seed_anchors": [],
         "seed_paths": [],
         "candidate_paths": ["app.py"],
     }
@@ -1693,6 +2233,67 @@ def test_context_query_bridges_reviewed_knowledge_path_to_code_relations_and_tes
     assert ("test_service.py", "TESTS_FILE", "service.py") in relations
     linked_item = next(item for item in bundle["groups"]["likely_change_surface"] if item["source_ref"]["path"] == "repos/service.py")
     assert linked_item["evidence_role"] == "knowledge_linked_source"
+
+
+def test_context_query_bounds_reviewed_knowledge_graph_anchors(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    paths = [f"owner_{index}.py" for index in range(5)]
+    for index, path in enumerate(paths):
+        (repo / path).write_text(
+            f"def owner_{index}():\n    return {index}\n",
+            encoding="utf-8",
+        )
+    _write_reviewed_knowledge_record(
+        tmp_path,
+        record_id="K-20260719010109Z--amber-lattice-routing",
+        claim="Amber lattice routing owns the bounded integration surfaces.",
+        applies_to_paths=paths,
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "amber lattice routing",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    assert len(resolution["anchors"]) == 3
+    assert len(resolution["candidates"]) == 5
+    assert {item["anchor_provenance"] for item in resolution["anchors"]} == {
+        "reviewed_knowledge"
+    }
+
+    assert main(
+        [
+            "context",
+            "query",
+            "amber lattice routing",
+            "--repo-id",
+            "main",
+            "--json",
+        ]
+    ) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    graph_anchor = compact["completeness"]["graph_anchor"]
+    assert len(graph_anchor["seed_paths"]) == 3
+    assert len(graph_anchor["seed_anchors"]) == 3
+    assert all(
+        item["provenance"] == "reviewed_knowledge"
+        for item in graph_anchor["seed_anchors"]
+    )
 
 
 def test_context_query_uses_product_source_ref_but_not_root_provenance_as_code_anchor(tmp_path: Path, monkeypatch, capsys) -> None:

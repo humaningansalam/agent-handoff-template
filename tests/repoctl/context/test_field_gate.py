@@ -25,6 +25,9 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
     _write_context_docs(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
+    source_annotation = repo / ".repometa/annotations/preexisting.json"
+    source_annotation.parent.mkdir(parents=True)
+    source_annotation.write_text("{}\n", encoding="utf-8")
     _copy_release_fixtures(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     output = tmp_path / ".repoctl-state/field-gates/release-candidate.json"
@@ -53,7 +56,8 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
         for category in artifact_gates["context_benchmark"]["summary"]["by_category"].values()
     )
     assert len(compact_output.encode("utf-8")) < len(artifact_output.encode("utf-8"))
-    assert not (repo / ".repometa").exists()
+    assert source_annotation.read_text(encoding="utf-8") == "{}\n"
+    assert not (repo / ".repometa/policy.json").exists()
     assert not (repo / "auth").exists()
     assert not (tmp_path / "docs/archive/tasks/T-20260624020202Z--pack-benchmark.md").exists()
 

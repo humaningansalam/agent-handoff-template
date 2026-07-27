@@ -23,11 +23,12 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 
 For repo-scoped implementation tasks, use this order before editing product files:
 
-1. Explore read-only using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query`; known file -> Graph or direct read; known symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
-2. Follow typed Graph continuations when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
-3. Create or resume the task and start it before the first product mutation. Exploration is not gated on task creation or task start.
-4. Record the explicit Candidate query and the files actually reviewed/chosen in `## Discovery` once task scope becomes concrete.
-5. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
+1. Explore read-only using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query` as the integrated discovery view; known file -> Graph or direct read; known exact string or symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
+2. Read `completeness.graph_anchor.seed_anchors` before acting: `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are explicit anchors, while `lexical_file` is a ranked hypothesis. Treat a coherent returned source/test/relation set as the initial working set after inspecting the source; `resolved` means the typed path exists in Graph, not that semantic ownership is proven. Follow typed Graph continuations repeatedly when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
+3. Do not restart the same broad repository discovery with `rg` after Context already returned a coherent working set. Narrow `rg` checks and direct reads remain appropriate for confirmation; refine the query or refresh Graph when Context reports ambiguity, missing coverage, or stale evidence.
+4. Create or resume the task and start it before the first product mutation. Exploration is not gated on task creation or task start.
+5. Record the explicit Candidate query and the files actually reviewed/chosen in `## Discovery` once task scope becomes concrete.
+6. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
 
 Do not require agents to log which discovery features they used or justify why a feature was skipped.
 

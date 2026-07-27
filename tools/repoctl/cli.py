@@ -15,7 +15,7 @@ from typing import Any
 
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
-from .context import build_context_bundle, compact_context_bundle, render_context_markdown
+from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
@@ -511,7 +511,7 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
         )
         add(
             "Run context benchmark gate",
-            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
             mutates_workspace=False,
             requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
         )
@@ -863,7 +863,7 @@ def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirecto
                 path=target.display_path,
             )
         source_metadata = target.root_path / ".repometa"
-        if source_metadata.is_dir():
+        if (source_metadata / "policy.json").is_file():
             shutil.copytree(source_metadata, repo / ".repometa", dirs_exist_ok=True)
     return temporary, isolated
 
@@ -974,6 +974,12 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                         fixture=context_fixture,
                         repo_id=repo_id,
                         min_recall_at_5=0.85,
+                        min_category_graph_edge_recall={"multi-owner-impact": 1.0},
+                        min_category_visible_recall={
+                            "area-isolation": 1.0,
+                            "integrated-owner-test": 1.0,
+                            "multi-owner-impact": 1.0,
+                        },
                         require_source_integrity=True,
                         require_fixture_corpus=True,
                         require_no_forbidden=True,
@@ -996,7 +1002,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 gates.append(
                     _release_candidate_gate_result(
                         name="context_benchmark",
-                        command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+                        command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
                         mutates_workspace=False,
                         data=context_benchmark,
                         problems=context_benchmark_problems,
@@ -4033,7 +4039,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
             print(problem.message)
     else:
         if bundle is not None:
-            print(f"context bundle {bundle.bundle_digest} repository={target.id} evidence={len(bundle.evidence)}")
+            print(render_context_text(bundle), end="")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -5865,7 +5871,11 @@ def build_parser() -> argparse.ArgumentParser:
     context_query = context_sub.add_parser("query")
     context_query.add_argument("query")
     context_query.add_argument("--repo-id")
-    context_query.add_argument("--mode", default="")
+    context_query.add_argument(
+        "--mode",
+        default="",
+        help="auto, startup-reading, code-location, call-impact, file-impact, authority, contract, past-decision, failure-mode, or invariant",
+    )
     context_query.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     context_query.add_argument("--explain", action="store_true")
     context_query.add_argument("--full", action="store_true", help="include full evidence and source diagnostics in JSON output")
