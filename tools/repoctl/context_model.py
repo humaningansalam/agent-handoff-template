@@ -122,6 +122,8 @@ class ContextGraphAnchorCandidate:
     lexical_rank: int = 0
     retrieval_score: float = 0.0
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    query_term_matches: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    graph_support: dict[str, Any] = field(default_factory=dict)
     related_record_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -143,6 +145,14 @@ class ContextGraphAnchorCandidate:
             data["score_breakdown"] = {
                 key: round(value, 6) for key, value in sorted(self.score_breakdown.items())
             }
+        if self.query_term_matches:
+            data["query_term_matches"] = {
+                field_name: list(terms)
+                for field_name, terms in sorted(self.query_term_matches.items())
+                if terms
+            }
+        if self.graph_support:
+            data["graph_support"] = self.graph_support
         return data
 
 
@@ -152,14 +162,18 @@ class ContextAnchorResolution:
     code: ContextAnchorResolutionCode
     anchors: tuple[ContextGraphAnchorCandidate, ...] = ()
     candidates: tuple[ContextGraphAnchorCandidate, ...] = ()
+    selection_coverage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "status": self.status.value,
             "code": self.code.value,
             "anchors": [candidate.to_dict() for candidate in self.anchors],
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
+        if self.selection_coverage:
+            data["selection_coverage"] = self.selection_coverage
+        return data
 
 
 @dataclass(frozen=True)
@@ -172,6 +186,7 @@ class ContextCandidate:
     graph_path: list[dict[str, Any]] = field(default_factory=list)
     evidence_kinds: tuple[ContextEvidenceKind, ...] = ()
     anchor_strength: ContextAnchorStrength = ContextAnchorStrength.NONE
+    query_term_matches: dict[str, tuple[str, ...]] = field(default_factory=dict)
     related_record_ids: tuple[str, ...] = ()
     document_role: DocumentRole = DocumentRole.UNSPECIFIED
 
@@ -185,6 +200,11 @@ class ContextCandidate:
             "graph_path": self.graph_path,
             "evidence_kinds": sorted(kind.value for kind in set(self.evidence_kinds)),
             "anchor_strength": self.anchor_strength.value,
+            "query_term_matches": {
+                field_name: list(terms)
+                for field_name, terms in sorted(self.query_term_matches.items())
+                if terms
+            },
             "related_record_ids": sorted(set(self.related_record_ids)),
         }
         if self.document_role != DocumentRole.UNSPECIFIED:
@@ -204,7 +224,7 @@ class ContextBundle:
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     relationship_candidates: list[dict[str, Any]] = field(default_factory=list)
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 12
+    schema_version: int = 13
     authoritative: bool = False
     bundle_digest: str = ""
 

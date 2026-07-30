@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.markdown import find_section, replace_frontmatter_line, replace_section
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
     init_committed_product_repo,
@@ -713,3 +715,261 @@ def test_task_block_resume_preserves_initial_head_and_dirty_baseline(tmp_path: P
 
     capsys.readouterr()
     assert state_path.read_bytes() == initial_state
+
+
+def _start_repo_task_with_resume_surface(tmp_path: Path, monkeypatch, capsys) -> tuple[Path, Path, Path]:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    text = (
+        task_text("T-20260609184046Z", status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"')
+    )
+    task_path = add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    receipt = tmp_path / "docs/tasks/.repoctl-state/resume/T-20260609184046Z.json"
+    return task_path, repo, receipt
+
+
+def _show_resume_guidance(capsys) -> dict:
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    return json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+
+
+def _bind_handoff(capsys, *extra: str) -> dict:
+    assert main(["task", "handoff", "bind", "T-20260609184046Z", *extra, "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_task_handoff_is_readable_but_inactive_until_explicit_bind(tmp_path: Path, monkeypatch, capsys) -> None:
+    task_path, _repo, receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+
+    assert not receipt.exists()
+    before = task_path.read_bytes()
+    guidance = _show_resume_guidance(capsys)
+    assert guidance["status"] == "unbound"
+    assert guidance["handoff"]["active"] is False
+    assert "Next exact step" in guidance["handoff"]["body"]
+
+    payload = _bind_handoff(capsys)
+    assert payload["data"]["resume_guidance"]["status"] == "current"
+    assert payload["data"]["resume_guidance"]["context_pack"]["status"] == "not_bound"
+    assert receipt.is_file()
+    assert task_path.read_bytes() == before
+
+    bound_receipt = receipt.read_bytes()
+    blocker = tmp_path / "blocker.md"
+    blocker.write_text("Waiting for an external decision.\n", encoding="utf-8")
+    assert main(["task", "block", "T-20260609184046Z", "--verification-file", str(blocker), "--json"]) == 0
+    capsys.readouterr()
+    assert receipt.read_bytes() == bound_receipt
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    start_payload = json.loads(capsys.readouterr().out)
+    assert receipt.read_bytes() == bound_receipt
+    assert start_payload["data"]["resume_guidance"]["status"] == "stale"
+
+
+def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, monkeypatch, capsys) -> None:
+    task_path, _repo, _receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    _bind_handoff(capsys)
+
+    def assert_stale(input_name: str) -> None:
+        guidance = _show_resume_guidance(capsys)
+        assert guidance["status"] == "stale"
+        assert input_name in guidance["changed_inputs"]
+        _bind_handoff(capsys)
+        assert _show_resume_guidance(capsys)["status"] == "current"
+
+    text = task_path.read_text(encoding="utf-8")
+    task_path.write_text(
+        replace_section(
+            text,
+            "Handoff",
+            "- Next exact step: inspect the changed owner.\n"
+            "- First file to open: `repos/app.py`\n"
+            "- First command to run: `git -C repos diff -- app.py`\n"
+            "- Done when: the owner is verified.\n",
+        ),
+        encoding="utf-8",
+    )
+    assert_stale("handoff")
+
+    assert main(["task", "discovery", "add", "T-20260609184046Z", "--query", "app owner", "--json"]) == 0
+    capsys.readouterr()
+    assert_stale("discovery")
+
+    assert main(["task", "log", "append", "T-20260609184046Z", "reviewed app owner", "--json"]) == 0
+    capsys.readouterr()
+    assert_stale("execution_log")
+
+    text = task_path.read_text(encoding="utf-8")
+    task_path.write_text(replace_section(text, "Verification", "- Command: pytest\n- Result: pass\n"), encoding="utf-8")
+    assert_stale("verification")
+
+    text = task_path.read_text(encoding="utf-8")
+    task_path.write_text(replace_frontmatter_line(text, "status", "blocked"), encoding="utf-8")
+    guidance = _show_resume_guidance(capsys)
+    assert guidance["status"] == "stale"
+    assert "task_contract" in guidance["changed_inputs"]
+
+
+def test_task_handoff_repository_digest_detects_same_head_content_drift_but_not_touch(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _task_path, repo, _receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    app = repo / "app.py"
+    app.write_text("value = 2\n", encoding="utf-8")
+    _bind_handoff(capsys)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    app.write_text("value = 3\n", encoding="utf-8")
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == head
+    guidance = _show_resume_guidance(capsys)
+    assert guidance["status"] == "stale"
+    assert "repository" in guidance["changed_inputs"]
+
+    _bind_handoff(capsys)
+    app.touch()
+    assert _show_resume_guidance(capsys)["status"] == "current"
+
+
+def test_task_handoff_invalid_receipt_fails_closed_and_archived_handoff_is_historical(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_path, _repo, receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    _bind_handoff(capsys)
+    receipt.write_text("{}\n", encoding="utf-8")
+
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 1
+    show_payload = json.loads(capsys.readouterr().out)
+    guidance = show_payload["data"]["resume_guidance"]
+    assert show_payload["ok"] is False
+    assert show_payload["problems"][0]["code"] == "task_resume_binding_invalid"
+    assert guidance["status"] == "unknown"
+    assert guidance["handoff"]["reason_codes"] == ["resume_binding_invalid"]
+    assert guidance["handoff"]["active"] is False
+    assert main(["check", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == "task_resume_binding_invalid" for problem in check_payload["problems"])
+
+    _bind_handoff(capsys)
+    archived = tmp_path / "docs/archive/tasks" / task_path.name
+    archived.write_text(replace_frontmatter_line(task_path.read_text(encoding="utf-8"), "status", "done"), encoding="utf-8")
+    task_path.unlink()
+    (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
+
+    guidance = _show_resume_guidance(capsys)
+    assert guidance["status"] == "historical"
+    assert guidance["handoff"]["active"] is False
+
+
+def test_task_handoff_bind_rejects_missing_empty_and_duplicate_canonical_fields(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_path, _repo, receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    original = task_path.read_text(encoding="utf-8")
+    canonical = {
+        "Next exact step": "inspect the owner",
+        "First file to open": "`repos/app.py`",
+        "First command to run": "`git -C repos diff -- app.py`",
+        "Done when": "the owner is verified",
+    }
+
+    for omitted in canonical:
+        body = "".join(f"- {label}: {value}\n" for label, value in canonical.items() if label != omitted)
+        task_path.write_text(replace_section(original, "Handoff", body), encoding="utf-8")
+        assert main(["task", "handoff", "bind", "T-20260609184046Z", "--json"]) == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["problems"][0]["code"] == "invalid_handoff_structure"
+        assert not receipt.exists()
+
+    empty = "".join(
+        f"- {label}: {'' if label == 'Next exact step' else value}\n"
+        for label, value in canonical.items()
+    )
+    task_path.write_text(replace_section(original, "Handoff", empty), encoding="utf-8")
+    assert main(["task", "handoff", "bind", "T-20260609184046Z", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "invalid_handoff_structure"
+
+    duplicate = "".join(f"- {label}: {value}\n" for label, value in canonical.items()) + "- Done when: duplicate\n"
+    task_path.write_text(replace_section(original, "Handoff", duplicate), encoding="utf-8")
+    assert main(["task", "handoff", "bind", "T-20260609184046Z", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "invalid_handoff_structure"
+
+
+def test_task_show_rejects_strictly_malformed_resume_receipts(tmp_path: Path, monkeypatch, capsys) -> None:
+    _task_path, _repo, receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    _bind_handoff(capsys)
+    valid = json.loads(receipt.read_text(encoding="utf-8"))
+    invalid_receipts = []
+
+    boolean_version = dict(valid)
+    boolean_version["schema_version"] = True
+    invalid_receipts.append(boolean_version)
+
+    wrong_task = dict(valid)
+    wrong_task["task_id"] = "T-20260609184047Z"
+    invalid_receipts.append(wrong_task)
+
+    extra_field = dict(valid)
+    extra_field["unexpected"] = True
+    invalid_receipts.append(extra_field)
+
+    noncanonical_pack_path = dict(valid)
+    noncanonical_pack_path["context_pack"] = {
+        "path": "./.repoctl-state/context-pack/pack.json",
+        "artifact_sha256": "sha256:" + "1" * 64,
+        "input_digest": "sha256:" + "2" * 64,
+    }
+    invalid_receipts.append(noncanonical_pack_path)
+
+    for invalid in invalid_receipts:
+        receipt.write_text(json.dumps(invalid, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["problems"][0]["code"] == "task_resume_binding_invalid"
+        assert payload["data"]["resume_guidance"]["status"] == "unknown"
+
+
+def test_task_show_rejects_missing_handoff_and_keeps_summary_inputs_bounded(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_path, _repo, _receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    _bind_handoff(capsys)
+    text = task_path.read_text(encoding="utf-8")
+    long_query = "query-sentinel-" + "x" * 4000
+    long_verification = "verification-sentinel-" + "y" * 4000
+    text = replace_section(
+        text,
+        "Discovery",
+        f"- Candidate query: {long_query}\n- Candidate files reviewed: `repos/app.py`\n- Chosen files: `repos/app.py`\n",
+    )
+    text = replace_section(text, "Verification", f"- {long_verification}\n")
+    task_path.write_text(text, encoding="utf-8")
+
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    summary_text = capsys.readouterr().out
+    assert "query-sentinel" not in summary_text
+    assert "verification-sentinel" not in summary_text
+    assert len(summary_text) < 12000
+
+    text = task_path.read_text(encoding="utf-8")
+    handoff_section = find_section(text, "Handoff")
+    task_path.write_text((text[: handoff_section.start] + text[handoff_section.end :]).rstrip() + "\n", encoding="utf-8")
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["problems"][0]["code"] == "missing_handoff"
+    assert payload["data"]["resume_guidance"]["status"] == "unknown"

@@ -24,6 +24,8 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Create parent task: `./scripts/repoctl task create --type parent "Parent title"`
 - List tasks: `./scripts/repoctl task list --json`
 - Show task: `./scripts/repoctl task show T-... --json`
+- Bind a reviewed pause/transfer Handoff: `./scripts/repoctl task handoff bind T-... --json`
+- Bind an optional reviewed Context Pack with it: `./scripts/repoctl task handoff bind T-... --context-pack .repoctl-state/context-pack/T-....md --json`
 - Append log: `./scripts/repoctl task log append T-... "message" --json`
 - Finish task from completed `## Verification`: `./scripts/repoctl task finish T-... --json`
 - Finish with an external verification artifact: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`

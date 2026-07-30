@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from .context_retrieval import ContextRetrievalLane, context_retrieval_lane, exc
 from .context_sources import collect_context_sources, context_document_paths, context_graph_problems, context_overlay_chunks, current_source_chunks_for_paths
 from .document_roles import AUTHORITY_DOCUMENT_ROLES, DocumentRole, source_document_role
 from .evidence_store import evidence_chunks_for_paths, query_evidence_index
-from .graph import compact_relationship_candidates, project_context_neighborhood, relationship_candidates_for_paths
+from .graph import build_context_projection_index, compact_relationship_candidates, context_path_support_profiles, project_context_neighborhood, relationship_candidates_for_paths
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
@@ -77,6 +78,27 @@ CONTEXT_GRAPH_FRESHNESS_WARNING_CODES = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class _CoverageContribution:
+    new_pairs: frozenset[tuple[str, str]]
+    new_lane: str
+    new_roles: frozenset[str]
+    new_component: str
+    identity: bool
+    lexical: bool
+    component: bool
+
+    @property
+    def contributes(self) -> bool:
+        return bool(
+            self.identity
+            or self.lexical
+            or self.new_lane
+            or self.new_roles
+            or self.component
+        )
+
+
 def build_context_bundle(
     root: Path,
     *,
@@ -105,7 +127,25 @@ def build_context_bundle(
     index_meta: dict[str, Any] = {}
     index_problems: list[Problem] = []
     index_available = False
-    stale_workspace_paths: set[str] = set()
+    stale_repo_paths = graph_stale_paths(freshness)
+    stale_workspace_paths = {
+        *{
+            f"{target.display_path.rstrip('/')}/{path}"
+            for path in stale_repo_paths
+        },
+        *{
+            str(path)
+            for path in freshness.get("changed_root_paths", [])
+            if str(path)
+        },
+    }
+    stale_path_classifications = (
+        freshness.get("stale_path_classifications")
+        if isinstance(freshness.get("stale_path_classifications"), dict)
+        else freshness.get("changed_path_classifications")
+        if isinstance(freshness.get("changed_path_classifications"), dict)
+        else {}
+    )
     overlay_chunks: list[Any] = []
     evidence_index_path = graph_state_root / target.id / "evidence.sqlite3" if graph_state_root is not None else None
     if snapshot is not None:
@@ -161,7 +201,6 @@ def build_context_bundle(
         )
         if snapshot is not None:
             completeness["graph_completeness"] = snapshot.completeness
-        completeness["graph_freshness"] = freshness
         problems = [problem for problem in index_problems if problem.severity != "error"]
         problems.extend(evidence_index_problems)
         receipt_graph_problems = [
@@ -175,22 +214,14 @@ def build_context_bundle(
             if isinstance(problem, dict)
         ]
         problems.extend(context_graph_problems([*graph_problems, *receipt_graph_problems]))
-        stale_repo_paths = graph_stale_paths(freshness)
-        stale_workspace_paths = {
-            *{f"{target.display_path.rstrip('/')}/{path}" for path in stale_repo_paths},
-            *{str(path) for path in freshness.get("changed_root_paths", []) if str(path)},
-        }
-        classifications = (
-            freshness.get("stale_path_classifications")
-            if isinstance(freshness.get("stale_path_classifications"), dict)
-            else freshness.get("changed_path_classifications")
-            if isinstance(freshness.get("changed_path_classifications"), dict)
-            else {}
-        )
         overlay_chunks, overlay_problems = current_source_chunks_for_paths(
             root,
             target=target,
-            repo_paths={path for path in stale_repo_paths if str(classifications.get(path) or "") != "excluded"},
+            repo_paths={
+                path
+                for path in stale_repo_paths
+                if str(stale_path_classifications.get(path) or "") != "excluded"
+            },
         )
         problems.extend(overlay_problems)
         static_overlay_chunks, static_overlay_problems = context_overlay_chunks(
@@ -241,6 +272,7 @@ def build_context_bundle(
             repository_path=target.display_path,
             limit=24,
         )
+    completeness["graph_freshness"] = freshness
     if _task_history_stale(freshness) and isinstance(completeness.get("graph_completeness"), dict):
         graph_completeness = dict(completeness["graph_completeness"])
         capabilities = dict(graph_completeness.get("capabilities") or {})
@@ -307,15 +339,26 @@ def build_context_bundle(
         retrieved_candidates = _dedupe_candidates([*knowledge_path_candidates, *retrieved_candidates])
     graph_projection: dict[str, Any] = {}
     graph_anchor_resolution: ContextAnchorResolution | None = None
+    graph_projection_index: Any = None
     if query_mode in GRAPH_EXPANSION_MODES:
-        graph_anchor_resolution = _resolve_graph_anchors(retrieved_candidates, target=target)
-        completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
         stale_paths = graph_stale_paths(freshness)
+        graph_anchor_resolution, graph_projection_index = _resolve_graph_anchors(
+            retrieved_candidates,
+            target=target,
+            snapshot=snapshot,
+            excluded_paths=stale_paths,
+        )
+        completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
         if snapshot is None and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
             graph_anchor_resolution = ContextAnchorResolution(
                 status=ContextAnchorStatus.UNRESOLVED,
                 code=ContextAnchorResolutionCode.UNRESOLVED,
                 candidates=graph_anchor_resolution.candidates,
+                selection_coverage=_anchor_selection_coverage_after_filter(
+                    graph_anchor_resolution,
+                    (),
+                    eligible_paths=set(),
+                ),
             )
             completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
         elif snapshot is not None and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
@@ -329,6 +372,11 @@ def build_context_bundle(
                     status=ContextAnchorStatus.UNRESOLVED,
                     code=ContextAnchorResolutionCode.UNRESOLVED,
                     candidates=graph_anchor_resolution.candidates,
+                    selection_coverage=_anchor_selection_coverage_after_filter(
+                        graph_anchor_resolution,
+                        (),
+                        eligible_paths=set(),
+                    ),
                 )
                 completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
             elif len(fresh_anchor_candidates) != len(graph_anchor_resolution.anchors):
@@ -337,6 +385,10 @@ def build_context_bundle(
                     code=ContextAnchorResolutionCode.RESOLVED,
                     anchors=fresh_anchor_candidates,
                     candidates=graph_anchor_resolution.candidates,
+                    selection_coverage=_anchor_selection_coverage_after_filter(
+                        graph_anchor_resolution,
+                        fresh_anchor_candidates,
+                    ),
                 )
                 completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
             graph_anchors = [candidate.anchor for candidate in graph_anchor_resolution.anchors]
@@ -347,12 +399,14 @@ def build_context_bundle(
                     anchors=graph_anchors,
                     mode=query_mode,
                     excluded_candidate_paths=stale_paths,
+                    projection_index=graph_projection_index,
                 )
             if graph_projection.get("ambiguous_anchors"):
                 graph_anchor_resolution = ContextAnchorResolution(
                     status=ContextAnchorStatus.AMBIGUOUS,
                     code=ContextAnchorResolutionCode.AMBIGUOUS,
                     candidates=graph_anchor_resolution.candidates,
+                    selection_coverage=graph_anchor_resolution.selection_coverage,
                 )
                 completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
             elif graph_projection.get("unresolved_anchors"):
@@ -372,6 +426,18 @@ def build_context_bundle(
                     for candidate in graph_anchor_resolution.anchors
                     if candidate.anchor.key() in resolved_anchor_keys
                 )
+                unresolved_paths = {
+                    str(item.get("path") or "")
+                    for item in graph_projection.get("unresolved_anchors", [])
+                    if isinstance(item, dict) and str(item.get("path") or "")
+                }
+                eligible_paths = {
+                    str(path)
+                    for path in graph_anchor_resolution.selection_coverage.get(
+                        "eligible_paths", []
+                    )
+                    if str(path) and str(path) not in unresolved_paths
+                }
                 graph_anchor_resolution = ContextAnchorResolution(
                     status=(
                         ContextAnchorStatus.RESOLVED
@@ -385,6 +451,11 @@ def build_context_bundle(
                     ),
                     anchors=resolved_candidates,
                     candidates=graph_anchor_resolution.candidates,
+                    selection_coverage=_anchor_selection_coverage_after_filter(
+                        graph_anchor_resolution,
+                        resolved_candidates,
+                        eligible_paths=eligible_paths,
+                    ),
                 )
                 completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
             if index_available and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
@@ -535,6 +606,7 @@ def build_context_bundle(
         groups,
         mode=query_mode,
         max_group_items=COMPACT_ITEM_LIMIT,
+        repository_path=target.display_path,
     )
     selection["compact_projection"] = compact_projection
     project_knowledge = _project_knowledge_summary(
@@ -784,9 +856,60 @@ def _retrieval_chunks(chunks: list[Any], *, mode: str, target: RepoTarget) -> li
     ]
 
 
+def _field_term_evidence_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts = [
+        f"{field_name}=[{', '.join(str(term) for term in terms)}]"
+        for field_name, terms in sorted(value.items())
+        if isinstance(terms, list) and terms
+    ]
+    return "; ".join(parts)
+
+
+def _markdown_coverage_lines(label: str, coverage: dict[str, Any]) -> list[str]:
+    lines = [
+        f"- {label}: `{coverage.get('status', '')}` "
+        f"({coverage.get('selected_count', 0)}/{coverage.get('eligible_count', 0)} eligible; "
+        f"{coverage.get('coverage_omitted_count', 0)} distinct omission(s))"
+    ]
+    field_term_evidence = _field_term_evidence_text(
+        coverage.get("unrepresented_field_term_evidence")
+    )
+    if field_term_evidence:
+        lines.append(f"- Unrepresented field-term evidence: {field_term_evidence}")
+    for field_name, title in (
+        ("unrepresented_lanes", "Unrepresented lanes"),
+        ("unrepresented_roles", "Unrepresented roles"),
+        ("unrepresented_components", "Unrepresented components"),
+    ):
+        values = coverage.get(field_name)
+        if isinstance(values, list) and values:
+            lines.append(f"- {title}: " + ", ".join(f"`{value}`" for value in values))
+    omitted_paths = coverage.get("coverage_omitted_paths")
+    if isinstance(omitted_paths, list) and omitted_paths:
+        lines.append(
+            "- Distinct omitted paths: "
+            + ", ".join(f"`{path}`" for path in omitted_paths)
+        )
+    return lines
+
+
 def render_context_markdown(bundle: ContextBundle) -> str:
     data = bundle.to_dict()
     query = data["query"]
+    displayed, _continuations, projection_stats = _compact_projection(
+        bundle.groups,
+        mode=str(bundle.query.get("mode") or "auto"),
+        max_group_items=COMPACT_ITEM_LIMIT,
+        repository_path=str(bundle.repository.get("path") or ""),
+    )
+    compact_completeness = _compact_completeness(
+        bundle.completeness,
+        working_set_coverage=projection_stats.get("working_set_coverage"),
+    )
+    graph_anchor = compact_completeness.get("graph_anchor") if isinstance(compact_completeness.get("graph_anchor"), dict) else {}
+    working_set_coverage = compact_completeness.get("working_set_coverage") if isinstance(compact_completeness.get("working_set_coverage"), dict) else {}
     lines = [
         "# Context Bundle",
         "",
@@ -796,6 +919,29 @@ def render_context_markdown(bundle: ContextBundle) -> str:
         f"- Bundle digest: `{bundle.bundle_digest}`",
         "",
     ]
+    if graph_anchor:
+        coverage = graph_anchor.get("selection_coverage") if isinstance(graph_anchor.get("selection_coverage"), dict) else {}
+        lines.extend(
+            [
+                "## Graph Working Set",
+                "",
+                f"- Anchor resolution: `{graph_anchor.get('status', '')}` (`{graph_anchor.get('code', '')}`)",
+            ]
+        )
+        if coverage:
+            lines.extend(_markdown_coverage_lines("Selection coverage", coverage))
+        for seed in graph_anchor.get("seed_anchors", []):
+            if not isinstance(seed, dict):
+                continue
+            lines.append(
+                f"- Seed `{seed.get('path', '')}`: `{seed.get('provenance', '')}`, "
+                f"strength `{seed.get('anchor_strength', '')}`"
+            )
+        lines.append("")
+    if working_set_coverage:
+        lines.extend(["## Compact Working Set", ""])
+        lines.extend(_markdown_coverage_lines("Working-set coverage", working_set_coverage))
+        lines.append("")
     titles = {
         "must_read": "Must Read",
         "likely_change_surface": "Likely Change Surface",
@@ -826,7 +972,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
             )
         lines.append("")
     for group in CONTEXT_GROUPS:
-        items = data.get("groups", {}).get(group, [])
+        items = displayed.get(group, [])
         lines.extend([f"## {titles[group]}", ""])
         if not items:
             lines.extend(["- No evidence selected.", ""])
@@ -869,6 +1015,38 @@ def render_context_text(bundle: ContextBundle) -> str:
                 f"{seed.get('path', '')} provenance={seed.get('provenance', '')} "
                 f"strength={seed.get('anchor_strength', '')}"
             )
+        coverage = graph_anchor.get("selection_coverage") if isinstance(graph_anchor.get("selection_coverage"), dict) else {}
+        if coverage:
+            lines.append(
+                "graph_anchor_selection_coverage "
+                f"status={coverage.get('status', '')} "
+                f"selected={coverage.get('selected_count', 0)} "
+                f"eligible={coverage.get('eligible_count', 0)} "
+                f"coverage_omitted={coverage.get('coverage_omitted_count', 0)}"
+            )
+            field_term_evidence = _field_term_evidence_text(
+                coverage.get("unrepresented_field_term_evidence")
+            )
+            if field_term_evidence:
+                lines.append(f"  unrepresented_field_term_evidence {field_term_evidence}")
+    working_set_coverage = (
+        data.get("completeness", {}).get("working_set_coverage", {})
+        if isinstance(data.get("completeness"), dict)
+        else {}
+    )
+    if isinstance(working_set_coverage, dict) and working_set_coverage:
+        lines.append(
+            "working_set_coverage "
+            f"status={working_set_coverage.get('status', '')} "
+            f"selected={working_set_coverage.get('selected_count', 0)} "
+            f"eligible={working_set_coverage.get('eligible_count', 0)} "
+            f"coverage_omitted={working_set_coverage.get('coverage_omitted_count', 0)}"
+        )
+        field_term_evidence = _field_term_evidence_text(
+            working_set_coverage.get("unrepresented_field_term_evidence")
+        )
+        if field_term_evidence:
+            lines.append(f"  unrepresented_field_term_evidence {field_term_evidence}")
     for group in (
         "likely_change_surface",
         "tests_and_verification",
@@ -910,10 +1088,11 @@ def render_context_text(bundle: ContextBundle) -> str:
 def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 120) -> dict[str, Any]:
     """Return the default agent-facing view without full evidence diagnostics."""
     mode = str(bundle.query.get("mode") or "auto")
-    displayed_items, continuations, _projection_stats = _compact_projection(
+    displayed_items, continuations, projection_stats = _compact_projection(
         bundle.groups,
         mode=mode,
         max_group_items=max_group_items,
+        repository_path=str(bundle.repository.get("path") or ""),
     )
     groups = {
         group: [_compact_group_item(item, excerpt_chars=excerpt_chars) for item in items]
@@ -927,7 +1106,10 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "authoritative": bundle.authoritative,
         "repository": bundle.repository,
         "query": bundle.query,
-        "completeness": _compact_completeness(bundle.completeness),
+        "completeness": _compact_completeness(
+            bundle.completeness,
+            working_set_coverage=projection_stats.get("working_set_coverage"),
+        ),
         "groups": groups,
         "relationship_candidates": relationship_candidate_projection["items"],
         "relationship_candidate_count": relationship_candidate_projection["total_count"],
@@ -942,6 +1124,7 @@ def _compact_projection(
     *,
     mode: str,
     max_group_items: int,
+    repository_path: str,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, Any]]:
     group_limits = {
         "must_read": 2,
@@ -959,43 +1142,302 @@ def _compact_projection(
         group_limits["must_read"] = 5
     elif mode in {"authority_or_contract", "invariant"}:
         group_limits["must_read"] = 3
-    return _compact_bundle_projection(
-        _compact_graph_working_set_groups(groups),
+    projected_groups = _compact_graph_working_set_groups(
+        groups,
+        group_limits=group_limits,
+        repository_path=repository_path,
+    )
+    displayed, continuations, stats = _compact_bundle_projection(
+        projected_groups,
         group_limits=group_limits,
         max_group_items=max_group_items,
         item_limit=COMPACT_ITEM_LIMIT,
         continuation_limit=COMPACT_CONTINUATION_LIMIT,
         mode=mode,
     )
+    total_items = sum(len(items) for items in groups.values())
+    displayed_items = sum(len(items) for items in displayed.values())
+    total_continuations = len(_collect_bundle_continuations(groups))
+    stats["items"] = {
+        "total": total_items,
+        "displayed": displayed_items,
+        "omitted": max(0, total_items - displayed_items),
+    }
+    stats["continuations"] = {
+        "total": total_continuations,
+        "displayed": len(continuations),
+        "omitted": max(0, total_continuations - len(continuations)),
+    }
+    working_set_coverage = _compact_working_set_coverage(
+        groups,
+        displayed,
+        repository_path=repository_path,
+    )
+    if working_set_coverage:
+        stats["working_set_coverage"] = working_set_coverage
+    return displayed, continuations, stats
+
+
+def _compact_group_coverage_profiles(
+    items: list[dict[str, Any]],
+    *,
+    group: str,
+    repository_path: str,
+) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        evidence_kinds = {str(value) for value in item.get("evidence_kinds", []) if str(value)}
+        matches = item.get("query_term_matches") if isinstance(item.get("query_term_matches"), dict) else {}
+        try:
+            strength = ContextAnchorStrength(str(item.get("anchor_strength") or ContextAnchorStrength.NONE.value))
+        except ValueError:
+            strength = ContextAnchorStrength.NONE
+        graph_path = item.get("graph_path") if isinstance(item.get("graph_path"), list) else []
+        source_kind = str(ref.get("kind") or "")
+        if source_kind not in ACTIONABLE_PRODUCT_KINDS:
+            continue
+        lane_key = (
+            ContextRetrievalLane.PRODUCT_TEST.value
+            if group == "tests_and_verification"
+            else "product_config"
+            if source_kind == "config"
+            else ContextRetrievalLane.PRODUCT_SOURCE.value
+        )
+        path = str(ref.get("path") or "")
+        path_identity = _coverage_source_ref_repo_path(
+            path,
+            repository_path=repository_path,
+        )
+        relation_paths = {
+            identity
+            for relation in graph_path
+            if isinstance(relation, dict)
+            for key in ("from_path", "to_path")
+            if (
+                identity := _coverage_graph_repo_path(
+                    str(relation.get(key) or "")
+                )
+            )
+        }
+        neighbor_paths = sorted(
+            relation_path
+            for relation_path in relation_paths
+            if relation_path != path_identity
+        )
+        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+        evidence_roles = {
+            str(role)
+            for role in item.get("evidence_roles", [])
+            if str(role)
+        }
+        connection_priority = (
+            0
+            if "anchor_connected_test" in evidence_roles
+            else 1
+            if "directly_connected_test" in evidence_roles
+            else 2
+            if ContextEvidenceKind.GRAPH_RELATION.value in evidence_kinds
+            else 3
+        )
+        profiles.append(
+            {
+                "path": path,
+                "path_identity": path_identity,
+                "component_key": str(Path(path_identity).parent.as_posix()),
+                "lane_key": lane_key,
+                "query_term_matches": matches,
+                "graph_support": {
+                    "direct_relation_count": len(graph_path),
+                    "direct_test_count": sum(
+                        1
+                        for relation in graph_path
+                        if isinstance(relation, dict) and relation.get("edge") == "TESTS_FILE"
+                    ),
+                    "candidate_neighbor_count": len(neighbor_paths),
+                    "candidate_neighbor_paths": neighbor_paths,
+                },
+                "graph_supported": ContextEvidenceKind.GRAPH_RELATION.value in evidence_kinds,
+                "direct_query": bool(evidence_kinds - {kind.value for kind in GRAPH_DERIVED_CONTEXT_EVIDENCE_KINDS}),
+                "structured_relationship_source": any(
+                    isinstance(section, dict)
+                    and section.get("section_kind")
+                    == ContextSectionKind.PROVIDER_RELATIONSHIP.value
+                    for section in item.get("sections", [])
+                ),
+                "strong_symbol": ContextEvidenceKind.EXACT_SYMBOL.value in evidence_kinds,
+                "anchor_strength": strength.value,
+                "field_count": sum(1 for terms in matches.values() if isinstance(terms, (list, tuple)) and terms),
+                "query_coverage": float(breakdown.get("exact") or 0.0),
+                "path_name_coverage": float(breakdown.get("path_name") or 0.0),
+                "path_area_coverage": float(breakdown.get("path_area") or 0.0),
+                "path_scope_coverage": float(breakdown.get("path_scope") or 0.0),
+                "role_priority": _evidence_role_priority(str(item.get("evidence_role") or "")),
+                "coverage_roles": evidence_roles,
+                "connection_priority": connection_priority,
+                "score": float(item.get("score") or 0.0),
+                "item": item,
+            }
+        )
+    return profiles
 
 
 def _compact_graph_working_set_groups(
     groups: dict[str, list[dict[str, Any]]],
+    *,
+    group_limits: dict[str, int],
+    repository_path: str,
 ) -> dict[str, list[dict[str, Any]]]:
     actionable_groups = ("likely_change_surface", "tests_and_verification")
-    actionable_items = [
-        item
-        for group in actionable_groups
-        for item in groups.get(group, [])
-        if isinstance(item, dict)
-    ]
-    has_graph_seed = any("graph_seed" in item.get("evidence_kinds", []) for item in actionable_items)
-    has_graph_relations = any("graph_relation" in item.get("evidence_kinds", []) for item in actionable_items)
-    if not has_graph_seed or not has_graph_relations:
-        return groups
-
     projected = {group: list(items) for group, items in groups.items()}
+    profiles_by_group = {
+        group: _compact_group_coverage_profiles(
+            groups.get(group, []),
+            group=group,
+            repository_path=repository_path,
+        )
+        for group in actionable_groups
+    }
+    combined_profiles = [
+        {**profile, "group": group}
+        for group in actionable_groups
+        for profile in profiles_by_group[group]
+    ]
+    admitted_profiles = _select_coverage_profiles(
+        _eligible_coverage_profiles(combined_profiles),
+        limit=len(combined_profiles),
+    )
+    admitted_keys = {
+        (str(profile.get("group") or ""), str(profile.get("path") or ""))
+        for profile in admitted_profiles
+    }
     for group in actionable_groups:
-        projected[group] = [
-            item
-            for item in groups.get(group, [])
-            if isinstance(item, dict)
-            and bool({"graph_seed", "graph_relation"} & set(item.get("evidence_kinds", [])))
+        profiles = profiles_by_group[group]
+        has_selection_signal = any(
+            _coverage_profile_pairs(profile)
+            or _coverage_profile_graph_supported(profile)
+            or _coverage_profile_anchor_priority(profile) > 0
+            for profile in profiles
+        )
+        if not has_selection_signal:
+            continue
+        eligible = [
+            profile
+            for profile in profiles
+            if (group, str(profile.get("path") or "")) in admitted_keys
         ]
+        selected = _select_coverage_profiles(
+            eligible,
+            limit=group_limits.get(group, len(eligible)),
+        )
+        projected[group] = [profile["item"] for profile in selected]
     return projected
 
 
-def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
+def _compact_working_set_coverage(
+    all_groups: dict[str, list[dict[str, Any]]],
+    displayed_groups: dict[str, list[dict[str, Any]]],
+    *,
+    repository_path: str,
+) -> dict[str, Any]:
+    actionable_groups = ("likely_change_surface", "tests_and_verification")
+    profiles = [
+        profile
+        for group in actionable_groups
+        for profile in _compact_group_coverage_profiles(
+            all_groups.get(group, []),
+            group=group,
+            repository_path=repository_path,
+        )
+    ]
+    if not profiles:
+        return {}
+    selected_paths = {
+        str((item.get("source_ref") or {}).get("path") or "")
+        for group in actionable_groups
+        for item in displayed_groups.get(group, [])
+        if isinstance(item, dict) and isinstance(item.get("source_ref"), dict)
+    }
+    diagnostics = _coverage_omission_diagnostics(profiles, selected_paths=selected_paths)
+    omitted = diagnostics["omitted"]
+    coverage_omissions = diagnostics["coverage_omissions"]
+    weak_single_term_fallback = _coverage_profiles_use_weak_single_term_fallback(profiles)
+    return {
+        "status": "partial" if coverage_omissions else "complete",
+        "reason": (
+            "weak_single_term_fallback"
+            if coverage_omissions and weak_single_term_fallback
+            else "compact_budget_exhausted"
+            if coverage_omissions
+            else ""
+        ),
+        "candidate_count": len(profiles),
+        "eligible_count": len(profiles),
+        "selected_count": len(profiles) - len(omitted),
+        "omitted_count": len(omitted),
+        "coverage_omitted_count": len(coverage_omissions),
+        "eligible_paths": [str(profile.get("path") or "") for profile in profiles],
+        "selected_paths": sorted(selected_paths),
+        "omitted_paths": [str(profile.get("path") or "") for profile in omitted],
+        "coverage_omitted_paths": [
+            str(profile.get("path") or "") for profile in coverage_omissions
+        ],
+        "unrepresented_field_term_evidence": diagnostics["unrepresented_field_term_evidence"],
+        "unrepresented_lanes": diagnostics["unrepresented_lanes"],
+        "unrepresented_roles": diagnostics["unrepresented_roles"],
+        "unrepresented_components": diagnostics["unrepresented_components"],
+    }
+
+
+def _compact_field_term_evidence(value: Any, *, limit: int = 8) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    remaining = limit
+    compact: dict[str, list[str]] = {}
+    for field_name, terms in sorted(value.items()):
+        if remaining <= 0 or not isinstance(terms, list):
+            continue
+        selected = sorted({str(term) for term in terms if str(term)})[:remaining]
+        if selected:
+            compact[str(field_name)] = selected
+            remaining -= len(selected)
+    return compact
+
+
+def _compact_coverage_diagnostics(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = {
+        key: value.get(key)
+        for key in (
+            "status",
+            "reason",
+            "candidate_count",
+            "eligible_count",
+            "selected_count",
+            "omitted_count",
+            "coverage_omitted_count",
+        )
+    }
+    compact["omitted_paths"] = [str(path) for path in value.get("omitted_paths", []) if str(path)][:5]
+    compact["coverage_omitted_paths"] = [
+        str(path) for path in value.get("coverage_omitted_paths", []) if str(path)
+    ][:5]
+    compact["unrepresented_field_term_evidence"] = _compact_field_term_evidence(
+        value.get("unrepresented_field_term_evidence")
+    )
+    for key in ("unrepresented_lanes", "unrepresented_roles", "unrepresented_components"):
+        compact[key] = [str(item) for item in value.get(key, []) if str(item)][:5]
+    return compact
+
+
+def _compact_completeness(
+    completeness: dict[str, Any],
+    *,
+    working_set_coverage: Any = None,
+) -> dict[str, Any]:
     graph = completeness.get("graph_completeness") if isinstance(completeness.get("graph_completeness"), dict) else {}
     compact = {
         "graph_available": bool(completeness.get("graph_available")),
@@ -1046,6 +1488,14 @@ def _compact_completeness(completeness: dict[str, Any]) -> dict[str, Any]:
                 )
             ),
         }
+        selection_coverage = anchor.get("selection_coverage") if isinstance(anchor.get("selection_coverage"), dict) else {}
+        if selection_coverage:
+            compact["graph_anchor"]["selection_coverage"] = _compact_coverage_diagnostics(
+                selection_coverage
+            )
+    compact_working_set_coverage = _compact_coverage_diagnostics(working_set_coverage)
+    if compact_working_set_coverage:
+        compact["working_set_coverage"] = compact_working_set_coverage
     return compact
 
 
@@ -1271,7 +1721,6 @@ def _known_context_product_paths(
         if (
             chunk.source_ref.kind in ACTIONABLE_PRODUCT_KINDS
             and path.startswith(product_prefix)
-            and path.removeprefix(product_prefix) not in excluded_repo_paths
         ):
             known_paths.add(path.removeprefix(product_prefix))
     for chunk in overlay_chunks:
@@ -1279,6 +1728,30 @@ def _known_context_product_paths(
         if chunk.source_ref.kind in ACTIONABLE_PRODUCT_KINDS and path.startswith(product_prefix):
             known_paths.add(path.removeprefix(product_prefix))
     return known_paths
+
+
+def _current_product_selector_paths(*, target: RepoTarget, value: str) -> set[str]:
+    """Return current files represented by either accepted selector spelling."""
+    candidates: set[str] = set()
+    for repository_path in ("", target.display_path):
+        resolution = resolve_repo_selector_path(
+            value,
+            repository_path=repository_path,
+        )
+        if resolution.status == RepoSelectorStatus.RESOLVED and resolution.path:
+            candidates.add(resolution.path)
+
+    target_root = target.root_path.resolve()
+    current: set[str] = set()
+    for candidate in candidates:
+        path = target.root_path / candidate
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.is_relative_to(target_root) and path.is_file():
+            current.add(candidate)
+    return current
 
 
 def _resolve_reviewed_knowledge_paths(
@@ -1314,10 +1787,14 @@ def _resolve_reviewed_knowledge_paths(
                         }
                     )
                     continue
+                current_known_paths = {
+                    *known_paths,
+                    *_current_product_selector_paths(target=target, value=raw_path),
+                }
                 resolution = resolve_repo_selector_path(
                     raw_path,
                     repository_path=target.display_path,
-                    known_paths=known_paths,
+                    known_paths=current_known_paths,
                 )
                 item = {
                     "kind": kind,
@@ -1669,6 +2146,7 @@ def _graph_context_candidates(
                 graph_path=scoring_relations[:3],
                 evidence_kinds=tuple(sorted(evidence_kinds, key=lambda kind: kind.value)),
                 anchor_strength=retrieved.anchor_strength if retrieved is not None else ContextAnchorStrength.NONE,
+                query_term_matches=retrieved.query_term_matches if retrieved is not None else {},
                 related_record_ids=retrieved.related_record_ids if retrieved is not None else (),
                 document_role=retrieved.document_role if retrieved is not None else chunk.document_role,
             )
@@ -1701,8 +2179,24 @@ def _resolve_graph_anchors(
     source_candidates: list[ContextCandidate],
     *,
     target: RepoTarget,
-) -> ContextAnchorResolution:
+    snapshot: Any = None,
+    excluded_paths: set[str] | None = None,
+) -> tuple[ContextAnchorResolution, Any]:
     product_prefix = f"{target.display_path.rstrip('/')}/"
+    snapshot_file_paths = {
+        str(node.identity.get("path") or "")
+        for node in (snapshot.nodes if snapshot is not None else [])
+        if node.kind == "file" and str(node.identity.get("path") or "")
+    }
+    explicitly_unavailable_paths = set(excluded_paths or set())
+
+    def selection_available(path: str) -> bool:
+        return bool(
+            snapshot is not None
+            and path in snapshot_file_paths
+            and path not in explicitly_unavailable_paths
+        )
+
     exact_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
     knowledge_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
     diagnostic_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
@@ -1767,19 +2261,43 @@ def _resolve_graph_anchors(
             symbol_paths = {pair[1].anchor.path for pair in exact_symbols}
             file_paths = {pair[1].anchor.path for pair in exact_files}
             if len(exact_symbols) != 1 or any(path not in symbol_paths for path in file_paths):
-                return _ambiguous_graph_anchor_resolution([*exact_symbols, *exact_files])
+                return _ambiguous_graph_anchor_resolution([*exact_symbols, *exact_files]), None
             selected = exact_symbols
         else:
             selected = exact_files
         ordered = _dedupe_graph_anchor_pairs(selected)
         if len(ordered) != 1:
-            return _ambiguous_graph_anchor_resolution(ordered)
+            return _ambiguous_graph_anchor_resolution(ordered), None
         graph_candidates = (ordered[0][1],)
-        return ContextAnchorResolution(
-            status=ContextAnchorStatus.RESOLVED,
-            code=ContextAnchorResolutionCode.RESOLVED,
-            anchors=graph_candidates,
-            candidates=graph_candidates,
+        selectable_candidates = tuple(
+            candidate
+            for candidate in graph_candidates
+            if selection_available(candidate.anchor.path)
+        )
+        return (
+            ContextAnchorResolution(
+                status=(
+                    ContextAnchorStatus.RESOLVED
+                    if selectable_candidates
+                    else ContextAnchorStatus.UNRESOLVED
+                ),
+                code=(
+                    ContextAnchorResolutionCode.RESOLVED
+                    if selectable_candidates
+                    else ContextAnchorResolutionCode.UNRESOLVED
+                ),
+                anchors=selectable_candidates,
+                candidates=graph_candidates,
+                selection_coverage=_anchor_selection_coverage(
+                    candidates=graph_candidates,
+                    anchors=selectable_candidates,
+                    eligible_paths={
+                        candidate.anchor.path
+                        for candidate in selectable_candidates
+                    },
+                ),
+            ),
+            None,
         )
 
     if knowledge_pairs:
@@ -1790,23 +2308,83 @@ def _resolve_graph_anchors(
         graph_candidates = tuple(
             graph_candidate for _candidate, graph_candidate in ranked_knowledge_pairs
         )
-        return ContextAnchorResolution(
-            status=ContextAnchorStatus.RESOLVED,
-            code=ContextAnchorResolutionCode.RESOLVED,
-            anchors=graph_candidates[:GRAPH_ANCHOR_LIMIT],
-            candidates=graph_candidates,
+        selectable_candidates = tuple(
+            graph_candidate
+            for _candidate, graph_candidate in ranked_knowledge_pairs
+            if selection_available(graph_candidate.anchor.path)
+        )
+        anchors = selectable_candidates[:GRAPH_ANCHOR_LIMIT]
+        return (
+            ContextAnchorResolution(
+                status=(
+                    ContextAnchorStatus.RESOLVED
+                    if anchors
+                    else ContextAnchorStatus.UNRESOLVED
+                ),
+                code=(
+                    ContextAnchorResolutionCode.RESOLVED
+                    if anchors
+                    else ContextAnchorResolutionCode.UNRESOLVED
+                ),
+                anchors=anchors,
+                candidates=graph_candidates,
+                selection_coverage=_anchor_selection_coverage(
+                    candidates=graph_candidates,
+                    anchors=anchors,
+                    eligible_paths={
+                        candidate.anchor.path
+                        for candidate in selectable_candidates
+                    },
+                ),
+            ),
+            None,
         )
 
-    heuristic_anchors = _ranked_heuristic_graph_anchors(
+    projection_index = (
+        build_context_projection_index(snapshot)
+        if snapshot is not None and heuristic_candidates_by_path
+        else None
+    )
+    graph_support = (
+        context_path_support_profiles(
+            snapshot,
+            paths=set(heuristic_candidates_by_path),
+            excluded_paths=excluded_paths,
+            projection_index=projection_index,
+        )
+        if snapshot is not None and heuristic_candidates_by_path
+        else {}
+    )
+    heuristic_anchors, heuristic_candidates, selection_coverage = _ranked_heuristic_graph_anchors(
         heuristic_candidates_by_path,
         target=target,
+        graph_support=graph_support,
+        unavailable_paths={
+            path
+            for path in heuristic_candidates_by_path
+            if not selection_available(path)
+        },
     )
     if heuristic_anchors:
-        return ContextAnchorResolution(
-            status=ContextAnchorStatus.RESOLVED,
-            code=ContextAnchorResolutionCode.RESOLVED,
-            anchors=heuristic_anchors,
-            candidates=heuristic_anchors,
+        return (
+            ContextAnchorResolution(
+                status=ContextAnchorStatus.RESOLVED,
+                code=ContextAnchorResolutionCode.RESOLVED,
+                anchors=heuristic_anchors,
+                candidates=heuristic_candidates,
+                selection_coverage=selection_coverage,
+            ),
+            projection_index,
+        )
+    if heuristic_candidates:
+        return (
+            ContextAnchorResolution(
+                status=ContextAnchorStatus.UNRESOLVED,
+                code=ContextAnchorResolutionCode.UNRESOLVED,
+                candidates=heuristic_candidates,
+                selection_coverage=selection_coverage,
+            ),
+            projection_index,
         )
 
     candidates = tuple(
@@ -1821,10 +2399,13 @@ def _resolve_graph_anchors(
             ),
         )[:5]
     )
-    return ContextAnchorResolution(
-        status=ContextAnchorStatus.UNRESOLVED,
-        code=ContextAnchorResolutionCode.UNRESOLVED,
-        candidates=candidates,
+    return (
+        ContextAnchorResolution(
+            status=ContextAnchorStatus.UNRESOLVED,
+            code=ContextAnchorResolutionCode.UNRESOLVED,
+            candidates=candidates,
+        ),
+        projection_index,
     )
 
 
@@ -1834,6 +2415,7 @@ def _context_graph_anchor_candidate(
     target: RepoTarget,
     provenance: ContextGraphAnchorProvenance,
     lexical_rank: int = 0,
+    graph_support: dict[str, Any] | None = None,
 ) -> ContextGraphAnchorCandidate:
     ranked = sorted(candidates, key=_candidate_sort_key)
     primary = next(
@@ -1864,9 +2446,12 @@ def _context_graph_anchor_candidate(
         key=lambda strength: CONTEXT_ANCHOR_STRENGTH_PRIORITY[strength],
     )
     score_breakdown: dict[str, float] = {}
+    query_term_matches: dict[str, set[str]] = {}
     for candidate in candidates:
         for key, value in candidate.score_breakdown.items():
             score_breakdown[key] = max(score_breakdown.get(key, 0.0), float(value))
+        for field_name, terms in candidate.query_term_matches.items():
+            query_term_matches.setdefault(field_name, set()).update(terms)
     lane = context_retrieval_lane(
         kind=primary.source_ref.kind,
         path=primary.source_ref.path,
@@ -1889,6 +2474,12 @@ def _context_graph_anchor_candidate(
         lexical_rank=lexical_rank,
         retrieval_score=max(candidate.score for candidate in candidates),
         score_breakdown=score_breakdown,
+        query_term_matches={
+            field_name: tuple(sorted(terms))
+            for field_name, terms in sorted(query_term_matches.items())
+            if terms
+        },
+        graph_support=dict(graph_support or {}),
         related_record_ids=tuple(
             sorted({record_id for candidate in candidates for record_id in candidate.related_record_ids})
         ),
@@ -1899,8 +2490,16 @@ def _ranked_heuristic_graph_anchors(
     candidates_by_path: dict[str, list[ContextCandidate]],
     *,
     target: RepoTarget,
-) -> tuple[ContextGraphAnchorCandidate, ...]:
+    graph_support: dict[str, dict[str, Any]] | None = None,
+    unavailable_paths: set[str] | None = None,
+) -> tuple[
+    tuple[ContextGraphAnchorCandidate, ...],
+    tuple[ContextGraphAnchorCandidate, ...],
+    dict[str, Any],
+]:
     entries: list[dict[str, Any]] = []
+    graph_support = graph_support or {}
+    unavailable_paths = unavailable_paths or set()
     for repo_path, path_candidates in candidates_by_path.items():
         if _direct_query_score(path_candidates) <= 0:
             continue
@@ -1916,6 +2515,7 @@ def _ranked_heuristic_graph_anchors(
         entries.append(
             {
                 "path": repo_path,
+                "path_identity": repo_path,
                 "candidates": path_candidates,
                 "primary": primary,
                 "strong_symbol": strong_symbol,
@@ -1937,132 +2537,626 @@ def _ranked_heuristic_graph_anchors(
                     for candidate in path_candidates
                 ),
                 "lane_key": _lexical_anchor_lane_key(lane, source_kind=primary.source_ref.kind),
+                "coverage_roles": {_lexical_anchor_lane_key(lane, source_kind=primary.source_ref.kind)},
+                "component_key": str(Path(repo_path).parent.as_posix()),
+                "query_term_matches": _merge_query_term_matches(
+                    candidate.query_term_matches for candidate in path_candidates
+                ),
+                "graph_support": graph_support.get(repo_path, {}),
+                "selection_available": repo_path not in unavailable_paths,
+                "direct_query": True,
+                "structured_relationship_source": any(
+                    candidate.source_ref.section_kind
+                    is ContextSectionKind.PROVIDER_RELATIONSHIP
+                    for candidate in path_candidates
+                ),
+                "role_priority": 0,
             }
         )
     entries.sort(key=lambda entry: _candidate_sort_key(entry["primary"]))
     for rank, entry in enumerate(entries, start=1):
         entry["rank"] = rank
-    rich_entries = [
-        entry
-        for entry in entries
-        if entry["strong_symbol"] or entry["field_count"] >= 2
-    ]
-    rich_coverage = max(
-        (float(entry["query_coverage"]) for entry in rich_entries),
-        default=0.0,
+    if not entries:
+        return (), (), {}
+    eligible_entries = _eligible_coverage_profiles(entries)
+    admitted_entries = _select_coverage_profiles(
+        eligible_entries,
+        limit=len(eligible_entries),
     )
-    coverage_entries = [
-        entry
-        for entry in entries
-        if rich_entries
-        and entry not in rich_entries
-        and float(entry["query_coverage"]) >= rich_coverage
-    ]
-    eligible_entries = [*rich_entries, *coverage_entries]
-    area_entries = [entry for entry in eligible_entries if entry["path_area_coverage"] > 0]
-    if area_entries:
-        eligible_entries = area_entries
-    for entry in eligible_entries:
-        entry["component_affinity"] = max(
-            (
-                _shared_parent_prefix_depth(str(entry["path"]), str(other["path"]))
-                for other in eligible_entries
-                if other is not entry and other["lane_key"] != entry["lane_key"]
-            ),
-            default=0,
-        )
-    cohort = (
-        sorted(eligible_entries, key=_lexical_anchor_selection_key)
-        if eligible_entries
-        else entries[:1]
-    )
-    if not cohort:
-        return ()
+    selected = admitted_entries[:GRAPH_ANCHOR_LIMIT]
 
-    selected: list[dict[str, Any]] = [cohort[0]]
-    diversity = next(
-        iter(
-            sorted(
-                (
-                    entry
-                    for entry in cohort[1:]
-                    if entry["lane_key"] != selected[0]["lane_key"]
-                ),
-                key=lambda entry: _lexical_anchor_related_selection_key(
-                    entry,
-                    selected=selected,
-                ),
-            )
-        ),
-        None,
-    )
-    if diversity is not None:
-        selected.append(diversity)
-    remaining = sorted(
-        (entry for entry in cohort[1:] if entry not in selected),
-        key=lambda entry: _lexical_anchor_related_selection_key(
-            entry,
-            selected=selected,
-        ),
-    )
-    for entry in remaining:
-        if len(selected) >= GRAPH_ANCHOR_LIMIT:
-            break
-        selected.append(entry)
-
-    anchors: list[ContextGraphAnchorCandidate] = []
-    for entry in selected:
+    graph_candidates: dict[str, ContextGraphAnchorCandidate] = {}
+    for entry in entries:
         provenance = (
             ContextGraphAnchorProvenance.PROVIDER_SYMBOL
             if entry["strong_symbol"]
             else ContextGraphAnchorProvenance.LEXICAL_FILE
         )
-        anchors.append(
-            _context_graph_anchor_candidate(
-                entry["candidates"],
-                target=target,
-                provenance=provenance,
-                lexical_rank=int(entry["rank"]),
-            )
+        graph_candidates[str(entry["path"])] = _context_graph_anchor_candidate(
+            entry["candidates"],
+            target=target,
+            provenance=provenance,
+            lexical_rank=int(entry["rank"]),
+            graph_support=entry["graph_support"],
         )
-    return tuple(anchors)
+    all_candidates = tuple(
+        graph_candidates[str(entry["path"])] for entry in entries
+    )
+    anchors = tuple(graph_candidates[str(entry["path"])] for entry in selected)
+    coverage = _anchor_selection_coverage(
+        candidates=all_candidates,
+        anchors=anchors,
+        eligible_paths={
+            str(entry["path"])
+            for entry in eligible_entries
+            if entry.get("selection_available", True)
+        },
+        bounded_reason=(
+            "weak_single_term_fallback"
+            if _coverage_profiles_use_weak_single_term_fallback(eligible_entries)
+            else ""
+        ),
+    )
+    return anchors, all_candidates, coverage
 
 
-def _lexical_anchor_selection_key(entry: dict[str, Any]) -> tuple[Any, ...]:
-    primary = entry["primary"]
-    return (
-        -CONTEXT_ANCHOR_STRENGTH_PRIORITY[primary.anchor_strength],
-        -float(entry["query_coverage"]),
-        -int(entry.get("component_affinity") or 0),
-        -int(entry["field_count"]),
-        -float(entry["path_name_coverage"]),
-        -float(entry["path_scope_coverage"]),
-        -primary.score,
-        primary.source_ref.path,
-        primary.source_ref.line_start,
+def _merge_query_term_matches(
+    values: Iterable[dict[str, tuple[str, ...]] | dict[str, list[str]]],
+) -> dict[str, tuple[str, ...]]:
+    merged: dict[str, set[str]] = {}
+    for value in values:
+        for field_name, terms in value.items():
+            merged.setdefault(str(field_name), set()).update(str(term) for term in terms if str(term))
+    return {
+        field_name: tuple(sorted(terms))
+        for field_name, terms in sorted(merged.items())
+        if terms
+    }
+
+
+def _coverage_profile_pairs(profile: dict[str, Any]) -> set[tuple[str, str]]:
+    matches = profile.get("query_term_matches")
+    if not isinstance(matches, dict):
+        return set()
+    return {
+        (str(field_name), str(term))
+        for field_name, terms in matches.items()
+        if str(field_name) in {"path", "section", "body"} and isinstance(terms, (list, tuple))
+        for term in terms
+        if str(term)
+    }
+
+
+def _coverage_profile_term_count(profile: dict[str, Any]) -> int:
+    return len(_coverage_profile_terms(profile))
+
+
+def _coverage_profile_terms(profile: dict[str, Any]) -> set[str]:
+    return {term for _field_name, term in _coverage_profile_pairs(profile)}
+
+
+def _coverage_term_breadth_tier(terms: set[str]) -> int:
+    # Saturating breadth prevents vocabulary-heavy consumers from crowding out owners.
+    return min(3, len(terms).bit_length())
+
+
+def _coverage_profile_anchor_priority(profile: dict[str, Any]) -> int:
+    primary = profile.get("primary")
+    if isinstance(primary, ContextCandidate):
+        return CONTEXT_ANCHOR_STRENGTH_PRIORITY[primary.anchor_strength]
+    try:
+        strength = ContextAnchorStrength(str(profile.get("anchor_strength") or ContextAnchorStrength.NONE.value))
+    except ValueError:
+        strength = ContextAnchorStrength.NONE
+    return CONTEXT_ANCHOR_STRENGTH_PRIORITY[strength]
+
+
+def _coverage_profile_support_count(profile: dict[str, Any]) -> int:
+    support = profile.get("graph_support") if isinstance(profile.get("graph_support"), dict) else {}
+    return int(support.get("direct_relation_count") or 0)
+
+
+def _coverage_profile_direct_test_count(profile: dict[str, Any]) -> int:
+    support = profile.get("graph_support") if isinstance(profile.get("graph_support"), dict) else {}
+    return int(support.get("direct_test_count") or 0)
+
+
+def _coverage_profile_candidate_neighbor_count(profile: dict[str, Any]) -> int:
+    support = profile.get("graph_support") if isinstance(profile.get("graph_support"), dict) else {}
+    return int(support.get("candidate_neighbor_count") or 0)
+
+
+def _coverage_profile_roles(profile: dict[str, Any]) -> set[str]:
+    raw_roles = profile.get("coverage_roles")
+    if isinstance(raw_roles, (set, list, tuple)):
+        return {str(role) for role in raw_roles if str(role)}
+    lane = str(profile.get("lane_key") or "")
+    return {lane} if lane else set()
+
+
+def _coverage_profile_graph_supported(profile: dict[str, Any]) -> bool:
+    return _coverage_profile_support_count(profile) > 0 or bool(profile.get("graph_supported"))
+
+
+def _coverage_profile_has_explicit_identity(profile: dict[str, Any]) -> bool:
+    return bool(
+        profile.get("strong_symbol")
+        or _coverage_profile_anchor_priority(profile)
+        >= CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.EXACT]
     )
 
 
-def _lexical_anchor_related_selection_key(
-    entry: dict[str, Any],
+def _coverage_profile_neighbor_paths(profile: dict[str, Any]) -> set[str]:
+    support = profile.get("graph_support") if isinstance(profile.get("graph_support"), dict) else {}
+    values = support.get("candidate_neighbor_paths")
+    if not isinstance(values, (list, tuple, set)):
+        return set()
+    return {str(path) for path in values if str(path)}
+
+
+def _coverage_profile_path_identity(profile: dict[str, Any]) -> str:
+    return str(profile.get("path_identity") or profile.get("path") or "")
+
+
+def _coverage_profile_connected_to_selected(
+    profile: dict[str, Any],
     *,
     selected: list[dict[str, Any]],
+) -> bool:
+    neighbor_paths = _coverage_profile_neighbor_paths(profile)
+    return bool(
+        neighbor_paths
+        and any(
+            _coverage_profile_path_identity(item) in neighbor_paths
+            for item in selected
+        )
+    )
+
+
+def _coverage_profile_establishes_scope(profile: dict[str, Any]) -> bool:
+    return bool(
+        profile.get("direct_query", True)
+        and (
+            profile.get("structured_relationship_source")
+            or (
+                (
+                    float(profile.get("path_area_coverage") or 0.0) > 0.0
+                    or float(profile.get("path_scope_coverage") or 0.0) > 0.0
+                )
+                and
+                _coverage_profile_graph_supported(profile)
+                and _coverage_profile_candidate_neighbor_count(profile) > 0
+            )
+        )
+    )
+
+
+def _coverage_profile_contribution(
+    profile: dict[str, Any],
+    *,
+    selected: list[dict[str, Any]],
+) -> _CoverageContribution:
+    covered_pairs = {pair for item in selected for pair in _coverage_profile_pairs(item)}
+    selected_lanes = {
+        str(item.get("lane_key") or "")
+        for item in selected
+        if str(item.get("lane_key") or "")
+    }
+    lane = str(profile.get("lane_key") or "")
+    selected_roles = {
+        role
+        for item in selected
+        if str(item.get("lane_key") or "") == lane
+        for role in _coverage_profile_roles(item)
+    }
+    selected_components = {
+        str(item.get("component_key") or "")
+        for item in selected
+        if str(item.get("component_key") or "")
+    }
+    pairs = _coverage_profile_pairs(profile)
+    terms = _coverage_profile_terms(profile)
+    covered_terms = {
+        term
+        for item in selected
+        for term in _coverage_profile_terms(item)
+    }
+    new_terms = terms - covered_terms
+    component = str(profile.get("component_key") or "")
+    new_pairs = pairs - covered_pairs
+    new_lane = lane if lane and lane not in selected_lanes else ""
+    new_roles = _coverage_profile_roles(profile) - selected_roles
+    new_component = component if component and component not in selected_components else ""
+    explicit_identity = _coverage_profile_has_explicit_identity(profile)
+    coverage_identity_required = bool(profile.get("coverage_identity_required"))
+    connected_to_selected = _coverage_profile_connected_to_selected(
+        profile,
+        selected=selected,
+    )
+    scoped_selection = any(
+        _coverage_profile_establishes_scope(item)
+        for item in selected
+    )
+    lexical = bool(
+        new_pairs
+        and (
+            explicit_identity
+            or len(terms) > 1
+            or (
+                new_component
+                and bool(new_terms)
+            )
+        )
+    )
+    component_contribution = bool(
+        new_component
+        and (
+            bool(new_terms)
+            or (
+                profile.get("direct_query", True)
+                and connected_to_selected
+            )
+            or (
+                not scoped_selection
+                and len(terms) > 1
+            )
+        )
+    )
+    return _CoverageContribution(
+        new_pairs=frozenset(new_pairs),
+        new_lane=new_lane,
+        new_roles=frozenset(new_roles),
+        new_component=new_component,
+        identity=coverage_identity_required,
+        lexical=lexical,
+        component=component_contribution,
+    )
+
+
+def _coverage_graph_repo_path(path: str) -> str:
+    resolution = resolve_repo_selector_path(
+        path,
+        repository_path="",
+    )
+    return resolution.path if resolution.status == RepoSelectorStatus.RESOLVED else ""
+
+
+def _coverage_source_ref_repo_path(path: str, *, repository_path: str) -> str:
+    workspace_path = _coverage_graph_repo_path(path)
+    workspace_repository_path = _coverage_graph_repo_path(repository_path)
+    if not workspace_path:
+        return ""
+    if not workspace_repository_path:
+        return workspace_path
+    prefix = f"{workspace_repository_path}/"
+    return workspace_path.removeprefix(prefix) if workspace_path.startswith(prefix) else ""
+
+
+def _coverage_pair_frequencies(profiles: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
+    frequencies: dict[tuple[str, str], int] = {}
+    for profile in profiles:
+        for pair in _coverage_profile_pairs(profile):
+            frequencies[pair] = frequencies.get(pair, 0) + 1
+    return frequencies
+
+
+def _coverage_pair_weight(
+    pairs: set[tuple[str, str]],
+    frequencies: dict[tuple[str, str], int],
+) -> float:
+    return sum(1.0 / max(1, frequencies.get(pair, 1)) for pair in pairs)
+
+
+def _coverage_profile_initial_connection_priority(profile: dict[str, Any]) -> int:
+    raw_priority = profile.get("connection_priority")
+    if isinstance(raw_priority, int):
+        return raw_priority
+    if _coverage_profile_direct_test_count(profile) > 0:
+        return 0
+    if _coverage_profile_candidate_neighbor_count(profile) > 0:
+        return 2
+    return 3
+
+
+def _coverage_profile_initial_key(
+    profile: dict[str, Any],
+    *,
+    frequencies: dict[tuple[str, str], int],
 ) -> tuple[Any, ...]:
-    primary = entry["primary"]
-    affinity = max(
-        (_shared_parent_prefix_depth(str(entry["path"]), str(item["path"])) for item in selected),
-        default=0,
+    pairs = _coverage_profile_pairs(profile)
+    lane = str(profile.get("lane_key") or "")
+    connection_priority = _coverage_profile_initial_connection_priority(profile)
+    explicit_test_connection = (
+        lane == ContextRetrievalLane.PRODUCT_TEST.value
+        and isinstance(profile.get("connection_priority"), int)
     )
     return (
-        -CONTEXT_ANCHOR_STRENGTH_PRIORITY[primary.anchor_strength],
+        -_coverage_profile_anchor_priority(profile),
+        0 if profile.get("strong_symbol") else 1,
+        0 if profile.get("direct_query", True) else 1,
+        0 if lane in {ContextRetrievalLane.PRODUCT_SOURCE.value, "product_config"} else 1,
+        connection_priority if explicit_test_connection else 3,
+        -_coverage_term_breadth_tier(_coverage_profile_terms(profile)),
+        connection_priority if not explicit_test_connection else 3,
+        int(profile.get("role_priority") or 0),
+        -_coverage_pair_weight(pairs, frequencies),
+        -int(profile.get("field_count") or 0),
+        -float(profile.get("query_coverage") or 0.0),
+        -float(profile.get("path_name_coverage") or 0.0),
+        -float(profile.get("path_area_coverage") or 0.0),
+        -float(profile.get("path_scope_coverage") or 0.0),
+        0 if _coverage_profile_direct_test_count(profile) > 0 else 1,
+        -_coverage_profile_candidate_neighbor_count(profile),
+        0 if _coverage_profile_graph_supported(profile) else 1,
+        -float(profile.get("score") or getattr(profile.get("primary"), "score", 0.0)),
+        -_coverage_profile_direct_test_count(profile),
+        -_coverage_profile_support_count(profile),
+        str(profile.get("path") or ""),
+    )
+
+
+def _coverage_profile_related_key(
+    profile: dict[str, Any],
+    *,
+    selected: list[dict[str, Any]],
+    frequencies: dict[tuple[str, str], int],
+) -> tuple[Any, ...]:
+    covered_pairs = {pair for item in selected for pair in _coverage_profile_pairs(item)}
+    selected_lanes = {str(item.get("lane_key") or "") for item in selected}
+    selected_components = {str(item.get("component_key") or "") for item in selected}
+    selected_roles = {role for item in selected for role in _coverage_profile_roles(item)}
+    pairs = _coverage_profile_pairs(profile)
+    new_pairs = pairs - covered_pairs
+    covered_terms = {term for _field_name, term in covered_pairs}
+    new_terms = _coverage_profile_terms(profile) - covered_terms
+    lane = str(profile.get("lane_key") or "")
+    component = str(profile.get("component_key") or "")
+    new_roles = _coverage_profile_roles(profile) - selected_roles
+    affinity = max(
+        (
+            _shared_parent_prefix_depth(
+                _coverage_profile_path_identity(profile),
+                _coverage_profile_path_identity(item),
+            )
+            for item in selected
+        ),
+        default=0,
+    )
+    connected_to_selected = _coverage_profile_connected_to_selected(
+        profile,
+        selected=selected,
+    )
+    connection_priority = (
+        _coverage_profile_initial_connection_priority(profile)
+        if connected_to_selected
+        else 3
+    )
+    explicit_test_connection = (
+        lane == ContextRetrievalLane.PRODUCT_TEST.value
+        and isinstance(profile.get("connection_priority"), int)
+    )
+    return (
+        -_coverage_profile_anchor_priority(profile),
+        0 if profile.get("strong_symbol") else 1,
+        0 if profile.get("direct_query", True) else 1,
+        0 if lane and lane not in selected_lanes else 1,
+        connection_priority if explicit_test_connection else 3,
+        -_coverage_term_breadth_tier(new_terms),
+        0 if component and component not in selected_components else 1,
+        -_coverage_term_breadth_tier(_coverage_profile_terms(profile)),
+        connection_priority if not explicit_test_connection else 3,
+        -_coverage_pair_weight(new_pairs, frequencies),
+        -_coverage_pair_weight(pairs, frequencies),
+        0 if new_roles else 1,
+        int(profile.get("role_priority") or 0),
+        -int(profile.get("field_count") or 0),
+        -float(profile.get("query_coverage") or 0.0),
+        -float(profile.get("path_name_coverage") or 0.0),
+        -float(profile.get("path_area_coverage") or 0.0),
+        -float(profile.get("path_scope_coverage") or 0.0),
+        0 if _coverage_profile_direct_test_count(profile) > 0 else 1,
+        -_coverage_profile_candidate_neighbor_count(profile),
+        0 if _coverage_profile_graph_supported(profile) else 1,
+        -float(profile.get("score") or getattr(profile.get("primary"), "score", 0.0)),
+        -_coverage_profile_direct_test_count(profile),
+        -_coverage_profile_support_count(profile),
         -affinity,
-        -float(entry["query_coverage"]),
-        -int(entry["field_count"]),
-        -float(entry["path_name_coverage"]),
-        -float(entry["path_scope_coverage"]),
-        -primary.score,
-        primary.source_ref.path,
-        primary.source_ref.line_start,
+        str(profile.get("path") or ""),
+    )
+
+
+def _eligible_coverage_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return list(profiles)
+
+
+def _coverage_profiles_use_weak_single_term_fallback(profiles: list[dict[str, Any]]) -> bool:
+    selectable = [profile for profile in profiles if profile.get("selection_available", True)]
+    terms = {term for profile in selectable for term in _coverage_profile_terms(profile)}
+    return bool(selectable) and len(terms) <= 1 and all(
+        not profile.get("strong_symbol")
+        and not _coverage_profile_graph_supported(profile)
+        and _coverage_profile_term_count(profile) <= 1
+        and _coverage_profile_anchor_priority(profile)
+        < CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.EXACT]
+        for profile in selectable
+    )
+
+
+def _coverage_profile_contributes(
+    profile: dict[str, Any],
+    *,
+    selected: list[dict[str, Any]],
+) -> bool:
+    if not selected:
+        return True
+    return _coverage_profile_contribution(profile, selected=selected).contributes
+
+
+def _select_coverage_profiles(
+    profiles: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not profiles or limit <= 0:
+        return []
+    selectable = [profile for profile in profiles if profile.get("selection_available", True)]
+    if not selectable:
+        return []
+    if _coverage_profiles_use_weak_single_term_fallback(profiles):
+        limit = min(limit, 1)
+    frequencies = _coverage_pair_frequencies(profiles)
+    remaining = list(selectable)
+    first = min(remaining, key=lambda profile: _coverage_profile_initial_key(profile, frequencies=frequencies))
+    selected = [first]
+    remaining.remove(first)
+    while remaining and len(selected) < limit:
+        contributors = [
+            profile
+            for profile in remaining
+            if _coverage_profile_contributes(profile, selected=selected)
+        ]
+        if not contributors:
+            break
+        next_profile = min(
+            contributors,
+            key=lambda profile: _coverage_profile_related_key(
+                profile,
+                selected=selected,
+                frequencies=frequencies,
+            ),
+        )
+        selected.append(next_profile)
+        remaining.remove(next_profile)
+    return selected
+
+
+def _coverage_omission_diagnostics(
+    profiles: list[dict[str, Any]],
+    *,
+    selected_paths: set[str],
+) -> dict[str, Any]:
+    selected = [profile for profile in profiles if str(profile.get("path") or "") in selected_paths]
+    omitted = [profile for profile in profiles if str(profile.get("path") or "") not in selected_paths]
+    coverage_omissions: list[dict[str, Any]] = []
+    unrepresented_pairs: set[tuple[str, str]] = set()
+    unrepresented_lanes: set[str] = set()
+    unrepresented_roles: set[str] = set()
+    unrepresented_components: set[str] = set()
+    for profile in omitted:
+        if not profile.get("selection_available", True):
+            continue
+        contribution = _coverage_profile_contribution(profile, selected=selected)
+        if not contribution.contributes:
+            continue
+        coverage_omissions.append(profile)
+        if contribution.lexical:
+            unrepresented_pairs.update(contribution.new_pairs)
+        if contribution.new_lane:
+            unrepresented_lanes.add(contribution.new_lane)
+        unrepresented_roles.update(contribution.new_roles)
+        if contribution.component:
+            unrepresented_components.add(contribution.new_component)
+    field_term_evidence: dict[str, list[str]] = {}
+    for field_name, term in sorted(unrepresented_pairs):
+        field_term_evidence.setdefault(field_name, []).append(term)
+    return {
+        "omitted": omitted,
+        "coverage_omissions": coverage_omissions,
+        "unrepresented_field_term_evidence": field_term_evidence,
+        "unrepresented_lanes": sorted(unrepresented_lanes),
+        "unrepresented_roles": sorted(unrepresented_roles),
+        "unrepresented_components": sorted(unrepresented_components),
+    }
+
+
+def _anchor_selection_coverage(
+    *,
+    candidates: tuple[ContextGraphAnchorCandidate, ...],
+    anchors: tuple[ContextGraphAnchorCandidate, ...],
+    eligible_paths: set[str],
+    bounded_reason: str = "",
+) -> dict[str, Any]:
+    candidate_by_path = {candidate.anchor.path: candidate for candidate in candidates}
+    eligible = [candidate_by_path[path] for path in sorted(eligible_paths) if path in candidate_by_path]
+    selected_paths = {anchor.anchor.path for anchor in anchors}
+    profiles = [
+        {
+            "path": candidate.anchor.path,
+            "path_identity": candidate.anchor.path,
+            "component_key": str(Path(candidate.anchor.path).parent.as_posix()),
+            "lane_key": candidate.retrieval_lane,
+            "coverage_roles": {candidate.retrieval_lane} if candidate.retrieval_lane else set(),
+            "query_term_matches": candidate.query_term_matches,
+            "strong_symbol": candidate.anchor_provenance
+            is ContextGraphAnchorProvenance.PROVIDER_SYMBOL,
+            "coverage_identity_required": candidate.anchor_provenance
+            in {
+                ContextGraphAnchorProvenance.EXACT_IDENTITY,
+                ContextGraphAnchorProvenance.REVIEWED_KNOWLEDGE,
+            },
+            "anchor_strength": candidate.anchor_strength.value,
+            "graph_support": candidate.graph_support,
+            "structured_relationship_source": candidate.source_ref.section_kind
+            is ContextSectionKind.PROVIDER_RELATIONSHIP,
+            "selection_available": candidate.anchor.path in eligible_paths,
+        }
+        for candidate in candidates
+    ]
+    diagnostics = _coverage_omission_diagnostics(profiles, selected_paths=selected_paths)
+    omitted = diagnostics["omitted"]
+    coverage_omissions = diagnostics["coverage_omissions"]
+    partial = bool(coverage_omissions)
+    return {
+        "status": "partial" if partial else "complete",
+        "reason": (
+            bounded_reason
+            if partial and bounded_reason
+            else "anchor_budget_exhausted"
+            if partial and len(anchors) >= GRAPH_ANCHOR_LIMIT
+            else "anchor_unavailable"
+            if partial
+            else ""
+        ),
+        "candidate_count": len(candidates),
+        "eligible_count": len(eligible),
+        "selected_count": len(anchors),
+        "omitted_count": len(omitted),
+        "coverage_omitted_count": len(coverage_omissions),
+        "eligible_paths": [candidate.anchor.path for candidate in eligible],
+        "selected_paths": [anchor.anchor.path for anchor in anchors],
+        "omitted_paths": [str(profile.get("path") or "") for profile in omitted],
+        "coverage_omitted_paths": [
+            str(profile.get("path") or "") for profile in coverage_omissions
+        ],
+        "unrepresented_field_term_evidence": diagnostics["unrepresented_field_term_evidence"],
+        "unrepresented_lanes": diagnostics["unrepresented_lanes"],
+        "unrepresented_roles": diagnostics["unrepresented_roles"],
+        "unrepresented_components": diagnostics["unrepresented_components"],
+    }
+
+
+def _anchor_selection_coverage_after_filter(
+    resolution: ContextAnchorResolution,
+    anchors: tuple[ContextGraphAnchorCandidate, ...],
+    *,
+    eligible_paths: set[str] | None = None,
+) -> dict[str, Any]:
+    if eligible_paths is None:
+        eligible_paths = {
+            str(path)
+            for path in resolution.selection_coverage.get("eligible_paths", [])
+            if str(path)
+        }
+    return _anchor_selection_coverage(
+        candidates=resolution.candidates,
+        anchors=anchors,
+        eligible_paths=eligible_paths,
+        bounded_reason=(
+            str(resolution.selection_coverage.get("reason") or "")
+            if anchors
+            and resolution.selection_coverage.get("reason") == "weak_single_term_fallback"
+            else ""
+        ),
     )
 
 
@@ -2446,6 +3540,11 @@ def _candidate_group_item(candidate: ContextCandidate, *, target: RepoTarget, st
         "score": candidate.score,
         "score_breakdown": candidate.score_breakdown,
         "anchor_strength": candidate.anchor_strength.value,
+        "query_term_matches": {
+            field_name: list(terms)
+            for field_name, terms in sorted(candidate.query_term_matches.items())
+            if terms
+        },
         "evidence_kinds": sorted(kind.value for kind in set(candidate.evidence_kinds)),
         "excerpt": candidate.text,
         "graph_path": candidate.graph_path,
@@ -2465,10 +3564,11 @@ def _candidate_section(candidate: ContextCandidate) -> dict[str, Any]:
     section = {"kind": candidate.source_ref.kind}
     for key, value in (
         ("section", candidate.source_ref.section),
+        ("section_kind", candidate.source_ref.section_kind.value),
         ("line_start", candidate.source_ref.line_start),
         ("line_end", candidate.source_ref.line_end),
     ):
-        if value not in {"", 0}:
+        if value not in {"", 0, ContextSectionKind.UNSPECIFIED.value}:
             section[key] = value
     return section
 
@@ -2543,12 +3643,13 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
     primary = ranked[0]
     item = _candidate_group_item(primary, target=target, status="current")
     primary_continuations = _candidate_continuations(primary, target=target)
-    sections: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+    sections: dict[tuple[str, str, str, int, int], dict[str, Any]] = {}
     reasons: set[str] = set()
     roles: set[str] = set()
     continuations: list[dict[str, Any]] = []
     graph_paths: dict[str, dict[str, Any]] = {}
     breakdown: dict[str, float] = {}
+    query_term_matches: dict[str, set[str]] = {}
     evidence_kinds: set[ContextEvidenceKind] = set()
     anchor_strength = ContextAnchorStrength.NONE
     for candidate in ranked:
@@ -2556,6 +3657,7 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
         section_key = (
             str(section.get("kind") or ""),
             str(section.get("section") or ""),
+            str(section.get("section_kind") or ""),
             int(section.get("line_start") or 0),
             int(section.get("line_end") or 0),
         )
@@ -2569,6 +3671,8 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
                 graph_paths.setdefault(digest_data(relation), relation)
         for key, value in candidate.score_breakdown.items():
             breakdown[key] = max(breakdown.get(key, 0.0), float(value))
+        for field_name, terms in candidate.query_term_matches.items():
+            query_term_matches.setdefault(field_name, set()).update(terms)
         evidence_kinds.update(candidate.evidence_kinds)
         if CONTEXT_ANCHOR_STRENGTH_PRIORITY[candidate.anchor_strength] > CONTEXT_ANCHOR_STRENGTH_PRIORITY[anchor_strength]:
             anchor_strength = candidate.anchor_strength
@@ -2581,6 +3685,11 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
             "selection_reasons": sorted(reasons),
             "score": max(candidate.score for candidate in ranked),
             "score_breakdown": breakdown,
+            "query_term_matches": {
+                field_name: sorted(terms)
+                for field_name, terms in sorted(query_term_matches.items())
+                if terms
+            },
             "anchor_strength": anchor_strength.value,
             "evidence_kinds": sorted(kind.value for kind in evidence_kinds),
             "graph_path": merged_graph_paths,

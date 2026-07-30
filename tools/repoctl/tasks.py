@@ -12,6 +12,7 @@ from typing import Any
 
 from .io import LOCK_REL, RepoctlError, atomic_write
 from .git import ChangedEntry, RepoGitState, normalize_repo_path, repo_change_fingerprint_records, repo_changed_entries, repo_git_head, repo_git_status, repo_path_fingerprints
+from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoSelectorStatus, RepoTarget, default_repo_target, repo_layout, resolve_repo_selector_path
 from .settings import document_language, validate_document_language
@@ -27,6 +28,15 @@ SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
 TASK_STATE_SCHEMA_VERSION = 3
 COMPLETION_RECEIPT_SCHEMA_VERSION = 2
+RESUME_BINDING_SCHEMA_VERSION = 1
+
+
+class TaskHandoffStatus(StrEnum):
+    UNBOUND = "unbound"
+    CURRENT = "current"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+    HISTORICAL = "historical"
 
 
 class _CompletionEvidenceMode(StrEnum):
@@ -707,6 +717,10 @@ def _completion_receipt_path(root: Path, task_id: str) -> Path:
     return _state_dir(root) / "completions" / f"{task_id}.json"
 
 
+def _resume_binding_path(root: Path, task_id: str) -> Path:
+    return _state_dir(root) / "resume" / f"{task_id}.json"
+
+
 def _entry_to_dict(entry: ChangedEntry) -> dict[str, str]:
     change, path, old_path = entry
     data = {"change": change, "path": path}
@@ -731,6 +745,309 @@ def _sha256_text(text: str) -> str:
 
 def _valid_sha256(value: str) -> bool:
     return bool(re.fullmatch(r"sha256:[0-9a-f]{64}", value))
+
+
+def _normalized_task_section_body(task: Task, section_name: str) -> str | None:
+    try:
+        section = find_section(task.body, section_name)
+    except RepoctlError:
+        return None
+    body = task.body[section.body_start : section.end].strip()
+    return body + "\n" if body else ""
+
+
+def task_handoff_body(task: Task) -> str | None:
+    return _normalized_task_section_body(task, "Handoff")
+
+
+def task_verification_body(task: Task) -> str:
+    return _normalized_task_section_body(task, "Verification") or ""
+
+
+def _task_contract_digest(task: Task) -> str:
+    text = task.path.read_text(encoding="utf-8")
+    for section_name in ("Discovery", "Execution Log", "Verification", "Handoff"):
+        if has_section(text, section_name):
+            text = replace_section(text, section_name, f"<!-- repoctl resume component: {section_name} -->\n")
+    return digest_data({"task_contract": text})
+
+
+def _repo_state_projection(state: RepoGitState) -> dict[str, Any]:
+    return {
+        "available": state.available,
+        "reason": state.reason,
+        "repo_id": state.repo_id,
+        "repo_path": state.repo_path,
+    }
+
+
+def _resume_observation_unavailable(task: Task, state: RepoGitState) -> RepoctlError:
+    return RepoctlError(
+        f"task resume repository observation is unavailable: {state.reason or 'unknown repository state'}",
+        code="task_resume_observation_unavailable",
+        path=state.repo_path or task.rel_path,
+    )
+
+
+def _repository_resume_projection(root: Path, task: Task) -> dict[str, Any]:
+    target = _target_for_task(root, task)
+    if target is not None:
+        delta = repo_changes_since_task_start(root, task.id)
+        head, head_state = repo_git_head(root, target)
+        records, fingerprint_state = repo_change_fingerprint_records(
+            root,
+            list(delta.get("changes") or []),
+            target,
+        )
+        if not head_state.available:
+            raise _resume_observation_unavailable(task, head_state)
+        if not fingerprint_state.available:
+            raise _resume_observation_unavailable(task, fingerprint_state)
+        child_changes = [
+            item
+            for item in delta.get("child_attributed_changes", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "scope": "selected_repository",
+            "repository": {"id": target.id, "path": target.display_path},
+            "head": head,
+            "head_state": _repo_state_projection(head_state),
+            "baseline_available": bool(delta.get("baseline_available")),
+            "change_records": records,
+            "baseline_conflicts": sorted(str(value) for value in delta.get("baseline_conflicts", []) if str(value)),
+            "child_attributed_changes": sorted(
+                child_changes,
+                key=lambda item: json.dumps(item, ensure_ascii=True, sort_keys=True),
+            ),
+        }
+
+    surfaces = _root_task_product_surfaces(root)
+    if not surfaces:
+        return {"scope": "not_applicable", "repositories": []}
+    repositories: list[dict[str, Any]] = []
+    for surface in surfaces:
+        entries, entries_state = repo_changed_entries(root, surface)
+        records, fingerprint_state = repo_change_fingerprint_records(root, entries, surface)
+        head, head_state = repo_git_head(root, surface)
+        for state in (entries_state, fingerprint_state, head_state):
+            if not state.available:
+                raise _resume_observation_unavailable(task, state)
+        repositories.append(
+            {
+                "id": surface.id,
+                "path": surface.display_path,
+                "head": head,
+                "head_state": _repo_state_projection(head_state),
+                "change_records": records,
+            }
+        )
+    repositories.sort(key=lambda item: (str(item["path"]), str(item["id"])))
+    return {"scope": "workspace_repositories", "repositories": repositories}
+
+
+def task_resume_input_digests(root: Path, task: Task) -> dict[str, str]:
+    section_digests = {
+        "discovery": digest_data({"section": _normalized_task_section_body(task, "Discovery")}),
+        "execution_log": digest_data({"section": _normalized_task_section_body(task, "Execution Log")}),
+        "verification": digest_data({"section": _normalized_task_section_body(task, "Verification")}),
+    }
+    return {
+        "task_contract": _task_contract_digest(task),
+        **section_digests,
+        "repository": digest_data(_repository_resume_projection(root, task)),
+    }
+
+
+def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]) -> None:
+    rel = path.as_posix()
+    expected_keys = {
+        "schema",
+        "schema_version",
+        "task_id",
+        "handoff_digest",
+        "input_digests",
+        "context_pack",
+    }
+    if set(data) != expected_keys:
+        raise RepoctlError("task resume binding has invalid fields", code="task_resume_binding_invalid", path=rel)
+    if (
+        data.get("schema") != "repoctl.task.resume_binding"
+        or type(data.get("schema_version")) is not int
+        or data.get("schema_version") != RESUME_BINDING_SCHEMA_VERSION
+    ):
+        raise RepoctlError("task resume binding has invalid schema", code="task_resume_binding_invalid", path=rel)
+    if str(data.get("task_id") or "") != task_id:
+        raise RepoctlError("task resume binding task id does not match", code="task_resume_binding_invalid", path=rel)
+    if not _valid_sha256(str(data.get("handoff_digest") or "")):
+        raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
+    input_digests = data.get("input_digests")
+    expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository"}
+    if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
+        raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)
+    if any(not _valid_sha256(str(value or "")) for value in input_digests.values()):
+        raise RepoctlError("task resume binding has invalid input digest", code="task_resume_binding_invalid", path=rel)
+    context_pack = data.get("context_pack")
+    if context_pack is None:
+        return
+    if not isinstance(context_pack, dict) or set(context_pack) != {"path", "artifact_sha256", "input_digest"}:
+        raise RepoctlError("task resume binding has invalid Context Pack binding", code="task_resume_binding_invalid", path=rel)
+    pack_path = str(context_pack.get("path") or "")
+    candidate = Path(pack_path)
+    if (
+        not pack_path
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or "\\" in pack_path
+        or normalize_repo_path(pack_path) != pack_path
+    ):
+        raise RepoctlError("task resume binding has invalid Context Pack path", code="task_resume_binding_invalid", path=rel)
+    for key in ("artifact_sha256", "input_digest"):
+        if not _valid_sha256(str(context_pack.get(key) or "")):
+            raise RepoctlError("task resume binding has invalid Context Pack digest", code="task_resume_binding_invalid", path=rel)
+
+
+def load_task_resume_binding(root: Path, task_id: str) -> dict[str, Any] | None:
+    normalized_task_id = normalize_task_id(task_id)
+    path = _resume_binding_path(root, normalized_task_id)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RepoctlError("task resume binding is unreadable", code="task_resume_binding_invalid", path=path.relative_to(root).as_posix()) from exc
+    if not isinstance(data, dict):
+        raise RepoctlError("task resume binding must be an object", code="task_resume_binding_invalid", path=path.relative_to(root).as_posix())
+    _validate_resume_binding_data(path.relative_to(root), normalized_task_id, data)
+    return data
+
+
+def bind_task_handoff(
+    root: Path,
+    task_id: str,
+    *,
+    context_pack: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if not (root / LOCK_REL).is_dir():
+        raise RepoctlError(f"task Handoff binding requires repoctl lock: {LOCK_REL}", code="task_lock_required", path=LOCK_REL.as_posix())
+    task = resolve_live_task(root, task_id)
+    if task.status not in LIVE:
+        raise RepoctlError("only a live task Handoff can be bound", code="task_not_live", path=task.rel_path)
+    handoff_problems = _live_handoff_problems(task, root)
+    if handoff_problems:
+        problem = handoff_problems[0]
+        raise RepoctlError(problem.message, code=problem.code, path=problem.path)
+    handoff = task_handoff_body(task)
+    if handoff is None:
+        raise RepoctlError("live task must contain a Handoff section", code="missing_handoff", path=task.rel_path)
+    if context_pack is not None:
+        candidate_binding = {
+            "path": str(context_pack.get("path") or ""),
+            "artifact_sha256": str(context_pack.get("artifact_sha256") or ""),
+            "input_digest": str(context_pack.get("input_digest") or ""),
+        }
+    else:
+        candidate_binding = None
+    data: dict[str, Any] = {
+        "schema": "repoctl.task.resume_binding",
+        "schema_version": RESUME_BINDING_SCHEMA_VERSION,
+        "task_id": task.id,
+        "handoff_digest": digest_data({"handoff": handoff}),
+        "input_digests": task_resume_input_digests(root, task),
+        "context_pack": candidate_binding,
+    }
+    path = _resume_binding_path(root, task.id)
+    _validate_resume_binding_data(path.relative_to(root), task.id, data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {
+        "task_id": task.id,
+        "receipt_path": path.relative_to(root).as_posix(),
+        "current_revision": digest_data(data["input_digests"]),
+        "context_pack": candidate_binding,
+    }
+
+
+def task_handoff_observation(
+    root: Path,
+    task: Task,
+    *,
+    binding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    handoff = task_handoff_body(task)
+    if task.archived or task.status in NON_LIVE:
+        return {
+            "status": TaskHandoffStatus.HISTORICAL.value,
+            "active": False,
+            "body": handoff or "",
+            "reason_codes": [],
+            "receipt_ref": "",
+            "bound_revision": "",
+            "current_revision": "",
+            "changed_inputs": [],
+        }
+    handoff_problems = _live_handoff_problems(task, root)
+    if handoff_problems:
+        return {
+            "status": TaskHandoffStatus.UNKNOWN.value,
+            "active": False,
+            "body": handoff or "",
+            "reason_codes": [problem.code for problem in handoff_problems],
+            "receipt_ref": "",
+            "bound_revision": "",
+            "current_revision": "",
+            "changed_inputs": ["handoff"],
+        }
+    if binding is None:
+        try:
+            current_digests = task_resume_input_digests(root, task)
+            current_revision = digest_data(current_digests)
+        except RepoctlError:
+            current_revision = ""
+        return {
+            "status": TaskHandoffStatus.UNBOUND.value,
+            "active": False,
+            "body": handoff,
+            "reason_codes": ["handoff_unbound"],
+            "receipt_ref": "",
+            "bound_revision": "",
+            "current_revision": current_revision,
+            "changed_inputs": [],
+        }
+    bound_digests = binding["input_digests"]
+    try:
+        current_digests = task_resume_input_digests(root, task)
+    except RepoctlError:
+        return {
+            "status": TaskHandoffStatus.UNKNOWN.value,
+            "active": False,
+            "body": handoff,
+            "reason_codes": ["resume_observation_unavailable"],
+            "receipt_ref": _resume_binding_path(root, task.id).relative_to(root).as_posix(),
+            "bound_revision": digest_data(bound_digests),
+            "current_revision": "",
+            "changed_inputs": [],
+        }
+    changed_inputs = [
+        key
+        for key in ("task_contract", "discovery", "execution_log", "verification", "repository")
+        if str(bound_digests.get(key) or "") != str(current_digests.get(key) or "")
+    ]
+    reason_codes = [f"{key}_changed" for key in changed_inputs]
+    if str(binding.get("handoff_digest") or "") != digest_data({"handoff": handoff}):
+        changed_inputs.insert(0, "handoff")
+        reason_codes.insert(0, "handoff_changed")
+    status = TaskHandoffStatus.STALE if reason_codes else TaskHandoffStatus.CURRENT
+    return {
+        "status": status.value,
+        "active": status == TaskHandoffStatus.CURRENT,
+        "body": handoff,
+        "reason_codes": reason_codes,
+        "receipt_ref": _resume_binding_path(root, task.id).relative_to(root).as_posix(),
+        "bound_revision": digest_data(bound_digests),
+        "current_revision": digest_data(current_digests),
+        "changed_inputs": changed_inputs,
+    }
 
 
 def _valid_receipt_task_path(value: str, *, task_id: str = "", allow_empty: bool = False) -> bool:
@@ -1873,6 +2190,11 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     copy = _copy(_task_language(root, task))
     if task.status not in {"todo", "blocked"}:
         raise RepoctlError("task start requires status todo or blocked; an active task baseline cannot be refreshed", code="task_already_started", path=task.rel_path)
+    if task.status == "blocked":
+        handoff_problems = _live_handoff_problems(task, root)
+        if handoff_problems:
+            problem = handoff_problems[0]
+            raise RepoctlError(problem.message, code=problem.code, path=problem.path)
     existing_state = _read_task_state(root, task.id)
     target = _target_for_task(root, task)
     repo_scoped = _repo_scoped_task(task)
@@ -2350,17 +2672,30 @@ def _task_workspace_root(task: Task) -> Path:
 
 
 def _live_handoff_problems(task: Task, root: Path) -> list[Problem]:
+    labels = ("Next exact step", "First file to open", "First command to run", "Done when")
     try:
         fields = parse_labeled_list_section(
             task.body,
             "Handoff",
-            ("Next exact step", "First file to open", "First command to run", "Done when"),
+            labels,
         )
     except RepoctlError:
         return [Problem("error", "missing_handoff", "live task must contain a Handoff section", task.rel_path)]
+    invalid_fields = [
+        label
+        for label in labels
+        if len(fields.get(label, [])) != 1 or not _strip_ticks(fields[label][0]).strip()
+    ]
+    if invalid_fields:
+        return [
+            Problem(
+                "error",
+                "invalid_handoff_structure",
+                "live Handoff must contain exactly one non-empty value for each canonical field: " + ", ".join(labels),
+                task.rel_path,
+            )
+        ]
     first_file_values = fields.get("First file to open", [])
-    if len(first_file_values) != 1:
-        return [Problem("error", "missing_handoff_first_file", "live Handoff must contain First file to open", task.rel_path)]
     value = _strip_ticks(first_file_values[0])
     path = Path(value)
     if not value or path.is_absolute() or ".." in path.parts:
@@ -2690,12 +3025,24 @@ def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
     problems: list[Problem] = []
     for task in live_tasks(tasks):
         path = _baseline_path(root, task.id)
-        if not path.is_file():
-            continue
-        try:
-            _read_task_state(root, task.id)
-        except RepoctlError as exc:
-            problems.append(Problem("error", exc.code or "task_state_invalid", str(exc), exc.path or path.relative_to(root).as_posix()))
+        if path.is_file():
+            try:
+                _read_task_state(root, task.id)
+            except RepoctlError as exc:
+                problems.append(Problem("error", exc.code or "task_state_invalid", str(exc), exc.path or path.relative_to(root).as_posix()))
+        resume_path = _resume_binding_path(root, task.id)
+        if resume_path.is_file():
+            try:
+                load_task_resume_binding(root, task.id)
+            except RepoctlError as exc:
+                problems.append(
+                    Problem(
+                        "error",
+                        exc.code or "task_resume_binding_invalid",
+                        str(exc),
+                        exc.path or resume_path.relative_to(root).as_posix(),
+                    )
+                )
     return problems
 
 

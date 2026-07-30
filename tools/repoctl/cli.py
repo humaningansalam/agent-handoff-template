@@ -17,7 +17,7 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
 from .graph_model import digest_data
@@ -29,7 +29,7 @@ from .knowledge_render import render_knowledge
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, unbound_repository_state_namespaces
-from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
+from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -69,6 +69,8 @@ class NextActionKind(StrEnum):
     GRAPH_REBUILD = "graph_rebuild"
     GRAPH_REFRESH = "graph_refresh"
     CONTEXT_RESUME = "context_resume"
+    TASK_HANDOFF_BIND = "task_handoff_bind"
+    CONTEXT_PACK_REFRESH = "context_pack_refresh"
 
 
 class BaselineOwnership(StrEnum):
@@ -402,6 +404,37 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "task_not_found":
             add("List live tasks", command="./scripts/repoctl task list --json")
             add("Open Board task registry", path="docs/BOARD.md")
+        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_resume_binding_invalid"}:
+            add(
+                "Bind the reviewed Handoff to the current task and repository inputs",
+                command=f"./scripts/repoctl task handoff bind {task_id} --json",
+                kind=NextActionKind.TASK_HANDOFF_BIND,
+                source="data.resume_guidance.handoff.status",
+            )
+        elif code == "task_resume_observation_unavailable":
+            add("Inspect current task and repository state", command=f"./scripts/repoctl task show {task_id} --summary --json")
+        elif code in {"context_pack_stale", "context_pack_missing", "context_pack_invalid", "context_pack_unknown"}:
+            resume = _mapping_at(data, "resume_guidance")
+            context_pack = _mapping_at(resume, "context_pack")
+            pack_path = str(context_pack.get("path") or ".repoctl-state/context-pack/<task>.json")
+            task_data = _mapping_at(data, "task")
+            repo_id = str(task_data.get("repo_id") or "main")
+            if pack_path.endswith(".md"):
+                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --format markdown --output {shlex.quote(pack_path)}"
+            else:
+                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --output {shlex.quote(pack_path)} --json"
+            add(
+                "Regenerate the optional bound Context Pack after reviewing current scope",
+                command=command,
+                kind=NextActionKind.CONTEXT_PACK_REFRESH,
+                source="data.resume_guidance.context_pack.status",
+            )
+            add(
+                "Bind the reviewed Handoff and regenerated Context Pack",
+                command=f"./scripts/repoctl task handoff bind {task_id} --context-pack {shlex.quote(pack_path)} --json",
+                kind=NextActionKind.TASK_HANDOFF_BIND,
+                source="data.resume_guidance.context_pack.path",
+            )
         elif code == "repository_not_found":
             add("Inspect configured repositories", command="./scripts/repoctl repo list --json")
             add("Adopt detected product repositories", command="./scripts/repoctl repo adopt --all --json")
@@ -1749,6 +1782,132 @@ def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[st
     }
 
 
+def _task_resume_guidance(
+    root: Path,
+    task: Any,
+    *,
+    target: RepoTarget | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[Problem]]:
+    warnings: list[dict[str, Any]] = []
+    problems: list[Problem] = []
+    binding: dict[str, Any] | None = None
+    historical = bool(task.archived or task.status in {"done", "canceled"})
+    if not historical:
+        try:
+            binding = load_task_resume_binding(root, task.id)
+        except RepoctlError as exc:
+            problems.append(
+                Problem(
+                    "error",
+                    exc.code or "task_resume_binding_invalid",
+                    str(exc),
+                    exc.path or task.rel_path,
+                )
+            )
+    handoff = task_handoff_observation(root, task, binding=binding)
+    if problems and handoff["status"] != "historical":
+        handoff.update(
+            {
+                "status": "unknown",
+                "active": False,
+                "reason_codes": ["resume_binding_invalid"],
+                "changed_inputs": ["binding"],
+            }
+        )
+    elif handoff["status"] == "unknown":
+        structural_codes = [
+            code
+            for code in handoff.get("reason_codes", [])
+            if code != "resume_observation_unavailable"
+        ]
+        if structural_codes:
+            problems.append(
+                Problem(
+                    "error",
+                    structural_codes[0],
+                    "live Task Handoff is missing, malformed, or not safely resolvable",
+                    task.rel_path,
+                )
+            )
+    context_pack_binding = binding.get("context_pack") if isinstance(binding, dict) else None
+    if handoff["status"] == "historical":
+        context_pack = {"status": "not_bound", "active": False, "path": "", "reason_codes": []}
+        overall_status = "historical"
+    elif context_pack_binding is None:
+        context_pack = {"status": "not_bound", "active": False, "path": "", "reason_codes": []}
+        overall_status = handoff["status"]
+    elif target is None:
+        context_pack = {
+            "status": "unknown",
+            "active": False,
+            "path": str(context_pack_binding.get("path") or ""),
+            "reason_codes": ["pack_repository_unavailable"],
+        }
+        overall_status = "unknown" if handoff["status"] == "current" else handoff["status"]
+    else:
+        context_pack = inspect_task_context_pack_binding(
+            root,
+            target=target,
+            task_id=task.id,
+            binding=context_pack_binding,
+        )
+        overall_status = handoff["status"]
+        if handoff["status"] == "current" and context_pack["status"] != "current":
+            overall_status = "unknown" if context_pack["status"] == "unknown" else "stale"
+    handoff["active"] = overall_status == "current"
+    context_pack["active"] = overall_status == "current" and context_pack.get("status") == "current"
+
+    if overall_status == "unbound":
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_handoff_unbound",
+                "message": "Handoff is readable but is not bound to the current task and repository inputs",
+                "path": task.rel_path,
+            }
+        )
+    elif overall_status == "stale":
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_handoff_stale",
+                "message": "Handoff binding no longer matches the current task, repository, or bound Context Pack inputs",
+                "path": task.rel_path,
+            }
+        )
+    elif overall_status == "unknown" and not problems:
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_resume_observation_unavailable",
+                "message": "repoctl cannot verify whether the current Handoff binding is still current",
+                "path": task.rel_path,
+            }
+        )
+    pack_status = str(context_pack.get("status") or "not_bound")
+    if pack_status in {"stale", "missing", "invalid", "unknown"}:
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": f"context_pack_{pack_status}",
+                "message": "the explicitly bound Context Pack is not current active resume evidence",
+                "path": str(context_pack.get("path") or task.rel_path),
+            }
+        )
+
+    changed_inputs = list(handoff.get("changed_inputs") or [])
+    if pack_status in {"stale", "missing", "invalid", "unknown"} and "context_pack" not in changed_inputs:
+        changed_inputs.append("context_pack")
+    guidance = {
+        "status": overall_status,
+        "current_revision": str(handoff.get("current_revision") or ""),
+        "changed_inputs": changed_inputs,
+        "handoff": handoff,
+        "context_pack": context_pack,
+    }
+    return guidance, warnings, problems
+
+
 def cmd_task_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task = resolve_task(root, args.task_id)
@@ -1765,6 +1924,8 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         scope_warning = _task_scope_drift_warning(root, task, delta)
         if scope_warning is not None:
             warnings.append(scope_warning)
+    resume_guidance, resume_warnings, resume_problems = _task_resume_guidance(root, task, target=target)
+    warnings.extend(resume_warnings)
     repo_changes = (
         _repo_change_summary(
             delta,
@@ -1774,7 +1935,12 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         if delta
         else None
     )
-    summary = {"task": task.to_list_dict(), "path": task.rel_path, "repo_changes": repo_changes}
+    summary = {
+        "task": task.to_list_dict(),
+        "path": task.rel_path,
+        "repo_changes": repo_changes,
+        "resume_guidance": resume_guidance,
+    }
     if delta:
         action_inputs = _task_action_inputs(delta)
         if action_inputs:
@@ -1784,32 +1950,44 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         section = find_section(text, args.section)
         body = text[section.body_start : section.end].strip()
         payload = {
-            "ok": True,
+            "ok": not _has_errors(resume_problems),
             "command": "task.show",
             "data": {**summary, "section": {"name": args.section, "body": body}},
-            "problems": [],
+            "problems": [problem.to_dict() for problem in resume_problems],
             "warnings": warnings,
         }
     elif args.summary:
-        payload = {"ok": True, "command": "task.show", "data": summary, "problems": [], "warnings": warnings}
-    else:
         payload = {
-            "ok": True,
+            "ok": not _has_errors(resume_problems),
             "command": "task.show",
-            "data": {**summary, "frontmatter": task.frontmatter, "body": task.body},
-            "problems": [],
+            "data": summary,
+            "problems": [problem.to_dict() for problem in resume_problems],
             "warnings": warnings,
         }
-    payload["next_actions"] = _next_actions_for_problems(warnings, data={**summary, "task_id": task.id})
+    else:
+        payload = {
+            "ok": not _has_errors(resume_problems),
+            "command": "task.show",
+            "data": {**summary, "frontmatter": task.frontmatter, "body": task.body},
+            "problems": [problem.to_dict() for problem in resume_problems],
+            "warnings": warnings,
+        }
+    payload["next_actions"] = _next_actions_for_problems(
+        [*[problem.to_dict() for problem in resume_problems], *warnings],
+        data={**summary, "task_id": task.id},
+    )
     if args.json:
         _json(payload)
     elif args.section:
+        if args.section == "Handoff":
+            print(f"Handoff status: {resume_guidance['status']} active={str(resume_guidance['handoff']['active']).lower()}")
         print(f"## {args.section}\n\n{payload['data']['section']['body']}".rstrip())
     elif args.summary:
-        print(f"{task.id} {task.status} {task.rel_path}")
+        print(f"{task.id} {task.status} {task.rel_path} handoff={resume_guidance['status']}")
     else:
+        print(f"Handoff status: {resume_guidance['status']} active={str(resume_guidance['handoff']['active']).lower()}")
         print(task.path.read_text(encoding="utf-8"))
-    return 0
+    return 1 if _has_errors(resume_problems) else 0
 
 
 def cmd_task_log_append(args: argparse.Namespace) -> int:
@@ -1830,6 +2008,53 @@ def cmd_task_log_append(args: argparse.Namespace) -> int:
     else:
         print(f"Logged: {task_id} {result['timestamp']}")
     return 0
+
+
+def cmd_task_handoff_bind(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    with repoctl_lock(root):
+        task = resolve_task(root, args.task_id)
+        try:
+            target = _repo_target_for_task_command(root, task)
+        except RepoctlError:
+            target = None
+        context_pack_binding: dict[str, str] | None = None
+        if args.context_pack:
+            if target is None:
+                raise RepoctlError(
+                    "binding a Context Pack requires a repo-scoped task",
+                    code="context_pack_binding_repository_required",
+                    path=task.rel_path,
+                )
+            requested = Path(args.context_pack)
+            pack_path = requested if requested.is_absolute() else root / requested
+            context_pack_binding, problems = prepare_task_context_pack_binding(
+                root,
+                target=target,
+                task_id=task.id,
+                path=pack_path,
+            )
+            errors = [problem for problem in problems if problem.severity == "error"]
+            if errors:
+                problem = errors[0]
+                raise RepoctlError(problem.message, code=problem.code, path=problem.path)
+        result = bind_task_handoff(root, task.id, context_pack=context_pack_binding)
+    task = resolve_task(root, task.id)
+    guidance, warnings, guidance_problems = _task_resume_guidance(root, task, target=target)
+    data = {**result, "resume_guidance": guidance}
+    payload = {
+        "ok": not _has_errors(guidance_problems),
+        "command": "task.handoff.bind",
+        "data": data,
+        "problems": [problem.to_dict() for problem in guidance_problems],
+        "warnings": warnings,
+        "next_actions": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"Bound Handoff: {task.id} status={guidance['status']}")
+    return 1 if _has_errors(guidance_problems) else 0
 
 
 def cmd_task_discovery_add(args: argparse.Namespace) -> int:
@@ -2326,13 +2551,16 @@ def cmd_backlog_remove(args: argparse.Namespace) -> int:
 
 def cmd_task_start(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    task_id = resolve_task(root, args.task_id).id
+    task = resolve_task(root, args.task_id)
+    task_id = task.id
     with repoctl_lock(root):
+        load_task_resume_binding(root, task_id)
         result = start_task(root, task_id, force_dirty=args.force_dirty)
         atomic_write(result["task"].path, result["text"])
+    started_task = resolve_task(root, task_id)
     delta = repo_changes_since_task_start(root, task_id)
     try:
-        target = _repo_target_for_task_command(root, result["task"])
+        target = _repo_target_for_task_command(root, started_task)
     except RepoctlError:
         target = None
     visible_dirty, dirty_count, dirty_truncated = _project_string_collection(result["dirty"], compact=True)
@@ -2344,29 +2572,46 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         "dirty_truncated": dirty_truncated,
         "repo_changes": _repo_change_summary(
             delta,
-            observation=_task_repo_observation(root, result["task"], target, delta),
+            observation=_task_repo_observation(root, started_task, target, delta),
         ),
     }
     next_actions: list[dict[str, str]] = []
-    if _repo_scoped_frontmatter(result["task"]):
+    if _repo_scoped_frontmatter(started_task):
         repo_path = "repos"
-        repo_id = str(result["task"].frontmatter.get("repo_id") or "main")
+        repo_id = str(started_task.frontmatter.get("repo_id") or "main")
         try:
-            target = _repo_target_for_task_command(root, result["task"])
+            target = _repo_target_for_task_command(root, started_task)
             if target is not None:
                 repo_path = target.display_path
                 repo_id = target.id
         except RepoctlError:
             pass
         next_actions = _discovery_guidance_actions(task_id, repo_id=repo_id, repo_path=repo_path)
-    payload = {"ok": True, "command": "task.start", "data": data, "problems": [], "warnings": [problem.to_dict() for problem in result.get("warnings", [])], "next_actions": next_actions}
+    resume_guidance, resume_warnings, resume_problems = _task_resume_guidance(root, started_task, target=target)
+    data["resume_guidance"] = resume_guidance
+    next_actions.append(
+        {
+            "label": "Bind the reviewed Handoff before pausing or transferring the task",
+            "command": f"./scripts/repoctl task handoff bind {task_id} --json",
+            "kind": NextActionKind.TASK_HANDOFF_BIND.value,
+            "source": "data.resume_guidance.handoff.status",
+        }
+    )
+    payload = {
+        "ok": not _has_errors(resume_problems),
+        "command": "task.start",
+        "data": data,
+        "problems": [problem.to_dict() for problem in resume_problems],
+        "warnings": [problem.to_dict() for problem in result.get("warnings", [])] + resume_warnings,
+        "next_actions": next_actions,
+    }
     if args.json:
         _json(payload)
     else:
         print(f"Started: {task_id}")
         if next_actions:
             print(f"Next: {next_actions[0]['command']}")
-    return 0
+    return 1 if _has_errors(resume_problems) else 0
 
 
 def _task_verification_input(root: Path, task_id: str) -> VerificationInput:
@@ -5679,6 +5924,13 @@ def build_parser() -> argparse.ArgumentParser:
     task_log_append.add_argument("message")
     task_log_append.add_argument("--json", action="store_true")
     task_log_append.set_defaults(func=cmd_task_log_append)
+    task_handoff = task_sub.add_parser("handoff")
+    task_handoff_sub = task_handoff.add_subparsers(dest="task_handoff_command", required=True, parser_class=RepoctlArgumentParser)
+    task_handoff_bind = task_handoff_sub.add_parser("bind")
+    task_handoff_bind.add_argument("task_id")
+    task_handoff_bind.add_argument("--context-pack", help="workspace-local Context Pack to bind as optional active resume evidence")
+    task_handoff_bind.add_argument("--json", action="store_true")
+    task_handoff_bind.set_defaults(func=cmd_task_handoff_bind)
     task_discovery = task_sub.add_parser("discovery")
     task_discovery_sub = task_discovery.add_subparsers(dest="task_discovery_command", required=True, parser_class=RepoctlArgumentParser)
     task_discovery_add = task_discovery_sub.add_parser("add")

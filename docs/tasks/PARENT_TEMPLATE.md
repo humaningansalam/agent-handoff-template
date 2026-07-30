@@ -100,4 +100,5 @@ Update on a best-effort basis; omissions are not rule violations.
 Use this template only when the work needs a root-only coordinating parent across multiple independently verifiable repo-scoped child tasks.
 Child tasks should use `docs/tasks/TEMPLATE.md` with `parent: "T-..."` filled in.
 The child's `parent` field is the authoritative link; this file's child lists are convenience summaries.
+Before pausing or transferring the parent, review its four Handoff fields and run `./scripts/repoctl task handoff bind T-... --json`.
 -->

@@ -39,6 +39,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     data = payload["data"]
     assert artifact == payload
     assert payload["command"] == "context pack"
+    assert data["schema_version"] == 3
     assert data["authoritative"] is False
     assert data["view"] == "compact"
     assert data["pack_digest"].startswith("sha256:")
@@ -59,6 +60,21 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert any(ref["path"] == "docs/contracts/repoctl-context-contract.md" for ref in data["metrics"]["must_read_source_refs"])
     assert "bundle" not in data
     assert payload["warnings"][0]["code"] == "context_pack_not_authoritative"
+
+    assert main(
+        [
+            "task",
+            "handoff",
+            "bind",
+            "T-20260622010101Z",
+            "--context-pack",
+            ".repoctl-state/context-pack/T-20260622010101Z.json",
+            "--json",
+        ]
+    ) == 0
+    binding = json.loads(capsys.readouterr().out)
+    assert binding["data"]["resume_guidance"]["status"] == "current"
+    assert binding["data"]["resume_guidance"]["context_pack"]["status"] == "current"
 
 
 def test_context_pack_keeps_chosen_and_supporting_sets_disjoint(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -151,6 +167,33 @@ def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path
     assert exact["render_projection"] == "required_reference_manifest"
     assert exact["stop_reason"] == "budget_reached"
     assert exact["budget"]["final_render_estimated_tokens"] <= exact_budget
+
+    output = tmp_path / ".repoctl-state/context-pack/reference-compact.json"
+    assert main(
+        [
+            "context",
+            "pack",
+            "--task",
+            task_id,
+            "--repo-id",
+            "main",
+            "--budget-tokens",
+            "450",
+            "--output",
+            output.as_posix(),
+            "--json",
+        ]
+    ) == 0
+    compact = json.loads(capsys.readouterr().out)
+    assert compact["data"]["render_projection"] == "required_reference_manifest"
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", output.as_posix(), "--json"]) == 0
+    binding = json.loads(capsys.readouterr().out)
+    assert binding["data"]["resume_guidance"]["context_pack"]["status"] == "current"
+    (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")
+    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert stale["context_pack"]["status"] == "stale"
+    assert "pack_inputs_changed" in stale["context_pack"]["reason_codes"]
 
 
 def test_context_pack_reports_irreducible_required_reference_overflow(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -455,6 +498,22 @@ def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, 
     assert "## Definitions, Callers, Imports, Dependents" in artifact
     assert "login --CALLS--> validate_token" in artifact
     assert "Context Pack is read-only evidence" not in artifact
+    assert artifact.startswith("<!-- repoctl-context-pack-envelope {")
+
+    assert main(
+        [
+            "task",
+            "handoff",
+            "bind",
+            "T-20260622010103Z",
+            "--context-pack",
+            ".repoctl-state/context-pack/T-20260622010103Z.md",
+            "--json",
+        ]
+    ) == 0
+    binding = json.loads(capsys.readouterr().out)
+    assert binding["data"]["resume_guidance"]["status"] == "current"
+    assert binding["data"]["resume_guidance"]["context_pack"]["status"] == "current"
 
     assert main(["context", "pack", "--task", "T-20260622010103Z", "--repo-id", "main", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -577,3 +636,252 @@ def test_context_pack_does_not_load_unrelated_knowledge_history(tmp_path: Path, 
     assert payload["problems"] == []
     assert "reviewed_knowledge" not in payload["data"]["groups"]
     assert output.exists()
+
+
+def test_bound_context_pack_detects_same_head_source_drift_without_rewriting_artifact(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    app = repo / "app.py"
+    app.write_text("def run():\n    return 1\n", encoding="utf-8")
+    task_id = "T-20260622013131Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="bound-drift",
+        title="Track bound context source drift",
+        query="run owner",
+        goal="Reject a bound pack after its source changes.",
+    )
+    output = tmp_path / ".repoctl-state/context-pack/bound-drift.md"
+    assert main(
+        [
+            "context",
+            "pack",
+            "--task",
+            task_id,
+            "--repo-id",
+            "main",
+            "--budget-tokens",
+            "1800",
+            "--format",
+            "markdown",
+            "--output",
+            output.as_posix(),
+        ]
+    ) == 0
+    capsys.readouterr()
+    artifact = output.read_bytes()
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", output.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
+    current = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert current["status"] == "current"
+    assert current["context_pack"]["status"] == "current"
+    assert output.read_bytes() == artifact
+
+    app.write_text("def run():\n    return 2\n", encoding="utf-8")
+    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert stale["status"] == "stale"
+    assert stale["context_pack"]["status"] == "stale"
+    assert {"pack_inputs_changed", "pack_source_changed"} & set(stale["context_pack"]["reason_codes"])
+    assert output.read_bytes() == artifact
+
+
+def test_context_pack_binding_rejects_missing_tampered_wrong_task_and_legacy_markdown(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    task_id = "T-20260622014141Z"
+    other_id = "T-20260622014142Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="binding-rejection",
+        title="Reject invalid pack bindings",
+        query="run owner",
+        goal="Bind only the exact current task pack.",
+    )
+    _write_context_pack_task(
+        tmp_path,
+        task_id=other_id,
+        slug="other-binding",
+        title="Other task pack",
+        query="run owner",
+        goal="Produce a different task identity.",
+    )
+    valid = tmp_path / ".repoctl-state/context-pack/valid.json"
+    other = tmp_path / ".repoctl-state/context-pack/other.json"
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--output", valid.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    assert main(["context", "pack", "--task", other_id, "--repo-id", "main", "--output", other.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", ".repoctl-state/context-pack/missing.json", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_missing"
+
+    tampered = tmp_path / ".repoctl-state/context-pack/tampered.json"
+    tampered_payload = json.loads(valid.read_text(encoding="utf-8"))
+    tampered_payload["data"]["stop_reason"] = "tampered"
+    tampered.write_text(json.dumps(tampered_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", tampered.as_posix(), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_artifact_digest_mismatch"
+
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", other.as_posix(), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_binding_identity_mismatch"
+
+    legacy = tmp_path / ".repoctl-state/context-pack/legacy.md"
+    legacy.write_text("# Agent Context Pack\n\nHistorical text only.\n", encoding="utf-8")
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", legacy.as_posix(), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_binding_metadata_missing"
+
+    markdown = tmp_path / ".repoctl-state/context-pack/valid.md"
+    assert main(
+        [
+            "context",
+            "pack",
+            "--task",
+            task_id,
+            "--repo-id",
+            "main",
+            "--format",
+            "markdown",
+            "--output",
+            markdown.as_posix(),
+        ]
+    ) == 0
+    capsys.readouterr()
+    markdown_text = markdown.read_text(encoding="utf-8")
+    body_tampered = tmp_path / ".repoctl-state/context-pack/body-tampered.md"
+    body_tampered.write_text(markdown_text + "tampered\n", encoding="utf-8")
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", body_tampered.as_posix(), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_binding_invalid"
+
+    first_line, body = markdown_text.split("\n", 1)
+    prefix = "<!-- repoctl-context-pack-envelope "
+    envelope = json.loads(first_line[len(prefix) : -4])
+    envelope["input_digest"] = "sha256:" + "3" * 64
+    envelope_tampered = tmp_path / ".repoctl-state/context-pack/envelope-tampered.md"
+    envelope_tampered.write_text(
+        prefix + json.dumps(envelope, separators=(",", ":"), sort_keys=True) + " -->\n" + body,
+        encoding="utf-8",
+    )
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", envelope_tampered.as_posix(), "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_stale"
+
+
+def test_context_pack_binding_uses_canonical_candidate_digests_for_scoped_fallback_and_verification(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "README.md").write_text("# Product\n\nScoped fallback text.\n", encoding="utf-8")
+    (repo / "app.py").write_bytes(b"def run():\r\n    return 1\r\n")
+    package = repo / "package.json"
+    package.write_text('{"name":"demo","scripts":{"test":"vitest run"}}\n', encoding="utf-8")
+    task_id = "T-20260622014646Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="canonical-input-digests",
+        title="Keep source digest ownership canonical",
+        query="run verification",
+        goal="Bind current scoped source and manifest-derived verification evidence.",
+    )
+    output = tmp_path / ".repoctl-state/context-pack/canonical-inputs.json"
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", output.as_posix(), "--json"]) == 0
+    current = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert current["status"] == "current"
+    assert current["context_pack"]["status"] == "current"
+
+    package.write_text('{"name":"demo","scripts":{"test":"vitest run --coverage"}}\n', encoding="utf-8")
+    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert stale["context_pack"]["status"] == "stale"
+    assert "pack_inputs_changed" in stale["context_pack"]["reason_codes"]
+
+
+def test_required_reference_manifest_markdown_has_verifiable_envelope_and_binds(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    context_docs = []
+    for index in range(14):
+        rel = f"docs/contracts/envelope-required-{index}.md"
+        context_docs.append(rel)
+        (tmp_path / rel).write_text(f"# Required {index}\n\nEvidence {index}.\n", encoding="utf-8")
+    task_id = "T-20260622015151Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="reference-envelope",
+        title="Bind a reference manifest",
+        query="run",
+        goal="Keep required references verifiable.",
+        context_doc=context_docs[0],
+    )
+    task_path = next((tmp_path / "docs/tasks").glob(f"{task_id}--*.md"))
+    task_path.write_text(
+        task_path.read_text(encoding="utf-8").replace(
+            f"- `{context_docs[0]}`",
+            "\n".join(f"- `{path}`" for path in context_docs),
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / ".repoctl-state/context-pack/reference-manifest.md"
+    assert main(
+        [
+            "context",
+            "pack",
+            "--task",
+            task_id,
+            "--repo-id",
+            "main",
+            "--budget-tokens",
+            "450",
+            "--format",
+            "markdown",
+            "--output",
+            output.as_posix(),
+        ]
+    ) == 0
+    capsys.readouterr()
+    text = output.read_text(encoding="utf-8")
+    first_line = text.splitlines()[0]
+    prefix = "<!-- repoctl-context-pack-envelope "
+    assert first_line.startswith(prefix) and first_line.endswith(" -->")
+    envelope = json.loads(first_line[len(prefix) : -4])
+    assert envelope["schema"] == "repoctl.context.task_pack.markdown_envelope"
+    assert envelope["task_pack_schema_version"] == 3
+    assert envelope["task_id"] == task_id
+    assert envelope["repo_id"] == "main"
+    assert set(envelope) == {
+        "schema",
+        "schema_version",
+        "task_pack_schema_version",
+        "task_id",
+        "repo_id",
+        "input_digest",
+        "body_sha256",
+    }
+    assert len(first_line) < 600
+    assert "details and digests remain in full JSON" in text
+
+    assert main(["task", "handoff", "bind", task_id, "--context-pack", output.as_posix(), "--json"]) == 0
+    binding = json.loads(capsys.readouterr().out)
+    assert binding["data"]["resume_guidance"]["status"] == "current"
+    assert binding["data"]["resume_guidance"]["context_pack"]["status"] == "current"

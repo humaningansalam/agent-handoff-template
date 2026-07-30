@@ -654,7 +654,16 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
     assert graph_anchor["status"] == "resolved"
     assert graph_anchor["code"] == "context_graph_anchor_resolved"
     assert graph_anchor["seed_paths"] == ["lib/client.dart"]
-    assert graph_anchor["candidate_paths"] == ["lib/client.dart"]
+    assert graph_anchor["candidate_paths"] == [
+        "lib/client.dart",
+        "supabase/migrations/20240201000000_active.sql",
+        "supabase/migrations/20240101000000_functions.sql",
+    ]
+    assert graph_anchor["selection_coverage"]["status"] == "complete"
+    assert graph_anchor["selection_coverage"]["omitted_paths"] == [
+        "supabase/migrations/20240201000000_active.sql",
+        "supabase/migrations/20240101000000_functions.sql",
+    ]
     assert graph_anchor["seed_anchors"] == [
         {
             "path": "lib/client.dart",
@@ -672,6 +681,10 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
     )
     assert context_candidate["targets"][0]["path"] == "supabase/migrations/20240201000000_active.sql"
     assert context_candidate["resolution"]["reason_code"] == "schema_not_observed"
+    assert {
+        item["source_ref"]["path"]
+        for item in context_bundle["groups"]["likely_change_surface"]
+    } == {"repos/lib/client.dart"}
 
     provider_path = tmp_path / ".repoctl-state/graph/main/providers/dart_analyzer.json"
     provider_data = json.loads(provider_path.read_text(encoding="utf-8"))

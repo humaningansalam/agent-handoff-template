@@ -258,6 +258,11 @@ def rank_context_chunks(
         path_name_coverage = _term_coverage(ordered_terms, path_name_terms)
         section_coverage = _term_coverage(ordered_terms, section_terms)
         body_coverage = _term_coverage(ordered_terms, body_terms)
+        query_term_matches = {
+            "path": _matched_query_terms(ordered_terms, path_terms),
+            "section": _matched_query_terms(ordered_terms, section_terms),
+            "body": _matched_query_terms(ordered_terms, body_terms),
+        }
         identity_kinds = context_identity_evidence(
             selectors,
             path=chunk.source_ref.path,
@@ -335,6 +340,7 @@ def rank_context_chunks(
                     section_kind=chunk.source_ref.section_kind,
                     section_coverage=section_coverage,
                 ),
+                query_term_matches=query_term_matches,
                 document_role=document_role,
             )
         )
@@ -463,6 +469,10 @@ def _term_coverage(query_terms: tuple[str, ...], field_terms: set[str]) -> float
     if not query_terms:
         return 0.0
     return sum(1 for term in query_terms if term in field_terms) / len(query_terms)
+
+
+def _matched_query_terms(query_terms: tuple[str, ...], field_terms: set[str]) -> tuple[str, ...]:
+    return tuple(term for term in query_terms if term in field_terms)
 
 
 def _is_sequence_suffix(value: tuple[str, ...], suffix: tuple[str, ...]) -> bool:

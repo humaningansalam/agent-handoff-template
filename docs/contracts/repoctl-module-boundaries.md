@@ -4,7 +4,8 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 
 ## Ownership
 
-- `task lifecycle` owns task frontmatter, Board membership, archive transitions, start baselines, finish gates, Handoff, Execution Log, and Verification updates.
+- `task lifecycle` owns task frontmatter, Board membership, archive transitions, start baselines, finish gates, Handoff, Execution Log, Verification updates, and the compact machine-owned Handoff binding receipt.
+- `Context / Task Pack` owns canonical Pack input collection, source-identity projection, artifact rendering, and read-only Pack integrity/freshness inspection. It does not write Handoff or task lifecycle state.
 - `backlog` owns opaque raw block CRUD only.
 - `meta` owns `.repometa` policy, annotations, exclusions, move repair, and metadata validation.
 - `index` owns read-only technical facts such as language, imports, symbols, calls, syntax-resolved structured file dependencies, and observed effect hints.
@@ -14,6 +15,7 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 
 - MCP, if added, must call stable repoctl command handlers or consume the JSON contract; it must not parse human stdout.
 - Graph derives relation data from index facts, task evidence, and `.repometa`; it must not store graph fields inside `.repometa` annotations.
+- CLI may compose Task Handoff and optional Pack observations into resume guidance, but it must not infer prose meaning, auto-bind on start/show, regenerate stale artifacts, or duplicate the input projection owned by Context / Task Pack.
 - The Dart semantic provider owns resolved RPC source facts, actual-to-formal invocation validity, routine/parameter bindings, schema-selection evidence, and source coverage. The structured resolver owns SQL compatibility and the linked/non-linked outcome. Graph materializes linked edges and separately projects compatible non-linked candidates; no second Dart scanner or fallback owns the same decision.
 - Graph/Index owns observed repo-specific topics; `.repometa` topics are human hints and bootstrap labels, not the authoritative topic graph.
 - llmwiki renders reviewed knowledge and current evidence as a non-authoritative view; it must not replace task frontmatter, Board, Backlog, or `.repometa` authority.

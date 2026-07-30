@@ -41,6 +41,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 ## Success Criteria
 
 - A new agent can resume a live task from `AGENTS.md`, `docs/BOARD.md`, the task file, and Handoff without guessing.
+- A live Handoff is active only after an explicit review binding to the exact structured Task and observed repository state; later input drift is visible as typed inactive resume guidance instead of silently blessing old prose.
 - Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
 - Task finish leaves auditable verification evidence and stable completion receipts.
 - Graph and Context answers preserve source refs, repo IDs, digests, freshness, typed continuations, and completeness warnings.
@@ -63,6 +64,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Keep executable task state in task frontmatter and required sections under `docs/tasks/**`.
 - Archive completed standalone tasks under `docs/archive/tasks/**`.
 - Require Handoff and Verification evidence so another agent can resume or audit the work.
+- Keep the human-readable four-field Handoff as the collaboration surface while repoctl stores only a compact machine-owned binding receipt. Starting or showing a task must never create or refresh that receipt automatically.
 
 ### Product Repository Boundary
 
@@ -82,8 +84,9 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 
 - Materialize Graph and its persistent evidence index as one deterministic boundary over source facts, metadata, documents, receipts, imports, symbols, calls, and artifacts; queries read it without hidden rebuilds or unchanged-source rescans.
 - Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays and typed continuations for iterative exploration.
+- Let an optional Task Pack participate in resume guidance only when the user or agent explicitly binds that exact current artifact. JSON and Markdown artifacts must share one canonical input projection, reject missing/tampered/wrong-task/legacy artifacts, and become inactive when their producer-owned source identities, structured Task inputs, Graph snapshot, or repository observation changes.
 - Resolve bounded lexical file hypotheses into the existing typed Graph projection so ambiguous natural-language work can include owners, direct tests, callers, callees, imports, and structured dependencies without a hidden rebuild or a second traversal engine.
-- Preserve exact-identity fail-closed behavior, let an explicit match on the first repository-relative path segment constrain the requested product area, rank the remaining field-rich lexical hypotheses by provider strength and filename evidence, and use deeper directory matches only as a secondary preference that cannot discard stronger source/test/config evidence. Keep weak fallback to one top hypothesis, and continue with fresh resolved anchors when another hypothesis is stale or absent.
+- Preserve exact-identity fail-closed behavior. Keep every current source/test/config lexical hypothesis eligible, preserve canonical path/section/body query evidence, and allocate the bounded working set by saturating lexical breadth plus source/test/config lane, evidence-role, and repository-component coverage so vocabulary-heavy consumers cannot crowd out distinct owners. Use fresh typed relations among the current query candidates as later coherence corroboration, keep raw Graph degree later still, and use shared directory scope only as a final tie-break. When the whole cohort contains only weak single-term matches, select one top fallback while still reporting every omitted candidate; in a mixed cohort, a weak isolated singleton may remain diagnostic without consuming a slot unless it adds meaningful lane, role, or component evidence. Continue with fresh resolved anchors when another hypothesis is stale or absent, report anchor omissions independently from typed anchor resolution, and report final compact working-set omissions independently from anchor coverage.
 - Preserve source refs, digests, repo namespaces, and completeness diagnostics.
 - Keep confirmed relations and compatible unresolved relationship candidates as separate typed lanes; candidates must preserve their structured resolution reason and never imply task scope.
 - Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.

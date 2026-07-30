@@ -76,4 +76,4 @@ State the outcome in one clear sentence.
 - First command to run: `<command>`
 - Done when: <objective completion condition>
 
-<!-- Keep these four fields concrete enough for another agent to resume in about 30 seconds. -->
+<!-- Keep these four fields concrete enough for another agent to resume in about 30 seconds. Before pausing or transferring, review them and run `./scripts/repoctl task handoff bind T-... --json`; add `--context-pack <path>` only for an optional Pack reviewed with this Handoff. -->

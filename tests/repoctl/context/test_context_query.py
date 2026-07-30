@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl import context as context_module
+from tools.repoctl import graph as graph_module
 from tools.repoctl.cli import main
 from tools.repoctl.context import compact_context_bundle
 from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
@@ -330,7 +331,7 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert bundle["schema"] == "repoctl.context.bundle"
     assert bundle["authoritative"] is False
     assert bundle["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
-    assert bundle["schema_version"] == 12
+    assert bundle["schema_version"] == 13
     assert bundle["view"] == "compact"
     grouped_items = [item for items in bundle["groups"].values() for item in items if isinstance(item.get("source_ref"), dict)]
     refs = [item["source_ref"] for item in grouped_items]
@@ -472,6 +473,528 @@ def test_context_query_does_not_promote_generic_natural_language_token_to_exact_
         )
 
 
+def test_context_query_preserves_cross_component_runtime_coverage_against_vocabulary_rich_consumers(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for path in ("src/aggregator", "src/exchanges/upbit", "tests", "examples"):
+        (repo / path).mkdir(parents=True, exist_ok=True)
+    (repo / "src/main.py").write_text(
+        "from src.aggregator.aggregator import ProviderState\n"
+        "from src.exchanges.upbit.rest_client import UpbitRestClient\n\n"
+        "def route_market_stream():\n"
+        "    return ProviderState(), UpbitRestClient()\n"
+        "# concurrent Upbit Binance ZMQ raw candle subscriptions provider gateway exchange routing\n",
+        encoding="utf-8",
+    )
+    (repo / "src/aggregator/aggregator.py").write_text(
+        "class ProviderState:\n"
+        "    def update_subscriptions(self, provider_key: str):\n"
+        "        return {'provider_keyed_state': provider_key, 'subscriptions': []}\n",
+        encoding="utf-8",
+    )
+    (repo / "src/exchanges/upbit/rest_client.py").write_text(
+        "class UpbitRestClient:\n"
+        "    def historical_candles(self, before_ts=None, start_ts=None, end_ts=None, cursor=None):\n"
+        "        return {'pagination': cursor, 'before_ts': before_ts, 'start_ts': start_ts, 'end_ts': end_ts}\n",
+        encoding="utf-8",
+    )
+    (repo / "tests/test_upbit_rest_client.py").write_text(
+        "from src.exchanges.upbit.rest_client import UpbitRestClient\n\n"
+        "def test_historical_candle_cursor_pagination():\n"
+        "    assert UpbitRestClient().historical_candles(cursor='next')['pagination'] == 'next'\n",
+        encoding="utf-8",
+    )
+    for name in ("raw_data", "quote_api", "candle"):
+        (repo / f"examples/example_{name}_client.py").write_text(
+            "def run_example():\n"
+            "    return 'concurrent Upbit Binance ZMQ raw candle subscriptions provider keyed state "
+            "gateway exchange routing HTTP historical candle pagination before_ts start_ts end_ts cursor examples'\n",
+            encoding="utf-8",
+        )
+
+    query = (
+        "concurrent Upbit Binance ZMQ raw candle subscriptions provider keyed state gateway "
+        "exchange routing plus HTTP historical candle pagination before_ts start_ts end_ts cursor examples"
+    )
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    without_graph = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    without_graph_sources = {
+        item["source_ref"]["path"]
+        for item in without_graph["groups"]["likely_change_surface"]
+    }
+    assert "repos/src/main.py" in without_graph_sources
+    assert any(path.startswith("repos/src/") and path != "repos/src/main.py" for path in without_graph_sources)
+
+    _materialize(tmp_path)
+    assert main(["context", "query", query, "--repo-id", "main", "--full", "--json"]) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    anchor_paths = {
+        item["anchor"]["path"]
+        for item in full["selection"]["graph_anchor"]["anchors"]
+    }
+    assert "src/main.py" in anchor_paths
+    assert "tests/test_upbit_rest_client.py" in anchor_paths
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact_sources = {
+        item["source_ref"]["path"]
+        for item in compact["groups"]["likely_change_surface"]
+    }
+    assert "repos/src/main.py" in compact_sources
+    assert any(path.startswith("repos/src/exchanges/") for path in compact_sources)
+    assert compact["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/test_upbit_rest_client.py"
+    )
+
+
+def test_context_query_keeps_single_term_runtime_candidate_in_typed_coverage(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "consumer").mkdir()
+    (repo / "runtime").mkdir()
+    (repo / "consumer/index.py").write_text(
+        "def render_request():\n"
+        "    return 'shared request'\n",
+        encoding="utf-8",
+    )
+    (repo / "runtime/implementation.py").write_text(
+        "def execute_runtime():\n"
+        "    return 'keystone'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "shared request keystone",
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    coverage = resolution["selection_coverage"]
+    assert "runtime/implementation.py" in coverage["eligible_paths"]
+    assert "runtime/implementation.py" in {
+        item["anchor"]["path"] for item in resolution["anchors"]
+    }
+
+
+def test_context_query_prefers_distinct_query_evidence_over_graph_degree(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for hub_index in range(3):
+        hub = repo / f"hub{hub_index}"
+        hub.mkdir()
+        imports = []
+        for dependency_index in range(4):
+            dependency = f"hub{hub_index}_dependency_{dependency_index}"
+            (repo / f"{dependency}.py").write_text("VALUE = True\n", encoding="utf-8")
+            imports.append(f"from {dependency} import VALUE as VALUE_{dependency_index}")
+        (hub / "index.py").write_text(
+            "\n".join(imports)
+            + "\n\ndef render_request():\n"
+            + "    return 'shared request'\n",
+            encoding="utf-8",
+        )
+    (repo / "runtime").mkdir()
+    (repo / "runtime/implementation.py").write_text(
+        "def execute_runtime():\n"
+        "    return 'provider gateway exchange pagination cursor history'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "shared request provider gateway exchange pagination cursor history"
+    assert main(
+        [
+            "context",
+            "query",
+            query,
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    anchors = bundle["selection"]["graph_anchor"]["anchors"]
+    assert anchors[0]["anchor"]["path"] == "runtime/implementation.py"
+    assert "runtime/implementation.py" in {
+        item["anchor"]["path"] for item in anchors
+    }
+
+
+def test_context_graph_refresh_does_not_reduce_distinct_owner_coverage(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "lib/sidebar").mkdir(parents=True)
+    (repo / "lib/widgets").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "lib/bible_content_view.py").write_text(
+        "def choose_content_layout(threshold: int):\n"
+        "    return 'content reading font threshold layout'\n",
+        encoding="utf-8",
+    )
+    (repo / "lib/sidebar/l_tablet.py").write_text(
+        "def tablet_navigation_sidebar():\n"
+        "    return 'tablet wide navigation sidebar rail'\n",
+        encoding="utf-8",
+    )
+    (repo / "lib/widgets/comparison.py").write_text(
+        "from lib.bible_content_view import choose_content_layout\n\n"
+        "def comparison_widget():\n"
+        "    return choose_content_layout(720)\n"
+        "# content reading font threshold layout tablet\n",
+        encoding="utf-8",
+    )
+    (repo / "tests/test_layout.py").write_text(
+        "from lib.bible_content_view import choose_content_layout\n"
+        "from lib.sidebar.l_tablet import tablet_navigation_sidebar\n\n"
+        "def test_tablet_content_layout():\n"
+        "    assert choose_content_layout(720)\n"
+        "    assert tablet_navigation_sidebar()\n",
+        encoding="utf-8",
+    )
+    query = "tablet wide navigation sidebar content reading font threshold layout"
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    before = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    before_paths = {
+        item["source_ref"]["path"]
+        for item in before["groups"]["likely_change_surface"]
+    }
+    required = {"repos/lib/bible_content_view.py", "repos/lib/sidebar/l_tablet.py"}
+    assert required.issubset(before_paths)
+
+    _materialize(tmp_path)
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    after = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    after_paths = {
+        item["source_ref"]["path"]
+        for item in after["groups"]["likely_change_surface"]
+    }
+    assert required.issubset(after_paths)
+
+
+def test_context_query_preserves_independent_owner_before_connected_component_repeats(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for path in ("core", "adapter_a", "adapter_b"):
+        (repo / path).mkdir()
+    (repo / "core/owner.py").write_text(
+        "from adapter_a.dependency import ADAPTER_A\n"
+        "from adapter_b.dependency import run_adapter_b\n\n"
+        "def route_request():\n"
+        "    marker = 'amber cobalt quartz meadow'\n"
+        "    return ADAPTER_A, run_adapter_b()\n",
+        encoding="utf-8",
+    )
+    (repo / "core/independent.py").write_text(
+        "def own_independent_policy():\n"
+        "    return 'violet harbor'\n",
+        encoding="utf-8",
+    )
+    (repo / "adapter_a/dependency.py").write_text(
+        "ADAPTER_A = 'amber cobalt'\n",
+        encoding="utf-8",
+    )
+    (repo / "adapter_b/dependency.py").write_text(
+        "def run_adapter_b():\n"
+        "    return 'quartz meadow'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "amber cobalt quartz meadow violet harbor"
+    assert main(["context", "query", query, "--repo-id", "main", "--full", "--json"]) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    anchors = {
+        item["anchor"]["path"]
+        for item in full["selection"]["graph_anchor"]["anchors"]
+    }
+    dependency_paths = {"adapter_a/dependency.py", "adapter_b/dependency.py"}
+    assert {"core/owner.py", "core/independent.py"}.issubset(anchors)
+    assert len(anchors & dependency_paths) == 1
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact_paths = {
+        item["source_ref"]["path"]
+        for item in compact["groups"]["likely_change_surface"]
+    }
+    workspace_dependencies = {f"repos/{path}" for path in dependency_paths}
+    assert {"repos/core/owner.py", "repos/core/independent.py"}.issubset(compact_paths)
+    assert len(compact_paths & workspace_dependencies) == 1
+
+    assert main(["context", "query", query, "--repo-id", "main", "--format", "markdown"]) == 0
+    markdown = capsys.readouterr().out
+    change_surface = markdown.split("## Likely Change Surface", 1)[1].split("\n## ", 1)[0]
+    for path in compact_paths:
+        assert path in change_surface
+    omitted_dependency = next(iter(workspace_dependencies - compact_paths))
+    assert omitted_dependency not in change_surface
+
+
+def test_context_query_preserves_component_coverage_after_novel_terms_are_saturated(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for path in ("core", "runtime", "tests"):
+        (repo / path).mkdir()
+    (repo / "core/owner.py").write_text(
+        "def primary_owner():\n"
+        "    return 'amber cobalt quartz meadow violet harbor silver orbit'\n",
+        encoding="utf-8",
+    )
+    (repo / "core/amber_cobalt_quartz_meadow.py").write_text(
+        "def echo_consumer():\n"
+        "    return 'violet harbor silver orbit'\n",
+        encoding="utf-8",
+    )
+    (repo / "runtime/implementation.py").write_text(
+        "def runtime_component():\n"
+        "    return 'amber cobalt'\n",
+        encoding="utf-8",
+    )
+    (repo / "tests/test_owner.py").write_text(
+        "from core.owner import primary_owner\n\n"
+        "def test_owner():\n"
+        "    marker = 'amber'\n"
+        "    assert primary_owner()\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "amber cobalt quartz meadow violet harbor silver orbit"
+    assert main(["context", "query", query, "--repo-id", "main", "--full", "--json"]) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    anchors = {
+        item["anchor"]["path"]
+        for item in bundle["selection"]["graph_anchor"]["anchors"]
+    }
+    assert "core/owner.py" in anchors
+    assert "runtime/implementation.py" in anchors
+    assert "core/amber_cobalt_quartz_meadow.py" not in anchors
+
+
+def test_context_reuses_projection_index_for_support_scoring_and_traversal(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "owner.py").write_text(
+        "def reconcile_gateway():\n"
+        "    return 'gateway reconciliation owner'\n",
+        encoding="utf-8",
+    )
+    (repo / "consumer.py").write_text(
+        "from owner import reconcile_gateway\n\n"
+        "def run_reconciliation():\n"
+        "    return reconcile_gateway()\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    original = graph_module._build_context_projection_index
+    call_count = 0
+
+    def counted_projection_index(snapshot: GraphSnapshot):
+        nonlocal call_count
+        call_count += 1
+        return original(snapshot)
+
+    monkeypatch.setattr(graph_module, "_build_context_projection_index", counted_projection_index)
+    assert main(
+        [
+            "context",
+            "query",
+            "gateway reconciliation owner",
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert call_count == 1
+
+
+def test_context_reports_bounded_working_set_coverage_in_json_text_and_markdown(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    terms = (
+        ("alpha", "comet"),
+        ("beta", "orbit"),
+        ("gamma", "signal"),
+        ("delta", "harbor"),
+    )
+    for index, (left, right) in enumerate(terms):
+        next_module = terms[(index + 1) % len(terms)][0]
+        (repo / f"{left}_owner.py").write_text(
+            f"from {next_module}_owner import {next_module}_owner\n\n"
+            f"def {left}_owner():\n"
+            f"    return '{left} {right}', {next_module}_owner\n",
+            encoding="utf-8",
+        )
+    _materialize(tmp_path)
+    query = "alpha comet beta orbit gamma signal delta harbor"
+
+    assert main(["context", "query", query, "--repo-id", "main", "--full", "--json"]) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    coverage = full["selection"]["graph_anchor"]["selection_coverage"]
+    assert coverage["status"] == "partial"
+    assert coverage["reason"] == "anchor_budget_exhausted"
+    assert coverage["selected_count"] == 3
+    assert coverage["eligible_count"] == 4
+    assert coverage["coverage_omitted_count"] == 1
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact_coverage = compact["completeness"]["graph_anchor"]["selection_coverage"]
+    assert compact_coverage["status"] == "partial"
+    assert compact_coverage["coverage_omitted_count"] == 1
+    working_set_coverage = compact["completeness"]["working_set_coverage"]
+    assert working_set_coverage["status"] == "partial"
+    assert working_set_coverage["coverage_omitted_count"] == 1
+
+    assert main(["context", "query", query, "--repo-id", "main"]) == 0
+    text = capsys.readouterr().out
+    assert "graph_anchor_selection_coverage status=partial" in text
+    assert "working_set_coverage status=partial" in text
+
+    assert main(["context", "query", query, "--repo-id", "main", "--format", "markdown"]) == 0
+    markdown = capsys.readouterr().out
+    assert "## Graph Working Set" in markdown
+    assert "Selection coverage: `partial`" in markdown
+    assert "## Compact Working Set" in markdown
+    assert "Working-set coverage: `partial`" in markdown
+
+
+def test_compact_working_set_reports_visible_omissions_with_field_identity() -> None:
+    groups = {group: [] for group in context_module.CONTEXT_GROUPS}
+    profiles = (
+        ("repos/alpha/owner.py", {"path": ["alpha", "beta"]}, 30.0),
+        ("repos/gamma/owner.py", {"body": ["gamma", "delta"]}, 20.0),
+        ("repos/beta/consumer.py", {"body": ["alpha", "beta"]}, 10.0),
+    )
+    for path, matches, score in profiles:
+        groups["likely_change_surface"].append(
+            _compact_evidence_item(
+                "current_source",
+                path,
+                "file",
+                path.removeprefix("repos/"),
+                ["workspace.open", "graph.file"],
+                selection_reason="query match",
+                score=score,
+                score_breakdown={"exact": 0.5},
+                anchor_strength="weak",
+                query_term_matches=matches,
+                evidence_kinds=["body_terms"],
+                evidence_role="change_candidate",
+                evidence_roles=["change_candidate"],
+                graph_path=[],
+            )
+        )
+    anchors = [
+        {
+            "anchor": {"kind": "file", "path": path.removeprefix("repos/")},
+            "anchor_provenance": "lexical_file",
+            "anchor_strength": "weak",
+        }
+        for path, _matches, _score in profiles
+    ]
+    anchor_coverage = {
+        "status": "complete",
+        "reason": "",
+        "candidate_count": 3,
+        "eligible_count": 3,
+        "selected_count": 3,
+        "omitted_count": 0,
+        "coverage_omitted_count": 0,
+        "eligible_paths": [path.removeprefix("repos/") for path, _matches, _score in profiles],
+        "selected_paths": [path.removeprefix("repos/") for path, _matches, _score in profiles],
+        "omitted_paths": [],
+        "coverage_omitted_paths": [],
+        "unrepresented_field_term_evidence": {},
+        "unrepresented_lanes": [],
+        "unrepresented_roles": [],
+        "unrepresented_components": [],
+    }
+    bundle = ContextBundle(
+        repository={"id": "main", "path": "repos", "identity_source": "reserved"},
+        query={"text": "alpha beta gamma delta", "mode": "code_location"},
+        source_snapshots={},
+        completeness={
+            "graph_available": True,
+            "graph_completeness": {"status": "complete"},
+            "graph_anchor": {
+                "status": "resolved",
+                "code": "context_graph_anchor_resolved",
+                "anchors": anchors,
+                "candidates": anchors,
+                "selection_coverage": anchor_coverage,
+            },
+        },
+        evidence=[],
+        selection={},
+        groups=groups,
+    )
+
+    compact = compact_context_bundle(bundle)
+    assert len(compact["groups"]["likely_change_surface"]) == 2
+    assert compact["completeness"]["graph_anchor"]["selection_coverage"]["status"] == "complete"
+    coverage = compact["completeness"]["working_set_coverage"]
+    assert coverage["status"] == "partial"
+    assert coverage["selected_count"] == 2
+    assert coverage["eligible_count"] == 3
+    assert coverage["omitted_paths"] == ["repos/beta/consumer.py"]
+    assert coverage["unrepresented_field_term_evidence"] == {
+        "body": ["alpha", "beta"]
+    }
+    assert "unrepresented_query_terms" not in coverage
+
+    text = context_module.render_context_text(bundle)
+    assert "working_set_coverage status=partial" in text
+    assert "unrepresented_field_term_evidence body=[alpha, beta]" in text
+    markdown = context_module.render_context_markdown(bundle)
+    assert "## Compact Working Set" in markdown
+    assert "Unrepresented field-term evidence: body=[alpha, beta]" in markdown
+
+
 def test_context_query_prefers_connected_test_over_weak_lexical_test_seed(
     tmp_path: Path,
     monkeypatch,
@@ -604,8 +1127,8 @@ def test_context_query_keeps_stronger_test_anchor_when_another_lane_matches_dire
     anchors = full["selection"]["graph_anchor"]["anchors"]
     anchor_paths = {item["anchor"]["path"] for item in anchors}
     assert "web/test/test_render.py" in anchor_paths
-    assert anchors[0]["anchor"]["path"] == "web/test/test_render.py"
-    assert anchors[1]["anchor"]["path"] == "web/src/gate_policy.py"
+    assert anchors[0]["anchor"]["path"] == "web/src/gate_policy.py"
+    assert anchors[1]["anchor"]["path"] == "web/test/test_render.py"
     assert any(
         relation.get("edge") == "TESTS_FILE"
         and relation.get("from_path") == "web/test/test_render.py"
@@ -1053,7 +1576,19 @@ def test_context_query_indexes_text_sources_without_claiming_semantic_graph_supp
 
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     paths = {item["source_ref"]["path"] for item in bundle["groups"]["likely_change_surface"]}
-    assert {"repos/index.html", "repos/css/style.css"}.issubset(paths)
+    assert paths == {
+        "repos/index.html",
+        "repos/css/style.css",
+        "repos/js/main.js",
+    }
+
+    assert main(["context", "query", query, "--repo-id", "main", "--full", "--json"]) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(
+        item["source_ref"]["path"] == "repos/index.html"
+        for item in full["evidence"]
+    )
+    assert full["selection"]["graph_anchor"]["selection_coverage"]["status"] == "complete"
 
 
 def test_context_query_returns_actionable_groups_for_call_impact(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1254,14 +1789,14 @@ def test_context_graph_propagates_each_origin_through_another_seed(
     (repo / "audit_router.py").write_text(
         "from leaf import VALUE\n\n"
         "def record_event():\n"
-        "    marker = 'settlement audit router behavior'\n"
+        "    marker = 'settlement behavior'\n"
         "    return VALUE\n",
         encoding="utf-8",
     )
     (repo / "settlement_router.py").write_text(
         "from audit_router import record_event\n\n"
         "def route_payment():\n"
-        "    marker = 'settlement audit router behavior'\n"
+        "    marker = 'audit behavior'\n"
         "    return record_event()\n",
         encoding="utf-8",
     )
@@ -1704,13 +2239,21 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
 
     assert main(["context", "query", "app.py", "--mode", "file-impact", "--repo-id", "main", "--json"]) == 0
     stale_anchor = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    assert stale_anchor["completeness"]["graph_anchor"] == {
-        "status": "unresolved",
-        "code": "context_graph_anchor_unresolved",
-        "seed_anchors": [],
-        "seed_paths": [],
-        "candidate_paths": ["app.py"],
-    }
+    graph_anchor = stale_anchor["completeness"]["graph_anchor"]
+    assert graph_anchor["status"] == "unresolved"
+    assert graph_anchor["code"] == "context_graph_anchor_unresolved"
+    assert graph_anchor["seed_anchors"] == []
+    assert graph_anchor["seed_paths"] == []
+    assert graph_anchor["candidate_paths"] == ["app.py"]
+    coverage = graph_anchor["selection_coverage"]
+    assert coverage["status"] == "complete"
+    assert coverage["candidate_count"] == 1
+    assert coverage["eligible_count"] == 0
+    assert coverage["selected_count"] == 0
+    assert coverage["omitted_count"] == 1
+    assert coverage["coverage_omitted_count"] == 0
+    assert coverage["omitted_paths"] == ["app.py"]
+    assert coverage["coverage_omitted_paths"] == []
     assert not stale_anchor["groups"]["callers_and_dependents"]
 
     assert main(["context", "query", "what should I read first", "--mode", "startup-reading", "--repo-id", "main", "--json"]) == 0
@@ -1824,6 +2367,63 @@ def test_context_query_missing_graph_returns_typed_build_and_resume_actions(tmp_
     assert actions["graph_build"]["command"] == "./scripts/repoctl graph build --repo-id main --json"
     assert actions["context_resume"]["command"] == (
         "./scripts/repoctl context query 'initial discovery owner' --repo-id main --json"
+    )
+
+
+def test_context_query_live_fallback_resolves_new_and_rejects_deleted_knowledge_paths(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    deleted_path = repo / "deleted_owner.py"
+    deleted_path.write_text("def deleted_owner():\n    return 'old'\n", encoding="utf-8")
+    _write_reviewed_knowledge_record(
+        tmp_path,
+        record_id="K-20260719010111Z--deleted-owner",
+        claim="Cobalt horizon dispatch used the deleted owner.",
+        applies_to_paths=["deleted_owner.py"],
+    )
+    _materialize(tmp_path)
+
+    fresh_path = repo / "fresh_owner.py"
+    fresh_path.write_text("def fresh_owner():\n    return 'new'\n", encoding="utf-8")
+    _write_reviewed_knowledge_record(
+        tmp_path,
+        record_id="K-20260719010112Z--fresh-owner",
+        claim="Nebula harbor dispatch uses the fresh owner.",
+        applies_to_paths=["fresh_owner.py"],
+    )
+    deleted_path.unlink()
+    index_path = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
+    index_path.rename(index_path.with_suffix(".sqlite3.saved"))
+
+    assert main(["context", "query", "nebula harbor dispatch", "--repo-id", "main", "--full", "--json"]) == 0
+    fresh_payload = json.loads(capsys.readouterr().out)
+    fresh_bundle = fresh_payload["data"]["bundle"]
+    assert fresh_bundle["completeness"]["graph_available"] is False
+    assert fresh_bundle["knowledge_results"][0]["resolved_code_paths"] == ["fresh_owner.py"]
+    assert any(
+        item["source_ref"]["path"] == "repos/fresh_owner.py"
+        for item in fresh_bundle["groups"]["likely_change_surface"]
+    )
+
+    assert main(["context", "query", "cobalt horizon dispatch", "--repo-id", "main", "--full", "--json"]) == 0
+    deleted_payload = json.loads(capsys.readouterr().out)
+    deleted_bundle = deleted_payload["data"]["bundle"]
+    deleted_result = deleted_bundle["knowledge_results"][0]
+    assert deleted_result["resolved_code_paths"] == []
+    assert deleted_result["code_path_resolutions"][0]["status"] == "not_found"
+    assert not any(
+        item.get("source_ref", {}).get("path") == "repos/deleted_owner.py"
+        for items in deleted_bundle["groups"].values()
+        for item in items
+    )
+    assert not any(
+        continuation.get("selector") == {"kind": "file", "value": "deleted_owner.py"}
+        for items in deleted_bundle["groups"].values()
+        for item in items
+        for continuation in item.get("continuations", [])
     )
 
 
@@ -2275,6 +2875,23 @@ def test_context_query_bounds_reviewed_knowledge_graph_anchors(
     assert {item["anchor_provenance"] for item in resolution["anchors"]} == {
         "reviewed_knowledge"
     }
+    assert resolution["selection_coverage"] == {
+        "status": "partial",
+        "reason": "anchor_budget_exhausted",
+        "candidate_count": 5,
+        "eligible_count": 5,
+        "selected_count": 3,
+        "omitted_count": 2,
+        "coverage_omitted_count": 2,
+        "eligible_paths": paths,
+        "selected_paths": paths[:3],
+        "omitted_paths": paths[3:],
+        "coverage_omitted_paths": paths[3:],
+        "unrepresented_field_term_evidence": {},
+        "unrepresented_lanes": [],
+        "unrepresented_roles": [],
+        "unrepresented_components": [],
+    }
 
     assert main(
         [
@@ -2294,6 +2911,79 @@ def test_context_query_bounds_reviewed_knowledge_graph_anchors(
         item["provenance"] == "reviewed_knowledge"
         for item in graph_anchor["seed_anchors"]
     )
+
+
+def test_context_query_backfills_snapshot_available_reviewed_knowledge_anchors(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    paths = [f"owner_{index}.py" for index in range(7)]
+    for index, path in enumerate(paths):
+        (repo / path).write_text(
+            f"def owner_{index}():\n    return {index}\n",
+            encoding="utf-8",
+        )
+    _write_reviewed_knowledge_record(
+        tmp_path,
+        record_id="K-20260719010110Z--violet-lattice-routing",
+        claim="Violet lattice routing owns the bounded integration surfaces.",
+        applies_to_paths=paths,
+    )
+    _materialize(tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+    snapshot, problems, meta = load_materialized_graph(tmp_path, target=target)
+    assert snapshot is not None
+    assert not problems
+    unavailable = set(paths[:3])
+    snapshot_without_early_paths = GraphSnapshot(
+        repository=snapshot.repository,
+        sources=snapshot.sources,
+        completeness=snapshot.completeness,
+        nodes=[
+            node
+            for node in snapshot.nodes
+            if not (
+                node.kind == "file"
+                and str(node.identity.get("path") or "") in unavailable
+            )
+        ],
+        edges=snapshot.edges,
+        schema=snapshot.schema,
+        schema_version=snapshot.schema_version,
+        authoritative=snapshot.authoritative,
+        capabilities=snapshot.capabilities,
+        snapshot_digest=snapshot.snapshot_digest,
+    )
+    monkeypatch.setattr(
+        context_module,
+        "load_materialized_graph",
+        lambda *_args, **_kwargs: (snapshot_without_early_paths, [], meta),
+    )
+
+    assert main(
+        [
+            "context",
+            "query",
+            "violet lattice routing",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert [item["anchor"]["path"] for item in resolution["candidates"]] == paths
+    assert [item["anchor"]["path"] for item in resolution["anchors"]] == paths[3:6]
+    coverage = resolution["selection_coverage"]
+    assert coverage["eligible_paths"] == paths[3:]
+    assert coverage["omitted_paths"] == [*paths[:3], paths[6]]
+    assert coverage["coverage_omitted_paths"] == [paths[6]]
+    assert coverage["status"] == "partial"
+    assert coverage["reason"] == "anchor_budget_exhausted"
 
 
 def test_context_query_uses_product_source_ref_but_not_root_provenance_as_code_anchor(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -2479,6 +3169,62 @@ def test_context_query_fails_closed_on_ambiguous_knowledge_path_identity(tmp_pat
     assert bundle["knowledge_results"][0]["applicability_path_resolutions"][0]["status"] == "ambiguous"
     assert not any("reviewed_knowledge_path" in item.get("evidence_kinds", []) for item in bundle["evidence"])
     assert any(problem["code"] == "context_knowledge_path_ambiguous" for problem in payload["problems"])
+
+
+def test_context_query_keeps_workspace_source_and_graph_endpoint_identities_distinct(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "dependency.py").write_text("VALUE = 'root dependency'\n", encoding="utf-8")
+    (repo / "service.py").write_text(
+        "from dependency import VALUE\n\n"
+        "def root_service():\n"
+        "    return VALUE\n",
+        encoding="utf-8",
+    )
+    nested = repo / "repos/service.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(
+        "def nested_service():\n"
+        "    return 'topaz lattice ownership'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "topaz lattice ownership",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    anchors = {
+        item["anchor"]["path"]
+        for item in bundle["selection"]["graph_anchor"]["anchors"]
+    }
+    assert "repos/service.py" in anchors
+    assert "service.py" not in anchors
+    nested_item = next(
+        item
+        for item in bundle["evidence"]
+        if item["source_ref"].get("path") == "repos/repos/service.py"
+    )
+    assert not any(
+        relation.get("from_path") == "service.py"
+        or relation.get("to_path") == "service.py"
+        for relation in nested_item.get("graph_path", [])
+    )
+    assert not any(
+        item["source_ref"].get("path") == "repos/dependency.py"
+        for item in bundle["groups"]["likely_change_surface"]
+    )
 
 
 def test_context_query_does_not_cross_repository_for_knowledge_paths(tmp_path: Path, monkeypatch, capsys) -> None:

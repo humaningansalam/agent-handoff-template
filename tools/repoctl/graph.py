@@ -1348,6 +1348,61 @@ def _build_context_projection_index(snapshot: GraphSnapshot) -> _ContextProjecti
     )
 
 
+def build_context_projection_index(snapshot: GraphSnapshot) -> _ContextProjectionIndex:
+    """Build the shared index used by Context support scoring and traversal."""
+    return _build_context_projection_index(snapshot)
+
+
+def context_path_support_profiles(
+    snapshot: GraphSnapshot,
+    *,
+    paths: set[str],
+    excluded_paths: set[str] | None = None,
+    projection_index: _ContextProjectionIndex | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Summarize fresh typed cross-file support without performing Graph traversal."""
+    index = projection_index or build_context_projection_index(snapshot)
+    repo_id = str(snapshot.repository.get("id") or "")
+    excluded = {normalize_repo_path(path) for path in (excluded_paths or set()) if normalize_repo_path(path)}
+    candidate_paths = {
+        path
+        for raw_path in paths
+        if (path := normalize_repo_path(raw_path)) and path not in excluded
+    }
+    profiles: dict[str, dict[str, Any]] = {}
+    for path in sorted(candidate_paths):
+        current_file_id = file_id(repo_id, path)
+        relations: dict[tuple[str, str, str, str, str], tuple[GraphEdge, str, str]] = {}
+        for edge, from_file_id, to_file_id, _from_symbol_id, _to_symbol_id in index.file_relations_by_file.get(current_file_id, []):
+            from_node = index.nodes.get(from_file_id)
+            to_node = index.nodes.get(to_file_id)
+            from_path = normalize_repo_path(str(from_node.identity.get("path") or "")) if from_node is not None else ""
+            to_path = normalize_repo_path(str(to_node.identity.get("path") or "")) if to_node is not None else ""
+            if not from_path or not to_path or from_path == to_path:
+                continue
+            if from_path in excluded or to_path in excluded:
+                continue
+            relations[_edge_key(edge)] = (edge, from_path, to_path)
+        if not relations:
+            continue
+        values = list(relations.values())
+        candidate_neighbors = {
+            to_path if from_path == path else from_path
+            for _edge, from_path, to_path in values
+            if (to_path if from_path == path else from_path) in candidate_paths
+        }
+        profiles[path] = {
+            "direct_relation_count": len(values),
+            "direct_test_count": sum(1 for edge, _from_path, _to_path in values if edge.kind == "TESTS_FILE"),
+            "candidate_neighbor_count": len(candidate_neighbors),
+            "candidate_neighbor_paths": sorted(candidate_neighbors),
+            "incoming_relation_count": sum(1 for _edge, _from_path, to_path in values if to_path == path),
+            "outgoing_relation_count": sum(1 for _edge, from_path, _to_path in values if from_path == path),
+            "relation_kinds": sorted({edge.kind for edge, _from_path, _to_path in values}),
+        }
+    return profiles
+
+
 def _context_anchor_symbol_ids(
     *,
     repo_id: str,
@@ -1386,10 +1441,11 @@ def project_context_neighborhood(
     max_relations: int = 128,
     max_history: int = 5,
     excluded_candidate_paths: set[str] | None = None,
+    projection_index: _ContextProjectionIndex | None = None,
 ) -> dict[str, Any]:
     """Project bounded, mode-specific relations around typed Context anchors."""
     repo_id = str(snapshot.repository.get("id") or "")
-    index = _build_context_projection_index(snapshot)
+    index = projection_index or build_context_projection_index(snapshot)
     nodes = index.nodes
     mode_policy = _CONTEXT_GRAPH_MODE_POLICIES.get(mode)
     if mode_policy is None:

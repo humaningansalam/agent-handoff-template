@@ -38,9 +38,10 @@ Do not require agents to log which discovery features they used or justify why a
 ./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl task discovery add T-... --reviewed repos/path --chosen repos/path --json
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
+./scripts/repoctl task handoff bind T-... --context-pack .repoctl-state/context-pack/T-....md --json
 ```
 
-Context Pack is optional read-only evidence and never defines task scope. If generated before Chosen files exist, refresh it after Discovery before relying on its scoped view.
+Context Pack is optional read-only evidence and never defines task scope. If generated before Chosen files exist, refresh it after Discovery before relying on its scoped view. Before pausing or transferring a live task, review the four Handoff fields and explicitly run `task handoff bind`; add `--context-pack` only when that exact Pack should be active resume evidence. `task start` and `task show` never bind automatically. Only `current` resume guidance is active; `unbound`, `stale`, `unknown`, and `historical` Handoffs remain readable but must not be treated as current instructions.
 
 `graph query` reads the last materialized snapshot and never rebuilds automatically. Its default response reports bounded freshness state only; use `--full` for freshness counts, exact stale paths, or raw relations. Run `graph build` explicitly when no snapshot exists or after changes that must be reflected in Graph traversal. With a snapshot, `context query` uses the persistent evidence index and reads only stale path overlays. Without a snapshot, it still returns lexical source/document/task/Knowledge evidence and marks Graph relations unavailable.
 
@@ -85,6 +86,7 @@ Scope matrix:
 - `owner` and `depends_on` are informational metadata, not locks/enforcement.
 - Worker agents must not set lifecycle-managed fields such as `status: done`; use `repoctl task finish`.
 - Humans and agents write task meaning: Goal, Discovery, Execution Log, Verification, and Handoff. Do not hand-edit `.repoctl-state` baselines, fingerprints, ownership decisions, completion receipts, or archive metadata; repoctl owns those machine records.
+- A Handoff binding records that the exact four-field Handoff, structured task inputs, and observed repository state were reviewed together. It does not certify the semantic correctness of the prose. Any later Handoff, task contract, Discovery, Execution Log, Verification, or observed repository-content change makes it stale until explicitly reviewed and rebound.
 
 ## repoctl Boundary
 
@@ -92,6 +94,7 @@ Scope matrix:
 - Task/Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
 - Do not keep separate task creation wrappers; use `./scripts/repoctl task create`.
 - Use `./scripts/repoctl task show T-... --summary --json` for compact task inspection, omit `--summary` when the full task body is needed, and use `./scripts/repoctl task log append T-... "message" --json` to append timestamped execution log entries.
+- Use `./scripts/repoctl task handoff bind T-... --json` after reviewing a pause/transfer Handoff. If an optional Pack was generated and reviewed, bind that exact workspace-local artifact with `--context-pack <path>`; repoctl fails closed on missing, tampered, wrong-task, legacy, or stale artifacts.
 - When `## Verification` is complete, finish directly with `./scripts/repoctl task finish T-... --json`. Use `--verification-file` only for an external artifact. If the task established a reusable cross-task decision, invariant, or failure mode, add `--knowledge-kind`, an explicit `--knowledge-claim` or `--knowledge-claim-file`, and any literal `--knowledge-applies-to` paths to the same finish command so the completion receipt and review candidate are persisted together.
 - Prefer finishing before committing product repo changes. If product changes were already committed after task start, use `--use-committed-diff`. This mode is allowed only when the recorded start HEAD is an ancestor of the current HEAD and no task-new working-tree changes remain.
 - Use `./scripts/repoctl task doctor T-... --use-committed-diff --json` to preflight that same committed-range path before finish.

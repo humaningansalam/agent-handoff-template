@@ -183,38 +183,21 @@ def collect_context_sources(
         + invalid_receipt_problems
     )
     problems.extend(graph_context_problems)
-    if snapshot is None:
-        inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
-        current_source_chunks, current_source_problems = _current_source_chunks_from_records(
-            root,
-            records=[
-                (item.workspace_path, item.path, item.classification)
-                for item in inventory
-            ],
-            existing_paths={chunk.source_ref.path for chunk in chunks},
-        )
-        chunks.extend(current_source_chunks)
-        problems.extend(inventory_problems)
-        problems.extend(current_source_problems)
-        completeness = {
-            "documents_checked": len(document_paths),
-            "manifests_checked": len(manifest_paths),
-            "receipts_checked": len(receipts),
-            "history_loaded": include_history,
-            "receipt_problem_count": len(reported_receipt_problems),
-            "receipt_problem_paths": receipt_problem_paths,
-            "graph_available": False,
-            "graph_meta": graph_meta,
-            "current_sources_checked": len(current_source_chunks),
-        }
-        return chunks, {
-            "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest", "verification_hint"}]),
-            "receipt_manifest_digest": digest_data(receipts),
-            "current_source_manifest_digest": _manifest_digest(current_source_chunks),
-        }, completeness, problems
-
-    current_source_chunks, current_source_problems = _current_source_chunks(root, snapshot=snapshot, existing_paths={chunk.source_ref.path for chunk in chunks})
+    inventory, inventory_problems, _inventory_meta = meta_inventory(
+        root,
+        changed=False,
+        target=target,
+    )
+    current_source_chunks, current_source_problems = _current_source_chunks_from_records(
+        root,
+        records=[
+            (item.workspace_path, item.path, item.classification)
+            for item in inventory
+        ],
+        existing_paths={chunk.source_ref.path for chunk in chunks},
+    )
     chunks.extend(current_source_chunks)
+    problems.extend(inventory_problems)
     problems.extend(current_source_problems)
     completeness = {
         "documents_checked": len(document_paths),
@@ -224,36 +207,19 @@ def collect_context_sources(
         "history_loaded": include_history,
         "receipt_problem_count": len(reported_receipt_problems),
         "receipt_problem_paths": receipt_problem_paths,
-        "graph_available": True,
+        "graph_available": snapshot is not None,
         "graph_meta": graph_meta,
-        "graph_completeness": snapshot.completeness,
     }
+    if snapshot is not None:
+        completeness["graph_completeness"] = snapshot.completeness
     source_snapshots = {
         "document_manifest_digest": _manifest_digest([chunk for chunk in chunks if chunk.source_ref.kind in {"document", "product_manifest", "verification_hint"}]),
         "receipt_manifest_digest": digest_data(receipts),
         "current_source_manifest_digest": _manifest_digest(current_source_chunks),
-        "graph_digest": snapshot.snapshot_digest,
     }
+    if snapshot is not None:
+        source_snapshots["graph_digest"] = snapshot.snapshot_digest
     return chunks, source_snapshots, completeness, problems
-
-
-def _current_source_chunks(
-    root: Path,
-    *,
-    snapshot: GraphSnapshot,
-    existing_paths: set[str],
-) -> tuple[list[DocumentChunk], list[Problem]]:
-    records: list[tuple[str, str, str]] = []
-    for node in snapshot.nodes:
-        if node.kind != "file":
-            continue
-        identity = node.identity if isinstance(node.identity, dict) else {}
-        facts = node.facts if isinstance(node.facts, dict) else {}
-        index = facts.get("index") if isinstance(facts.get("index"), dict) else {}
-        workspace_path = str(identity.get("workspace_path") or "")
-        repo_path = str(identity.get("path") or "")
-        records.append((workspace_path, repo_path, str(index.get("classification") or "")))
-    return _current_source_chunks_from_records(root, records=records, existing_paths=existing_paths)
 
 
 def _current_source_chunks_from_records(

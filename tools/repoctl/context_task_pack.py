@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from .context import (
 from .context_chunks import chunk_markdown_file, chunk_text_source
 from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
 from .context_retrieval import rank_context_chunks
+from .context_sources import context_graph_problems
 from .document_roles import (
     AUTHORITY_DOCUMENT_ROLES,
     SOURCE_EXCLUDED_DOCUMENT_ROLES,
@@ -23,12 +25,17 @@ from .document_roles import (
 from .graph import project_context_neighborhood
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import graph_materialization_freshness, graph_stale_paths, load_materialized_graph
-from .git import normalize_repo_path, repo_git_head
+from .git import normalize_repo_path, repo_change_fingerprint_records, repo_changed_entries, repo_git_head
 from .language_profiles import collect_verification_hints
 from .markdown import find_section
 from .path_roles import PathRole, classify_path_role
 from .repositories import RepoTarget
-from .tasks import Problem, Task, resolve_task, task_discovery_values
+from .tasks import Problem, Task, normalize_task_id, repo_changes_since_task_start, resolve_task, task_discovery_values
+
+
+TASK_CONTEXT_PACK_SCHEMA_VERSION = 3
+TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_SCHEMA_VERSION = 1
+TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_PREFIX = "<!-- repoctl-context-pack-envelope "
 
 
 @dataclass(frozen=True)
@@ -38,8 +45,98 @@ class ContextDocRef:
     path: Path
 
 
+@dataclass(frozen=True)
+class _TaskContextPackInputs:
+    task: Task
+    discovery: dict[str, list[str]]
+    reviewed: list[str]
+    chosen: list[str]
+    stage: str
+    query: str
+    snapshot: Any
+    graph_meta: dict[str, Any]
+    bundle: ContextBundle | None
+    explicit_candidates: list[ContextCandidate]
+    required_candidates: list[ContextCandidate]
+    discovery_candidates: list[ContextCandidate]
+    fallback_candidates: list[ContextCandidate]
+    verification_candidates: list[ContextCandidate]
+    bundle_candidates: list[ContextCandidate]
+    problems: list[Problem]
+    meta: dict[str, Any]
+
+
 def estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _context_pack_source_digest_inputs(candidates: list[ContextCandidate]) -> list[dict[str, str]]:
+    values = {
+        (
+            candidate.source_ref.kind,
+            candidate.source_ref.path,
+            candidate.source_ref.content_sha256,
+        )
+        for candidate in candidates
+        if candidate.source_ref.path and candidate.source_ref.content_sha256
+    }
+    return [
+        {"kind": kind, "path": path, "content_sha256": content_sha256}
+        for kind, path, content_sha256 in sorted(values)
+    ]
+
+
+def _task_context_pack_repository_input(root: Path, *, target: RepoTarget, task: Task) -> dict[str, Any]:
+    task_repo_id = str(task.frontmatter.get("repo_id") or "")
+    if task_repo_id:
+        delta = repo_changes_since_task_start(root, task.id)
+        entries = list(delta.get("changes") or [])
+        baseline_conflicts = sorted(str(value) for value in delta.get("baseline_conflicts", []) if str(value))
+    else:
+        entries, _entries_state = repo_changed_entries(root, target)
+        baseline_conflicts = []
+    records, state = repo_change_fingerprint_records(root, entries, target)
+    head, head_state = repo_git_head(root, target)
+    return {
+        "repository": target.to_dict(),
+        "head": head,
+        "head_available": head_state.available,
+        "head_reason": head_state.reason,
+        "change_fingerprints_available": state.available,
+        "change_fingerprint_reason": state.reason,
+        "change_records": records,
+        "baseline_conflicts": baseline_conflicts,
+    }
+
+
+def _task_context_pack_input_projection(
+    root: Path,
+    *,
+    target: RepoTarget,
+    task: Task,
+    discovery: dict[str, list[str]],
+    reviewed: list[str],
+    chosen: list[str],
+    explicit_candidates: list[ContextCandidate],
+    source_candidates: list[ContextCandidate],
+    snapshot: Any,
+) -> dict[str, Any]:
+    graph_completeness = snapshot.completeness if snapshot is not None else {}
+    return {
+        "task_content_digest": _task_content_digest(task),
+        "candidate_query_history": _without_discovery_placeholders(discovery.get("Candidate query", [])),
+        "reviewed_files": reviewed,
+        "chosen_files": chosen,
+        "context_docs": _context_doc_digest_inputs(explicit_candidates),
+        "source_inputs": _context_pack_source_digest_inputs(source_candidates),
+        "repository_state": _task_context_pack_repository_input(root, target=target, task=task),
+        "graph_snapshot_digest": snapshot.snapshot_digest if snapshot is not None else "",
+        "capability_matrix": graph_completeness.get("capabilities", {}),
+    }
 
 
 def _stabilize_render_estimate(data: dict[str, Any], *, budget_tokens: int) -> int:
@@ -124,21 +221,25 @@ def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, 
     return data, problems
 
 
-def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 1500, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
+def _collect_task_context_pack_inputs(
+    root: Path,
+    *,
+    target: RepoTarget,
+    task_id: str,
+    explain: bool = False,
+) -> _TaskContextPackInputs:
     task = resolve_task(root, task_id)
     discovery = task_discovery_values(task)
     chosen = _without_discovery_placeholders(discovery.get("Chosen files", []))
     reviewed = _without_discovery_placeholders(discovery.get("Candidate files reviewed", []))
-    chosen_paths = {normalize_repo_path(path) for path in chosen}
-    reviewed_paths = {normalize_repo_path(path) for path in reviewed} - chosen_paths
     stage = "scoped" if chosen else "bootstrap"
     query = _task_seed_query(task)
-    bundle: ContextBundle | None = None
     problems: list[Problem] = []
-    meta: dict[str, Any] = {"repository": target.to_dict()}
     context_docs, context_doc_problems = _resolve_context_docs(root, task)
     problems.extend(context_doc_problems)
     snapshot, graph_problems, graph_meta = load_materialized_graph(root, target=target)
+    bundle: ContextBundle | None = None
+    meta: dict[str, Any] = {"repository": target.to_dict()}
     if query:
         bundle, bundle_problems, meta = build_context_bundle(
             root,
@@ -149,6 +250,131 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             include_linked_records=False,
         )
         problems.extend(bundle_problems)
+    else:
+        problems.extend(context_graph_problems(graph_problems))
+    explicit_candidates, explicit_problems = _explicit_context_doc_candidates(
+        root,
+        target=target,
+        context_docs=context_docs,
+    )
+    problems.extend(explicit_problems)
+    required_candidates, required_problems = _required_task_candidates(
+        root,
+        target=target,
+        task=task,
+        query=query,
+    )
+    problems.extend(required_problems)
+    discovery_candidates, discovery_problems = _discovery_file_candidates(
+        root,
+        target=target,
+        chosen=chosen,
+        reviewed=reviewed,
+    )
+    problems.extend(discovery_problems)
+    fallback_candidates, fallback_problems = _startup_fallback_candidates(
+        root,
+        target=target,
+        task=task,
+    )
+    problems.extend(fallback_problems)
+    if stage == "scoped":
+        fallback_candidates = [
+            candidate
+            for candidate in fallback_candidates
+            if candidate.source_ref.kind == "product_manifest"
+        ]
+    verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
+    problems.extend(verification_problems)
+    required_paths = {candidate.source_ref.path for candidate in required_candidates}
+    mandatory_candidates = [
+        candidate
+        for candidate in explicit_candidates
+        if candidate.source_ref.path not in required_paths
+    ]
+    bundle_candidates = _task_pack_bundle_candidates(
+        bundle,
+        excluded_paths={
+            *(candidate.source_ref.path for candidate in required_candidates),
+            *(candidate.source_ref.path for candidate in mandatory_candidates),
+        },
+        limit=8,
+    )
+    return _TaskContextPackInputs(
+        task=task,
+        discovery=discovery,
+        reviewed=reviewed,
+        chosen=chosen,
+        stage=stage,
+        query=query,
+        snapshot=snapshot,
+        graph_meta=graph_meta,
+        bundle=bundle,
+        explicit_candidates=explicit_candidates,
+        required_candidates=required_candidates,
+        discovery_candidates=discovery_candidates,
+        fallback_candidates=fallback_candidates,
+        verification_candidates=verification_candidates,
+        bundle_candidates=bundle_candidates,
+        problems=problems,
+        meta=meta,
+    )
+
+
+def _task_context_pack_input_digest(root: Path, *, target: RepoTarget, inputs: _TaskContextPackInputs) -> str:
+    return digest_data(
+        _task_context_pack_input_projection(
+            root,
+            target=target,
+            task=inputs.task,
+            discovery=inputs.discovery,
+            reviewed=inputs.reviewed,
+            chosen=inputs.chosen,
+            explicit_candidates=inputs.explicit_candidates,
+            source_candidates=_dedupe_candidates(
+                [
+                    *inputs.required_candidates,
+                    *inputs.explicit_candidates,
+                    *inputs.discovery_candidates,
+                    *inputs.fallback_candidates,
+                    *inputs.verification_candidates,
+                    *inputs.bundle_candidates,
+                ]
+            ),
+            snapshot=inputs.snapshot,
+        )
+    )
+
+
+def current_task_context_pack_input_digest(
+    root: Path,
+    *,
+    target: RepoTarget,
+    task_id: str,
+) -> tuple[str, list[Problem]]:
+    inputs = _collect_task_context_pack_inputs(root, target=target, task_id=task_id)
+    return _task_context_pack_input_digest(root, target=target, inputs=inputs), inputs.problems
+
+
+def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, budget_tokens: int = 1500, explain: bool = False) -> tuple[dict[str, Any], list[Problem], dict[str, Any]]:
+    inputs = _collect_task_context_pack_inputs(
+        root,
+        target=target,
+        task_id=task_id,
+        explain=explain,
+    )
+    task = inputs.task
+    chosen = inputs.chosen
+    reviewed = inputs.reviewed
+    chosen_paths = {normalize_repo_path(path) for path in chosen}
+    reviewed_paths = {normalize_repo_path(path) for path in reviewed} - chosen_paths
+    stage = inputs.stage
+    query = inputs.query
+    bundle = inputs.bundle
+    problems = list(inputs.problems)
+    meta = inputs.meta
+    snapshot = inputs.snapshot
+    graph_meta = inputs.graph_meta
     graph_freshness, graph_freshness_problems = _task_pack_graph_freshness(
         root,
         target=target,
@@ -165,19 +391,8 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         if stage == "scoped" and snapshot is not None
         else []
     )
-    explicit_candidates, explicit_problems = _explicit_context_doc_candidates(
-        root,
-        target=target,
-        context_docs=context_docs,
-    )
-    problems.extend(explicit_problems)
-    required_candidates, required_problems = _required_task_candidates(
-        root,
-        target=target,
-        task=task,
-        query=query,
-    )
-    problems.extend(required_problems)
+    explicit_candidates = inputs.explicit_candidates
+    required_candidates = inputs.required_candidates
     required_paths = {
         candidate.source_ref.path
         for candidate in required_candidates
@@ -187,22 +402,10 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         for candidate in explicit_candidates
         if candidate.source_ref.path not in required_paths
     ]
-    discovery_candidates, discovery_problems = _discovery_file_candidates(root, target=target, chosen=chosen, reviewed=reviewed)
-    problems.extend(discovery_problems)
-    fallback_candidates, fallback_problems = _startup_fallback_candidates(root, target=target, task=task)
-    problems.extend(fallback_problems)
-    verification_candidates, verification_problems = _verification_hint_candidates(root, target=target)
-    problems.extend(verification_problems)
-    bundle_candidates = _task_pack_bundle_candidates(
-        bundle,
-        excluded_paths={
-            *(candidate.source_ref.path for candidate in required_candidates),
-            *(candidate.source_ref.path for candidate in mandatory_candidates),
-        },
-        limit=8,
-    )
-    if stage == "scoped":
-        fallback_candidates = [candidate for candidate in fallback_candidates if candidate.source_ref.kind == "product_manifest"]
+    discovery_candidates = inputs.discovery_candidates
+    fallback_candidates = inputs.fallback_candidates
+    verification_candidates = inputs.verification_candidates
+    bundle_candidates = inputs.bundle_candidates
     context_candidates = _dedupe_candidates(
         [*required_candidates, *mandatory_candidates, *discovery_candidates, *fallback_candidates, *verification_candidates, *bundle_candidates]
     )
@@ -245,23 +448,10 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         *_graph_capability_warnings(graph_completeness, graph_meta),
         *_pack_quality_warnings(groups, task),
     ]
-    observed_head, _head_state = repo_git_head(root, target)
-    input_digest = digest_data(
-        {
-            "task_content_digest": _task_content_digest(task),
-            "candidate_query_history": _without_discovery_placeholders(discovery.get("Candidate query", [])),
-            "reviewed_files": reviewed,
-            "chosen_files": chosen,
-            "context_docs": _context_doc_digest_inputs(explicit_candidates),
-            "repository": target.to_dict(),
-            "observed_head": observed_head,
-            "graph_snapshot_digest": snapshot.snapshot_digest if snapshot is not None else "",
-            "capability_matrix": graph_completeness.get("capabilities", {}),
-        }
-    )
+    input_digest = _task_context_pack_input_digest(root, target=target, inputs=inputs)
     data = {
         "schema": "repoctl.context.task_pack",
-        "schema_version": 2,
+        "schema_version": TASK_CONTEXT_PACK_SCHEMA_VERSION,
         "authoritative": False,
         "stage": stage,
         "render_projection": "full",
@@ -270,7 +460,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             "id": task.id,
             "path": task.rel_path,
             "status": task.status,
-            "repo_id": str(task.frontmatter.get("repo_id") or ""),
+            "repo_id": str(task.frontmatter.get("repo_id") or target.id),
             "area": str(task.frontmatter.get("area") or ""),
             "content_digest": _task_content_digest(task),
         },
@@ -317,6 +507,22 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
 
 
 def render_task_context_pack_markdown(data: dict[str, Any]) -> str:
+    body = _render_task_context_pack_markdown_body(data)
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    envelope = {
+        "schema": "repoctl.context.task_pack.markdown_envelope",
+        "schema_version": TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_SCHEMA_VERSION,
+        "task_pack_schema_version": int(data.get("schema_version") or 0),
+        "task_id": str(task.get("id") or ""),
+        "repo_id": str(task.get("repo_id") or ""),
+        "input_digest": str(data.get("input_digest") or ""),
+        "body_sha256": _sha256_bytes(body.encode("utf-8")),
+    }
+    encoded = json.dumps(envelope, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return f"{TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_PREFIX}{encoded} -->\n{body}"
+
+
+def _render_task_context_pack_markdown_body(data: dict[str, Any]) -> str:
     if data.get("render_projection") == "required_reference_manifest":
         return _render_required_reference_manifest(data)
     task = data.get("task") if isinstance(data.get("task"), dict) else {}
@@ -1345,6 +1551,191 @@ def _pack_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
         "pack_digest": str(data.get("pack_digest") or ""),
         "task_id": str(task.get("id") or ""),
     }
+
+
+def _valid_sha256(value: str) -> bool:
+    return bool(re.fullmatch(r"sha256:[0-9a-f]{64}", value))
+
+
+def _read_context_pack_markdown_metadata(path: Path, raw: bytes) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return {}, [Problem("error", "context_pack_binding_invalid", str(exc), path.as_posix())]
+    first_line, separator, body = text.partition("\n")
+    if not separator or not first_line.startswith(TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_PREFIX) or not first_line.endswith(" -->"):
+        return {}, [
+            Problem(
+                "error",
+                "context_pack_binding_metadata_missing",
+                "legacy Markdown Context Pack has no machine-verifiable binding envelope",
+                path.as_posix(),
+            )
+        ]
+    encoded = first_line[len(TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_PREFIX) : -4]
+    try:
+        envelope = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        return {}, [Problem("error", "context_pack_binding_invalid", str(exc), path.as_posix())]
+    expected_keys = {
+        "schema",
+        "schema_version",
+        "task_pack_schema_version",
+        "task_id",
+        "repo_id",
+        "input_digest",
+        "body_sha256",
+    }
+    if not isinstance(envelope, dict) or set(envelope) != expected_keys:
+        return {}, [Problem("error", "context_pack_binding_invalid", "Markdown Context Pack envelope has invalid fields", path.as_posix())]
+    if (
+        envelope.get("schema") != "repoctl.context.task_pack.markdown_envelope"
+        or type(envelope.get("schema_version")) is not int
+        or envelope.get("schema_version") != TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_SCHEMA_VERSION
+        or type(envelope.get("task_pack_schema_version")) is not int
+        or envelope.get("task_pack_schema_version") != TASK_CONTEXT_PACK_SCHEMA_VERSION
+    ):
+        problems.append(Problem("error", "context_pack_binding_invalid", "Markdown Context Pack envelope has invalid schema", path.as_posix()))
+    for key in ("input_digest", "body_sha256"):
+        if not _valid_sha256(str(envelope.get(key) or "")):
+            problems.append(Problem("error", "context_pack_binding_invalid", f"Markdown Context Pack has invalid {key}", path.as_posix()))
+    if str(envelope.get("body_sha256") or "") != _sha256_bytes(body.encode("utf-8")):
+        problems.append(Problem("error", "context_pack_binding_invalid", "Markdown Context Pack body digest does not match", path.as_posix()))
+    return {
+        "task_id": str(envelope.get("task_id") or ""),
+        "repo_id": str(envelope.get("repo_id") or ""),
+        "input_digest": str(envelope.get("input_digest") or ""),
+    }, problems
+
+
+def _read_bindable_context_pack(path: Path) -> tuple[dict[str, Any], list[Problem]]:
+    if not path.is_file():
+        return {}, [Problem("error", "context_pack_missing", "bound Context Pack is missing", path.as_posix())]
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return {}, [Problem("error", "context_pack_invalid", str(exc), path.as_posix())]
+    if path.suffix.lower() == ".md" or raw.startswith(TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_PREFIX.encode("utf-8")):
+        metadata, problems = _read_context_pack_markdown_metadata(path, raw)
+        if metadata:
+            metadata["artifact_sha256"] = _sha256_bytes(raw)
+        return metadata, problems
+    problems: list[Problem] = []
+    data = _read_pack_artifact(path, problems, label="bound")
+    if not data:
+        return {}, problems
+    if (
+        data.get("schema") != "repoctl.context.task_pack"
+        or type(data.get("schema_version")) is not int
+        or data.get("schema_version") != TASK_CONTEXT_PACK_SCHEMA_VERSION
+    ):
+        problems.append(Problem("error", "context_pack_binding_invalid", "active Context Pack requires the current task-pack schema", path.as_posix()))
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    return {
+        "task_id": str(task.get("id") or ""),
+        "repo_id": str(task.get("repo_id") or ""),
+        "input_digest": str(data.get("input_digest") or ""),
+        "artifact_sha256": _sha256_bytes(raw),
+    }, problems
+
+
+def inspect_task_context_pack_binding(
+    root: Path,
+    *,
+    target: RepoTarget,
+    task_id: str,
+    binding: dict[str, str] | None,
+) -> dict[str, Any]:
+    if binding is None:
+        return {"status": "not_bound", "active": False, "path": "", "reason_codes": []}
+    path_value = str(binding.get("path") or "")
+    candidate = Path(path_value)
+    if not path_value or candidate.is_absolute() or ".." in candidate.parts or "\\" in path_value:
+        return {"status": "invalid", "active": False, "path": path_value, "reason_codes": ["pack_path_invalid"]}
+    path = root / candidate
+    if not path.is_file():
+        return {"status": "missing", "active": False, "path": path_value, "reason_codes": ["pack_missing"]}
+    metadata, metadata_problems = _read_bindable_context_pack(path)
+    if any(problem.severity == "error" for problem in metadata_problems):
+        return {
+            "status": "invalid",
+            "active": False,
+            "path": path_value,
+            "reason_codes": sorted({problem.code for problem in metadata_problems}),
+        }
+    if metadata.get("task_id") != normalize_task_id(task_id) or metadata.get("repo_id") != target.id:
+        return {"status": "invalid", "active": False, "path": path_value, "reason_codes": ["pack_identity_mismatch"]}
+    reason_codes: list[str] = []
+    if str(metadata.get("artifact_sha256") or "") != str(binding.get("artifact_sha256") or ""):
+        reason_codes.append("pack_artifact_changed")
+    if str(metadata.get("input_digest") or "") != str(binding.get("input_digest") or ""):
+        reason_codes.append("pack_identity_changed")
+    current_input_digest, input_problems = current_task_context_pack_input_digest(
+        root,
+        target=target,
+        task_id=task_id,
+    )
+    input_errors = [problem for problem in input_problems if problem.severity == "error"]
+    if current_input_digest != str(binding.get("input_digest") or ""):
+        reason_codes.append("pack_inputs_changed")
+    if input_errors and not reason_codes:
+        return {
+            "status": "unknown",
+            "active": False,
+            "path": path_value,
+            "reason_codes": ["pack_input_observation_unavailable"],
+            "recorded_input_digest": str(binding.get("input_digest") or ""),
+            "current_input_digest": "",
+        }
+    reason_codes = list(dict.fromkeys(reason_codes))
+    return {
+        "status": "stale" if reason_codes else "current",
+        "active": not reason_codes,
+        "path": path_value,
+        "reason_codes": reason_codes,
+        "recorded_input_digest": str(binding.get("input_digest") or ""),
+        "current_input_digest": current_input_digest,
+    }
+
+
+def prepare_task_context_pack_binding(
+    root: Path,
+    *,
+    target: RepoTarget,
+    task_id: str,
+    path: Path,
+) -> tuple[dict[str, str], list[Problem]]:
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return {}, [Problem("error", "context_pack_binding_path_invalid", "Context Pack binding path must stay inside the workspace", path.as_posix())]
+    metadata, problems = _read_bindable_context_pack(root / relative)
+    if any(problem.severity == "error" for problem in problems):
+        return {}, problems
+    if metadata.get("task_id") != normalize_task_id(task_id) or metadata.get("repo_id") != target.id:
+        return {}, [Problem("error", "context_pack_binding_identity_mismatch", "Context Pack task or repository identity does not match", relative)]
+    binding = {
+        "path": relative,
+        "artifact_sha256": str(metadata.get("artifact_sha256") or ""),
+        "input_digest": str(metadata.get("input_digest") or ""),
+    }
+    observation = inspect_task_context_pack_binding(
+        root,
+        target=target,
+        task_id=task_id,
+        binding=binding,
+    )
+    if observation.get("status") != "current":
+        return {}, [
+            Problem(
+                "error",
+                f"context_pack_{observation.get('status', 'invalid')}",
+                "Context Pack must be current and verifiable before binding",
+                relative,
+            )
+        ]
+    return binding, []
 
 
 def _read_pack_benchmark_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
