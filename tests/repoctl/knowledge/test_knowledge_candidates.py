@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.graph_model import digest_data
 from tools.repoctl.knowledge_candidates import query_knowledge_records
 from tests.repoctl.knowledge_test_helpers import (
     _setup_knowledge_workspace,
@@ -303,6 +304,23 @@ def test_knowledge_candidate_refresh_creates_new_candidate_after_source_drift(tm
     assert status_payload["data"]["candidate_review_states"] == {"pending": 1, "refreshed": 1}
     assert status_payload["data"]["event_types"] == {"refreshed_candidate": 1}
 
+    old_path = tmp_path / f".repoctl-state/knowledge/candidates/main/{old_candidate['id']}.json"
+    invalid_old = json.loads(old_path.read_text(encoding="utf-8"))
+    invalid_old["schema_version"] = 2
+    invalid_old["candidate_digest"] = digest_data(
+        {key: value for key, value in invalid_old.items() if key != "candidate_digest"}
+    )
+    old_path.write_text(json.dumps(invalid_old, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 1
+    blocked_batch = json.loads(capsys.readouterr().out)
+    blocked_old = next(
+        item
+        for item in blocked_batch["data"]["skipped_candidates"]
+        if item["candidate_id"] == old_candidate["id"]
+    )
+    assert blocked_old["reason"] == "blocked_by_non_drift_errors"
+    assert blocked_old["problem_codes"]["knowledge_candidate_schema_invalid"] == 1
+
 
 def test_knowledge_candidate_rejects_state_source(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
@@ -496,6 +514,443 @@ def test_task_finish_creates_source_linked_knowledge_candidate(tmp_path: Path, m
     assert main(["graph", "query", "--repo-id", "main", "--file", "service.py", "--json"]) == 0
     stale_result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert not any(path["edge"] == "KNOWLEDGE_APPLIES_TO" for path in stale_result["paths"])
+
+
+def test_receipt_knowledge_resolves_byte_identical_parent_archive_move(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    _write_knowledge_docs(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "service.py").write_text("def deliver() -> str:\n    return 'before'\n", encoding="utf-8")
+    commit_all(repo)
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    add_task(tmp_path, f"{parent_id}--parent.md", task_text(parent_id, status="doing"))
+    child_body = (
+        task_text(child_id, status="todo", parent=parent_id)
+        .replace('repo_id: ""', 'repo_id: "main"')
+        .replace('area: ""', 'area: "repo"')
+    )
+    add_task(tmp_path, f"{child_id}--child.md", child_body)
+    (tmp_path / "docs/BOARD.md").write_text(
+        f"# BOARD\n\n## Board\n\n- docs/tasks/{parent_id}--parent.md\n- docs/tasks/{child_id}--child.md\n\n## Backlog\n",
+        encoding="utf-8",
+    )
+    verification = tmp_path / "verification.md"
+    verification.write_text("- Command: pytest\n- Result: pass\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            child_id,
+            "--query",
+            "delivery invariant",
+            "--reviewed",
+            "repos/service.py",
+            "--chosen",
+            "repos/service.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    (repo / "service.py").write_text("def deliver() -> str:\n    return 'after'\n", encoding="utf-8")
+    claim = "Delivery must follow the reviewed receipt-backed path."
+    assert main(
+        [
+            "task",
+            "finish",
+            child_id,
+            "--verification-file",
+            verification.as_posix(),
+            "--knowledge-kind",
+            "invariant",
+            "--knowledge-claim",
+            claim,
+            "--knowledge-applies-to",
+            "service.py",
+            "--json",
+        ]
+    ) == 0
+    finish_payload = json.loads(capsys.readouterr().out)
+    candidate_path = tmp_path / finish_payload["data"]["knowledge_closeout"]["candidate_path"]
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    live_task_path = f"docs/tasks/{child_id}--child.md"
+    archive_task_path = f"docs/archive/tasks/{child_id}--child.md"
+    assert candidate["source_refs"][1]["path"] == live_task_path
+
+    assert main(
+        [
+            "knowledge",
+            "candidate",
+            "suggest",
+            "--from-task",
+            child_id,
+            "--repo-id",
+            "main",
+            "--kind",
+            "invariant",
+            "--claim",
+            "Delivery retry policy must preserve the same reviewed source binding.",
+            "--applies-to",
+            "service.py",
+            "--json",
+        ]
+    ) == 0
+    pending_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    pending_path = tmp_path / f".repoctl-state/knowledge/candidates/main/{pending_id}.json"
+    pending_bytes = pending_path.read_bytes()
+    missing_derivation = json.loads(pending_bytes)
+    missing_derivation.pop("derived_from")
+    missing_derivation["candidate_digest"] = digest_data(
+        {key: value for key, value in missing_derivation.items() if key != "candidate_digest"}
+    )
+    pending_path.write_text(json.dumps(missing_derivation, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert main(["knowledge", "candidate", "check", pending_id, "--repo-id", "main", "--json"]) == 1
+    invalid_check = json.loads(capsys.readouterr().out)
+    invalid_problem = next(problem for problem in invalid_check["problems"] if problem["code"] == "knowledge_source_identity_invalid")
+    assert invalid_problem["cause_code"] == "completion_derivation_missing"
+    before_candidate_paths = set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json"))
+    before_event_paths = set((tmp_path / "docs/knowledge/events").glob("E-*.json"))
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 1
+    blocked_refresh = json.loads(capsys.readouterr().out)
+    blocked = next(item for item in blocked_refresh["data"]["skipped_candidates"] if item["candidate_id"] == pending_id)
+    assert blocked["reason"] == "blocked_by_non_drift_errors"
+    refresh_problem = next(problem for problem in blocked_refresh["problems"] if problem["code"] == "knowledge_source_identity_invalid")
+    assert refresh_problem["cause_code"] == "completion_derivation_missing"
+    assert set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json")) == before_candidate_paths
+    assert set((tmp_path / "docs/knowledge/events").glob("E-*.json")) == before_event_paths
+    pending_path.write_bytes(pending_bytes)
+    assert main(["knowledge", "approve", candidate["id"], "--repo-id", "main", "--json"]) == 0
+    record_payload = json.loads(capsys.readouterr().out)
+    record_id = record_payload["data"]["record"]["id"]
+    record_path = tmp_path / record_payload["data"]["record_path"]
+    candidate_bytes = candidate_path.read_bytes()
+    record_bytes = record_path.read_bytes()
+
+    assert main(["task", "finish", parent_id, "--verification-file", verification.as_posix(), "--json"]) == 0
+    capsys.readouterr()
+    assert not (tmp_path / live_task_path).exists()
+    assert (tmp_path / archive_task_path).is_file()
+
+    assert main(["knowledge", "candidate", "check", pending_id, "--repo-id", "main", "--json"]) == 0
+    pending_check = json.loads(capsys.readouterr().out)
+    task_status = next(status for status in pending_check["data"]["source_ref_statuses"] if status["kind"] == "task_artifact")
+    assert task_status["status"] == "relocated"
+    assert task_status["declared_path"] == live_task_path
+    assert task_status["resolved_path"] == archive_task_path
+    assert task_status["digest_matches"] is True
+
+    assert main(["knowledge", "candidate", "show", pending_id, "--repo-id", "main", "--format", "markdown"]) == 0
+    review_markdown = capsys.readouterr().out
+    assert (
+        f"declared=`{live_task_path}` resolved=`{archive_task_path}` status=`relocated` "
+        "declared_exists=`False` resolved_exists=`True` digest_matches=`True`"
+    ) in review_markdown
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    record_check = json.loads(capsys.readouterr().out)
+    checked_record = next(item for item in record_check["data"]["records"] if item["id"] == record_id)
+    assert checked_record["status"] == "reviewed"
+    assert any(status["status"] == "relocated" for status in checked_record["source_statuses"])
+
+    query, problems, warnings = query_knowledge_records(tmp_path, repo_id="main", query=claim)
+    assert problems == []
+    assert warnings == []
+    public_record = query["results"][0]["record"]
+    assert public_record["record_digest"] == record_payload["data"]["record"]["record_digest"]
+    assert any(ref["path"] == live_task_path for ref in public_record["source_refs"])
+    assert any(ref["path"] == archive_task_path and ref["declared_path"] == live_task_path for ref in public_record["resolved_source_refs"])
+
+    related_query, related_problems, related_warnings = query_knowledge_records(
+        tmp_path,
+        repo_id="main",
+        query="no lexical claim match",
+        related_paths={archive_task_path},
+        require_related=True,
+    )
+    assert related_problems == []
+    assert related_warnings == []
+    assert related_query["results"][0]["record"]["id"] == record_id
+    assert related_query["results"][0]["matched_paths"] == [archive_task_path]
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+    graph = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    knowledge_node = next(node["id"] for node in graph["nodes"] if node["kind"] == "knowledge" and node["identity"]["record_id"] == record_id)
+    source_node_ids = {edge["to"] for edge in graph["edges"] if edge["kind"] == "KNOWLEDGE_SOURCED_FROM" and edge["from"] == knowledge_node}
+    source_paths = {node["identity"].get("path", "") for node in graph["nodes"] if node["id"] in source_node_ids}
+    assert archive_task_path in source_paths
+    assert live_task_path not in source_paths
+
+    assert main(["context", "query", claim, "--repo-id", "main", "--full", "--json"]) == 0
+    context_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    knowledge_item = next(
+        item
+        for item in context_bundle["groups"]["reviewed_knowledge"]
+        if item.get("record_id") == record_id
+    )
+    document_continuations = {
+        item["selector"]["value"]
+        for item in knowledge_item["continuations"]
+        if item.get("selector", {}).get("kind") == "document"
+    }
+    assert archive_task_path in document_continuations
+    assert live_task_path not in document_continuations
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
+    render_payload = json.loads(capsys.readouterr().out)
+    record_page = (tmp_path / f"docs/knowledge/generated/records/{record_id}.md").read_text(encoding="utf-8")
+    assert archive_task_path in record_page
+    assert f"status=`relocated` declared=`{live_task_path}`" in record_page
+    rendered_by_path = {item["path"]: item for item in render_payload["data"]["rendered"]}
+    record_bundle = rendered_by_path[f"docs/knowledge/generated/records/{record_id}.md"]["source_bundle"]
+    assert any(ref["path"] == live_task_path for ref in record_bundle["source_refs"])
+    assert any(
+        ref["path"] == archive_task_path and ref["resolution_status"] == "relocated"
+        for ref in record_bundle["resolved_source_refs"]
+    )
+    assert record_bundle["source_status_counts"] == {"current": 1, "relocated": 1}
+    assert candidate_path.read_bytes() == candidate_bytes
+    assert record_path.read_bytes() == record_bytes
+
+    archive_bytes = (tmp_path / archive_task_path).read_bytes()
+    (tmp_path / archive_task_path).write_bytes(archive_bytes.replace(b"\n", b"\r\n"))
+    assert main(["knowledge", "candidate", "check", pending_id, "--repo-id", "main", "--json"]) == 1
+    newline_drift = json.loads(capsys.readouterr().out)
+    newline_problem = next(problem for problem in newline_drift["problems"] if problem["code"] == "knowledge_source_identity_invalid")
+    assert newline_problem["cause_code"] == "invalid_completion_receipt"
+    (tmp_path / archive_task_path).write_bytes(archive_bytes)
+    assert main(["knowledge", "candidate", "check", pending_id, "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["upgrade", "postflight", "--workspace-root", tmp_path.as_posix(), "--json"]) == 0
+    postflight = json.loads(capsys.readouterr().out)
+    assert postflight["data"]["status"] == "ready"
+    assert not [action for action in postflight["data"]["recovery_actions"] if action["kind"].startswith("knowledge")]
+
+    (tmp_path / live_task_path).write_bytes((tmp_path / archive_task_path).read_bytes())
+    assert main(["knowledge", "candidate", "check", pending_id, "--repo-id", "main", "--json"]) == 1
+    ambiguous = json.loads(capsys.readouterr().out)
+    identity_problem = next(problem for problem in ambiguous["problems"] if problem["code"] == "knowledge_source_identity_invalid")
+    assert identity_problem["cause_code"] == "invalid_completion_receipt"
+
+    before_candidate_paths = set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json"))
+    before_event_paths = set((tmp_path / "docs/knowledge/events").glob("E-*.json"))
+    assert main(
+        [
+            "knowledge",
+            "candidate",
+            "refresh",
+            "--all-stale",
+            "--include-records",
+            "--repo-id",
+            "main",
+            "--json",
+        ]
+    ) == 1
+    blocked_all = json.loads(capsys.readouterr().out)
+    blocked_candidate = next(item for item in blocked_all["data"]["skipped_candidates"] if item["candidate_id"] == pending_id)
+    blocked_record = next(item for item in blocked_all["data"]["skipped_records"] if item["record_id"] == record_id)
+    assert blocked_candidate["reason"] == "blocked_by_non_drift_errors"
+    assert blocked_record["reason"] == "blocked_by_non_drift_errors"
+    assert any(problem["code"] == "knowledge_source_identity_invalid" for problem in blocked_all["problems"])
+    assert set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json")) == before_candidate_paths
+    assert set((tmp_path / "docs/knowledge/events").glob("E-*.json")) == before_event_paths
+
+    assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
+    invalid_render = json.loads(capsys.readouterr().out)
+    invalid_by_path = {item["path"]: item for item in invalid_render["data"]["rendered"]}
+    invalid_bundle = invalid_by_path[f"docs/knowledge/generated/records/{record_id}.md"]["source_bundle"]
+    assert invalid_bundle["source_status_counts"] == {"current": 1, "invalid_identity": 1}
+    invalid_page = (tmp_path / f"docs/knowledge/generated/records/{record_id}.md").read_text(encoding="utf-8")
+    assert "status=`invalid_identity`" in invalid_page
+    assert "cause=`invalid_completion_receipt`" in invalid_page
+
+    (tmp_path / live_task_path).unlink()
+    receipt_path = tmp_path / f"docs/tasks/.repoctl-state/completions/{child_id}.json"
+    receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt_path.write_text(
+        json.dumps(receipt_data, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    pending_current_bytes = pending_path.read_bytes()
+    invalid_pending = json.loads(pending_current_bytes)
+    invalid_pending["derived_from"]["verification_artifact"] = "docs/tasks/T-20260609184099Z--other.md"
+    invalid_pending["candidate_digest"] = digest_data(
+        {key: value for key, value in invalid_pending.items() if key != "candidate_digest"}
+    )
+    pending_path.write_text(json.dumps(invalid_pending, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before_candidate_paths = set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json"))
+    before_event_paths = set((tmp_path / "docs/knowledge/events").glob("E-*.json"))
+    assert main(["knowledge", "candidate", "refresh", pending_id, "--repo-id", "main", "--json"]) == 1
+    invalid_identity_refresh = json.loads(capsys.readouterr().out)
+    identity_blocker = next(
+        problem
+        for problem in invalid_identity_refresh["problems"]
+        if problem["code"] == "knowledge_source_identity_invalid"
+    )
+    assert identity_blocker["cause_code"] == "completion_task_artifact_binding_invalid"
+    assert set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json")) == before_candidate_paths
+    assert set((tmp_path / "docs/knowledge/events").glob("E-*.json")) == before_event_paths
+    pending_path.write_bytes(pending_current_bytes)
+
+    approval_event_path = tmp_path / record_payload["data"]["event_path"]
+    approval_event_bytes = approval_event_path.read_bytes()
+    invalid_record = json.loads(record_bytes)
+    invalid_record["schema_version"] = 2
+    invalid_record["created_from"]["candidate_id"] = pending_id
+    invalid_record["record_digest"] = digest_data(
+        {key: value for key, value in invalid_record.items() if key != "record_digest"}
+    )
+    record_path.write_text(json.dumps(invalid_record, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    invalid_approval_event = json.loads(approval_event_bytes)
+    invalid_approval_event["record_digest"] = invalid_record["record_digest"]
+    invalid_approval_event["event_digest"] = digest_data(
+        {key: value for key, value in invalid_approval_event.items() if key != "event_digest"}
+    )
+    approval_event_path.write_text(
+        json.dumps(invalid_approval_event, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    assert main(["knowledge", "candidate", "refresh", "--record-id", record_id, "--repo-id", "main", "--json"]) == 1
+    invalid_record_refresh = json.loads(capsys.readouterr().out)
+    invalid_record_codes = {problem["code"] for problem in invalid_record_refresh["problems"]}
+    assert "knowledge_record_schema_invalid" in invalid_record_codes
+    assert "knowledge_approval_candidate_mismatch" in invalid_record_codes
+    assert set((tmp_path / ".repoctl-state/knowledge/candidates/main").glob("KC-*.json")) == before_candidate_paths
+    assert set((tmp_path / "docs/knowledge/events").glob("E-*.json")) == before_event_paths
+    record_path.write_bytes(record_bytes)
+    approval_event_path.write_bytes(approval_event_bytes)
+
+    assert main(["knowledge", "candidate", "refresh", candidate["id"], "--repo-id", "main", "--json"]) == 1
+    approved_refresh = json.loads(capsys.readouterr().out)
+    assert approved_refresh["problems"][0]["code"] == "knowledge_candidate_refresh_not_pending"
+    assert main(
+        [
+            "knowledge",
+            "candidate",
+            "refresh",
+            "--all-stale",
+            "--include-records",
+            "--repo-id",
+            "main",
+            "--json",
+        ]
+    ) == 0
+    refreshed_all = json.loads(capsys.readouterr().out)
+    refreshed_record = next(item for item in refreshed_all["data"]["refreshed_records"] if item["record_id"] == record_id)
+    replacement_candidate_id = refreshed_record["new_candidate_id"]
+    assert main(["knowledge", "candidate", "check", replacement_candidate_id, "--repo-id", "main", "--json"]) == 0
+    replacement_check = json.loads(capsys.readouterr().out)
+    assert replacement_check["data"]["passed"] is True
+    assert main(["knowledge", "candidate", "show", replacement_candidate_id, "--repo-id", "main", "--json"]) == 0
+    replacement_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]
+    assert replacement_candidate["derived_from"]["kind"] == "knowledge_record"
+    assert replacement_candidate["derived_from"]["record_id"] == record_id
+    assert replacement_candidate["derived_from"]["source_derivation"]["kind"] == "completion_receipt"
+
+    replacement_candidate_path = tmp_path / f".repoctl-state/knowledge/candidates/main/{replacement_candidate_id}.json"
+    replacement_candidate_bytes = replacement_candidate_path.read_bytes()
+    invalid_replacement = json.loads(replacement_candidate_bytes)
+    invalid_replacement["derived_from"]["record_digest"] = "sha256:" + "0" * 64
+    invalid_replacement["candidate_digest"] = digest_data(
+        {key: value for key, value in invalid_replacement.items() if key != "candidate_digest"}
+    )
+    replacement_candidate_path.write_text(
+        json.dumps(invalid_replacement, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    assert main(["knowledge", "candidate", "check", replacement_candidate_id, "--repo-id", "main", "--json"]) == 1
+    invalid_replacement_check = json.loads(capsys.readouterr().out)
+    assert any(
+        problem["code"] == "knowledge_candidate_record_derivation_digest_mismatch"
+        for problem in invalid_replacement_check["problems"]
+    )
+    replacement_candidate_path.write_bytes(replacement_candidate_bytes)
+
+    invalid_replacement = json.loads(replacement_candidate_bytes)
+    invalid_replacement["derived_from"]["source_derivation"]["unreviewed_lineage"] = "other-receipt"
+    invalid_replacement["candidate_digest"] = digest_data(
+        {key: value for key, value in invalid_replacement.items() if key != "candidate_digest"}
+    )
+    replacement_candidate_path.write_text(
+        json.dumps(invalid_replacement, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    expected_lineage_problem = "knowledge_candidate_record_derivation_source_mismatch"
+    assert main(["knowledge", "candidate", "check", replacement_candidate_id, "--repo-id", "main", "--json"]) == 1
+    invalid_lineage_check = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == expected_lineage_problem for problem in invalid_lineage_check["problems"])
+    assert main(["knowledge", "candidate", "refresh", replacement_candidate_id, "--repo-id", "main", "--json"]) == 1
+    invalid_lineage_refresh = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == expected_lineage_problem for problem in invalid_lineage_refresh["problems"])
+    assert main(["knowledge", "candidate", "refresh", "--all-stale", "--repo-id", "main", "--json"]) == 1
+    invalid_lineage_batch = json.loads(capsys.readouterr().out)
+    blocked_replacement = next(
+        item
+        for item in invalid_lineage_batch["data"]["skipped_candidates"]
+        if item["candidate_id"] == replacement_candidate_id
+    )
+    assert blocked_replacement["reason"] == "blocked_by_non_drift_errors"
+    assert expected_lineage_problem in blocked_replacement["problem_codes"]
+    assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--json"]) == 1
+    invalid_lineage_approval = json.loads(capsys.readouterr().out)
+    assert any(problem["code"] == expected_lineage_problem for problem in invalid_lineage_approval["problems"])
+    replacement_candidate_path.write_bytes(replacement_candidate_bytes)
+
+    receipt_path.write_text(
+        json.dumps(receipt_data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    assert main(["knowledge", "candidate", "refresh", replacement_candidate_id, "--repo-id", "main", "--json"]) == 0
+    second_refresh = json.loads(capsys.readouterr().out)
+    replacement_candidate_id = second_refresh["data"]["candidate"]["id"]
+    second_replacement = second_refresh["data"]["candidate"]
+    assert second_replacement["derived_from"]["kind"] == "knowledge_record"
+    assert second_replacement["derived_from"]["record_id"] == record_id
+    assert second_replacement["derived_from"]["record_digest"] == record_payload["data"]["record"]["record_digest"]
+    assert second_replacement["derived_from"]["source_derivation"]["kind"] == "completion_receipt"
+    assert main(["knowledge", "approve", replacement_candidate_id, "--repo-id", "main", "--json"]) == 0
+    replacement_record = json.loads(capsys.readouterr().out)["data"]["record"]
+    assert replacement_record["supersedes"] == [record_id]
+
+    assert main(["knowledge", "candidate", "refresh", "--record-id", record_id, "--repo-id", "main", "--json"]) == 1
+    superseded_refresh = json.loads(capsys.readouterr().out)
+    assert superseded_refresh["problems"][0]["code"] == "knowledge_record_refresh_not_current"
+
+    replacement_query, replacement_problems, replacement_warnings = query_knowledge_records(
+        tmp_path,
+        repo_id="main",
+        query=claim,
+    )
+    assert replacement_problems == []
+    assert {warning.code for warning in replacement_warnings} == {"knowledge_superseded_record_excluded"}
+    public_replacement = next(
+        item["record"]
+        for item in replacement_query["results"]
+        if item["record"]["id"] == replacement_record["id"]
+    )
+    assert public_replacement["provenance"]["source_task"] == child_id
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+    replacement_graph = json.loads(capsys.readouterr().out)["data"]["snapshot"]
+    replacement_node = next(
+        node["id"]
+        for node in replacement_graph["nodes"]
+        if node["kind"] == "knowledge" and node["identity"].get("record_id") == replacement_record["id"]
+    )
+    assert any(
+        edge["kind"] == "KNOWLEDGE_DERIVED_FROM_TASK"
+        and edge["from"] == replacement_node
+        and edge["to"] == f"task:{child_id}"
+        for edge in replacement_graph["edges"]
+    )
 
 
 def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypatch, capsys) -> None:

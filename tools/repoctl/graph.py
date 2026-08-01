@@ -16,7 +16,7 @@ from .knowledge_candidates import KnowledgeExplicitPathKind, KnowledgeExplicitPa
 from .meta import RepoMetadataFacts, read_metadata_facts
 from .path_roles import is_test_path
 from .repositories import RepoSelectorResolution, RepoSelectorStatus, RepoTarget, resolve_repo_selector_path
-from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path, completion_receipt_task_path, normalize_task_id
+from .tasks import CompletionReceiptCollection, Problem, collect_completion_receipt_collection, completion_receipt_task_path, normalize_task_id
 
 
 def _has_errors(problems: list[Problem]) -> bool:
@@ -261,6 +261,7 @@ def build_graph(
     code_index_result: tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]] | None = None,
     cached_semantic_results: list[SemanticProviderResult] | None = None,
     provider_results_out: list[SemanticProviderResult] | None = None,
+    receipt_collection: CompletionReceiptCollection | None = None,
 ) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
     entries, index_problems, index_meta = code_index_result or build_code_index(root, changed=False, limit=-1, target=target)
     if _has_errors(index_problems):
@@ -361,9 +362,12 @@ def build_graph(
             nodes.setdefault(topic_node_id, GraphNode(id=topic_node_id, kind="topic", identity={"repo_id": repo_id, "topic": topic}))
             add_edge(GraphEdge("HAS_TOPIC", file_node.id, topic_node_id, "declared", "repometa_annotation"))
 
-    task_receipts, receipt_problems = collect_completion_receipts(root, repo_id=repo_id)
+    receipts = receipt_collection or collect_completion_receipt_collection(root, repo_id=repo_id)
+    task_receipt_artifacts = receipts.artifacts
+    receipt_problems = receipts.problems
     problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
-    for receipt in task_receipts:
+    for receipt_artifact in task_receipt_artifacts:
+        receipt = receipt_artifact.receipt
         receipt_task_id = str(receipt.get("task_id") or "")
         if not receipt_task_id:
             continue
@@ -384,7 +388,7 @@ def build_graph(
             },
         )
         verification = receipt.get("verification") if isinstance(receipt.get("verification"), dict) else {}
-        artifact_path = completion_receipt_artifact_path(root, receipt)
+        artifact_path = receipt_artifact.resolved_path
         if artifact_path:
             artifact_node_id = artifact_id(receipt_task_id, artifact_path)
             nodes[artifact_node_id] = GraphNode(
@@ -421,7 +425,11 @@ def build_graph(
                 add_edge(GraphEdge("CHANGE_AFFECTED_FILE", change_node_id, old_file_id, "recorded", "task_completion", {"role": "old_path"}))
                 add_edge(GraphEdge("TASK_CHANGED_FILE", task_node_id, old_file_id, "recorded", "task_completion", {"change": change, "role": "old_path"}))
 
-    knowledge_records, knowledge_problems = knowledge_records_for_graph(root, repo_id=repo_id)
+    knowledge_records, knowledge_problems = knowledge_records_for_graph(
+        root,
+        repo_id=repo_id,
+        receipt_collection=receipts,
+    )
     problems.extend(
         Problem("warning", "graph_knowledge_unavailable", problem.message, problem.path, problem.code)
         for problem in knowledge_problems
@@ -485,8 +493,11 @@ def build_graph(
                         raw_path,
                     )
                 )
-        for ref in record.get("source_refs", []) if isinstance(record.get("source_refs"), list) else []:
+        graph_source_refs = record.get("resolved_source_refs") if isinstance(record.get("resolved_source_refs"), list) else []
+        for ref in graph_source_refs if isinstance(graph_source_refs, list) else []:
             if not isinstance(ref, dict):
+                continue
+            if str(ref.get("resolution_status") or "") == "invalid_identity":
                 continue
             path = str(ref.get("path") or "")
             if not path:
@@ -751,7 +762,7 @@ def build_graph(
             {"path": fact.path, "areas": list(fact.areas), "policy_topics": list(fact.policy_topics)}
             for fact in metadata_facts
         ],
-        "task_completion": task_receipts,
+        "task_completion": [artifact.receipt for artifact in task_receipt_artifacts],
         "knowledge_records": knowledge_records,
         "structured_file_relations": [relation.to_dict() for relation in structured_result.relations],
         "rpc_resolutions": [resolution.to_dict() for resolution in structured_result.rpc_resolutions],

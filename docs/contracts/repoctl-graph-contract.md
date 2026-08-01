@@ -297,6 +297,8 @@ committed_range   / range_observed
 
 The receipt filename, `task_id`, and task ID encoded by `task_path_at_completion` must agree. `content_sha256` must bind to exactly one live or archived artifact for that task; a missing artifact, another task's artifact, or simultaneous live/archive matches are invalid. When present, `fingerprint_manifest.entry_fingerprints[]` covers `changed_entries` by exact `change + path + old_path` identity. `committed_range/range_observed` remains observed range evidence and never becomes task or child ownership evidence.
 
+Receipt-derived Knowledge uses the same artifact identity rule. Its immutable `source_refs` retain the declared path and digest, while `resolved_source_refs` may point navigation and `KNOWLEDGE_SOURCED_FROM` at the unique byte-identical archive artifact after a parent task archives a completed child. This relocation requires the exact task ID, repository ID, completion-receipt ref, declared verification artifact, receipt path, filename, and digest binding; it never follows a lookalike path or a digest-only match. Invalid, missing, duplicate, reversed, or content-changing moves remain stale/invalid and produce no current Knowledge behavior.
+
 Symbol and anchor edges are produced only by semantic providers. Name-only `facts.index.symbol_names` values must not be treated as symbol identities.
 
 ## Provenance

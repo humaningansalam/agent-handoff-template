@@ -274,7 +274,7 @@ def test_knowledge_render_defaults_to_repo_namespaced_output_for_multirepo(tmp_p
     assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "web", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
-    capsys.readouterr()
+    web_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
     assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "api", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
     api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
     assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
@@ -293,6 +293,8 @@ def test_knowledge_render_defaults_to_repo_namespaced_output_for_multirepo(tmp_p
     api_manifest = json.loads((tmp_path / "docs/knowledge/generated/api/manifest.json").read_text(encoding="utf-8"))
     assert web_manifest["repo_id"] == "web"
     assert api_manifest["repo_id"] == "api"
+    web_record_page = (tmp_path / f"docs/knowledge/generated/web/records/{web_record_id}.md").read_text(encoding="utf-8")
+    assert "(../../../../contracts/repoctl-context-contract.md)" in web_record_page
 
     assert main(["knowledge", "render", "--repo-id", "web", "--check", "--json"]) == 0
     web_check = json.loads(capsys.readouterr().out)

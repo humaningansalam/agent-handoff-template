@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import file_id
-from tools.repoctl.graph_store import materialize_graph
+from tools.repoctl.graph_store import graph_materialization_freshness, materialize_graph
 from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
@@ -122,7 +122,9 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     assert main(["graph", "query", "--task", task_id, "--full", "--json"]) == 0
     stale = json.loads(capsys.readouterr().out)
     assert stale["data"]["freshness"]["status"] == "stale"
-    assert stale["data"]["freshness"]["changed_root_paths"] == [task_path]
+    assert stale["data"]["freshness"]["changed_root_paths"] == sorted(
+        [finish_payload["data"]["completion_receipt"], task_path]
+    )
 
 
 def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -259,6 +261,71 @@ def test_graph_reports_unknown_scope_invalid_receipt_without_losing_current_inve
     assert all(warning["code"] != "invalid_completion_receipt" for warning in payload["warnings"])
 
 
+def test_graph_rejects_completion_receipt_symlink_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True)
+    outside_receipt = tmp_path.parent / f"{tmp_path.name}-outside-receipt.json"
+    outside_receipt.write_text("{}\n", encoding="utf-8")
+    (receipt_dir / "T-20260609184046Z.json").symlink_to(outside_receipt)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    receipt_warning = next(warning for warning in payload["warnings"] if warning["code"] == "invalid_completion_receipt")
+    assert "escapes workspace" in receipt_warning["message"]
+    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
+
+
+def test_graph_rejects_completion_receipt_directory_symlink_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    outside_receipts = tmp_path.parent / f"{tmp_path.name}-outside-completions"
+    outside_receipts.mkdir()
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.parent.mkdir(parents=True)
+    receipt_dir.symlink_to(outside_receipts, target_is_directory=True)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    receipt_warning = next(warning for warning in payload["warnings"] if warning["code"] == "invalid_completion_receipt")
+    assert receipt_warning["path"] == "docs/tasks/.repoctl-state/completions"
+    assert "escapes workspace" in receipt_warning["message"]
+    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
+    assert payload["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
+
+
+def test_graph_rejects_completion_receipt_directory_replaced_by_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.parent.mkdir(parents=True)
+    receipt_dir.write_text("not a receipt directory\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    receipt_warning = next(warning for warning in payload["warnings"] if warning["code"] == "invalid_completion_receipt")
+    assert receipt_warning["path"] == "docs/tasks/.repoctl-state/completions"
+    assert "not a directory" in receipt_warning["message"]
+    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
+    assert payload["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
+
+
 def test_graph_excludes_receipt_with_fake_hash_without_losing_current_inventory(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -327,3 +394,76 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
     assert len(task_paths) == 1
     assert task_paths[0]["to"]["path"] == "app.py"
     assert all(path.get("to", {}).get("path") != "sibling.py" for path in result["paths"])
+
+
+def test_graph_rebuilds_when_receipt_artifact_identity_becomes_ambiguous(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    commit_all(repo)
+    task_id = "T-20260609184046Z"
+    live_rel = f"docs/tasks/{task_id}--alpha.md"
+    archive_rel = f"docs/archive/tasks/{task_id}--alpha.md"
+    archive_path = tmp_path / archive_rel
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    history_token = "receipt_identity_history_sentinel"
+    artifact_text = task_text(task_id, status="done") + f"\n{history_token}\n"
+    archive_path.write_text(artifact_text, encoding="utf-8")
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True)
+    receipt = _receipt(
+        task_id,
+        repo_id="main",
+        task_path=live_rel,
+        content_sha256=_sha256_text(artifact_text),
+        changed_entries=[{"change": "modified", "path": "app.py"}],
+    )
+    (receipt_dir / f"{task_id}.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    target = require_repo_target(tmp_path, repo_id="main")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    first, first_problems, first_meta = materialize_graph(tmp_path, target=target)
+    assert first is not None
+    assert not [problem for problem in first_problems if problem.severity == "error"]
+    assert first_meta["materialization"]["status"] == "rebuilt"
+    assert any(node.id == f"task:{task_id}" for node in first.nodes)
+    assert main(["context", "query", history_token, "--repo-id", "main", "--full", "--json"]) == 0
+    initial_context = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(item["source_ref"]["path"] == archive_rel for item in initial_context["groups"]["related_history"])
+
+    live_path = tmp_path / live_rel
+    live_path.write_bytes(archive_path.read_bytes())
+    stale, stale_problems = graph_materialization_freshness(tmp_path, target=target)
+    assert not [problem for problem in stale_problems if problem.severity == "error"]
+    assert stale["status"] == "stale"
+    assert stale["root_evidence_changed"] is True
+    assert stale["completion_receipt_input_changed"] is True
+    assert live_rel in stale["changed_root_paths"]
+    assert archive_rel in stale["changed_root_paths"]
+    assert main(["context", "query", history_token, "--repo-id", "main", "--full", "--json"]) == 0
+    stale_context = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert all(item["source_ref"]["path"] != archive_rel for item in stale_context["groups"]["related_history"])
+
+    ambiguous, ambiguous_problems, ambiguous_meta = materialize_graph(tmp_path, target=target)
+    assert ambiguous is not None
+    assert ambiguous_meta["materialization"]["status"] == "updated"
+    assert ambiguous.completeness["capabilities"]["task_history"] == "partial"
+    assert ambiguous.completeness["receipt_set_complete"] is False
+    assert not any(node.id == f"task:{task_id}" for node in ambiguous.nodes)
+    assert any(problem.code == "invalid_completion_receipt" for problem in ambiguous_problems)
+    current_ambiguous, current_ambiguous_problems = graph_materialization_freshness(tmp_path, target=target)
+    assert current_ambiguous_problems == []
+    assert current_ambiguous["status"] == "current"
+
+    live_path.unlink()
+    restored, restored_problems, restored_meta = materialize_graph(tmp_path, target=target)
+    assert restored is not None
+    assert not [problem for problem in restored_problems if problem.severity == "error"]
+    assert restored_meta["materialization"]["status"] == "updated"
+    assert restored.completeness["capabilities"]["task_history"] == "complete"
+    assert any(node.id == f"task:{task_id}" for node in restored.nodes)
+    current_restored, current_restored_problems = graph_materialization_freshness(tmp_path, target=target)
+    assert current_restored_problems == []
+    assert current_restored["status"] == "current"

@@ -15,7 +15,7 @@ from .graph_model import digest_data
 from .io import RepoctlError, atomic_write
 from .markdown import find_section, parse_frontmatter
 from .repositories import RepoSelectorStatus, require_repo_target, resolve_repo_selector_path
-from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path, normalize_task_id
+from .tasks import CompletionReceiptCollection, Problem, completion_receipt_artifact_for_task, normalize_task_id
 
 
 ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
@@ -41,6 +41,27 @@ class KnowledgeSourceRefKind(StrEnum):
     AUTHORITY_DOCUMENT = "authority_document"
     COMPLETION_RECEIPT = "completion_receipt"
     TASK_ARTIFACT = "task_artifact"
+
+
+class KnowledgeSourceResolutionStatus(StrEnum):
+    CURRENT = "current"
+    RELOCATED = "relocated"
+    MISSING = "missing"
+    DIGEST_MISMATCH = "digest_mismatch"
+    INVALID_IDENTITY = "invalid_identity"
+
+
+class KnowledgeSourceRefreshDisposition(StrEnum):
+    CURRENT = "current"
+    REFRESHABLE = "refreshable"
+    BLOCKED = "blocked"
+
+
+class KnowledgeRefreshLifecycleStatus(StrEnum):
+    ELIGIBLE = "eligible"
+    ALREADY_REFRESHED = "already_refreshed"
+    NOT_PENDING = "not_pending"
+    NOT_CURRENT = "not_current"
 
 
 class KnowledgeQueryMatchStrength(StrEnum):
@@ -85,6 +106,29 @@ class PreparedKnowledgeCandidate:
 class KnowledgeArtifactRead:
     data: dict[str, Any] | None
     problem: Problem | None
+
+
+@dataclass(frozen=True)
+class KnowledgeSourceResolution:
+    status: KnowledgeSourceResolutionStatus
+    declared_path: str
+    resolved_path: str
+    expected_sha256: str
+    actual_sha256: str = ""
+    cause_code: str = ""
+
+
+@dataclass(frozen=True)
+class KnowledgeSourceAssessment:
+    disposition: KnowledgeSourceRefreshDisposition
+    resolutions: tuple[KnowledgeSourceResolution, ...]
+    problems: tuple[Problem, ...]
+
+
+@dataclass(frozen=True)
+class KnowledgeRefreshLifecycle:
+    status: KnowledgeRefreshLifecycleStatus
+    review_state: str = ""
 
 
 @dataclass(frozen=True)
@@ -246,25 +290,28 @@ def build_knowledge_candidate_from_receipt(
     if kind not in ALLOWED_KINDS:
         return {}, [Problem("error", "invalid_knowledge_candidate_kind", f"candidate kind must be one of {sorted(ALLOWED_KINDS)}")]
     normalized_task_id = normalize_task_id(task_id)
-    receipt, receipt_problems = _receipt_for_task(root, task_id=normalized_task_id, repo_id=repo_id)
-    if receipt is None:
+    artifact, receipt_problems = completion_receipt_artifact_for_task(root, task_id=normalized_task_id, repo_id=repo_id)
+    if artifact is None:
         if receipt_problems:
-            return {}, receipt_problems
+            return {}, [
+                Problem(
+                    "error",
+                    "knowledge_candidate_receipt_invalid",
+                    problem.message,
+                    problem.path,
+                    cause_code=problem.code,
+                )
+                for problem in receipt_problems
+            ]
         return {}, [Problem("error", "knowledge_candidate_receipt_missing", f"completion receipt not found for task: {normalized_task_id}")]
-    receipt_rel = f"docs/tasks/.repoctl-state/completions/{normalized_task_id}.json"
-    artifact_rel = completion_receipt_artifact_path(root, receipt)
-    artifact_path = root / artifact_rel
-    if not artifact_rel or not artifact_path.is_file():
-        return {}, [Problem("error", "knowledge_candidate_receipt_artifact_missing", "completion receipt artifact is missing", artifact_rel)]
-    receipt_text = (root / receipt_rel).read_text(encoding="utf-8")
-    artifact_text = artifact_path.read_text(encoding="utf-8")
+    receipt = artifact.receipt
     prepared, prepare_problems = prepare_knowledge_candidate_from_completion(
         root,
         receipt=receipt,
-        receipt_rel=receipt_rel,
-        receipt_text=receipt_text,
-        artifact_rel=artifact_rel,
-        artifact_text=artifact_text,
+        receipt_rel=artifact.receipt_path,
+        receipt_text=artifact.receipt_text,
+        artifact_rel=artifact.declared_path,
+        artifact_text=artifact.artifact_text,
         repo_id=repo_id,
         kind=kind,
         claim=claim,
@@ -580,38 +627,201 @@ def check_all_knowledge_candidates(root: Path, *, repo_id: str, pending_only: bo
     return data, problems
 
 
-def refresh_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str) -> tuple[dict[str, Any], list[Problem]]:
+def _candidate_refresh_source_assessment(
+    root: Path,
+    candidate: dict[str, Any],
+) -> tuple[KnowledgeSourceAssessment, tuple[Problem, ...]]:
+    candidate_id = str(candidate.get("id") or "")
+    assessment = _knowledge_source_assessment(root, candidate, record_id=candidate_id)
+    quality_problems = _candidate_quality_problems(root, candidate, source_assessment=assessment)
+    source_problems = set(assessment.problems)
+    hard_errors = tuple(
+        problem
+        for problem in quality_problems
+        if problem.severity == "error" and problem not in source_problems
+    )
+    return assessment, hard_errors
+
+
+def _candidate_refresh_lifecycle(
+    root: Path,
+    *,
+    repo_id: str,
+    candidate_id: str,
+    review_states: dict[str, str] | None = None,
+    refreshed_candidate_ids: set[str] | None = None,
+) -> KnowledgeRefreshLifecycle:
+    refreshed = (
+        refreshed_candidate_ids
+        if refreshed_candidate_ids is not None
+        else _refreshed_candidate_ids(root, repo_id=repo_id)
+    )
+    states = review_states if review_states is not None else _candidate_review_states(root, repo_id=repo_id)
+    review_state = states.get(candidate_id, "pending")
+    if candidate_id in refreshed:
+        return KnowledgeRefreshLifecycle(KnowledgeRefreshLifecycleStatus.ALREADY_REFRESHED, review_state)
+    if review_state != "pending":
+        return KnowledgeRefreshLifecycle(KnowledgeRefreshLifecycleStatus.NOT_PENDING, review_state)
+    return KnowledgeRefreshLifecycle(KnowledgeRefreshLifecycleStatus.ELIGIBLE, review_state)
+
+
+def _candidate_refresh_lifecycle_problem(
+    candidate_id: str,
+    lifecycle: KnowledgeRefreshLifecycle,
+) -> Problem | None:
+    if lifecycle.status is KnowledgeRefreshLifecycleStatus.ALREADY_REFRESHED:
+        return Problem(
+            "error",
+            "knowledge_candidate_refresh_already_refreshed",
+            "knowledge candidate already has a refresh successor",
+            candidate_id,
+        )
+    if lifecycle.status is KnowledgeRefreshLifecycleStatus.NOT_PENDING:
+        return Problem(
+            "error",
+            "knowledge_candidate_refresh_not_pending",
+            f"knowledge candidate review state is {lifecycle.review_state}; refresh the reviewed record when applicable",
+            candidate_id,
+        )
+    return None
+
+
+def _record_refresh_integrity_problems(
+    root: Path,
+    *,
+    repo_id: str,
+    record_id: str,
+    record: dict[str, Any],
+    events: list[dict[str, Any]] | None = None,
+) -> tuple[Problem, ...]:
+    inspected_events = events if events is not None else _load_events(root, repo_id=repo_id)
+    return tuple(
+        [
+            *_knowledge_record_contract_problems(record, record_id=record_id, repo_id=repo_id),
+            *_knowledge_approval_binding(record, inspected_events).problems,
+        ]
+    )
+
+
+def _record_refresh_lifecycle(
+    root: Path,
+    *,
+    repo_id: str,
+    record_id: str,
+    records: list[dict[str, Any]] | None = None,
+    events: list[dict[str, Any]] | None = None,
+    refreshed_record_ids: set[str] | None = None,
+) -> KnowledgeRefreshLifecycle:
+    inspected_records = records if records is not None else [
+        record
+        for record in _load_records(root)
+        if str(record.get("repo_id") or "") == repo_id
+    ]
+    inspected_events = events if events is not None else _load_events(root, repo_id=repo_id)
+    if record_id in _superseded_ids(inspected_records):
+        return KnowledgeRefreshLifecycle(KnowledgeRefreshLifecycleStatus.NOT_CURRENT, "superseded")
+    if record_id in _deprecated_ids_from_events(inspected_events):
+        return KnowledgeRefreshLifecycle(KnowledgeRefreshLifecycleStatus.NOT_CURRENT, "deprecated")
+    refreshed = (
+        refreshed_record_ids
+        if refreshed_record_ids is not None
+        else _refreshed_record_ids(root, repo_id=repo_id)
+    )
+    return KnowledgeRefreshLifecycle(
+        KnowledgeRefreshLifecycleStatus.ALREADY_REFRESHED
+        if record_id in refreshed
+        else KnowledgeRefreshLifecycleStatus.ELIGIBLE
+    )
+
+
+def _build_refreshed_receipt_candidate(
+    root: Path,
+    *,
+    task_id: str,
+    repo_id: str,
+    kind: str,
+    claim: str,
+    applies_to: list[str],
+    replacement_derivation: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[Problem]]:
+    refreshed_data, refresh_problems = build_knowledge_candidate_from_receipt(
+        root,
+        task_id=task_id,
+        repo_id=repo_id,
+        kind=kind,
+        claim=claim,
+        write=False,
+        applies_to=applies_to,
+    )
+    if refresh_problems:
+        return {}, refresh_problems
+    new_candidate = dict(refreshed_data["candidate"])
+    if replacement_derivation is not None:
+        source_derivation = dict(new_candidate.get("derived_from") or {})
+        new_candidate["derived_from"] = {
+            **replacement_derivation,
+            "source_derivation": source_derivation,
+        }
+    new_candidate["candidate_digest"] = _knowledge_candidate_digest(new_candidate)
+    destination = _candidate_dir(root, repo_id) / f"{new_candidate['id']}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(destination, json.dumps(new_candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return {
+        "candidate": new_candidate,
+        "path": destination.relative_to(root).as_posix(),
+    }, []
+
+
+def refresh_knowledge_candidate(
+    root: Path,
+    *,
+    repo_id: str,
+    candidate_id: str,
+) -> tuple[dict[str, Any], list[Problem]]:
     candidate_data, problems = show_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
     if problems:
         return {}, problems
     old_candidate = candidate_data["candidate"]
     if str(old_candidate.get("repo_id") or "") != repo_id:
         return {}, [Problem("error", "knowledge_candidate_repo_mismatch", "candidate belongs to a different repo", candidate_id)]
-    kind = str(old_candidate.get("kind") or "")
-    derived_from = old_candidate.get("derived_from")
-    claim_origin = str(old_candidate.get("claim_origin") or "")
-    receipt_derived = isinstance(derived_from, dict) and derived_from.get("kind") == "completion_receipt"
-    if claim_origin != "explicit":
+    assessment, hard_errors = _candidate_refresh_source_assessment(root, old_candidate)
+    if assessment.disposition is KnowledgeSourceRefreshDisposition.BLOCKED or hard_errors:
+        return {}, [*assessment.problems, *hard_errors]
+    lifecycle = _candidate_refresh_lifecycle(root, repo_id=repo_id, candidate_id=candidate_id)
+    if lifecycle_problem := _candidate_refresh_lifecycle_problem(candidate_id, lifecycle):
+        return {}, [lifecycle_problem]
+    if assessment.disposition is KnowledgeSourceRefreshDisposition.CURRENT:
         return {}, [
             Problem(
                 "error",
-                "knowledge_candidate_task_claim_not_explicit"
-                if receipt_derived
-                else "knowledge_candidate_claim_origin_invalid",
-                "candidate requires manual review and a newly supplied explicit reusable claim instead of refresh",
+                "knowledge_candidate_refresh_not_stale",
+                "knowledge candidate sources are current",
                 candidate_id,
             )
         ]
-    if receipt_derived:
-        task_id = str(derived_from.get("task_id") or "")
+    kind = str(old_candidate.get("kind") or "")
+    completion_derivation = _knowledge_completion_derivation(old_candidate)
+    if completion_derivation:
+        task_id = str(completion_derivation.get("task_id") or "")
         if not task_id:
             return {}, [Problem("error", "knowledge_candidate_refresh_source_missing", "receipt-derived candidate is missing task_id", candidate_id)]
-        refreshed_data, refresh_problems = build_knowledge_candidate_from_receipt(
+        outer_derivation = old_candidate.get("derived_from") if isinstance(old_candidate.get("derived_from"), dict) else {}
+        replacement_derivation = (
+            {
+                key: value
+                for key, value in outer_derivation.items()
+                if key != "source_derivation"
+            }
+            if str(outer_derivation.get("kind") or "") == "knowledge_record"
+            else None
+        )
+        refreshed_data, refresh_problems = _build_refreshed_receipt_candidate(
             root,
             task_id=task_id,
             repo_id=repo_id,
             kind=kind,
             claim=str(old_candidate.get("claim") or ""),
+            replacement_derivation=replacement_derivation,
             applies_to=_knowledge_applicability_paths(old_candidate),
         )
     else:
@@ -659,34 +869,75 @@ def refresh_knowledge_record_candidate(root: Path, *, repo_id: str, record_id: s
     if problems:
         return {}, problems
     record = record_data["record"]
-    if not _source_digest_problems(root, record, record_id=record_id):
-        return {}, [Problem("error", "knowledge_record_refresh_not_stale", "knowledge record is not stale", record_id)]
-    source_path = _refresh_source_path(record)
-    if not source_path:
-        return {}, [Problem("error", "knowledge_record_refresh_source_missing", "record has no refreshable document source", record_id)]
-    kind = str(record.get("kind") or "")
-    chunks = chunk_markdown_file(root, root / source_path)
-    if not chunks:
-        return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", source_path)]
-    refreshed_data, refresh_problems = _write_candidate_from_chunk(
+    source_assessment = _knowledge_source_assessment(root, record, record_id=record_id)
+    integrity_problems = _record_refresh_integrity_problems(
         root,
         repo_id=repo_id,
-        kind=kind,
-        primary=_primary_chunk(chunks, kind),
-        claim=str(record.get("claim") or ""),
-        applies_to=_knowledge_applicability_paths(record),
-        derived_from={
-            "kind": "knowledge_record",
-            "record_id": record_id,
-            "record_digest": record.get("record_digest", ""),
-        },
-        checklist=[
-            "refreshed source refs resolve to current content digests",
-            "candidate should replace the stale reviewed record only after explicit approval",
-            "approval should supersede the original reviewed record instead of editing it",
-            "candidate should not replace task, Board, Graph, or .repometa authority",
-        ],
+        record_id=record_id,
+        record=record,
     )
+    if source_assessment.disposition is KnowledgeSourceRefreshDisposition.BLOCKED or integrity_problems:
+        return {}, [*source_assessment.problems, *integrity_problems]
+    lifecycle = _record_refresh_lifecycle(root, repo_id=repo_id, record_id=record_id)
+    if lifecycle.status is KnowledgeRefreshLifecycleStatus.NOT_CURRENT:
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_record_refresh_not_current",
+                f"knowledge record lifecycle state is {lifecycle.review_state}",
+                record_id,
+            )
+        ]
+    if lifecycle.status is KnowledgeRefreshLifecycleStatus.ALREADY_REFRESHED:
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_record_refresh_already_refreshed",
+                "knowledge record already has a replacement candidate",
+                record_id,
+            )
+        ]
+    if source_assessment.disposition is KnowledgeSourceRefreshDisposition.CURRENT:
+        return {}, [Problem("error", "knowledge_record_refresh_not_stale", "knowledge record is not stale", record_id)]
+    kind = str(record.get("kind") or "")
+    replacement_derivation = {
+        "kind": "knowledge_record",
+        "record_id": record_id,
+        "record_digest": record.get("record_digest", ""),
+    }
+    completion_derivation = _knowledge_completion_derivation(record)
+    if completion_derivation:
+        refreshed_data, refresh_problems = _build_refreshed_receipt_candidate(
+            root,
+            task_id=str(completion_derivation.get("task_id") or ""),
+            repo_id=repo_id,
+            kind=kind,
+            claim=str(record.get("claim") or ""),
+            replacement_derivation=replacement_derivation,
+            applies_to=_knowledge_applicability_paths(record),
+        )
+    else:
+        source_path = _refresh_source_path(record)
+        if not source_path:
+            return {}, [Problem("error", "knowledge_record_refresh_source_missing", "record has no refreshable document source", record_id)]
+        chunks = chunk_markdown_file(root, root / source_path)
+        if not chunks:
+            return {}, [Problem("error", "knowledge_candidate_source_empty", "candidate source has no readable content", source_path)]
+        refreshed_data, refresh_problems = _write_candidate_from_chunk(
+            root,
+            repo_id=repo_id,
+            kind=kind,
+            primary=_primary_chunk(chunks, kind),
+            claim=str(record.get("claim") or ""),
+            applies_to=_knowledge_applicability_paths(record),
+            derived_from=replacement_derivation,
+            checklist=[
+                "refreshed source refs resolve to current content digests",
+                "candidate should replace the stale reviewed record only after explicit approval",
+                "approval should supersede the original reviewed record instead of editing it",
+                "candidate should not replace task, Board, Graph, or .repometa authority",
+            ],
+        )
     if refresh_problems:
         return {}, refresh_problems
 
@@ -728,22 +979,33 @@ def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_reco
     problems: list[Problem] = []
     for candidate in candidates:
         candidate_id = str(candidate.get("id") or "")
-        if candidate_id in refreshed_before:
+        source_assessment, hard_errors = _candidate_refresh_source_assessment(root, candidate)
+        if source_assessment.disposition is KnowledgeSourceRefreshDisposition.BLOCKED or hard_errors:
+            blockers = [*source_assessment.problems, *hard_errors]
+            skipped_candidates.append({"candidate_id": candidate_id, "reason": "blocked_by_non_drift_errors", "problem_codes": _problem_code_counts(blockers)})
+            problems.extend(blockers)
+            continue
+        lifecycle = _candidate_refresh_lifecycle(
+            root,
+            repo_id=repo_id,
+            candidate_id=candidate_id,
+            review_states=review_states,
+            refreshed_candidate_ids=refreshed_before,
+        )
+        if lifecycle.status is KnowledgeRefreshLifecycleStatus.ALREADY_REFRESHED:
             skipped_candidates.append({"candidate_id": candidate_id, "reason": "already_refreshed"})
             continue
-        review_state = review_states.get(candidate_id, "pending")
-        if review_state != "pending":
-            skipped_candidates.append({"candidate_id": candidate_id, "reason": "not_pending", "review_state": review_state})
+        if lifecycle.status is KnowledgeRefreshLifecycleStatus.NOT_PENDING:
+            skipped_candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "reason": "not_pending",
+                    "review_state": lifecycle.review_state,
+                }
+            )
             continue
-        quality_problems = _candidate_quality_problems(root, candidate)
-        has_source_problem = any(problem.code in {"knowledge_source_digest_drift", "knowledge_source_missing", "knowledge_source_refs_missing"} for problem in quality_problems)
-        hard_errors = [problem for problem in quality_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
-        if not has_source_problem:
+        if source_assessment.disposition is KnowledgeSourceRefreshDisposition.CURRENT:
             skipped_candidates.append({"candidate_id": candidate_id, "reason": "not_stale"})
-            continue
-        if hard_errors:
-            skipped_candidates.append({"candidate_id": candidate_id, "reason": "blocked_by_non_drift_errors", "problem_codes": _problem_code_counts(hard_errors)})
-            problems.extend(hard_errors)
             continue
         refreshed_data, refresh_problems = refresh_knowledge_candidate(root, repo_id=repo_id, candidate_id=candidate_id)
         if refresh_problems:
@@ -761,21 +1023,45 @@ def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_reco
     skipped_records: list[dict[str, Any]] = []
     if include_records:
         refreshed_record_ids = _refreshed_record_ids(root, repo_id=repo_id)
+        events = _load_events(root, repo_id=repo_id)
         records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
         for record in records:
             record_id = str(record.get("id") or "")
-            record_problems = _source_digest_problems(root, record, record_id=record_id)
-            has_source_problem = any(problem.code in {"knowledge_source_digest_drift", "knowledge_source_missing", "knowledge_source_refs_missing"} for problem in record_problems)
-            hard_errors = [problem for problem in record_problems if problem.severity == "error" and problem.code != "knowledge_source_digest_drift"]
-            if not has_source_problem:
-                skipped_records.append({"record_id": record_id, "reason": "not_stale"})
+            source_assessment = _knowledge_source_assessment(root, record, record_id=record_id)
+            integrity_problems = _record_refresh_integrity_problems(
+                root,
+                repo_id=repo_id,
+                record_id=record_id,
+                record=record,
+                events=events,
+            )
+            if source_assessment.disposition is KnowledgeSourceRefreshDisposition.BLOCKED or integrity_problems:
+                blockers = [*source_assessment.problems, *integrity_problems]
+                skipped_records.append({"record_id": record_id, "reason": "blocked_by_non_drift_errors", "problem_codes": _problem_code_counts(blockers)})
+                problems.extend(blockers)
                 continue
-            if record_id in refreshed_record_ids:
+            lifecycle = _record_refresh_lifecycle(
+                root,
+                repo_id=repo_id,
+                record_id=record_id,
+                records=records,
+                events=events,
+                refreshed_record_ids=refreshed_record_ids,
+            )
+            if lifecycle.status is KnowledgeRefreshLifecycleStatus.NOT_CURRENT:
+                skipped_records.append(
+                    {
+                        "record_id": record_id,
+                        "reason": "not_current",
+                        "record_state": lifecycle.review_state,
+                    }
+                )
+                continue
+            if lifecycle.status is KnowledgeRefreshLifecycleStatus.ALREADY_REFRESHED:
                 skipped_records.append({"record_id": record_id, "reason": "already_refreshed"})
                 continue
-            if hard_errors:
-                skipped_records.append({"record_id": record_id, "reason": "blocked_by_non_drift_errors", "problem_codes": _problem_code_counts(hard_errors)})
-                problems.extend(hard_errors)
+            if source_assessment.disposition is KnowledgeSourceRefreshDisposition.CURRENT:
+                skipped_records.append({"record_id": record_id, "reason": "not_stale"})
                 continue
             refreshed_data, refresh_problems = refresh_knowledge_record_candidate(root, repo_id=repo_id, record_id=record_id)
             if refresh_problems:
@@ -1154,7 +1440,11 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
     for record in selected:
         record_id = str(record.get("id") or "")
         status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
-        record_problems = [] if status in {"superseded", "deprecated"} else _source_digest_problems(root, record, record_id=record_id)
+        contract_problems = _knowledge_record_contract_problems(record, record_id=record_id, repo_id=repo_id)
+        record_problems = [
+            *contract_problems,
+            *([] if status in {"superseded", "deprecated"} else _source_digest_problems(root, record, record_id=record_id)),
+        ]
         problems.extend(record_problems)
         record_results.append(
             {
@@ -1242,10 +1532,30 @@ def query_knowledge_records(
     available_statuses: dict[str, int] = {}
     excluded_statuses: dict[str, int] = {}
     scored: list[dict[str, Any]] = []
-    fts_scores = _record_fts_scores(query, records)
+    source_views: dict[str, tuple[list[KnowledgeSourceResolution], list[dict[str, Any]]]] = {}
+    for record in records:
+        record_id = str(record.get("id") or "")
+        resolutions = knowledge_source_ref_resolutions(root, record)
+        source_views[record_id] = (
+            resolutions,
+            resolved_knowledge_source_refs(root, record, resolutions=resolutions),
+        )
+    fts_scores = _record_fts_scores(
+        query,
+        records,
+        resolved_source_refs_by_id={record_id: view[1] for record_id, view in source_views.items()},
+    )
     wanted_paths = {str(path).strip() for path in (related_paths or set()) if str(path).strip()}
     for record in records:
-        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        record_id = str(record.get("id") or "")
+        source_resolutions, resolved_source_refs = source_views[record_id]
+        status = _derived_status(
+            root,
+            record,
+            superseded_ids=superseded_ids,
+            deprecated_ids=deprecated_ids,
+            source_resolutions=source_resolutions,
+        )
         available_statuses[status] = available_statuses.get(status, 0) + 1
         if status == "stale" and not include_stale:
             excluded_statuses[status] = excluded_statuses.get(status, 0) + 1
@@ -1261,13 +1571,14 @@ def query_knowledge_records(
             continue
         if status not in {"reviewed", "stale", "superseded", "deprecated"}:
             continue
-        matched_paths = sorted(wanted_paths & _record_related_paths(record))
+        matched_paths = sorted(wanted_paths & _record_related_paths(record, resolved_source_refs=resolved_source_refs))
         if require_related and not matched_paths:
             continue
         score, breakdown, reasons = _record_score(
             query,
             record,
             fts=fts_scores.get(str(record.get("id") or ""), 0.0),
+            resolved_source_refs=resolved_source_refs,
         )
         query_matched = any(
             float(breakdown.get(key) or 0.0) > 0
@@ -1281,7 +1592,14 @@ def query_knowledge_records(
         if not query_matched and not matched_paths:
             continue
         item = {
-            "record": _public_record(record, status=status, lifecycle_relations=_record_lifecycle_relations(record, events)),
+            "record": _public_record(
+                root,
+                record,
+                status=status,
+                lifecycle_relations=_record_lifecycle_relations(record, events),
+                source_resolutions=source_resolutions,
+                resolved_source_refs=resolved_source_refs,
+            ),
             "score": round(score, 6),
             "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
             "selection_reasons": reasons,
@@ -1292,7 +1610,7 @@ def query_knowledge_records(
         if explain:
             item["explain"] = {
                 "status": status,
-                "source_ref_statuses": _source_ref_statuses(root, record),
+                "source_ref_statuses": _source_ref_statuses(root, record, resolutions=source_resolutions),
                 "superseded": status == "superseded",
                 "stale": status == "stale",
                 "deprecated": status == "deprecated",
@@ -1345,7 +1663,12 @@ def _knowledge_query_match_strength(
     return KnowledgeQueryMatchStrength.WEAK if query_matched else KnowledgeQueryMatchStrength.NONE
 
 
-def knowledge_records_for_graph(root: Path, *, repo_id: str) -> tuple[list[dict[str, Any]], list[Problem]]:
+def knowledge_records_for_graph(
+    root: Path,
+    *,
+    repo_id: str,
+    receipt_collection: CompletionReceiptCollection | None = None,
+) -> tuple[list[dict[str, Any]], list[Problem]]:
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
     events = _load_events(root, repo_id=repo_id)
     event_problems = event_integrity_problems(root, repo_id=repo_id, records=records, events=events)
@@ -1355,10 +1678,31 @@ def knowledge_records_for_graph(root: Path, *, repo_id: str) -> tuple[list[dict[
     deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
     projected: list[dict[str, Any]] = []
     for record in records:
-        status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
+        source_resolutions = knowledge_source_ref_resolutions(
+            root,
+            record,
+            receipt_collection=receipt_collection,
+        )
+        resolved_source_refs = resolved_knowledge_source_refs(root, record, resolutions=source_resolutions)
+        status = _derived_status(
+            root,
+            record,
+            superseded_ids=superseded_ids,
+            deprecated_ids=deprecated_ids,
+            source_resolutions=source_resolutions,
+        )
         if status not in {"reviewed", "stale"}:
             continue
-        projected.append(_public_record(record, status=status, lifecycle_relations=_record_lifecycle_relations(record, events)))
+        projected.append(
+            _public_record(
+                root,
+                record,
+                status=status,
+                lifecycle_relations=_record_lifecycle_relations(record, events),
+                source_resolutions=source_resolutions,
+                resolved_source_refs=resolved_source_refs,
+            )
+        )
     return sorted(projected, key=lambda item: str(item.get("id") or "")), event_problems
 
 
@@ -1432,13 +1776,111 @@ def _pack_authority_source_ref(root: Path, pack_data: dict[str, Any], kind: str)
 
 
 def _validate_source(root: Path, rel: str) -> Problem | None:
+    if (
+        not rel
+        or rel != rel.strip().replace("\\", "/")
+        or Path(rel).is_absolute()
+        or ".." in Path(rel).parts
+    ):
+        return Problem(
+            "error",
+            "knowledge_candidate_source_path_invalid",
+            "candidate source path is invalid",
+            rel,
+            cause_code="source_path_invalid",
+        )
     parts = set(Path(rel).parts)
     if parts & EXCLUDED_SOURCE_PARTS:
         return Problem("error", "knowledge_candidate_source_excluded", "candidate source is excluded from knowledge ingestion", rel)
     if not rel.startswith(ALLOWED_SOURCE_PREFIXES):
         return Problem("error", "knowledge_candidate_source_not_allowed", "candidate source must be an ADR, contract, or allowed workflow doc", rel)
-    if not (root / rel).is_file():
+    path = root / rel
+    try:
+        root_resolved = root.resolve()
+        path_resolved = path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return Problem(
+            "error",
+            "knowledge_candidate_source_path_invalid",
+            "candidate source path is unresolvable",
+            rel,
+            cause_code="source_path_unresolvable",
+        )
+    if root_resolved not in (path_resolved, *path_resolved.parents):
+        return Problem(
+            "error",
+            "knowledge_candidate_source_path_invalid",
+            "candidate source escapes the workspace",
+            rel,
+            cause_code="source_path_invalid",
+        )
+    resolved_rel = path_resolved.relative_to(root_resolved).as_posix()
+    if not resolved_rel.startswith(ALLOWED_SOURCE_PREFIXES) or set(Path(resolved_rel).parts) & EXCLUDED_SOURCE_PARTS:
+        return Problem(
+            "error",
+            "knowledge_candidate_source_path_invalid",
+            "candidate source resolves outside the allowed authority document boundary",
+            rel,
+            cause_code="source_authority_boundary_invalid",
+        )
+    if not path.is_file():
         return Problem("error", "knowledge_candidate_source_missing", "candidate source file is missing", rel)
+    return None
+
+
+def _knowledge_source_ref_boundary_problem(
+    root: Path,
+    *,
+    repo_id: str,
+    ref: dict[str, Any],
+) -> Problem | None:
+    rel = str(ref.get("path") or "")
+    try:
+        ref_kind = KnowledgeSourceRefKind(str(ref.get("kind") or ""))
+    except ValueError:
+        return Problem("error", "knowledge_source_kind_invalid", "knowledge source ref kind is invalid", rel)
+    if ref_kind in {KnowledgeSourceRefKind.DOCUMENT, KnowledgeSourceRefKind.AUTHORITY_DOCUMENT}:
+        problem = _validate_source(root, rel)
+        if problem is None:
+            return None
+        return Problem(
+            problem.severity,
+            problem.code.replace("knowledge_candidate_source", "knowledge_source", 1),
+            problem.message.replace("candidate source", "knowledge source", 1),
+            problem.path,
+            cause_code=problem.cause_code,
+        )
+    if ref_kind is KnowledgeSourceRefKind.CURRENT_SOURCE:
+        try:
+            target = require_repo_target(root, repo_id=repo_id)
+        except RepoctlError:
+            return Problem(
+                "error",
+                "knowledge_source_current_invalid",
+                "current_source must belong to the selected repository",
+                rel,
+            )
+        resolution = resolve_repo_selector_path(rel, repository_path=target.display_path)
+        expected = f"{target.display_path}/{resolution.path}" if resolution.path else ""
+        source_path = target.root_path / resolution.path
+        try:
+            target_root = target.root_path.resolve()
+            resolved_source = source_path.resolve()
+            source_contained = target_root in (resolved_source, *resolved_source.parents)
+        except (OSError, ValueError, RuntimeError):
+            source_contained = False
+        if (
+            resolution.status != RepoSelectorStatus.RESOLVED
+            or rel != expected
+            or not source_contained
+            or not source_path.is_file()
+        ):
+            return Problem(
+                "error",
+                "knowledge_source_current_invalid",
+                "current_source must be a current workspace-qualified file in the selected repository",
+                rel,
+            )
     return None
 
 
@@ -1452,22 +1894,6 @@ def _primary_chunk(chunks: Any, kind: str) -> Any:
         if chunk.title in preferred:
             return chunk
     return chunks[0]
-
-
-def _receipt_for_task(root: Path, *, task_id: str, repo_id: str) -> tuple[dict[str, Any] | None, list[Problem]]:
-    receipts, problems = collect_completion_receipts(root, repo_id=repo_id)
-    target_problem_path = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
-    target_problems = [
-        Problem("error", "knowledge_candidate_receipt_invalid", problem.message, problem.path)
-        for problem in problems
-        if problem.path == target_problem_path
-    ]
-    if target_problems:
-        return None, target_problems
-    for receipt in receipts:
-        if str(receipt.get("task_id") or "") == task_id:
-            return receipt, []
-    return None, []
 
 
 def _receipt_title(receipt: dict[str, Any], artifact_text: str) -> str:
@@ -1922,6 +2348,125 @@ def _knowledge_record_digest(record: dict[str, Any]) -> str:
     return digest_data({key: value for key, value in record.items() if key != "record_digest"})
 
 
+def _knowledge_record_contract_problems(
+    record: dict[str, Any],
+    *,
+    record_id: str,
+    repo_id: str,
+) -> list[Problem]:
+    problems: list[Problem] = []
+    if record.get("schema") != "repoctl.knowledge.record" or record.get("schema_version") != 1:
+        problems.append(Problem("error", "knowledge_record_schema_invalid", "knowledge record schema is invalid", record_id))
+    if str(record.get("id") or "") != record_id:
+        problems.append(Problem("error", "knowledge_record_id_mismatch", "knowledge record id does not match its path", record_id))
+    if str(record.get("repo_id") or "") != repo_id:
+        problems.append(Problem("error", "knowledge_record_repo_mismatch", "knowledge record belongs to a different repo", record_id))
+    if record.get("status") != "reviewed":
+        problems.append(Problem("error", "knowledge_record_status_invalid", "knowledge record status must be reviewed", record_id))
+    if record.get("authoritative") is not True:
+        problems.append(Problem("error", "knowledge_record_authority_invalid", "knowledge record must remain authoritative", record_id))
+    if str(record.get("kind") or "") not in ALLOWED_KINDS:
+        problems.append(Problem("error", "knowledge_record_kind_invalid", "knowledge record kind is invalid", record_id))
+    if not str(record.get("claim") or "").strip():
+        problems.append(Problem("error", "knowledge_record_claim_missing", "knowledge record claim is missing", record_id))
+    created_from = record.get("created_from")
+    if not isinstance(created_from, dict):
+        problems.append(Problem("error", "knowledge_record_provenance_invalid", "knowledge record approval provenance is invalid", record_id))
+    review = record.get("review")
+    if not isinstance(review, dict) or review.get("status") != "reviewed":
+        problems.append(Problem("error", "knowledge_record_review_invalid", "knowledge record review metadata is invalid", record_id))
+    return problems
+
+
+def _knowledge_record_derivation_problems(
+    root: Path,
+    candidate: dict[str, Any],
+) -> list[Problem]:
+    derived = candidate.get("derived_from") if isinstance(candidate.get("derived_from"), dict) else {}
+    if str(derived.get("kind") or "") != "knowledge_record":
+        return []
+    candidate_id = str(candidate.get("id") or "")
+    repo_id = str(candidate.get("repo_id") or "")
+    record_id = str(derived.get("record_id") or "")
+    record_data, read_problems = show_knowledge_record(root, record_id=record_id, repo_id=repo_id)
+    if read_problems:
+        cause = read_problems[0]
+        return [
+            Problem(
+                "error",
+                "knowledge_candidate_record_derivation_invalid",
+                "replacement candidate parent record could not be verified",
+                candidate_id,
+                cause_code=cause.code,
+            )
+        ]
+    record = record_data["record"]
+    expected_digest = str(derived.get("record_digest") or "")
+    if (
+        not expected_digest
+        or expected_digest != str(record.get("record_digest") or "")
+        or expected_digest != _knowledge_record_digest(record)
+    ):
+        return [
+            Problem(
+                "error",
+                "knowledge_candidate_record_derivation_digest_mismatch",
+                "replacement candidate parent digest does not match the reviewed record",
+                record_id or candidate_id,
+            )
+        ]
+    parent_source_derivation = _knowledge_completion_derivation(record)
+    candidate_source_derivation = derived.get("source_derivation")
+    if (
+        (parent_source_derivation and candidate_source_derivation != parent_source_derivation)
+        or (not parent_source_derivation and "source_derivation" in derived)
+    ):
+        return [
+            Problem(
+                "error",
+                "knowledge_candidate_record_derivation_source_mismatch",
+                "replacement candidate source derivation does not match the parent record provenance",
+                record_id or candidate_id,
+            )
+        ]
+    events = _load_events(root, repo_id=repo_id)
+    integrity_problems = _record_refresh_integrity_problems(
+        root,
+        repo_id=repo_id,
+        record_id=record_id,
+        record=record,
+        events=events,
+    )
+    if integrity_problems:
+        return list(integrity_problems)
+    records = [
+        item
+        for item in _load_records(root)
+        if str(item.get("repo_id") or "") == repo_id
+    ]
+    if record_id in _superseded_ids(records):
+        return [
+            Problem(
+                "error",
+                "knowledge_candidate_record_derivation_not_current",
+                "replacement candidate parent record is superseded",
+                record_id,
+                cause_code="superseded",
+            )
+        ]
+    if record_id in _deprecated_ids_from_events(events):
+        return [
+            Problem(
+                "error",
+                "knowledge_candidate_record_derivation_not_current",
+                "replacement candidate parent record is deprecated",
+                record_id,
+                cause_code="deprecated",
+            )
+        ]
+    return []
+
+
 def _knowledge_candidate_digest(candidate: dict[str, Any]) -> str:
     return digest_data({key: value for key, value in candidate.items() if key != "candidate_digest"})
 
@@ -2195,68 +2740,512 @@ def event_integrity_problems(
     return problems
 
 
-def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str] | None = None) -> str:
+def _derived_status(
+    root: Path,
+    record: dict[str, Any],
+    *,
+    superseded_ids: set[str],
+    deprecated_ids: set[str] | None = None,
+    source_resolutions: list[KnowledgeSourceResolution] | None = None,
+) -> str:
     record_id = str(record.get("id") or "")
     if record_id in superseded_ids:
         return "superseded"
     if deprecated_ids and record_id in deprecated_ids:
         return "deprecated"
-    if _source_digest_problems(root, record):
+    if _source_digest_problems(root, record, resolutions=source_resolutions):
         return "stale"
     return str(record.get("status") or "")
 
 
-def _source_digest_problems(root: Path, data: dict[str, Any], *, record_id: str = "") -> list[Problem]:
+def _knowledge_completion_derivation(data: dict[str, Any]) -> dict[str, Any]:
+    def completion_derivation(value: Any) -> dict[str, Any]:
+        derived = value if isinstance(value, dict) else {}
+        if str(derived.get("kind") or "") == "completion_receipt":
+            return derived
+        source_derivation = derived.get("source_derivation") if isinstance(derived.get("source_derivation"), dict) else {}
+        return source_derivation if str(source_derivation.get("kind") or "") == "completion_receipt" else {}
+
+    derived = completion_derivation(data.get("derived_from"))
+    if derived:
+        return derived
+    created_from = data.get("created_from") if isinstance(data.get("created_from"), dict) else {}
+    return completion_derivation(created_from.get("candidate_derived_from"))
+
+
+def _completion_source_shape_cause(data: dict[str, Any], *, derived: dict[str, Any]) -> str:
+    refs = data.get("source_refs")
+    completion_kinds = {
+        KnowledgeSourceRefKind.COMPLETION_RECEIPT.value,
+        KnowledgeSourceRefKind.TASK_ARTIFACT.value,
+    }
+    has_completion_ref = isinstance(refs, list) and any(
+        isinstance(ref, dict) and str(ref.get("kind") or "") in completion_kinds
+        for ref in refs
+    )
+    if not derived:
+        return "completion_derivation_missing" if has_completion_ref else ""
+    if not isinstance(refs, list) or len(refs) != 2 or any(not isinstance(ref, dict) for ref in refs):
+        return "completion_source_ref_shape_invalid"
+    kinds = [str(ref.get("kind") or "") for ref in refs]
+    if sorted(kinds) != sorted(
+        [
+            KnowledgeSourceRefKind.COMPLETION_RECEIPT.value,
+            KnowledgeSourceRefKind.TASK_ARTIFACT.value,
+        ]
+    ):
+        return "completion_source_ref_kinds_invalid"
+    task_ref = next(ref for ref in refs if str(ref.get("kind") or "") == KnowledgeSourceRefKind.TASK_ARTIFACT.value)
+    if str(task_ref.get("section") or "") != "Verification":
+        return "completion_task_artifact_section_invalid"
+    return ""
+
+
+def _source_resolution(
+    ref: dict[str, Any],
+    status: KnowledgeSourceResolutionStatus,
+    *,
+    resolved_path: str = "",
+    actual_sha256: str = "",
+    cause_code: str = "",
+) -> KnowledgeSourceResolution:
+    declared_path = str(ref.get("path") or "")
+    return KnowledgeSourceResolution(
+        status=status,
+        declared_path=declared_path,
+        resolved_path=resolved_path or declared_path,
+        expected_sha256=str(ref.get("content_sha256") or ""),
+        actual_sha256=actual_sha256,
+        cause_code=cause_code,
+    )
+
+
+def _literal_source_resolution(root: Path, ref: dict[str, Any]) -> KnowledgeSourceResolution:
+    declared_path = str(ref.get("path") or "")
+    expected = str(ref.get("content_sha256") or "")
+    if (
+        not declared_path
+        or declared_path != declared_path.strip().replace("\\", "/")
+        or Path(declared_path).is_absolute()
+        or ".." in Path(declared_path).parts
+    ):
+        return _source_resolution(ref, KnowledgeSourceResolutionStatus.INVALID_IDENTITY, cause_code="source_path_invalid")
+    path = root / declared_path
+    try:
+        root_resolved = root.resolve()
+        path_resolved = path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return _source_resolution(ref, KnowledgeSourceResolutionStatus.INVALID_IDENTITY, cause_code="source_path_unresolvable")
+    if root_resolved not in (path_resolved, *path_resolved.parents):
+        return _source_resolution(ref, KnowledgeSourceResolutionStatus.INVALID_IDENTITY, cause_code="source_path_invalid")
+    if not path.is_file():
+        return _source_resolution(ref, KnowledgeSourceResolutionStatus.MISSING)
+    try:
+        if str(ref.get("kind") or "") == KnowledgeSourceRefKind.COMPLETION_RECEIPT.value:
+            actual = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            actual = _sha256_text(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return _source_resolution(ref, KnowledgeSourceResolutionStatus.MISSING, cause_code="source_unreadable")
+    return _source_resolution(
+        ref,
+        KnowledgeSourceResolutionStatus.CURRENT if expected == actual else KnowledgeSourceResolutionStatus.DIGEST_MISMATCH,
+        actual_sha256=actual,
+    )
+
+
+def _completion_source_ref_resolutions(
+    root: Path,
+    data: dict[str, Any],
+    *,
+    derived: dict[str, Any],
+    receipt_collection: CompletionReceiptCollection | None = None,
+) -> tuple[KnowledgeSourceResolution, KnowledgeSourceResolution]:
+    refs = data.get("source_refs") if isinstance(data.get("source_refs"), list) else []
+    receipt_ref = next(
+        ref
+        for ref in refs
+        if isinstance(ref, dict) and str(ref.get("kind") or "") == KnowledgeSourceRefKind.COMPLETION_RECEIPT.value
+    )
+    task_ref = next(
+        ref
+        for ref in refs
+        if isinstance(ref, dict) and str(ref.get("kind") or "") == KnowledgeSourceRefKind.TASK_ARTIFACT.value
+    )
+
+    def observed_receipt_source() -> KnowledgeSourceResolution:
+        if receipt_collection is None:
+            return _literal_source_resolution(root, receipt_ref)
+        receipt_path = str(receipt_ref.get("path") or "")
+        resolution = next(
+            (
+                item
+                for item in receipt_collection.resolutions
+                if item.receipt_path == receipt_path
+            ),
+            None,
+        )
+        if resolution is None or not resolution.receipt_sha256:
+            return _source_resolution(receipt_ref, KnowledgeSourceResolutionStatus.MISSING)
+        expected = str(receipt_ref.get("content_sha256") or "")
+        return _source_resolution(
+            receipt_ref,
+            (
+                KnowledgeSourceResolutionStatus.CURRENT
+                if expected == resolution.receipt_sha256
+                else KnowledgeSourceResolutionStatus.DIGEST_MISMATCH
+            ),
+            actual_sha256=resolution.receipt_sha256,
+        )
+
+    def invalid_task(cause_code: str) -> tuple[KnowledgeSourceResolution, KnowledgeSourceResolution]:
+        return (
+            observed_receipt_source(),
+            _source_resolution(task_ref, KnowledgeSourceResolutionStatus.INVALID_IDENTITY, cause_code=cause_code),
+        )
+
+    raw_task_id = str(derived.get("task_id") or "")
+    repo_id = str(data.get("repo_id") or "")
+    try:
+        task_id = normalize_task_id(raw_task_id)
+    except RepoctlError:
+        task_id = ""
+    if not task_id or task_id != raw_task_id or str(derived.get("repo_id") or "") != repo_id:
+        return invalid_task("completion_derivation_identity_invalid")
+    if receipt_collection is None:
+        artifact, receipt_problems = completion_receipt_artifact_for_task(root, task_id=task_id, repo_id=repo_id)
+    else:
+        artifact = next(
+            (
+                item
+                for item in receipt_collection.artifacts
+                if str(item.receipt.get("task_id") or "") == task_id
+            ),
+            None,
+        )
+        receipt_problems = []
+    if artifact is None or receipt_problems:
+        if receipt_collection is not None:
+            has_observation = any(
+                resolution.receipt_path == str(receipt_ref.get("path") or "")
+                for resolution in receipt_collection.resolutions
+            ) or any(
+                problem.path == str(receipt_ref.get("path") or "")
+                for problem in receipt_collection.problems
+            )
+        else:
+            has_observation = bool(receipt_problems)
+        cause_code = (
+            receipt_problems[0].code
+            if receipt_problems
+            else "invalid_completion_receipt"
+            if has_observation
+            else "completion_receipt_missing"
+        )
+        return invalid_task(cause_code)
+    receipt_source = observed_receipt_source()
+    receipt = artifact.receipt
+    if (
+        str(receipt_ref.get("path") or "") != artifact.receipt_path
+        or str(receipt_ref.get("section") or "") != task_id
+    ):
+        return invalid_task("completion_receipt_ref_identity_invalid")
+    declared_path = str(task_ref.get("path") or "")
+    expected = str(task_ref.get("content_sha256") or "")
+    if (
+        artifact.declared_path != declared_path
+        or str(derived.get("verification_artifact") or "") != declared_path
+        or artifact.content_sha256 != expected
+        or derived.get("changed_files") != _receipt_changed_files(receipt)
+    ):
+        return (
+            receipt_source,
+            _source_resolution(
+                task_ref,
+                KnowledgeSourceResolutionStatus.INVALID_IDENTITY,
+                cause_code="completion_task_artifact_binding_invalid",
+            ),
+        )
+    resolved_path = artifact.resolved_path
+    if receipt_source.status is not KnowledgeSourceResolutionStatus.CURRENT:
+        return (
+            receipt_source,
+            _source_resolution(
+                task_ref,
+                KnowledgeSourceResolutionStatus.INVALID_IDENTITY,
+                resolved_path=resolved_path,
+                cause_code=f"completion_receipt_{receipt_source.status.value}",
+            ),
+        )
+    return (
+        receipt_source,
+        _source_resolution(
+            task_ref,
+            KnowledgeSourceResolutionStatus.CURRENT if resolved_path == declared_path else KnowledgeSourceResolutionStatus.RELOCATED,
+            resolved_path=resolved_path,
+            actual_sha256=artifact.content_sha256,
+        ),
+    )
+
+
+def knowledge_source_ref_resolutions(
+    root: Path,
+    data: dict[str, Any],
+    *,
+    receipt_collection: CompletionReceiptCollection | None = None,
+) -> list[KnowledgeSourceResolution]:
+    refs = data.get("source_refs", [])
+    if not isinstance(refs, list):
+        return []
+    derived = _knowledge_completion_derivation(data)
+    shape_cause = _completion_source_shape_cause(data, derived=derived)
+    completion_resolutions: tuple[KnowledgeSourceResolution, KnowledgeSourceResolution] | None = None
+    if derived and not shape_cause:
+        completion_resolutions = _completion_source_ref_resolutions(
+            root,
+            data,
+            derived=derived,
+            receipt_collection=receipt_collection,
+        )
+    resolutions: list[KnowledgeSourceResolution] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        boundary_problem = _knowledge_source_ref_boundary_problem(
+            root,
+            repo_id=str(data.get("repo_id") or ""),
+            ref=ref,
+        )
+        if shape_cause:
+            resolutions.append(_source_resolution(ref, KnowledgeSourceResolutionStatus.INVALID_IDENTITY, cause_code=shape_cause))
+        elif boundary_problem is not None:
+            resolutions.append(
+                _source_resolution(
+                    ref,
+                    (
+                        KnowledgeSourceResolutionStatus.MISSING
+                        if boundary_problem.code == "knowledge_source_missing"
+                        else KnowledgeSourceResolutionStatus.INVALID_IDENTITY
+                    ),
+                    cause_code=boundary_problem.cause_code or boundary_problem.code,
+                )
+            )
+        elif completion_resolutions is not None and str(ref.get("kind") or "") == KnowledgeSourceRefKind.COMPLETION_RECEIPT.value:
+            resolutions.append(completion_resolutions[0])
+        elif completion_resolutions is not None and str(ref.get("kind") or "") == KnowledgeSourceRefKind.TASK_ARTIFACT.value:
+            resolutions.append(completion_resolutions[1])
+        else:
+            resolutions.append(_literal_source_resolution(root, ref))
+    return resolutions
+
+
+def resolved_knowledge_source_refs(
+    root: Path,
+    data: dict[str, Any],
+    *,
+    resolutions: list[KnowledgeSourceResolution] | None = None,
+) -> list[dict[str, Any]]:
+    refs = data.get("source_refs", [])
+    if not isinstance(refs, list):
+        return []
+    resolutions = resolutions if resolutions is not None else knowledge_source_ref_resolutions(root, data)
+    resolved_refs: list[dict[str, Any]] = []
+    resolution_index = 0
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        resolution = resolutions[resolution_index]
+        resolution_index += 1
+        projected = dict(ref)
+        projected["declared_path"] = resolution.declared_path
+        projected["resolved_path"] = resolution.resolved_path
+        projected["resolution_status"] = resolution.status.value
+        if resolution.cause_code:
+            projected["resolution_cause_code"] = resolution.cause_code
+        if resolution.status in {
+            KnowledgeSourceResolutionStatus.CURRENT,
+            KnowledgeSourceResolutionStatus.RELOCATED,
+        }:
+            projected["path"] = resolution.resolved_path
+        resolved_refs.append(projected)
+    return resolved_refs
+
+
+def _knowledge_source_assessment(
+    root: Path,
+    data: dict[str, Any],
+    *,
+    record_id: str = "",
+    resolutions: list[KnowledgeSourceResolution] | None = None,
+) -> KnowledgeSourceAssessment:
     problems: list[Problem] = []
     refs = data.get("source_refs", [])
     if not isinstance(refs, list) or not refs:
         problems.append(Problem("error", "knowledge_source_refs_missing", "knowledge item has no source refs", str(record_id)))
-        return problems
-    for ref in refs:
-        if not isinstance(ref, dict):
+        return KnowledgeSourceAssessment(KnowledgeSourceRefreshDisposition.BLOCKED, (), tuple(problems))
+    derived = _knowledge_completion_derivation(data)
+    shape_cause = _completion_source_shape_cause(data, derived=derived)
+    if shape_cause:
+        problems.append(
+            Problem(
+                "error",
+                "knowledge_source_identity_invalid",
+                "receipt-derived knowledge source refs do not match the canonical completion binding",
+                str(record_id),
+                cause_code=shape_cause,
+            )
+        )
+        return KnowledgeSourceAssessment(KnowledgeSourceRefreshDisposition.BLOCKED, (), tuple(problems))
+    source_resolutions = resolutions if resolutions is not None else knowledge_source_ref_resolutions(root, data)
+    for resolution in source_resolutions:
+        if resolution.status in {KnowledgeSourceResolutionStatus.CURRENT, KnowledgeSourceResolutionStatus.RELOCATED}:
             continue
-        rel = str(ref.get("path") or "")
-        expected = str(ref.get("content_sha256") or "")
-        path = root / rel
-        if not path.is_file():
-            problems.append(Problem("error", "knowledge_source_missing", "knowledge source file is missing", rel))
-            continue
-        actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
-        if expected != actual:
-            problems.append(Problem("error", "knowledge_source_digest_drift", "knowledge source digest changed", rel))
-    return problems
+        if resolution.status is KnowledgeSourceResolutionStatus.MISSING:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_source_missing",
+                    "knowledge source file is missing",
+                    resolution.declared_path,
+                    cause_code=resolution.cause_code or None,
+                )
+            )
+        elif resolution.status is KnowledgeSourceResolutionStatus.DIGEST_MISMATCH:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_source_digest_drift",
+                    "knowledge source digest changed",
+                    resolution.resolved_path or resolution.declared_path,
+                )
+            )
+        else:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_source_identity_invalid",
+                    "receipt-derived knowledge source identity could not be verified",
+                    resolution.declared_path,
+                    cause_code=resolution.cause_code or None,
+                )
+            )
+    statuses = [resolution.status for resolution in source_resolutions]
+    receipt_drift_is_refreshable = False
+    if derived:
+        paired = list(zip(refs, source_resolutions, strict=False))
+        receipt_resolution = next(
+            (
+                resolution
+                for ref, resolution in paired
+                if isinstance(ref, dict)
+                and str(ref.get("kind") or "") == KnowledgeSourceRefKind.COMPLETION_RECEIPT.value
+            ),
+            None,
+        )
+        receipt_drift_is_refreshable = (
+            receipt_resolution is not None
+            and receipt_resolution.status is KnowledgeSourceResolutionStatus.DIGEST_MISMATCH
+        )
+    has_blocker = any(
+        status in {
+            KnowledgeSourceResolutionStatus.MISSING,
+            KnowledgeSourceResolutionStatus.INVALID_IDENTITY,
+        }
+        for status in statuses
+    )
+    if receipt_drift_is_refreshable:
+        receipt_drift_identity_cause = f"completion_receipt_{KnowledgeSourceResolutionStatus.DIGEST_MISMATCH.value}"
+        has_blocker = any(
+            resolution.status is KnowledgeSourceResolutionStatus.MISSING
+            or (
+                resolution.status is KnowledgeSourceResolutionStatus.INVALID_IDENTITY
+                and resolution.cause_code != receipt_drift_identity_cause
+            )
+            for resolution in source_resolutions
+        )
+    disposition = (
+        KnowledgeSourceRefreshDisposition.BLOCKED
+        if has_blocker
+        else KnowledgeSourceRefreshDisposition.REFRESHABLE
+        if KnowledgeSourceResolutionStatus.DIGEST_MISMATCH in statuses
+        else KnowledgeSourceRefreshDisposition.CURRENT
+    )
+    return KnowledgeSourceAssessment(disposition, tuple(source_resolutions), tuple(problems))
 
 
-def _source_ref_statuses(root: Path, data: dict[str, Any]) -> list[dict[str, Any]]:
+def _source_digest_problems(
+    root: Path,
+    data: dict[str, Any],
+    *,
+    record_id: str = "",
+    resolutions: list[KnowledgeSourceResolution] | None = None,
+) -> list[Problem]:
+    return list(
+        _knowledge_source_assessment(
+            root,
+            data,
+            record_id=record_id,
+            resolutions=resolutions,
+        ).problems
+    )
+
+
+def knowledge_sources_current(root: Path, data: dict[str, Any]) -> bool:
+    return not _source_digest_problems(root, data, record_id=str(data.get("id") or ""))
+
+
+def _source_ref_statuses(
+    root: Path,
+    data: dict[str, Any],
+    *,
+    resolutions: list[KnowledgeSourceResolution] | None = None,
+) -> list[dict[str, Any]]:
     statuses: list[dict[str, Any]] = []
     refs = data.get("source_refs", [])
     if not isinstance(refs, list):
         return statuses
+    resolutions = resolutions if resolutions is not None else knowledge_source_ref_resolutions(root, data)
+    resolution_index = 0
     for ref in refs:
         if not isinstance(ref, dict):
             continue
-        rel = str(ref.get("path") or "")
-        expected = str(ref.get("content_sha256") or "")
-        path = root / rel
-        exists = path.is_file()
-        actual = ""
-        if exists:
-            actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        resolution = resolutions[resolution_index]
+        resolution_index += 1
+        declared_exists = resolution.status in {
+            KnowledgeSourceResolutionStatus.CURRENT,
+            KnowledgeSourceResolutionStatus.DIGEST_MISMATCH,
+        }
+        resolved_exists = resolution.status in {
+            KnowledgeSourceResolutionStatus.CURRENT,
+            KnowledgeSourceResolutionStatus.RELOCATED,
+            KnowledgeSourceResolutionStatus.DIGEST_MISMATCH,
+        }
         statuses.append(
             {
-                "path": rel,
+                "path": resolution.declared_path,
+                "declared_path": resolution.declared_path,
+                "resolved_path": resolution.resolved_path,
                 "kind": str(ref.get("kind") or ""),
                 "section": str(ref.get("section") or ""),
-                "exists": exists,
-                "expected_sha256": expected,
-                "actual_sha256": actual,
-                "digest_matches": bool(expected) and expected == actual,
+                "status": resolution.status.value,
+                "exists": declared_exists,
+                "declared_exists": declared_exists,
+                "resolved_exists": resolved_exists,
+                "expected_sha256": resolution.expected_sha256,
+                "actual_sha256": resolution.actual_sha256,
+                "digest_matches": bool(resolution.expected_sha256) and resolution.expected_sha256 == resolution.actual_sha256,
+                **({"cause_code": resolution.cause_code} if resolution.cause_code else {}),
             }
         )
     return statuses
 
 
-def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[Problem]:
+def _candidate_quality_problems(
+    root: Path,
+    candidate: dict[str, Any],
+    *,
+    source_assessment: KnowledgeSourceAssessment | None = None,
+) -> list[Problem]:
     problems: list[Problem] = []
     candidate_id = str(candidate.get("id") or "")
     if candidate.get("schema") != "repoctl.knowledge.candidate" or candidate.get("schema_version") != 1:
@@ -2290,9 +3279,13 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
                 problems.append(Problem("error", "knowledge_candidate_source_ref_invalid", "candidate source ref is invalid", candidate_id))
                 continue
             rel = str(ref.get("path") or "")
-            ref_kind = str(ref.get("kind") or "document")
-            if ref_kind in {"document", "authority_document"} and _source_ref_excluded(rel):
-                problems.append(Problem("error", "knowledge_candidate_source_excluded", "candidate source is excluded from knowledge ingestion", rel))
+            boundary_problem = _knowledge_source_ref_boundary_problem(
+                root,
+                repo_id=str(candidate.get("repo_id") or ""),
+                ref=ref,
+            )
+            if boundary_problem is not None:
+                problems.append(boundary_problem)
             if not str(ref.get("content_sha256") or "").startswith("sha256:"):
                 problems.append(Problem("error", "knowledge_candidate_source_hash_invalid", "candidate source hash is invalid", rel))
     applies_to = candidate.get("applies_to")
@@ -2309,7 +3302,9 @@ def _candidate_quality_problems(root: Path, candidate: dict[str, Any]) -> list[P
                 values=raw_paths,
             )
             problems.extend(applicability_problems)
-    problems.extend(_source_digest_problems(root, candidate, record_id=candidate_id))
+    assessment = source_assessment or _knowledge_source_assessment(root, candidate, record_id=candidate_id)
+    problems.extend(assessment.problems)
+    problems.extend(_knowledge_record_derivation_problems(root, candidate))
     problems.extend(_context_pack_provenance_warnings(root, candidate))
     duplicate = _duplicate_reviewed_claim(root, candidate)
     if duplicate:
@@ -2340,7 +3335,20 @@ def _context_pack_provenance_warnings(root: Path, candidate: dict[str, Any]) -> 
 def _candidate_check_flags(candidate: dict[str, Any], problems: list[Problem]) -> dict[str, bool]:
     return {
         "schema_valid": not any(problem.code.startswith("knowledge_candidate_schema") for problem in problems),
-        "source_refs_valid": not any(problem.code.startswith("knowledge_candidate_source") for problem in problems),
+        "source_refs_valid": not any(
+            problem.code.startswith("knowledge_candidate_source")
+            or problem.code
+            in {
+                "knowledge_source_kind_invalid",
+                "knowledge_source_path_invalid",
+                "knowledge_source_excluded",
+                "knowledge_source_not_allowed",
+                "knowledge_source_missing",
+                "knowledge_source_current_invalid",
+                "knowledge_source_identity_invalid",
+            }
+            for problem in problems
+        ),
         "digest_current": not any(problem.code == "knowledge_source_digest_drift" for problem in problems),
         "pack_provenance_current": not any(problem.code.startswith("knowledge_candidate_pack_provenance") for problem in problems),
         "review_required": bool(candidate.get("review", {}).get("required")) if isinstance(candidate.get("review"), dict) else False,
@@ -2438,11 +3446,24 @@ def _candidate_related_records(root: Path, candidate: dict[str, Any]) -> list[di
     return sorted(related, key=lambda item: (item["status"], item["record_id"]))
 
 
-def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: dict[str, Any] | None = None) -> dict[str, Any]:
+def _public_record(
+    root: Path,
+    record: dict[str, Any],
+    *,
+    status: str,
+    lifecycle_relations: dict[str, Any] | None = None,
+    source_resolutions: list[KnowledgeSourceResolution] | None = None,
+    resolved_source_refs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     review = record.get("review") if isinstance(record.get("review"), dict) else {}
-    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
-    derived = created_from.get("candidate_derived_from") if isinstance(created_from.get("candidate_derived_from"), dict) else {}
+    derived = _knowledge_completion_derivation(record)
     source_digest_set = review.get("source_digest_set") if isinstance(review.get("source_digest_set"), list) else []
+    resolutions = source_resolutions if source_resolutions is not None else knowledge_source_ref_resolutions(root, record)
+    public_source_refs = (
+        resolved_source_refs
+        if resolved_source_refs is not None
+        else resolved_knowledge_source_refs(root, record, resolutions=resolutions)
+    )
     public = {
         "id": record.get("id", ""),
         "repo_id": record.get("repo_id", ""),
@@ -2452,6 +3473,8 @@ def _public_record(record: dict[str, Any], *, status: str, lifecycle_relations: 
         "claim": record.get("claim", ""),
         "summary": record.get("summary", ""),
         "source_refs": record.get("source_refs", []),
+        "resolved_source_refs": public_source_refs,
+        "source_resolutions": _source_ref_statuses(root, record, resolutions=resolutions),
         "explicit_path_refs": explicit_knowledge_path_refs(record),
         "record_digest": record.get("record_digest", ""),
         "applies_to": {"paths": sorted(_record_applicability_paths(record))},
@@ -2516,10 +3539,15 @@ def explicit_knowledge_path_refs(record: dict[str, Any]) -> list[dict[str, Any]]
     ]
 
 
-def _record_related_paths(record: dict[str, Any]) -> set[str]:
+def _record_related_paths(
+    record: dict[str, Any],
+    *,
+    resolved_source_refs: list[dict[str, Any]] | None = None,
+) -> set[str]:
     paths = _record_applicability_paths(record)
     source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
-    for ref in source_refs:
+    projected_refs = resolved_source_refs if resolved_source_refs is not None else []
+    for ref in [*source_refs, *projected_refs]:
         if isinstance(ref, dict) and str(ref.get("path") or "").strip():
             paths.add(str(ref.get("path") or "").strip())
     return paths
@@ -2568,7 +3596,12 @@ def _approval_context(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _record_search_body(record: dict[str, Any]) -> str:
+def _record_search_body(record: dict[str, Any], *, resolved_source_refs: list[dict[str, Any]] | None = None) -> str:
+    source_refs = record.get("source_refs", [])
+    searchable_source_refs = [
+        *(source_refs if isinstance(source_refs, list) else []),
+        *(resolved_source_refs or []),
+    ]
     return "\n".join(
         [
             str(record.get("id") or ""),
@@ -2576,17 +3609,28 @@ def _record_search_body(record: dict[str, Any]) -> str:
             str(record.get("title") or ""),
             str(record.get("claim") or ""),
             str(record.get("summary") or ""),
-            json.dumps(record.get("source_refs", []), ensure_ascii=False, sort_keys=True),
+            json.dumps(searchable_source_refs, ensure_ascii=False, sort_keys=True),
         ]
     )
 
 
-def _record_score(query: str, record: dict[str, Any], *, fts: float = 0.0) -> tuple[float, dict[str, float], list[str]]:
+def _record_score(
+    query: str,
+    record: dict[str, Any],
+    *,
+    fts: float = 0.0,
+    resolved_source_refs: list[dict[str, Any]] | None = None,
+) -> tuple[float, dict[str, float], list[str]]:
     identity_text = "\n".join([str(record.get("id") or ""), str(record.get("kind") or "")])
     title_text = str(record.get("title") or "")
     claim_text = str(record.get("claim") or "")
     summary_text = str(record.get("summary") or "")
-    source_text = json.dumps(record.get("source_refs", []), ensure_ascii=False, sort_keys=True)
+    source_refs = record.get("source_refs", [])
+    source_text = json.dumps(
+        [*(source_refs if isinstance(source_refs, list) else []), *(resolved_source_refs or [])],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     exact_identity = _exact_score(query, identity_text)
     exact_title = _exact_score(query, title_text)
     exact_claim = _exact_score(query, claim_text)
@@ -2629,7 +3673,12 @@ def _exact_score(query: str, body: str) -> float:
     return min(1.0, hits / len(terms))
 
 
-def _record_fts_scores(query: str, records: list[dict[str, Any]]) -> dict[str, float]:
+def _record_fts_scores(
+    query: str,
+    records: list[dict[str, Any]],
+    *,
+    resolved_source_refs_by_id: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, float]:
     terms = _query_terms(query)
     if not terms or not records:
         return {}
@@ -2639,7 +3688,13 @@ def _record_fts_scores(query: str, records: list[dict[str, Any]]) -> dict[str, f
         conn.executemany(
             "INSERT INTO records(record_id, body) VALUES (?, ?)",
             [
-                (str(record.get("id") or ""), _record_search_body(record))
+                (
+                    str(record.get("id") or ""),
+                    _record_search_body(
+                        record,
+                        resolved_source_refs=(resolved_source_refs_by_id or {}).get(str(record.get("id") or "")),
+                    ),
+                )
                 for record in records
                 if str(record.get("id") or "")
             ],

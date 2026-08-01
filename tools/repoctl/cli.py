@@ -4643,43 +4643,45 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     elif sum(1 for enabled in source_modes if enabled) != 1:
         data: dict[str, Any] = {}
         problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, --from-pack, or --from-task")]
-    elif from_task:
-        data, problems = build_knowledge_candidate_from_receipt(
-            root,
-            task_id=from_task,
-            repo_id=args.repo_id,
-            kind=args.kind,
-            write=not getattr(args, "dry_run", False),
-            claim=claim,
-            applies_to=list(getattr(args, "applies_to", []) or []),
-        )
-    elif args.from_receipt:
-        data, problems = build_knowledge_candidate_from_receipt(
-            root,
-            task_id=args.from_receipt,
-            repo_id=args.repo_id,
-            kind=args.kind,
-            claim=claim,
-            applies_to=list(getattr(args, "applies_to", []) or []),
-        )
-    elif args.from_pack:
-        data, problems = build_knowledge_candidate_from_pack(
-            root,
-            pack=Path(args.from_pack),
-            repo_id=args.repo_id,
-            kind=args.kind,
-            claim=claim,
-            applies_to=list(getattr(args, "applies_to", []) or []),
-        )
     else:
-        data, problems = build_knowledge_candidate(
-            root,
-            source=Path(args.source),
-            repo_id=args.repo_id,
-            kind=args.kind,
-            claim=claim,
-            applies_to=list(getattr(args, "applies_to", []) or []),
-        )
+        with repoctl_lock(root):
+            if from_task:
+                data, problems = build_knowledge_candidate_from_receipt(
+                    root,
+                    task_id=from_task,
+                    repo_id=args.repo_id,
+                    kind=args.kind,
+                    write=not getattr(args, "dry_run", False),
+                    claim=claim,
+                    applies_to=list(getattr(args, "applies_to", []) or []),
+                )
+            elif args.from_receipt:
+                data, problems = build_knowledge_candidate_from_receipt(
+                    root,
+                    task_id=args.from_receipt,
+                    repo_id=args.repo_id,
+                    kind=args.kind,
+                    claim=claim,
+                    applies_to=list(getattr(args, "applies_to", []) or []),
+                )
+            elif args.from_pack:
+                data, problems = build_knowledge_candidate_from_pack(
+                    root,
+                    pack=Path(args.from_pack),
+                    repo_id=args.repo_id,
+                    kind=args.kind,
+                    claim=claim,
+                    applies_to=list(getattr(args, "applies_to", []) or []),
+                )
+            else:
+                data, problems = build_knowledge_candidate(
+                    root,
+                    source=Path(args.source),
+                    repo_id=args.repo_id,
+                    kind=args.kind,
+                    claim=claim,
+                    applies_to=list(getattr(args, "applies_to", []) or []),
+                )
     response_data = data
     if getattr(args, "knowledge_candidate_command", "") == "suggest" and not getattr(args, "full", False):
         response_data = _compact_knowledge_candidate_data(data)
@@ -4959,8 +4961,15 @@ def _render_knowledge_candidate_review_markdown(data: dict[str, Any], check_data
         )
     lines.extend(["", "## Source Currentness", ""])
     for status in _candidate_source_statuses_for_review(check_data, candidate):
+        declared_path = str(status.get("declared_path") or status.get("path") or "")
+        resolved_path = str(status.get("resolved_path") or declared_path)
+        cause = str(status.get("cause_code") or "")
+        cause_suffix = f" cause=`{cause}`" if cause else ""
         lines.append(
-            f"- `{status.get('path', '')}` exists=`{status.get('exists', False)}` digest_matches=`{status.get('digest_matches', False)}`"
+            f"- declared=`{declared_path}` resolved=`{resolved_path}` status=`{status.get('status', '')}` "
+            f"declared_exists=`{status.get('declared_exists', status.get('exists', False))}` "
+            f"resolved_exists=`{status.get('resolved_exists', status.get('exists', False))}` "
+            f"digest_matches=`{status.get('digest_matches', False)}`{cause_suffix}"
         )
     lines.extend(["", "## Related Current Records", ""])
     related = check_data.get("related_records") if isinstance(check_data.get("related_records"), list) else []
@@ -5035,15 +5044,16 @@ def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
 def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    if args.all_stale:
-        data, problems = refresh_stale_knowledge_candidates(root, repo_id=args.repo_id, include_records=args.include_records)
-    elif args.record_id:
-        data, problems = refresh_knowledge_record_candidate(root, repo_id=args.repo_id, record_id=args.record_id)
-    elif args.candidate_id:
-        data, problems = refresh_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
-    else:
-        data = {}
-        problems = [Problem("error", "knowledge_candidate_refresh_target_required", "provide a candidate id, --record-id, or --all-stale")]
+    with repoctl_lock(root):
+        if args.all_stale:
+            data, problems = refresh_stale_knowledge_candidates(root, repo_id=args.repo_id, include_records=args.include_records)
+        elif args.record_id:
+            data, problems = refresh_knowledge_record_candidate(root, repo_id=args.repo_id, record_id=args.record_id)
+        elif args.candidate_id:
+            data, problems = refresh_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
+        else:
+            data = {}
+            problems = [Problem("error", "knowledge_candidate_refresh_target_required", "provide a candidate id, --record-id, or --all-stale")]
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge candidate refresh",
@@ -5205,7 +5215,8 @@ def cmd_knowledge_show(args: argparse.Namespace) -> int:
 def cmd_knowledge_reject(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = reject_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, reason_file=Path(args.reason_file))
+    with repoctl_lock(root):
+        data, problems = reject_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, reason_file=Path(args.reason_file))
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge reject",
@@ -5226,7 +5237,8 @@ def cmd_knowledge_reject(args: argparse.Namespace) -> int:
 def cmd_knowledge_deprecate(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    data, problems = deprecate_knowledge_record(root, repo_id=args.repo_id, record_id=args.record_id, reason_file=Path(args.reason_file))
+    with repoctl_lock(root):
+        data, problems = deprecate_knowledge_record(root, repo_id=args.repo_id, record_id=args.record_id, reason_file=Path(args.reason_file))
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge deprecate",
@@ -5330,7 +5342,8 @@ def cmd_knowledge_render(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     output = Path(args.output) if args.output else _default_knowledge_render_output(args.repo_id)
-    data, problems = render_knowledge(root, repo_id=args.repo_id, output=output, check=args.check)
+    with repoctl_lock(root):
+        data, problems = render_knowledge(root, repo_id=args.repo_id, output=output, check=args.check)
     response_data = data if args.full else _compact_knowledge_render_data(data)
     payload = {
         "ok": not _has_errors(problems),

@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source
+from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_markdown_text, chunk_text_source
 from .context_model import ContextSectionKind
 from .git import normalize_repo_path
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints, is_context_source_language, language_for_path, product_manifest_patterns
 from .meta import meta_inventory
 from .repositories import RepoTarget
-from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
+from .tasks import Problem, collect_completion_receipt_artifacts
 
 
 DOCUMENT_PATTERNS = (
@@ -134,7 +133,8 @@ def collect_context_sources(
     receipts: list[dict[str, Any]] = []
     receipt_warnings: list[Problem] = []
     if include_history:
-        receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
+        receipt_artifacts, receipt_problems = collect_completion_receipt_artifacts(root, repo_id=target.id)
+        receipts = [artifact.receipt for artifact in receipt_artifacts]
         receipt_warnings = [
             Problem(
                 "warning",
@@ -144,24 +144,26 @@ def collect_context_sources(
             )
             for problem in receipt_problems
         ]
-        for receipt in receipts:
-            rel = f"docs/tasks/.repoctl-state/completions/{receipt.get('task_id', '')}.json"
-            text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
+        for receipt_artifact in receipt_artifacts:
+            receipt = receipt_artifact.receipt
             chunks.append(
                 chunk_text_source(
                     root,
-                    rel,
-                    text,
+                    receipt_artifact.receipt_path,
+                    receipt_artifact.receipt_text,
                     kind="completion_receipt",
                     section=str(receipt.get("task_id") or "completion receipt"),
                     section_kind=ContextSectionKind.TASK,
                 )
             )
-            artifact = completion_receipt_artifact_path(root, receipt)
-            if artifact:
-                artifact_path = root / artifact
-                if artifact_path.is_file():
-                    chunks.extend(chunk_markdown_file(root, artifact_path, kind="task_artifact"))
+            chunks.extend(
+                chunk_markdown_text(
+                    root,
+                    receipt_artifact.resolved_path,
+                    receipt_artifact.artifact_text,
+                    kind="task_artifact",
+                )
+            )
 
     invalid_receipt_problems = [problem for problem in graph_problems if problem.code == "invalid_completion_receipt"]
     if snapshot is not None:
@@ -363,20 +365,20 @@ def context_overlay_chunks(
         for path in selected
     )
     if include_history and history_changed:
-        receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
+        receipt_artifacts, receipt_problems = collect_completion_receipt_artifacts(root, repo_id=target.id)
         problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
-        for receipt in receipts:
+        for receipt_artifact in receipt_artifacts:
+            receipt = receipt_artifact.receipt
             task_id = str(receipt.get("task_id") or "")
-            receipt_rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
-            artifact = completion_receipt_artifact_path(root, receipt)
+            receipt_rel = receipt_artifact.receipt_path
+            artifact = receipt_artifact.resolved_path
             artifacts = [artifact] if artifact else []
             if receipt_rel in selected:
-                text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
                 chunks.append(
                     chunk_text_source(
                         root,
                         receipt_rel,
-                        text,
+                        receipt_artifact.receipt_text,
                         kind="completion_receipt",
                         section=task_id or "completion receipt",
                         section_kind=ContextSectionKind.TASK,
@@ -385,13 +387,14 @@ def context_overlay_chunks(
             for artifact in artifacts:
                 if receipt_rel not in selected and artifact not in selected:
                     continue
-                path = root / artifact
-                if not path.is_file():
-                    continue
-                try:
-                    chunks.extend(chunk_markdown_file(root, path, kind="task_artifact"))
-                except (OSError, UnicodeDecodeError) as exc:
-                    problems.append(Problem("warning", "context_task_artifact_unreadable", str(exc), artifact))
+                chunks.extend(
+                    chunk_markdown_text(
+                        root,
+                        artifact,
+                        receipt_artifact.artifact_text,
+                        kind="task_artifact",
+                    )
+                )
     return chunks, problems
 
 

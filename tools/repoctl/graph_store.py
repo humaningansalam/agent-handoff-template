@@ -44,11 +44,12 @@ from .io import atomic_write
 from .language_profiles import language_for_path
 from .meta import meta_inventory
 from .repositories import RepoTarget
-from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
+from .tasks import CompletionReceiptCollection, Problem, collect_completion_receipt_collection
 
 
 GRAPH_STATE_SCHEMA = "repoctl.graph.materialization"
 GRAPH_STATE_SCHEMA_VERSION = 3
+COMPLETION_RECEIPT_INPUT_VERSION = 1
 GRAPH_STATE_ROOT = Path(".repoctl-state/graph")
 PROVIDER_RESULT_SCHEMA_VERSION = 3
 PROVIDER_CONFIG_PATTERNS = {
@@ -273,8 +274,8 @@ def _root_evidence_records(
     root: Path,
     target: RepoTarget,
     *,
+    receipt_collection: CompletionReceiptCollection,
     previous: dict[str, dict[str, Any]] | None = None,
-    discover_receipt_artifacts: bool = True,
 ) -> list[dict[str, object]]:
     previous = previous or {}
     records = [
@@ -289,23 +290,9 @@ def _root_evidence_records(
             continue
         logical_path = path.relative_to(root).as_posix()
         records.append(_path_record(path, logical_path=logical_path, previous=previous.get(logical_path)))
-    artifact_paths = {
-        path
-        for path in previous
-        if path.startswith(("docs/tasks/", "docs/archive/tasks/"))
-        and not path.startswith("docs/tasks/.repoctl-state/completions/")
-    }
-    if discover_receipt_artifacts:
-        receipts, _problems = collect_completion_receipts(root, repo_id=target.id)
-        artifact_paths.update(
-            artifact
-            for receipt in receipts
-            if (artifact := completion_receipt_artifact_path(root, receipt))
-        )
-    for artifact in sorted(artifact_paths):
+    for artifact in receipt_collection.candidate_paths:
         path = root / artifact
-        if path.is_file():
-            records.append(_path_record(path, logical_path=artifact, previous=previous.get(artifact)))
+        records.append(_path_record(path, logical_path=artifact, previous=previous.get(artifact)))
     for relative in ("docs/repoctl.json", "repoctl-upgrade-manifest.json", "pyproject.toml"):
         path = root / relative
         if path.is_file():
@@ -332,6 +319,7 @@ def collect_graph_inputs(
     target: RepoTarget,
     previous_manifest: dict[str, Any] | None = None,
     previous_snapshot: GraphSnapshot | None = None,
+    receipt_collection: CompletionReceiptCollection,
     rebuild: bool = False,
 ) -> tuple[
     tuple[list[CodeIndexEntry], list[Problem], dict[str, Any]],
@@ -428,6 +416,7 @@ def collect_graph_inputs(
     root_records = _root_evidence_records(
         root,
         target,
+        receipt_collection=receipt_collection,
         previous={str(path): value for path, value in previous_root_records.items() if isinstance(value, dict)},
     )
     root_evidence_records = {
@@ -445,12 +434,15 @@ def collect_graph_inputs(
         "repository": target.to_dict(),
         "code_index_input_version": CODE_INDEX_INPUT_VERSION,
         "structured_relation_input_version": STRUCTURED_RELATION_INPUT_VERSION,
+        "completion_receipt_input_version": COMPLETION_RECEIPT_INPUT_VERSION,
         "file_records": file_records,
         "file_fingerprints": file_fingerprints,
         "inventory_digest": digest_data(inventory_records),
         "root_evidence_digest": digest_data(root_evidence_fingerprints),
         "root_evidence_records": root_evidence_records,
         "root_evidence_fingerprints": root_evidence_fingerprints,
+        "completion_receipt_input_digest": receipt_collection.input_digest,
+        "completion_receipt_input_paths": list(receipt_collection.input_paths),
         "providers": providers,
     }
     state["input_digest"] = digest_data(
@@ -1113,6 +1105,7 @@ def graph_materialization_freshness(
     graph_input_version_changed = (
         manifest.get("code_index_input_version") != CODE_INDEX_INPUT_VERSION
         or manifest.get("structured_relation_input_version") != STRUCTURED_RELATION_INPUT_VERSION
+        or manifest.get("completion_receipt_input_version") != COMPLETION_RECEIPT_INPUT_VERSION
     )
     semantic_stale_paths = sorted(
         {
@@ -1137,11 +1130,12 @@ def graph_materialization_freshness(
         if path in current_classifications
     }
     previous_root_records = manifest.get("root_evidence_records") if isinstance(manifest.get("root_evidence_records"), dict) else {}
+    receipt_collection = collect_completion_receipt_collection(root, repo_id=target.id)
     root_records = _root_evidence_records(
         root,
         target,
+        receipt_collection=receipt_collection,
         previous={str(path): value for path, value in previous_root_records.items() if isinstance(value, dict)},
-        discover_receipt_artifacts=False,
     )
     current_root_fingerprints = {
         str(record.get("path") or ""): _root_record_fingerprint(record)
@@ -1149,13 +1143,35 @@ def graph_materialization_freshness(
         if str(record.get("path") or "")
     }
     previous_root_fingerprints = manifest.get("root_evidence_fingerprints") if isinstance(manifest.get("root_evidence_fingerprints"), dict) else {}
+    completion_receipt_input_changed = (
+        receipt_collection.input_digest != str(manifest.get("completion_receipt_input_digest") or "")
+    )
+    previous_receipt_input_paths = (
+        manifest.get("completion_receipt_input_paths")
+        if isinstance(manifest.get("completion_receipt_input_paths"), list)
+        else []
+    )
+    receipt_stale_paths = (
+        {
+            *receipt_collection.input_paths,
+            *(str(path) for path in previous_receipt_input_paths if str(path)),
+        }
+        if completion_receipt_input_changed
+        else set()
+    )
     changed_root_paths = sorted(
-        path
-        for path in set(current_root_fingerprints) | set(str(value) for value in previous_root_fingerprints)
-        if str(current_root_fingerprints.get(path) or "") != str(previous_root_fingerprints.get(path) or "")
+        receipt_stale_paths
+        | {
+            path
+            for path in set(current_root_fingerprints) | set(str(value) for value in previous_root_fingerprints)
+            if str(current_root_fingerprints.get(path) or "") != str(previous_root_fingerprints.get(path) or "")
+        }
     )
     root_evidence_digest = digest_data(current_root_fingerprints)
-    root_evidence_changed = root_evidence_digest != str(manifest.get("root_evidence_digest") or "")
+    root_evidence_changed = (
+        root_evidence_digest != str(manifest.get("root_evidence_digest") or "")
+        or completion_receipt_input_changed
+    )
     status = (
         "current"
         if not changed_paths
@@ -1177,6 +1193,7 @@ def graph_materialization_freshness(
         },
         "inventory_stale_paths": inventory_stale_paths,
         "root_evidence_changed": root_evidence_changed,
+        "completion_receipt_input_changed": completion_receipt_input_changed,
         "changed_root_paths": changed_root_paths,
         "changed_root_path_count": len(changed_root_paths),
         "provider_state_changed": provider_state_changed,
@@ -1500,11 +1517,13 @@ def materialize_graph(
             previous_manifest = materialized.manifest
             previous_snapshot = materialized.snapshot
             previous_provider_results = materialized.provider_results
+    receipt_collection = collect_completion_receipt_collection(root, repo_id=target.id)
     index_result, provider_entries, import_result, current, index_update = collect_graph_inputs(
         root,
         target=target,
         previous_manifest=previous_manifest,
         previous_snapshot=previous_snapshot,
+        receipt_collection=receipt_collection,
         rebuild=rebuild,
     )
     if any(problem.severity == "error" for problem in index_result[1]):
@@ -1519,6 +1538,7 @@ def materialize_graph(
             file_fingerprints=current["file_fingerprints"],
             changed_paths=set(index_update["changed_paths"]),
             graph_input_digest=current["input_digest"],
+            receipt_collection=receipt_collection,
             database_path=state_dir / "evidence.sqlite3",
         )
         if any(problem.severity == "error" for problem in evidence_problems):
@@ -1616,6 +1636,7 @@ def materialize_graph(
         target=target,
         code_index_result=index_result,
         cached_semantic_results=results,
+        receipt_collection=receipt_collection,
     )
     if snapshot is None or any(problem.severity == "error" for problem in problems):
         return snapshot, problems, {**meta, "materialization": {"status": "failed", "input_digest": current["input_digest"]}}
@@ -1631,6 +1652,7 @@ def materialize_graph(
         file_fingerprints=current["file_fingerprints"],
         changed_paths=evidence_update_paths,
         graph_input_digest=current["input_digest"],
+        receipt_collection=receipt_collection,
         rebuild=bool(index_update["full_reindex"]),
         allow_reset=rebuild,
         database_path=state_dir / "evidence.sqlite3",

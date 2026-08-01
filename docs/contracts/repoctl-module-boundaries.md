@@ -5,6 +5,7 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 ## Ownership
 
 - `task lifecycle` owns task frontmatter, Board membership, archive transitions, start baselines, finish gates, Handoff, Execution Log, Verification updates, and the compact machine-owned Handoff binding receipt.
+- `task lifecycle` also owns exact completion-receipt artifact resolution across live and archived task locations. Knowledge, Graph, Context, and llmwiki consume that typed identity result instead of guessing archive paths or rewriting immutable provenance.
 - `Context / Task Pack` owns canonical Pack input collection, source-identity projection, artifact rendering, and read-only Pack integrity/freshness inspection. It does not write Handoff or task lifecycle state.
 - `backlog` owns opaque raw block CRUD only.
 - `meta` owns `.repometa` policy, annotations, exclusions, move repair, and metadata validation.
@@ -19,6 +20,7 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 - The Dart semantic provider owns resolved RPC source facts, actual-to-formal invocation validity, routine/parameter bindings, schema-selection evidence, and source coverage. The structured resolver owns SQL compatibility and the linked/non-linked outcome. Graph materializes linked edges and separately projects compatible non-linked candidates; no second Dart scanner or fallback owns the same decision.
 - Graph/Index owns observed repo-specific topics; `.repometa` topics are human hints and bootstrap labels, not the authoritative topic graph.
 - llmwiki renders reviewed knowledge and current evidence as a non-authoritative view; it must not replace task frontmatter, Board, Backlog, or `.repometa` authority.
+- Receipt-derived Knowledge keeps its declared source refs and record digest unchanged. Public navigation may expose a separately resolved source ref only when the receipt, task/repository identity, declared artifact path, unique current artifact, and content digest all agree; a verified `docs/tasks/**` to `docs/archive/tasks/**` move is current rather than stale.
 - Monorepo layouts should treat packages/apps/services inside the selected product repo as scoped surfaces, not as separate workspace roots.
 - Multi-repo support must use explicit repo selectors/namespaces; MCP, Graph, and llmwiki must not infer repo identity from path strings alone.
 

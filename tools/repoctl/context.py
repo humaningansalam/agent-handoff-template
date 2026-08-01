@@ -3924,8 +3924,13 @@ def _knowledge_continuations(result: dict[str, Any]) -> list[dict[str, Any]]:
     for path in result.get("resolved_applicability_paths", []):
         if isinstance(path, str) and path:
             continuations.append(_file_continuation(path, include_impact=False))
-    for ref in record.get("source_refs", []):
-        if isinstance(ref, dict) and str(ref.get("path") or ""):
+    source_refs = record.get("resolved_source_refs") if isinstance(record.get("resolved_source_refs"), list) else []
+    for ref in source_refs:
+        if (
+            isinstance(ref, dict)
+            and str(ref.get("resolution_status") or "") in {"current", "relocated"}
+            and str(ref.get("path") or "")
+        ):
             continuations.append(_document_continuation(str(ref["path"])))
     return _dedupe_continuations(continuations)[:4]
 

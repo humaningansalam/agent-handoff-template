@@ -59,6 +59,115 @@ class DiscoveryResultAuthority(StrEnum):
 
 
 @dataclass(frozen=True)
+class CompletionReceiptArtifact:
+    receipt: dict[str, Any]
+    receipt_path: str
+    receipt_text: str
+    receipt_sha256: str
+    declared_path: str
+    resolved_path: str
+    content_sha256: str
+    artifact_text: str
+
+
+class CompletionReceiptArtifactResolutionStatus(StrEnum):
+    RESOLVED = "resolved"
+    INVALID_IDENTITY = "invalid_identity"
+    MISSING = "missing"
+    AMBIGUOUS = "ambiguous"
+    UNRESOLVABLE = "unresolvable"
+    OUTSIDE_WORKSPACE = "outside_workspace"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True)
+class CompletionReceiptArtifactResolution:
+    receipt_path: str
+    declared_path: str
+    status: CompletionReceiptArtifactResolutionStatus
+    candidate_paths: tuple[str, ...]
+    existing_paths: tuple[str, ...]
+    receipt_sha256: str = ""
+    resolved_path: str = ""
+    content_sha256: str = ""
+    artifact_bytes: bytes = b""
+    artifact_text: str = ""
+
+    def input_identity(self) -> dict[str, object]:
+        return {
+            "receipt_path": self.receipt_path,
+            "declared_path": self.declared_path,
+            "status": self.status.value,
+            "candidate_paths": list(self.candidate_paths),
+            "existing_paths": list(self.existing_paths),
+            "receipt_sha256": self.receipt_sha256,
+            "resolved_path": self.resolved_path,
+            "content_sha256": self.content_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class CompletionReceiptCollection:
+    artifacts: tuple[CompletionReceiptArtifact, ...]
+    problems: tuple[Problem, ...]
+    resolutions: tuple[CompletionReceiptArtifactResolution, ...]
+
+    @property
+    def input_digest(self) -> str:
+        return digest_data(
+            {
+                "artifacts": [
+                    {
+                        "receipt_path": artifact.receipt_path,
+                        "receipt_sha256": artifact.receipt_sha256,
+                        "declared_path": artifact.declared_path,
+                        "resolved_path": artifact.resolved_path,
+                        "content_sha256": artifact.content_sha256,
+                    }
+                    for artifact in self.artifacts
+                ],
+                "problems": [
+                    {
+                        "code": problem.code,
+                        "path": problem.path or "",
+                        "cause_code": problem.cause_code or "",
+                    }
+                    for problem in self.problems
+                ],
+                "resolutions": [resolution.input_identity() for resolution in self.resolutions],
+            }
+        )
+
+    @property
+    def candidate_paths(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    path
+                    for resolution in self.resolutions
+                    for path in resolution.candidate_paths
+                }
+            )
+        )
+
+    @property
+    def input_paths(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    *self.candidate_paths,
+                    *(
+                        resolution.receipt_path
+                        for resolution in self.resolutions
+                        if resolution.receipt_path
+                    ),
+                    *(problem.path for problem in self.problems if problem.path),
+                }
+            )
+        )
+
+
+@dataclass(frozen=True)
 class DiscoveryResultSelection:
     producer: DiscoveryResultProducer
     result_id: str
@@ -717,6 +826,18 @@ def _completion_receipt_path(root: Path, task_id: str) -> Path:
     return _state_dir(root) / "completions" / f"{task_id}.json"
 
 
+def _completion_receipt_path_problem(root: Path, path: Path) -> Problem | None:
+    rel = path.relative_to(root).as_posix()
+    try:
+        root_resolved = root.resolve()
+        path_resolved = path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return Problem("error", "invalid_completion_receipt", f"task completion receipt path is unresolvable: {rel}", rel)
+    if root_resolved not in (path_resolved, *path_resolved.parents):
+        return Problem("error", "invalid_completion_receipt", f"task completion receipt escapes workspace: {rel}", rel)
+    return None
+
+
 def _resume_binding_path(root: Path, task_id: str) -> Path:
     return _state_dir(root) / "resume" / f"{task_id}.json"
 
@@ -741,6 +862,10 @@ def _entry_paths(entries: list[ChangedEntry]) -> list[str]:
 
 def _sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _valid_sha256(value: str) -> bool:
@@ -1089,42 +1214,109 @@ def _completion_receipt_artifact_candidates(root: Path, task_id: str, task_path:
     return unique
 
 
-def completion_receipt_artifact_path(root: Path, receipt: dict[str, Any]) -> str:
-    task_id = str(receipt.get("task_id") or "")
-    task_path = completion_receipt_task_path(receipt)
-    if not ID_RE.match(task_id) or not task_path:
-        return ""
-    existing = [candidate for candidate in _completion_receipt_artifact_candidates(root, task_id, task_path) if candidate.is_file()]
-    if len(existing) != 1:
-        return ""
-    artifact = existing[0]
-    try:
-        return artifact.relative_to(root).as_posix()
-    except ValueError:
-        return ""
-
-
-def _read_receipt_artifact(root: Path, task_id: str, value: str) -> str:
+def _resolve_receipt_artifact(
+    root: Path,
+    task_id: str,
+    value: str,
+    *,
+    receipt_path: str = "",
+    receipt_sha256: str = "",
+) -> CompletionReceiptArtifactResolution:
     candidates = _completion_receipt_artifact_candidates(root, task_id, value)
+    candidate_paths = tuple(candidate.relative_to(root).as_posix() for candidate in candidates)
     if not candidates:
-        raise RepoctlError(f"task completion receipt artifact does not match task_id: {value}", code="invalid_completion_receipt", path=value)
+        return CompletionReceiptArtifactResolution(
+            receipt_path,
+            value,
+            CompletionReceiptArtifactResolutionStatus.INVALID_IDENTITY,
+            (),
+            (),
+            receipt_sha256,
+        )
     existing = [candidate for candidate in candidates if candidate.is_file()]
+    existing_paths = tuple(candidate.relative_to(root).as_posix() for candidate in existing)
     if not existing:
-        raise RepoctlError(f"task completion receipt artifact is missing: {value}", code="invalid_completion_receipt", path=value)
+        return CompletionReceiptArtifactResolution(
+            receipt_path,
+            value,
+            CompletionReceiptArtifactResolutionStatus.MISSING,
+            candidate_paths,
+            (),
+            receipt_sha256,
+        )
     if len(existing) != 1:
-        raise RepoctlError(f"task completion receipt artifact is ambiguous: {value}", code="invalid_completion_receipt", path=value)
+        return CompletionReceiptArtifactResolution(
+            receipt_path,
+            value,
+            CompletionReceiptArtifactResolutionStatus.AMBIGUOUS,
+            candidate_paths,
+            existing_paths,
+            receipt_sha256,
+        )
     path = existing[0]
     try:
         resolved = path.resolve()
         root_resolved = root.resolve()
-    except OSError as exc:
-        raise RepoctlError(f"task completion receipt artifact cannot be resolved: {value}", code="invalid_completion_receipt", path=value) from exc
+    except (OSError, ValueError, RuntimeError):
+        return CompletionReceiptArtifactResolution(
+            receipt_path,
+            value,
+            CompletionReceiptArtifactResolutionStatus.UNRESOLVABLE,
+            candidate_paths,
+            existing_paths,
+            receipt_sha256,
+        )
     if root_resolved not in (resolved, *resolved.parents):
-        raise RepoctlError(f"task completion receipt artifact escapes workspace: {value}", code="invalid_completion_receipt", path=value)
+        return CompletionReceiptArtifactResolution(
+            receipt_path,
+            value,
+            CompletionReceiptArtifactResolutionStatus.OUTSIDE_WORKSPACE,
+            candidate_paths,
+            existing_paths,
+            receipt_sha256,
+        )
     try:
-        return path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RepoctlError(f"task completion receipt artifact is unreadable: {value}", code="invalid_completion_receipt", path=value) from exc
+        artifact_bytes = path.read_bytes()
+        artifact_text = artifact_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return CompletionReceiptArtifactResolution(
+            receipt_path,
+            value,
+            CompletionReceiptArtifactResolutionStatus.UNREADABLE,
+            candidate_paths,
+            existing_paths,
+            receipt_sha256,
+        )
+    return CompletionReceiptArtifactResolution(
+        receipt_path,
+        value,
+        CompletionReceiptArtifactResolutionStatus.RESOLVED,
+        candidate_paths,
+        existing_paths,
+        receipt_sha256,
+        resolved_path=path.relative_to(root).as_posix(),
+        content_sha256=_sha256_bytes(artifact_bytes),
+        artifact_bytes=artifact_bytes,
+        artifact_text=artifact_text,
+    )
+
+
+def _completion_receipt_artifact_resolution_error(
+    resolution: CompletionReceiptArtifactResolution,
+) -> RepoctlError:
+    messages = {
+        CompletionReceiptArtifactResolutionStatus.INVALID_IDENTITY: "does not match task_id",
+        CompletionReceiptArtifactResolutionStatus.MISSING: "is missing",
+        CompletionReceiptArtifactResolutionStatus.AMBIGUOUS: "is ambiguous",
+        CompletionReceiptArtifactResolutionStatus.UNRESOLVABLE: "cannot be resolved",
+        CompletionReceiptArtifactResolutionStatus.OUTSIDE_WORKSPACE: "escapes workspace",
+        CompletionReceiptArtifactResolutionStatus.UNREADABLE: "is unreadable",
+    }
+    return RepoctlError(
+        f"task completion receipt artifact {messages[resolution.status]}: {resolution.declared_path}",
+        code="invalid_completion_receipt",
+        path=resolution.declared_path,
+    )
 
 
 def _completion_receipt_repo_id(path: Path, root: Path, data: dict[str, Any]) -> str:
@@ -1241,7 +1433,14 @@ def _completion_evidence_pair(
     return mode, attribution
 
 
-def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -> None:
+def _validate_completion_receipt(
+    path: Path,
+    root: Path,
+    data: dict[str, Any],
+    *,
+    receipt_text: str = "",
+    artifact_resolution: CompletionReceiptArtifactResolution | None = None,
+) -> CompletionReceiptArtifact:
     rel = path.relative_to(root).as_posix()
     task_id = str(data.get("task_id") or "")
     _completion_receipt_repo_id(path, root, data)
@@ -1263,7 +1462,12 @@ def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -
             raise RepoctlError(f"task completion receipt has invalid verification hash: {rel}", code="invalid_completion_receipt", path=rel)
     if not isinstance(verification.get("truncated"), bool):
         raise RepoctlError(f"task completion receipt has invalid verification truncation flag: {rel}", code="invalid_completion_receipt", path=rel)
-    if _sha256_text(_read_receipt_artifact(root, task_id, task_path)) != content_sha256:
+    resolution = artifact_resolution or _resolve_receipt_artifact(root, task_id, task_path, receipt_path=rel)
+    if resolution.status is not CompletionReceiptArtifactResolutionStatus.RESOLVED:
+        raise _completion_receipt_artifact_resolution_error(resolution)
+    artifact_bytes = resolution.artifact_bytes
+    artifact_text = resolution.artifact_text
+    if _sha256_bytes(artifact_bytes) != content_sha256:
         raise RepoctlError(f"task completion receipt hash does not match artifact: {rel}", code="invalid_completion_receipt", path=rel)
     repo_evidence = data.get("repo_evidence")
     if not isinstance(repo_evidence, dict):
@@ -1279,19 +1483,55 @@ def _validate_completion_receipt(path: Path, root: Path, data: dict[str, Any]) -
     if len(set(entries)) != len(entries):
         raise RepoctlError(f"task completion receipt has duplicate changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
     _validate_receipt_fingerprint_manifest(rel=rel, data=data, repo_evidence=repo_evidence, entries=entries)
+    return CompletionReceiptArtifact(
+        receipt=data,
+        receipt_path=rel,
+        receipt_text=receipt_text,
+        receipt_sha256=_sha256_text(receipt_text),
+        declared_path=task_path,
+        resolved_path=resolution.resolved_path,
+        content_sha256=content_sha256,
+        artifact_text=artifact_text,
+    )
 
 
-def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tuple[list[dict[str, Any]], list[Problem]]:
+def collect_completion_receipt_collection(
+    root: Path,
+    *,
+    repo_id: str | None = None,
+) -> CompletionReceiptCollection:
     directory = _state_dir(root) / "completions"
+    if directory_problem := _completion_receipt_path_problem(root, directory):
+        return CompletionReceiptCollection((), (directory_problem,), ())
+    if not directory.exists() and not directory.is_symlink():
+        return CompletionReceiptCollection((), (), ())
     if not directory.is_dir():
-        return [], []
-    receipts: list[dict[str, Any]] = []
+        rel = directory.relative_to(root).as_posix()
+        return CompletionReceiptCollection(
+            (),
+            (
+                Problem(
+                    "error",
+                    "invalid_completion_receipt",
+                    f"task completion receipt directory is not a directory: {rel}",
+                    rel,
+                ),
+            ),
+            (),
+        )
+    artifacts: list[CompletionReceiptArtifact] = []
     problems: list[Problem] = []
+    resolutions: list[CompletionReceiptArtifactResolution] = []
     for path in sorted(directory.glob("T-*.json")):
         rel = path.relative_to(root).as_posix()
+        if path_problem := _completion_receipt_path_problem(root, path):
+            problems.append(path_problem)
+            continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            receipt_bytes = path.read_bytes()
+            receipt_text = receipt_bytes.decode("utf-8")
+            data = json.loads(receipt_text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt is unreadable: {rel}", rel))
             continue
         if not isinstance(data, dict):
@@ -1304,13 +1544,99 @@ def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tu
             continue
         if repo_id is not None and receipt_repo_id != repo_id:
             continue
+        task_id = str(data.get("task_id") or "")
+        task_path = str(data.get("task_path_at_completion") or "")
+        resolution = _resolve_receipt_artifact(
+            root,
+            task_id,
+            task_path,
+            receipt_path=rel,
+            receipt_sha256=_sha256_bytes(receipt_bytes),
+        )
+        resolutions.append(resolution)
         try:
-            _validate_completion_receipt(path, root, data)
+            artifact = _validate_completion_receipt(
+                path,
+                root,
+                data,
+                receipt_text=receipt_text,
+                artifact_resolution=resolution,
+            )
         except RepoctlError as exc:
             problems.append(Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel))
             continue
-        receipts.append(data)
-    return receipts, problems
+        artifacts.append(artifact)
+    return CompletionReceiptCollection(tuple(artifacts), tuple(problems), tuple(resolutions))
+
+
+def collect_completion_receipt_artifacts(
+    root: Path,
+    *,
+    repo_id: str | None = None,
+) -> tuple[list[CompletionReceiptArtifact], list[Problem]]:
+    collection = collect_completion_receipt_collection(root, repo_id=repo_id)
+    return list(collection.artifacts), list(collection.problems)
+
+
+def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tuple[list[dict[str, Any]], list[Problem]]:
+    artifacts, problems = collect_completion_receipt_artifacts(root, repo_id=repo_id)
+    return [artifact.receipt for artifact in artifacts], problems
+
+
+def _completion_receipt_data_for_task(
+    root: Path,
+    *,
+    task_id: str,
+    repo_id: str | None = None,
+) -> tuple[Path | None, dict[str, Any] | None, str, list[Problem]]:
+    try:
+        normalized_task_id = normalize_task_id(task_id)
+    except RepoctlError as exc:
+        return None, None, "", [Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or task_id)]
+    if not ID_RE.fullmatch(normalized_task_id):
+        return None, None, "", [Problem("error", "invalid_completion_receipt", "completion receipt task id is invalid", task_id)]
+    path = _completion_receipt_path(root, normalized_task_id)
+    rel = path.relative_to(root).as_posix()
+    if path_problem := _completion_receipt_path_problem(root, path):
+        return None, None, "", [path_problem]
+    if not path.is_file():
+        return None, None, "", []
+    try:
+        receipt_bytes = path.read_bytes()
+        receipt_text = receipt_bytes.decode("utf-8")
+        data = json.loads(receipt_text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, None, "", [Problem("error", "invalid_completion_receipt", f"task completion receipt is unreadable: {rel}", rel)]
+    if not isinstance(data, dict):
+        return None, None, "", [Problem("error", "invalid_completion_receipt", f"task completion receipt has invalid schema: {rel}", rel)]
+    try:
+        receipt_repo_id = _completion_receipt_repo_id(path, root, data)
+        if repo_id is not None and receipt_repo_id != repo_id:
+            raise RepoctlError(
+                f"task completion receipt repo_id does not match requested repository: {rel}",
+                code="invalid_completion_receipt",
+                path=rel,
+            )
+    except RepoctlError as exc:
+        return None, None, "", [Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel)]
+    return path, data, receipt_text, []
+
+
+def completion_receipt_artifact_for_task(
+    root: Path,
+    *,
+    task_id: str,
+    repo_id: str | None = None,
+) -> tuple[CompletionReceiptArtifact | None, list[Problem]]:
+    """Return one validated receipt with its unique current task artifact identity."""
+    path, receipt, receipt_text, problems = _completion_receipt_data_for_task(root, task_id=task_id, repo_id=repo_id)
+    if path is None or receipt is None or problems:
+        return None, problems
+    try:
+        return _validate_completion_receipt(path, root, receipt, receipt_text=receipt_text), []
+    except RepoctlError as exc:
+        rel = path.relative_to(root).as_posix()
+        return None, [Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel)]
 
 
 def _entry_key(entry: ChangedEntry) -> tuple[str, str, str]:
@@ -1359,7 +1685,7 @@ def _write_task_state(root: Path, task_id: str, payload: dict[str, Any]) -> None
     if path.is_file():
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RepoctlError(f"task state is unreadable: {path.relative_to(root).as_posix()}", code="task_state_unreadable", path=path.relative_to(root).as_posix()) from exc
         if not isinstance(loaded, dict):
             raise RepoctlError(f"task state has invalid schema: {path.relative_to(root).as_posix()}", code="task_state_invalid", path=path.relative_to(root).as_posix())
@@ -1713,6 +2039,12 @@ def _done_descendant_completion_receipts(root: Path, task: Task) -> list[tuple[T
             continue
         receipt_path = _completion_receipt_path(root, child.id)
         receipt_rel = receipt_path.relative_to(root).as_posix()
+        if path_problem := _completion_receipt_path_problem(root, receipt_path):
+            raise RepoctlError(
+                f"done child task completion receipt is invalid: {path_problem.message}",
+                code="child_completion_receipt_invalid",
+                path=receipt_rel,
+            )
         if not receipt_path.is_file():
             raise RepoctlError(
                 "done child task is missing its completion receipt",
@@ -1721,7 +2053,7 @@ def _done_descendant_completion_receipts(root: Path, task: Task) -> list[tuple[T
             )
         try:
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RepoctlError(
                 "done child task completion receipt is unreadable",
                 code="child_completion_receipt_invalid",
@@ -2353,6 +2685,8 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     if task.status not in LIVE:
         raise RepoctlError("task finish requires a live status")
     receipt_path = _completion_receipt_path(root, task.id)
+    if path_problem := _completion_receipt_path_problem(root, receipt_path):
+        raise RepoctlError(path_problem.message, code=path_problem.code, path=path_problem.path)
     if receipt_path.exists():
         raise RepoctlError("task completion receipt already exists and will not be overwritten", code="completion_receipt_exists", path=receipt_path.relative_to(root).as_posix())
     repo_scoped = _repo_scoped_task(task)

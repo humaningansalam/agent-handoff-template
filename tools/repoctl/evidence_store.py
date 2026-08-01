@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .code_index import CodeIndexEntry
-from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
+from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_markdown_text, chunk_text_source, sha256_text
 from .context_model import ContextSectionKind, ContextSourceRef
 from .context_retrieval import (
     AUTO_RETRIEVAL_LANE_LIMITS,
@@ -27,7 +27,7 @@ from .document_roles import (
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints
 from .repositories import RepoTarget
-from .tasks import Problem, collect_completion_receipts, completion_receipt_artifact_path
+from .tasks import CompletionReceiptCollection, Problem
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
@@ -203,7 +203,12 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
     )
 
 
-def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChunk], set[str], list[Problem]]:
+def _static_chunks(
+    root: Path,
+    *,
+    target: RepoTarget,
+    receipt_collection: CompletionReceiptCollection,
+) -> tuple[list[DocumentChunk], set[str], list[Problem]]:
     chunks: list[DocumentChunk] = []
     static_paths: set[str] = set()
     problems: list[Problem] = []
@@ -246,31 +251,30 @@ def _static_chunks(root: Path, *, target: RepoTarget) -> tuple[list[DocumentChun
                 section_kind=ContextSectionKind.VERIFICATION,
             )
         )
-    receipts, receipt_problems = collect_completion_receipts(root, repo_id=target.id)
+    receipt_artifacts = receipt_collection.artifacts
+    receipt_problems = receipt_collection.problems
     problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
-    for receipt in receipts:
+    for receipt_artifact in receipt_artifacts:
+        receipt = receipt_artifact.receipt
         task_id = str(receipt.get("task_id") or "")
-        rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
-        text = json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2)
         chunks.append(
             chunk_text_source(
                 root,
-                rel,
-                text,
+                receipt_artifact.receipt_path,
+                receipt_artifact.receipt_text,
                 kind="completion_receipt",
                 section=task_id or "completion receipt",
                 section_kind=ContextSectionKind.TASK,
             )
         )
-        artifact = completion_receipt_artifact_path(root, receipt)
-        if artifact:
-            path = root / artifact
-            if not path.is_file():
-                continue
-            try:
-                chunks.extend(chunk_markdown_file(root, path, kind="task_artifact"))
-            except (OSError, UnicodeDecodeError) as exc:
-                problems.append(Problem("warning", "context_task_artifact_unreadable", str(exc), artifact))
+        chunks.extend(
+            chunk_markdown_text(
+                root,
+                receipt_artifact.resolved_path,
+                receipt_artifact.artifact_text,
+                kind="task_artifact",
+            )
+        )
     return chunks, static_paths, problems
 
 
@@ -467,6 +471,7 @@ def materialize_evidence_index(
     file_fingerprints: dict[str, str],
     changed_paths: set[str],
     graph_input_digest: str,
+    receipt_collection: CompletionReceiptCollection,
     rebuild: bool = False,
     allow_reset: bool = False,
     database_path: Path | None = None,
@@ -503,7 +508,11 @@ def materialize_evidence_index(
         with connection:
             if rebuild:
                 connection.execute("DELETE FROM chunks")
-            static_chunks, static_paths, static_problems = _static_chunks(root, target=target)
+            static_chunks, static_paths, static_problems = _static_chunks(
+                root,
+                target=target,
+                receipt_collection=receipt_collection,
+            )
             problems.extend(static_problems)
             placeholders = ",".join("?" for _ in STATIC_KINDS)
             connection.execute(f"DELETE FROM chunks WHERE kind IN ({placeholders})", tuple(sorted(STATIC_KINDS)))

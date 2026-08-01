@@ -98,6 +98,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 
 - Store reviewed knowledge in `docs/knowledge/records/**` with lifecycle events in `docs/knowledge/events/**`.
 - Require an explicit review action before durable knowledge exists; do not infer approval from source prose or task completion alone.
+- Preserve receipt-derived source identity when a completed child task moves from the live task directory to the archive. A byte-identical, uniquely resolved archive move remains current provenance; missing, ambiguous, identity-mismatched, or digest-mismatched evidence fails closed.
 - Treat generated llmwiki pages as regenerable, non-authoritative views.
 - Do not ingest generated llmwiki output as future source evidence.
 

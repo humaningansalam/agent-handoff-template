@@ -33,12 +33,29 @@ def chunk_markdown_file(
 ) -> list[DocumentChunk]:
     text = path.read_text(encoding="utf-8")
     rel = path.relative_to(root).as_posix()
+    return chunk_markdown_text(
+        root,
+        rel,
+        text,
+        kind=kind,
+        document_role=document_role,
+    )
+
+
+def chunk_markdown_text(
+    root: Path,
+    rel: str,
+    text: str,
+    *,
+    kind: str = "document",
+    document_role: DocumentRole = DocumentRole.UNSPECIFIED,
+) -> list[DocumentChunk]:
     role = source_document_role(kind=kind, path=rel, assigned=document_role)
     digest = sha256_text(text)
     lines = text.splitlines()
     chunks: list[DocumentChunk] = []
     section_kind = ContextSectionKind.TASK if kind == "task_artifact" else ContextSectionKind.DOCUMENT
-    current_heading = path.name
+    current_heading = Path(rel).name
     start_index = 0
 
     for index, line in enumerate(lines):

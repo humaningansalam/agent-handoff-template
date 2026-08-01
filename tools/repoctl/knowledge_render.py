@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -9,7 +9,12 @@ from urllib.parse import quote
 
 from .graph_model import digest_data
 from .io import atomic_write
-from .knowledge_candidates import event_integrity_problems
+from .knowledge_candidates import (
+    KnowledgeSourceResolutionStatus,
+    event_integrity_problems,
+    knowledge_sources_current,
+    resolved_knowledge_source_refs,
+)
 from .tasks import Problem
 
 
@@ -45,7 +50,7 @@ def render_knowledge(root: Path, *, repo_id: str, output: Path, check: bool = Fa
             "event_checks": {"error_count": len(event_problems)},
             "rendered": [],
         }, event_problems
-    pages = _pages(root, records, events)
+    pages = _pages(root, output_dir, records, events)
     page_records = _page_records(records)
     rendered = _rendered_page_entries(root=root, output_dir=output_dir, pages=pages, page_records=page_records, events=events)
     rendered = sorted(rendered, key=lambda item: item["path"])
@@ -259,7 +264,7 @@ def _load_events(root: Path, *, repo_id: str) -> list[dict[str, Any]]:
     return events
 
 
-def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, str]:
+def _pages(root: Path, output_dir: Path, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, str]:
     by_kind: dict[str, list[dict[str, Any]]] = {kind: [] for kind in PAGE_BY_KIND}
     for record in records:
         kind = str(record.get("kind") or "")
@@ -273,7 +278,14 @@ def _pages(root: Path, records: list[dict[str, Any]], events: list[dict[str, Any
     deprecated_ids = _deprecated_ids(events)
     for record in sorted(records, key=lambda item: str(item.get("id") or "")):
         record_id = str(record.get("id") or "")
-        pages[_record_page_name(record_id)] = _record_page(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids, events=events_by_record.get(record_id, []))
+        pages[_record_page_name(record_id)] = _record_page(
+            root,
+            output_dir,
+            record,
+            superseded_ids=superseded_ids,
+            deprecated_ids=deprecated_ids,
+            events=events_by_record.get(record_id, []),
+        )
     for target in _file_targets(records):
         pages[_file_target_page_name(target)] = _file_target_page(root, target, records, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
     for symbol in _symbol_targets(records):
@@ -307,12 +319,14 @@ def _page_records(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 
 
 def _page_source_bundle(root: Path, name: str, records: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, Any]:
-    refs = _unique_source_refs(records)
+    declared_refs = _unique_declared_source_refs(records)
+    resolved_refs = _unique_resolved_source_refs(root, records)
     event_ids = [str(event.get("id") or "") for event in events if _event_belongs_to_page(name, event, records)]
-    source_statuses = _source_statuses(root, refs)
+    source_statuses = _source_statuses(resolved_refs)
     bundle = {
         "record_ids": [str(record.get("id") or "") for record in records],
-        "source_refs": refs,
+        "source_refs": declared_refs,
+        "resolved_source_refs": resolved_refs,
         "source_statuses": source_statuses,
         "source_status_counts": _source_status_counts(source_statuses),
         "event_ids": sorted(event_ids),
@@ -321,17 +335,20 @@ def _page_source_bundle(root: Path, name: str, records: list[dict[str, Any]], ev
     return bundle
 
 
-def _source_statuses(root: Path, refs: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _source_statuses(refs: list[dict[str, Any]]) -> list[dict[str, str]]:
     statuses: list[dict[str, str]] = []
     for ref in refs:
-        statuses.append(
-            {
-                "path": str(ref.get("path") or ""),
-                "section": str(ref.get("section") or ""),
-                "content_sha256": str(ref.get("content_sha256") or ""),
-                "status": _source_ref_status(root, ref),
-            }
-        )
+        status = {
+            "path": str(ref.get("path") or ""),
+            "declared_path": str(ref.get("declared_path") or ref.get("path") or ""),
+            "resolved_path": str(ref.get("resolved_path") or ref.get("path") or ""),
+            "section": str(ref.get("section") or ""),
+            "content_sha256": str(ref.get("content_sha256") or ""),
+            "status": _source_ref_status(ref),
+        }
+        if ref.get("resolution_cause_code"):
+            status["cause_code"] = str(ref["resolution_cause_code"])
+        statuses.append(status)
     return sorted(statuses, key=lambda item: (item["path"], item["section"], item["content_sha256"]))
 
 
@@ -343,13 +360,22 @@ def _source_status_counts(statuses: list[dict[str, str]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _unique_source_refs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _unique_declared_source_refs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     refs: dict[str, dict[str, Any]] = {}
     for record in records:
-        source_refs = record.get("source_refs", [])
-        if not isinstance(source_refs, list):
-            continue
+        source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
         for ref in source_refs:
+            if not isinstance(ref, dict):
+                continue
+            key = json.dumps(ref, ensure_ascii=False, sort_keys=True)
+            refs[key] = ref
+    return [refs[key] for key in sorted(refs)]
+
+
+def _unique_resolved_source_refs(root: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    for record in records:
+        for ref in resolved_knowledge_source_refs(root, record):
             if not isinstance(ref, dict):
                 continue
             key = json.dumps(ref, ensure_ascii=False, sort_keys=True)
@@ -467,7 +493,7 @@ def _record_summary_item(root: Path, record: dict[str, Any], *, superseded_ids: 
     ]
 
 
-def _record_page(root: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> str:
+def _record_page(root: Path, output_dir: Path, record: dict[str, Any], *, superseded_ids: set[str], deprecated_ids: set[str], events: list[dict[str, Any]]) -> str:
     record_id = str(record.get("id") or "")
     status = _derived_status(root, record, superseded_ids=superseded_ids, deprecated_ids=deprecated_ids)
     kind = str(record.get("kind") or "")
@@ -532,15 +558,32 @@ def _record_page(root: Path, record: dict[str, Any], *, superseded_ids: set[str]
         "### Sources",
         "",
     ])
-    refs = record.get("source_refs", [])
+    refs = resolved_knowledge_source_refs(root, record)
+    page_name = _record_page_name(record_id)
     if isinstance(refs, list) and refs:
         for ref in refs:
             if not isinstance(ref, dict):
                 continue
             section = f"#{ref.get('section')}" if ref.get("section") else ""
             digest = ref.get("content_sha256", "")
-            source_status = _source_ref_status(root, ref)
-            lines.append(f"- [{ref.get('path', '')}{section}]({_record_source_link(str(ref.get('path') or ''))}) `{digest}` status=`{source_status}`")
+            source_status = _source_ref_status(ref)
+            declared = str(ref.get("declared_path") or "")
+            declared_suffix = f" declared=`{declared}`" if declared and declared != str(ref.get("path") or "") else ""
+            source_path = str(ref.get("path") or "")
+            source_link = (
+                _record_source_link(root, output_dir, page_name, source_path)
+                if source_status
+                in {
+                    KnowledgeSourceResolutionStatus.CURRENT.value,
+                    KnowledgeSourceResolutionStatus.RELOCATED.value,
+                    KnowledgeSourceResolutionStatus.DIGEST_MISMATCH.value,
+                }
+                else ""
+            )
+            source_label = f"[{source_path}{section}]({source_link})" if source_link else f"`{source_path}{section}`"
+            cause = str(ref.get("resolution_cause_code") or "")
+            cause_suffix = f" cause=`{cause}`" if cause else ""
+            lines.append(f"- {source_label} `{digest}` status=`{source_status}`{declared_suffix}{cause_suffix}")
     else:
         lines.append("- Missing source refs; do not treat this record as current knowledge.")
     lines.extend(["", "### Event Timeline", ""])
@@ -616,10 +659,21 @@ def _record_sibling_link(record_id: str) -> str:
     return f"{record_id}.md"
 
 
-def _record_source_link(path: str) -> str:
-    if path.startswith("docs/"):
-        return "../../../" + path.removeprefix("docs/")
-    return "../../../" + path
+def _record_source_link(root: Path, output_dir: Path, page_name: str, path: str) -> str:
+    if (
+        not path
+        or path != path.strip().replace("\\", "/")
+        or Path(path).is_absolute()
+        or ".." in Path(path).parts
+    ):
+        return ""
+    target = root / path
+    try:
+        target.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return ""
+    relative = Path(os.path.relpath(target, start=(output_dir / page_name).parent)).as_posix()
+    return quote(relative, safe="/.:@-")
 
 
 def _file_target_page_name(path: str) -> str:
@@ -859,7 +913,7 @@ def _search_index(root: Path, records: list[dict[str, Any]], *, superseded_ids: 
                 "applies_to": {"files": _record_file_targets(record), "symbols": [_symbol_search_index_entry(symbol) for symbol in _record_symbol_targets(record)], "topics": []},
                 "source_paths": sorted(
                     str(ref.get("path") or "")
-                    for ref in record.get("source_refs", [])
+                    for ref in resolved_knowledge_source_refs(root, record)
                     if isinstance(ref, dict) and str(ref.get("path") or "")
                 ),
                 "page_path": _record_page_name(record_id),
@@ -903,16 +957,11 @@ def _approval_context(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _source_ref_status(root: Path, ref: dict[str, Any]) -> str:
-    rel = str(ref.get("path") or "")
-    expected = str(ref.get("content_sha256") or "")
-    path = root / rel
-    if not path.is_file():
-        return "missing"
-    actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
-    if actual != expected:
-        return "digest_mismatch"
-    return "current"
+def _source_ref_status(ref: dict[str, Any]) -> str:
+    projected_status = str(ref.get("resolution_status") or "")
+    if projected_status in {status.value for status in KnowledgeSourceResolutionStatus}:
+        return projected_status
+    return KnowledgeSourceResolutionStatus.INVALID_IDENTITY.value
 
 
 def _events_by_record(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -957,18 +1006,4 @@ def _derived_status(root: Path, record: dict[str, Any], *, superseded_ids: set[s
 
 
 def _has_digest_drift(root: Path, record: dict[str, Any]) -> bool:
-    refs = record.get("source_refs", [])
-    if not isinstance(refs, list):
-        return True
-    for ref in refs:
-        if not isinstance(ref, dict):
-            continue
-        rel = str(ref.get("path") or "")
-        expected = str(ref.get("content_sha256") or "")
-        path = root / rel
-        if not path.is_file():
-            return True
-        actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
-        if actual != expected:
-            return True
-    return False
+    return not knowledge_sources_current(root, record)
