@@ -1342,20 +1342,25 @@ def _merge_failures(
     replace_paths: set[str],
     current_paths: set[str],
 ) -> tuple[ProviderFailure, ...]:
-    failures: dict[tuple[str, str, str, tuple[str, ...]], ProviderFailure] = {}
-    for failure in previous.failures:
-        remaining = tuple(sorted(path for path in failure.paths if path not in replace_paths and path in current_paths))
-        if not remaining:
-            continue
-        retained = ProviderFailure(failure.provider, failure.capability, failure.code, failure.message, remaining)
-        failures[(retained.capability, retained.code, retained.message, retained.paths)] = retained
-    for failure in update.failures:
-        paths = tuple(sorted(path for path in failure.paths if path in current_paths))
+    failures: dict[tuple[str, str, str, str], set[str]] = {}
+
+    def add_paths(failure: ProviderFailure, paths: set[str]) -> None:
         if not paths:
-            continue
-        current = ProviderFailure(failure.provider, failure.capability, failure.code, failure.message, paths)
-        failures[(current.capability, current.code, current.message, current.paths)] = current
-    return tuple(failures[key] for key in sorted(failures))
+            return
+        identity = (failure.provider, failure.capability, failure.code, failure.message)
+        failures.setdefault(identity, set()).update(paths)
+
+    for failure in previous.failures:
+        add_paths(
+            failure,
+            {path for path in failure.paths if path not in replace_paths and path in current_paths},
+        )
+    for failure in update.failures:
+        add_paths(failure, {path for path in failure.paths if path in current_paths})
+    return tuple(
+        ProviderFailure(*identity, tuple(sorted(paths)))
+        for identity, paths in sorted(failures.items())
+    )
 
 
 def _merge_provider_result(
