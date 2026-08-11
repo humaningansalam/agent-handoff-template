@@ -2652,6 +2652,77 @@ def test_context_graph_corroborates_weak_provider_symbols_between_current_query_
     }
 
 
+def test_context_graph_keeps_structural_owner_with_typed_candidate_coherence(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    query = "revoke access role before replacement assignment race"
+    services = repo / "services"
+    tests = repo / "tests"
+    services.mkdir()
+    tests.mkdir()
+    (services / "access_role_controller.py").write_text(
+        "def revoke_access_role():\n"
+        "    return 'role'\n",
+        encoding="utf-8",
+    )
+    (services / "access_role_contract.py").write_text(
+        "TRANSITION = 'revoke access role before replacement assignment race'\n",
+        encoding="utf-8",
+    )
+    (services / "access_role_bootstrap.py").write_text(
+        "from services.access_role_coordinator import coordinate_access_role\n\n"
+        "def bootstrap_access_role():\n"
+        "    marker = 'revoke'\n"
+        "    return coordinate_access_role(), marker\n",
+        encoding="utf-8",
+    )
+    (services / "access_role_coordinator.py").write_text(
+        "from services.access_role_bootstrap import bootstrap_access_role\n\n"
+        "def coordinate_access_role():\n"
+        "    marker = 'revoke'\n"
+        "    return bootstrap_access_role(), marker\n",
+        encoding="utf-8",
+    )
+    (tests / "test_behavior.py").write_text(
+        "from services.access_role_controller import revoke_access_role as subject\n\n"
+        "def test_behavior():\n"
+        "    assert subject() == 'role'\n",
+        encoding="utf-8",
+    )
+    (tests / "test_access_role_pipeline.py").write_text(
+        "from services.access_role_bootstrap import bootstrap_access_role\n"
+        "from services.access_role_coordinator import coordinate_access_role\n\n"
+        "SCENARIO = 'revoke access role before replacement assignment race'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            query,
+            "--repo-id",
+            "main",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert "services/access_role_controller.py" in bundle["completeness"][
+        "graph_anchor"
+    ]["seed_paths"]
+    assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+        "repos/services/access_role_controller.py"
+    )
+    assert bundle["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/test_behavior.py"
+    )
+
+
 def test_context_graph_keeps_symbol_specificity_with_compatible_exact_file_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "dependency.py").write_text("def dependency():\n    return 'dependency'\n", encoding="utf-8")

@@ -4101,6 +4101,10 @@ def _coverage_profile_owner_supported(profile: dict[str, Any]) -> bool:
     return bool(
         _coverage_profile_provider_owner_supported(profile)
         or _coverage_term_breadth_tier(_coverage_profile_terms(profile)) >= 3
+        or (
+            _coverage_profile_structural_pairs(profile)
+            and _coverage_term_breadth_tier(_coverage_profile_terms(profile)) >= 2
+        )
     )
 
 
