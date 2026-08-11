@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
-from tools.repoctl.graph_model import file_id
+from tools.repoctl.graph import project_context_neighborhood
+from tools.repoctl.graph_model import GraphContextAnchor, GraphContextAnchorKind, file_id
 from tools.repoctl.graph_store import graph_materialization_freshness, materialize_graph
 from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
@@ -124,6 +125,80 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     assert stale["data"]["freshness"]["status"] == "stale"
     assert stale["data"]["freshness"]["changed_root_paths"] == sorted(
         [finish_payload["data"]["completion_receipt"], task_path]
+    )
+
+
+def test_range_observed_receipt_does_not_claim_task_changed_files(tmp_path: Path) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (repo / "range_sibling.py").write_text("value = 2\n", encoding="utf-8")
+
+    task_id = "T-20260609184046Z"
+    artifact_rel = f"docs/archive/tasks/{task_id}--range-observation.md"
+    artifact_text = "# Range observation\n"
+    artifact = tmp_path / artifact_rel
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(artifact_text, encoding="utf-8")
+    receipt = _receipt(
+        task_id,
+        repo_id="main",
+        task_path=artifact_rel,
+        content_sha256=_sha256_text(artifact_text),
+        changed_entries=[
+            {"change": "modified", "path": "app.py"},
+            {"change": "modified", "path": "range_sibling.py"},
+        ],
+    )
+    repo_evidence = receipt["repo_evidence"]
+    assert isinstance(repo_evidence, dict)
+    repo_evidence["mode"] = "committed_range"
+    repo_evidence["attribution"] = "range_observed"
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    (receipt_dir / f"{task_id}.json").write_text(
+        json.dumps(receipt) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot, problems, _meta = materialize_graph(
+        tmp_path,
+        target=require_repo_target(tmp_path, repo_id="main"),
+    )
+
+    assert snapshot is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    task_node_id = f"task:{task_id}"
+    recorded_changes = [
+        edge
+        for edge in snapshot.edges
+        if edge.kind == "TASK_RECORDED_CHANGE" and edge.from_id == task_node_id
+    ]
+    assert recorded_changes
+    assert all(edge.facts.get("attribution") == "range_observed" for edge in recorded_changes)
+    assert any(
+        edge.kind == "CHANGE_AFFECTED_FILE"
+        and edge.to_id == file_id("main", "range_sibling.py")
+        for edge in snapshot.edges
+    )
+    assert not any(
+        edge.kind == "TASK_CHANGED_FILE" and edge.from_id == task_node_id
+        for edge in snapshot.edges
+    )
+
+    projection = project_context_neighborhood(
+        snapshot,
+        anchors=[GraphContextAnchor(kind=GraphContextAnchorKind.FILE, path="app.py")],
+        mode="auto",
+        related_task_ids=[task_id],
+    )
+
+    assert projection["history_path_support"] == {}
+    assert any(
+        item["task_id"] == task_id and item["attribution"] == "range_observed"
+        for item in projection["history"]
     )
 
 
@@ -372,6 +447,7 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
     write_repometa(repo)
     (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
     (repo / "sibling.py").write_text("value = 2\n", encoding="utf-8")
+    (repo / "newer_task_sibling.py").write_text("value = 3\n", encoding="utf-8")
     artifact_rel = "docs/archive/tasks/T-20260609184046Z--two-files.md"
     artifact = tmp_path / artifact_rel
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -387,9 +463,29 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
         changed_entries=[
             {"change": "modified", "path": "app.py"},
             {"change": "modified", "path": "sibling.py"},
+            {"change": "deleted", "path": "deleted.py"},
         ],
     )
     (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+    newer_task_id = "T-20260610184046Z"
+    newer_artifact_rel = f"docs/archive/tasks/{newer_task_id}--newer-two-files.md"
+    newer_artifact_text = "# newer completed task\n"
+    (tmp_path / newer_artifact_rel).write_text(newer_artifact_text, encoding="utf-8")
+    newer_receipt = _receipt(
+        newer_task_id,
+        repo_id="main",
+        task_path=newer_artifact_rel,
+        content_sha256=_sha256_text(newer_artifact_text),
+        changed_entries=[
+            {"change": "modified", "path": "app.py"},
+            {"change": "modified", "path": "newer_task_sibling.py"},
+        ],
+    )
+    newer_receipt["completed_at"] = "2026-06-10T18:40:46Z"
+    (receipt_dir / f"{newer_task_id}.json").write_text(
+        json.dumps(newer_receipt) + "\n",
+        encoding="utf-8",
+    )
     snapshot, problems, _meta = materialize_graph(tmp_path, target=require_repo_target(tmp_path, repo_id="main"))
     assert snapshot is not None
     assert not [problem for problem in problems if problem.severity == "error"]
@@ -399,9 +495,30 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
 
     result = json.loads(capsys.readouterr().out)["data"]["result"]
     task_paths = [path for path in result["paths"] if path["edge"] == "TASK_CHANGED_FILE"]
-    assert len(task_paths) == 1
-    assert task_paths[0]["to"]["path"] == "app.py"
-    assert all(path.get("to", {}).get("path") != "sibling.py" for path in result["paths"])
+    assert task_paths
+    assert all(path["to"]["path"] == "app.py" for path in task_paths)
+    assert all(
+        path.get("to", {}).get("path") not in {"sibling.py", "newer_task_sibling.py"}
+        for path in result["paths"]
+    )
+
+    projection = project_context_neighborhood(
+        snapshot,
+        anchors=[GraphContextAnchor(kind=GraphContextAnchorKind.FILE, path="app.py")],
+        mode="auto",
+        related_task_ids=["T-20260609184046Z", newer_task_id],
+    )
+    assert projection["history_path_support"] == {
+        "app.py": ["T-20260609184046Z"],
+        "sibling.py": ["T-20260609184046Z"],
+    }
+    assert any(item["task_id"] == newer_task_id for item in projection["history"])
+    assert "sibling.py" not in projection["related_paths"]
+    assert "newer_task_sibling.py" not in projection["related_paths"]
+    assert all(
+        "sibling.py" not in {relation.get("from_path"), relation.get("to_path")}
+        for relation in projection["relations"]
+    )
 
 
 def test_graph_rebuilds_when_receipt_artifact_identity_becomes_ambiguous(tmp_path: Path, monkeypatch, capsys) -> None:

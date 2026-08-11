@@ -308,6 +308,8 @@ def rank_context_chunks(
             reasons.append("exact provider symbol/section match")
         if ContextEvidenceKind.EXACT_RELATIONSHIP in identity_kinds:
             reasons.append("exact provider relationship identity match")
+        if ContextEvidenceKind.EXACT_TASK in identity_kinds:
+            reasons.append("exact task identity match")
         if path_coverage > 0:
             evidence_kinds.add(ContextEvidenceKind.PATH_TERMS)
             reasons.append("path term coverage")
@@ -436,6 +438,12 @@ def context_identity_evidence(
                 if section_kind == ContextSectionKind.PROVIDER_SYMBOL
                 else ContextEvidenceKind.EXACT_RELATIONSHIP
             )
+        if (
+            section_kind == ContextSectionKind.TASK
+            and section_identity
+            and selector == section_identity
+        ):
+            kinds.add(ContextEvidenceKind.EXACT_TASK)
     return tuple(sorted(kinds, key=lambda kind: kind.value))
 
 
@@ -456,6 +464,8 @@ def _identity_score_from_kinds(kinds: tuple[ContextEvidenceKind, ...]) -> tuple[
         return 1.35, "exact symbol/section match"
     if ContextEvidenceKind.EXACT_RELATIONSHIP in kinds:
         return 1.35, "exact relationship identity match"
+    if ContextEvidenceKind.EXACT_TASK in kinds:
+        return 1.35, "exact task identity match"
     if ContextEvidenceKind.EXACT_FILENAME in kinds:
         return 1.2, "exact filename match"
     return 0.0, ""

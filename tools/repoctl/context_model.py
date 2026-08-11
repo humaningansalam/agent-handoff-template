@@ -52,6 +52,7 @@ class ContextEvidenceKind(StrEnum):
     EXACT_FILENAME = "exact_filename"
     EXACT_SYMBOL = "exact_symbol"
     EXACT_RELATIONSHIP = "exact_relationship"
+    EXACT_TASK = "exact_task"
     PATH_TERMS = "path_terms"
     SECTION_TERMS = "section_terms"
     BODY_TERMS = "body_terms"
@@ -60,6 +61,14 @@ class ContextEvidenceKind(StrEnum):
     GRAPH_SEED = "graph_seed"
     GRAPH_RELATION = "graph_relation"
     REVIEWED_KNOWLEDGE_PATH = "reviewed_knowledge_path"
+    HISTORY_CORROBORATION = "history_corroboration"
+
+
+class ContextHistoryMatchStrength(StrEnum):
+    NONE = "none"
+    WEAK = "weak"
+    STRONG = "strong"
+    EXACT = "exact"
 
 
 class ContextAnchorStrength(StrEnum):

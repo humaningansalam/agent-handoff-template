@@ -16,7 +16,7 @@ from tools.repoctl.graph_model import GraphSnapshot, digest_data
 from tools.repoctl.graph_store import load_materialized_graph, materialize_graph
 from tools.repoctl.path_roles import PathRole, classify_path_role
 from tools.repoctl.repositories import require_repo_target
-from tools.repoctl.result_receipts import ResultProducer, result_receipt_path
+from tools.repoctl.result_receipts import ResultProducer, context_result_selections, result_receipt_path
 from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
 from tests.repoctl.context_test_helpers import (
     _write_completion_receipt,
@@ -1351,7 +1351,7 @@ def test_compact_test_slot_follows_primary_owner_before_novel_secondary_vocabula
                 "from_path": "tests/test_array_guard.py",
                 "edge": "TESTS_FILE",
                 "to_path": "src/array_guard.py",
-            }
+            },
         ],
     )
     primary_test = _compact_evidence_item(
@@ -3215,6 +3215,368 @@ def test_default_context_query_keeps_related_completion_history_separate(tmp_pat
         for continuation in history[0]["continuations"]
     )
     assert "auth.py" in history[0]["selection_reason"]
+
+
+@pytest.mark.parametrize("receipt_changes_test", [True, False])
+def test_context_history_corroborates_current_owner_and_uses_typed_test_relation(
+    tmp_path: Path,
+    monkeypatch,
+    receipt_changes_test: bool,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    source = repo / "src"
+    tests = repo / "tests"
+    source.mkdir()
+    tests.mkdir()
+    query = (
+        "distinguish request body size overflow from multipart form parsing limit "
+        "failures so oversized uploads keep a stable specific response contract"
+    )
+    (source / "metrics.py").write_text(
+        "def record_upload_metrics():\n"
+        "    return 'request body size overflow multipart form parsing limit failures "
+        "oversized uploads stable specific response contract request body size overflow'\n",
+        encoding="utf-8",
+    )
+    (source / "error_handlers.py").write_text(
+        "def handle_request_too_large():\n"
+        "    return 'distinguish multipart limit failures from request overflow response'\n",
+        encoding="utf-8",
+    )
+    (source / "unrelated.py").write_text(
+        "def unrelated_maintenance_helper():\n"
+        "    return 'quartz telemetry housekeeping'\n",
+        encoding="utf-8",
+    )
+    (tests / "test_metrics.py").write_text(
+        "from src.metrics import record_upload_metrics\n\n"
+        "def test_upload_metrics():\n"
+        "    assert record_upload_metrics()\n",
+        encoding="utf-8",
+    )
+    (tests / "test_error_handlers.py").write_text(
+        "from src.error_handlers import handle_request_too_large\n\n"
+        "def test_request_overflow_contract():\n"
+        "    assert handle_request_too_large()\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    baseline, baseline_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=require_repo_target(tmp_path, repo_id="main"),
+        query=query,
+    )
+    assert baseline is not None
+    assert not [problem for problem in baseline_problems if problem.severity == "error"]
+    baseline_compact = compact_context_bundle(baseline)
+    assert baseline_compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+        "repos/src/metrics.py"
+    )
+    assert baseline_compact["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/test_metrics.py"
+    )
+
+    _write_completion_receipt(
+        tmp_path,
+        task_id="T-20260626010101Z",
+        changed_paths=["src/metrics.py", "tests/test_metrics.py"],
+        completed_at="20260626T010101Z",
+    )
+    changed_paths = ["src/error_handlers.py", "src/unrelated.py"]
+    if receipt_changes_test:
+        changed_paths.append("tests/test_error_handlers.py")
+    _write_completion_receipt(tmp_path, changed_paths=changed_paths)
+    target_artifact = (
+        tmp_path
+        / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
+    )
+    target_artifact.write_text(
+        target_artifact.read_text(encoding="utf-8")
+        + f"\n## Evidence Summary\n\n{query}\n",
+        encoding="utf-8",
+    )
+    target_receipt_path = (
+        tmp_path
+        / "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json"
+    )
+    target_receipt = json.loads(target_receipt_path.read_text(encoding="utf-8"))
+    target_receipt["content_sha256"] = "sha256:" + hashlib.sha256(
+        target_artifact.read_bytes()
+    ).hexdigest()
+    target_receipt_path.write_text(
+        json.dumps(target_receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    bundle, problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=require_repo_target(tmp_path, repo_id="main"),
+        query=query,
+    )
+    assert bundle is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    compact = compact_context_bundle(bundle)
+    assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+        "repos/src/error_handlers.py"
+    )
+    assert compact["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/test_error_handlers.py"
+    )
+
+    owner = next(
+        item
+        for item in bundle.groups["likely_change_surface"]
+        if item["source_ref"]["path"] == "repos/src/error_handlers.py"
+    )
+    owner_test = next(
+        item
+        for item in bundle.groups["tests_and_verification"]
+        if item["source_ref"]["path"] == "repos/tests/test_error_handlers.py"
+    )
+    assert "history_corroboration" in owner["evidence_kinds"]
+    assert owner["related_record_ids"] == ["T-20260625010101Z"]
+    decoy_owner = next(
+        item
+        for item in bundle.groups["likely_change_surface"]
+        if item["source_ref"]["path"] == "repos/src/metrics.py"
+    )
+    assert "history_corroboration" not in decoy_owner["evidence_kinds"]
+    test_support = bundle.preselection_graph_support_by_path["tests/test_error_handlers.py"]
+    assert any(
+        relation.get("edge") == "TESTS_FILE"
+        and relation.get("from_path") == "tests/test_error_handlers.py"
+        and relation.get("to_path") == "src/error_handlers.py"
+        for relation in test_support["candidate_connections"]
+    )
+    assert ("history_corroboration" in owner_test["evidence_kinds"]) is receipt_changes_test
+    if not receipt_changes_test:
+        assert "related_record_ids" not in owner_test
+    assert all(
+        candidate.source_ref.path != "repos/src/unrelated.py"
+        for candidate in bundle.evidence
+    )
+    assert all(seed.anchor.path != "src/unrelated.py" for seed in bundle.graph_seed_refs)
+    assert all(
+        selection.ref != "repos/src/unrelated.py"
+        for selection in context_result_selections(compact)
+    )
+
+
+def test_history_corroboration_requires_strong_task_match_and_is_disabled_for_task_pack(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    query = "alpha beta gamma delta"
+    task_id = "T-20260625010101Z"
+    (repo / "a_owner.py").write_text(
+        "def owner():\n    return 'alpha beta gamma delta'\n",
+        encoding="utf-8",
+    )
+    (repo / "z_old_task.py").write_text(
+        "def archived_reporting_copy():\n    return 'alpha beta gamma delta'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    baseline, baseline_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=query,
+    )
+    assert baseline is not None
+    assert not [problem for problem in baseline_problems if problem.severity == "error"]
+    assert compact_context_bundle(baseline)["groups"]["likely_change_surface"][0][
+        "source_ref"
+    ]["path"] == "repos/a_owner.py"
+
+    _write_completion_receipt(
+        tmp_path,
+        task_id=task_id,
+        changed_paths=["z_old_task.py"],
+    )
+    artifact = (
+        tmp_path
+        / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
+    )
+    artifact_prefix = artifact.read_text(encoding="utf-8")
+    receipt_path = (
+        tmp_path
+        / "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json"
+    )
+
+    def write_history_evidence(text: str) -> None:
+        artifact.write_text(
+            artifact_prefix + f"\n## Historical task evidence\n\n{text}\n",
+            encoding="utf-8",
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["content_sha256"] = "sha256:" + hashlib.sha256(
+            artifact.read_bytes()
+        ).hexdigest()
+        receipt_path.write_text(
+            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _materialize(tmp_path)
+
+    write_history_evidence("alpha beta")
+    weak_bundle, weak_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=query,
+    )
+    assert weak_bundle is not None
+    assert not [problem for problem in weak_problems if problem.severity == "error"]
+    assert compact_context_bundle(weak_bundle)["groups"]["likely_change_surface"][0][
+        "source_ref"
+    ]["path"] == "repos/a_owner.py"
+    weak_old_path = next(
+        candidate
+        for candidate in weak_bundle.evidence
+        if candidate.source_ref.path == "repos/z_old_task.py"
+    )
+    assert "history_corroboration" not in {
+        kind.value for kind in weak_old_path.evidence_kinds
+    }
+
+    exact_bundle, exact_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=task_id,
+    )
+    assert exact_bundle is not None
+    assert not [problem for problem in exact_problems if problem.severity == "error"]
+    assert compact_context_bundle(exact_bundle)["groups"]["likely_change_surface"][0][
+        "source_ref"
+    ]["path"] == "repos/z_old_task.py"
+    exact_old_path = next(
+        candidate
+        for candidate in exact_bundle.evidence
+        if candidate.source_ref.path == "repos/z_old_task.py"
+    )
+    exact_evidence_kinds = {
+        kind.value for kind in exact_old_path.evidence_kinds
+    }
+    assert "exact_task" in exact_evidence_kinds
+    assert "history_corroboration" in exact_evidence_kinds
+
+    write_history_evidence(query)
+    strong_bundle, strong_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=query,
+    )
+    assert strong_bundle is not None
+    assert not [problem for problem in strong_problems if problem.severity == "error"]
+    assert compact_context_bundle(strong_bundle)["groups"]["likely_change_surface"][0][
+        "source_ref"
+    ]["path"] == "repos/z_old_task.py"
+    strong_old_path = next(
+        candidate
+        for candidate in strong_bundle.evidence
+        if candidate.source_ref.path == "repos/z_old_task.py"
+    )
+    assert "history_corroboration" in {
+        kind.value for kind in strong_old_path.evidence_kinds
+    }
+
+    pack_bundle, pack_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=query,
+        include_linked_records=False,
+    )
+    assert pack_bundle is not None
+    assert not [problem for problem in pack_problems if problem.severity == "error"]
+    assert compact_context_bundle(pack_bundle)["groups"]["likely_change_surface"][0][
+        "source_ref"
+    ]["path"] == "repos/a_owner.py"
+    assert not any(
+        candidate.source_ref.kind in {"completion_receipt", "task_artifact"}
+        or "history_corroboration" in {kind.value for kind in candidate.evidence_kinds}
+        for candidate in pack_bundle.evidence
+    )
+
+
+def test_history_corroboration_does_not_replace_dominating_current_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    query = (
+        "error service response request oauth nonce replay tenant boundary "
+        "session cookie rotation"
+    )
+    (repo / "a_true_owner.py").write_text(
+        "def owner():\n"
+        f"    return {query!r}\n",
+        encoding="utf-8",
+    )
+    (repo / "bridge.py").write_text(
+        "from a_true_owner import owner\n\n"
+        "def bridge():\n"
+        "    return owner()\n",
+        encoding="utf-8",
+    )
+    (repo / "z_history_owner.py").write_text(
+        "VALUE = 'error service'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    baseline, baseline_problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=query,
+    )
+    assert baseline is not None
+    assert not [problem for problem in baseline_problems if problem.severity == "error"]
+    assert compact_context_bundle(baseline)["groups"]["likely_change_surface"][0][
+        "source_ref"
+    ]["path"] == "repos/a_true_owner.py"
+
+    task_id = "T-20260625010101Z"
+    _write_completion_receipt(
+        tmp_path,
+        task_id=task_id,
+        changed_paths=["bridge.py", "z_history_owner.py"],
+    )
+    artifact = tmp_path / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8")
+        + "\n## Match\n\nerror service response request\n",
+        encoding="utf-8",
+    )
+    receipt_path = (
+        tmp_path
+        / "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["content_sha256"] = "sha256:" + hashlib.sha256(
+        artifact.read_bytes()
+    ).hexdigest()
+    receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    bundle, problems, _meta = context_module.build_context_bundle(
+        tmp_path,
+        target=target,
+        query=query,
+    )
+    assert bundle is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    compact = compact_context_bundle(bundle)
+    assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+        "repos/a_true_owner.py"
+    )
 
 
 def test_context_query_reserves_task_history_when_other_lanes_are_saturated(tmp_path: Path, monkeypatch, capsys) -> None:

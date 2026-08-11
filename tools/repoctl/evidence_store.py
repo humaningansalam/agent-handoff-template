@@ -713,6 +713,7 @@ def _retrieval_filter(
     target: RepoTarget,
     *,
     channel: EvidenceRetrievalChannel,
+    include_history: bool,
 ) -> tuple[str, list[Any]]:
     prefix = f"{target.display_path.rstrip('/')}/%"
     source_kinds = (
@@ -720,17 +721,11 @@ def _retrieval_filter(
         if channel is EvidenceRetrievalChannel.FTS
         else CONTEXT_SOURCE_KIND_VALUES
     )
-    if mode == "auto":
-        if channel is EvidenceRetrievalChannel.EXACT_IDENTITY:
-            return "1 = 1", []
-        exact_only_kinds = sorted(CONTEXT_SOURCE_KIND_VALUES - LEXICAL_CONTEXT_SOURCE_KIND_VALUES)
-        placeholders = ",".join("?" for _ in exact_only_kinds)
-        return f"c.kind NOT IN ({placeholders})", exact_only_kinds
     if mode in {"code_location", "call_impact", "file_impact"}:
         allowed_kinds = (*sorted(source_kinds), "product_manifest", "verification_hint")
         placeholders = ",".join("?" for _ in allowed_kinds)
         return f"c.path LIKE ? AND c.kind IN ({placeholders})", [prefix, *allowed_kinds]
-    if mode in {"past_decision", "failure_mode"}:
+    if include_history and mode in {"auto", "past_decision", "failure_mode"}:
         base_sql, base_params = "1 = 1", []
     else:
         base_sql, base_params = "c.kind NOT IN ('completion_receipt', 'task_artifact')", []
@@ -753,6 +748,7 @@ def query_evidence_index(
     database_path: Path | None = None,
     overlay_chunks: list[DocumentChunk] | None = None,
     replaced_paths: set[str] | None = None,
+    include_history: bool = True,
 ) -> tuple[list[DocumentChunk], dict[str, Any], list[Problem]]:
     metadata, problems = load_evidence_index_metadata(root, target=target, database_path=database_path)
     if problems:
@@ -798,11 +794,13 @@ def query_evidence_index(
             mode,
             target,
             channel=EvidenceRetrievalChannel.FTS,
+            include_history=include_history,
         )
         exact_filter_sql, exact_filter_params = _retrieval_filter(
             mode,
             target,
             channel=EvidenceRetrievalChannel.EXACT_IDENTITY,
+            include_history=include_history,
         )
         fts_rows = _path_diverse_fts_rows(
             query_connection,

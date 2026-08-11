@@ -19,6 +19,7 @@ from .context_model import (
     ContextGraphAnchorCandidate,
     ContextGraphAnchorProvenance,
     ContextGraphSeedRef,
+    ContextHistoryMatchStrength,
     ContextResultMode,
     ContextSectionKind,
     ContextSourceKind,
@@ -26,6 +27,7 @@ from .context_model import (
 )
 from .context_retrieval import (
     ContextRetrievalLane,
+    context_query_terms,
     context_retrieval_lane,
     excerpt_for_query,
     provider_symbol_owner_candidate,
@@ -72,6 +74,7 @@ LEXICAL_GRAPH_ANCHOR_KINDS = LEXICAL_CONTEXT_SOURCE_KIND_VALUES
 GRAPH_DERIVED_CONTEXT_EVIDENCE_KINDS = {
     ContextEvidenceKind.GRAPH_SEED,
     ContextEvidenceKind.GRAPH_RELATION,
+    ContextEvidenceKind.HISTORY_CORROBORATION,
 }
 CONTEXT_GRAPH_FRESHNESS_WARNING_CODES = frozenset(
     {
@@ -103,6 +106,13 @@ class _CoverageContribution:
         )
 
 
+@dataclass(frozen=True)
+class _HistoryTaskMatch:
+    task_id: str
+    strength: ContextHistoryMatchStrength
+    matched_terms: frozenset[str]
+
+
 def build_context_bundle(
     root: Path,
     *,
@@ -126,7 +136,7 @@ def build_context_bundle(
         )
     else:
         freshness, freshness_problems = {"status": "missing", "changed_paths": []}, []
-    include_history = query_mode in {"auto", "past_decision", "failure_mode"}
+    include_history = include_linked_records and query_mode in {"auto", "past_decision", "failure_mode"}
     indexed_chunks: list[Any] = []
     index_meta: dict[str, Any] = {}
     index_problems: list[Problem] = []
@@ -182,6 +192,7 @@ def build_context_bundle(
             database_path=evidence_index_path,
             overlay_chunks=overlay_chunks,
             replaced_paths=stale_workspace_paths,
+            include_history=include_history,
         )
         index_available = not any(problem.severity == "error" for problem in index_problems)
     if index_available:
@@ -359,6 +370,19 @@ def build_context_bundle(
     graph_projection: dict[str, Any] = {}
     graph_anchor_resolution: ContextAnchorResolution | None = None
     graph_projection_index: Any = None
+    history_task_matches = (
+        _query_retrieved_task_matches(
+            retrieved_candidates,
+            query_terms=context_query_terms(query),
+        )
+        if include_linked_records
+        else []
+    )
+    exact_history_task_matches = [
+        match
+        for match in history_task_matches
+        if match.strength is ContextHistoryMatchStrength.EXACT
+    ]
     preselection_graph_support_by_path: dict[str, dict[str, Any]] = {}
     if query_mode in GRAPH_EXPANSION_MODES:
         stale_paths = graph_stale_paths(freshness)
@@ -426,6 +450,12 @@ def build_context_bundle(
                     snapshot,
                     anchors=graph_anchors,
                     mode=query_mode,
+                    related_task_ids=[match.task_id for match in history_task_matches],
+                    explicit_task_ids={
+                        match.task_id
+                        for match in history_task_matches
+                        if match.strength is ContextHistoryMatchStrength.EXACT
+                    },
                     excluded_candidate_paths=stale_paths,
                     projection_index=graph_projection_index,
                 )
@@ -489,9 +519,26 @@ def build_context_bundle(
                 )
                 completeness["graph_anchor"] = graph_anchor_resolution.to_dict()
             if index_available and graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
+                history_support_paths = (
+                    []
+                    if _task_history_stale(freshness)
+                    else [
+                        str(path)
+                        for path in (
+                            graph_projection.get("history_path_support", {})
+                            if isinstance(graph_projection.get("history_path_support"), dict)
+                            else {}
+                        )
+                        if str(path) and str(path) not in stale_paths
+                    ]
+                )
                 projected_paths = {
                     f"{target.display_path.rstrip('/')}/{path}"
-                    for path in [*seed_paths, *[str(path) for path in graph_projection.get("related_paths", [])]]
+                    for path in [
+                        *seed_paths,
+                        *[str(path) for path in graph_projection.get("related_paths", [])],
+                        *history_support_paths,
+                    ]
                     if path and path not in stale_paths
                 }
                 chunks, chunk_problems = evidence_chunks_for_paths(
@@ -502,6 +549,35 @@ def build_context_bundle(
                     database_path=evidence_index_path,
                 )
                 problems.extend(chunk_problems)
+        if snapshot is not None and not graph_projection and exact_history_task_matches:
+            graph_projection = project_context_neighborhood(
+                snapshot,
+                anchors=[],
+                mode=query_mode,
+                related_task_ids=[match.task_id for match in exact_history_task_matches],
+                explicit_task_ids={match.task_id for match in exact_history_task_matches},
+                excluded_candidate_paths=stale_paths,
+                projection_index=graph_projection_index,
+            )
+            if index_available:
+                exact_history_paths = {
+                    f"{target.display_path.rstrip('/')}/{path}"
+                    for path in (
+                        graph_projection.get("history_path_support", {})
+                        if isinstance(graph_projection.get("history_path_support"), dict)
+                        else {}
+                    )
+                    if str(path) and str(path) not in stale_paths
+                }
+                if exact_history_paths:
+                    chunks, chunk_problems = evidence_chunks_for_paths(
+                        root,
+                        target=target,
+                        workspace_paths=exact_history_paths,
+                        kinds=ACTIONABLE_PRODUCT_KINDS,
+                        database_path=evidence_index_path,
+                    )
+                    problems.extend(chunk_problems)
         if snapshot is not None:
             candidate_anchors = (
                 graph_anchor_resolution.anchors
@@ -554,7 +630,28 @@ def build_context_bundle(
             stale_paths=stale_paths,
             task_history_stale=_task_history_stale(freshness),
         )
-        if graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED:
+        history_support_paths = {
+            str(path)
+            for path in (
+                graph_projection.get("history_path_support", {})
+                if isinstance(graph_projection.get("history_path_support"), dict)
+                else {}
+            )
+            if str(path)
+        }
+        if history_support_paths:
+            preselection_graph_support_by_path = _direct_query_graph_support(
+                retrieved_candidates,
+                target=target,
+                snapshot=snapshot,
+                excluded_paths=stale_paths,
+                projection_index=graph_projection_index,
+                additional_paths=history_support_paths,
+            )
+        if (
+            graph_anchor_resolution.status == ContextAnchorStatus.RESOLVED
+            or exact_history_task_matches
+        ):
             graph_candidates, graph_warnings, graph_projection = _graph_context_candidates(
                 snapshot,
                 chunks=chunks,
@@ -563,6 +660,7 @@ def build_context_bundle(
                 query=query,
                 anchor_resolution=graph_anchor_resolution,
                 projection=graph_projection,
+                history_task_matches=history_task_matches,
             )
         else:
             graph_candidates = []
@@ -896,6 +994,29 @@ def _fresh_graph_projection(
             if isinstance(item, dict) and str(item.get("path") or "") in reachable_paths
         ]
     )
+    raw_history_path_support = (
+        projection.get("history_path_support")
+        if isinstance(projection.get("history_path_support"), dict)
+        else {}
+    )
+    fresh_history_path_support = (
+        {}
+        if task_history_stale
+        else {
+            str(path): sorted(
+                {
+                    str(task_id)
+                    for task_id in task_ids
+                    if str(task_id)
+                }
+            )
+            for path, task_ids in raw_history_path_support.items()
+            if str(path)
+            and str(path) not in stale_paths
+            and isinstance(task_ids, list)
+            and any(str(task_id) for task_id in task_ids)
+        }
+    )
     return {
         **projection,
         "seed_paths": fresh_seed_paths,
@@ -903,6 +1024,7 @@ def _fresh_graph_projection(
         "relations": fresh_relations,
         "relationship_candidates": fresh_relationship_candidates,
         "history": fresh_history,
+        "history_path_support": fresh_history_path_support,
     }
 
 
@@ -916,6 +1038,107 @@ def _task_history_stale(freshness: dict[str, Any]) -> bool:
         str(path).startswith(prefixes)
         for path in freshness.get("changed_root_paths", [])
     )
+
+
+def _history_query_match_strength(
+    candidate: ContextCandidate,
+    *,
+    query_terms: set[str],
+) -> ContextHistoryMatchStrength:
+    if candidate.source_ref.kind not in {"completion_receipt", "task_artifact"}:
+        return ContextHistoryMatchStrength.NONE
+    evidence_kinds = set(candidate.evidence_kinds)
+    if evidence_kinds & {
+        ContextEvidenceKind.EXACT_PATH,
+        ContextEvidenceKind.EXACT_FILENAME,
+        ContextEvidenceKind.EXACT_TASK,
+    }:
+        return ContextHistoryMatchStrength.EXACT
+    if not _has_direct_query_evidence(candidate):
+        return ContextHistoryMatchStrength.NONE
+    matched_terms = _query_term_match_set(candidate.query_term_matches)
+    if not matched_terms or not query_terms:
+        return ContextHistoryMatchStrength.NONE
+    if _coverage_term_breadth_tier(matched_terms) >= _coverage_term_breadth_tier(query_terms):
+        return ContextHistoryMatchStrength.STRONG
+    return ContextHistoryMatchStrength.WEAK
+
+
+def _query_retrieved_task_matches(
+    candidates: list[ContextCandidate],
+    *,
+    query_terms: set[str],
+) -> list[_HistoryTaskMatch]:
+    matches: list[_HistoryTaskMatch] = []
+    matched_task_ids: set[str] = set()
+    for candidate in candidates:
+        strength = _history_query_match_strength(
+            candidate,
+            query_terms=query_terms,
+        )
+        if strength not in {
+            ContextHistoryMatchStrength.STRONG,
+            ContextHistoryMatchStrength.EXACT,
+        }:
+            continue
+        matched_terms = _query_term_match_set(candidate.query_term_matches)
+        path = candidate.source_ref.path
+        selectors = (
+            candidate.source_ref.section,
+            path,
+            Path(path).stem,
+        )
+        for selector in selectors:
+            if not selector:
+                continue
+            try:
+                task_id = normalize_task_id(selector)
+                if task_id not in matched_task_ids:
+                    matches.append(
+                        _HistoryTaskMatch(
+                            task_id=task_id,
+                            strength=strength,
+                            matched_terms=matched_terms,
+                        )
+                    )
+                    matched_task_ids.add(task_id)
+                break
+            except RepoctlError:
+                continue
+    return matches
+
+
+def _query_term_match_set(matches: dict[str, Any]) -> frozenset[str]:
+    return frozenset(
+        str(term)
+        for terms in matches.values()
+        if isinstance(terms, (list, tuple, set, frozenset))
+        for term in terms
+        if str(term)
+    )
+
+
+def _eligible_history_corroboration_task_ids(
+    task_ids: Iterable[str],
+    *,
+    task_matches: Iterable[_HistoryTaskMatch],
+    current_path_terms: frozenset[str],
+    leading_current_terms: frozenset[str],
+) -> tuple[str, ...]:
+    matches_by_task_id = {match.task_id: match for match in task_matches}
+    eligible: list[str] = []
+    for task_id in task_ids:
+        match = matches_by_task_id.get(str(task_id))
+        if match is None:
+            continue
+        if match.strength is ContextHistoryMatchStrength.EXACT:
+            eligible.append(match.task_id)
+            continue
+        task_adds_query_evidence = bool(match.matched_terms - leading_current_terms)
+        current_path_is_dominated = current_path_terms < leading_current_terms
+        if task_adds_query_evidence or not current_path_is_dominated:
+            eligible.append(match.task_id)
+    return tuple(dict.fromkeys(eligible))
 
 
 def context_graph_freshness_warnings(
@@ -1427,6 +1650,13 @@ def _compact_group_coverage_profiles(
                 "preselection_graph_support": preselection_graph_support,
                 "exact_reference_symbol_ids": exact_reference_symbol_ids,
                 "graph_supported": ContextEvidenceKind.GRAPH_RELATION.value in evidence_kinds,
+                "history_corroborated": ContextEvidenceKind.HISTORY_CORROBORATION.value
+                in evidence_kinds,
+                "related_record_ids": {
+                    str(record_id)
+                    for record_id in item.get("related_record_ids", [])
+                    if str(record_id)
+                },
                 "direct_query": bool(evidence_kinds - {kind.value for kind in GRAPH_DERIVED_CONTEXT_EVIDENCE_KINDS}),
                 "structured_relationship_source": any(
                     isinstance(section, dict)
@@ -2236,6 +2466,7 @@ def _graph_context_candidates(
     query: str,
     anchor_resolution: ContextAnchorResolution,
     projection: dict[str, Any],
+    history_task_matches: list[_HistoryTaskMatch],
 ) -> tuple[list[ContextCandidate], list[dict[str, str]], dict[str, Any]]:
     if snapshot is None:
         return [], [{"code": "context_graph_unavailable", "message": "Graph snapshot was not available for context query"}], {}
@@ -2257,8 +2488,21 @@ def _graph_context_candidates(
         if previous is None or _candidate_sort_key(candidate) < _candidate_sort_key(previous):
             retrieval_by_path[repo_path] = candidate
     seed_paths = list(dict.fromkeys(candidate.anchor.path for candidate in anchor_resolution.anchors))
-    if anchor_resolution.status != ContextAnchorStatus.RESOLVED or not seed_paths:
+    exact_history_task_ids = {
+        match.task_id
+        for match in history_task_matches
+        if match.strength is ContextHistoryMatchStrength.EXACT
+    }
+    if (
+        anchor_resolution.status != ContextAnchorStatus.RESOLVED
+        and not exact_history_task_ids
+    ) or (not seed_paths and not exact_history_task_ids):
         return [], [], {}
+    leading_current_terms = (
+        _query_term_match_set(anchor_resolution.anchors[0].query_term_matches)
+        if anchor_resolution.anchors
+        else frozenset()
+    )
 
     candidates: list[ContextCandidate] = []
     relations = projection.get("relations") if isinstance(projection.get("relations"), list) else []
@@ -2288,8 +2532,22 @@ def _graph_context_candidates(
             )
         )
 
-    projected_paths = list(dict.fromkeys([*seed_paths, *[str(path) for path in projection.get("related_paths", [])]]))
+    related_paths = [str(path) for path in projection.get("related_paths", [])]
+    raw_history_path_support = (
+        projection.get("history_path_support")
+        if isinstance(projection.get("history_path_support"), dict)
+        else {}
+    )
+    history_path_support = {
+        str(path): tuple(sorted({str(task_id) for task_id in task_ids if str(task_id)}))
+        for path, task_ids in raw_history_path_support.items()
+        if str(path) and isinstance(task_ids, list)
+    }
+    projected_paths = list(
+        dict.fromkeys([*seed_paths, *related_paths, *history_path_support])
+    )
     seed_path_set = set(seed_paths)
+    graph_path_set = {*seed_paths, *related_paths}
     projected_retrieval_by_path: dict[str, ContextCandidate] = {}
     projected_chunks = [
         chunk
@@ -2313,6 +2571,30 @@ def _graph_context_candidates(
         retrieved = retrieval_by_path.get(str(path)) or projected_retrieval_by_path.get(str(path))
         chunk = _graph_source_chunk(path_chunks, retrieved=retrieved)
         if chunk is None:
+            continue
+        raw_related_task_ids = history_path_support.get(str(path), ())
+        related_task_ids = _eligible_history_corroboration_task_ids(
+            raw_related_task_ids,
+            task_matches=history_task_matches,
+            current_path_terms=_query_term_match_set(
+                retrieved.query_term_matches if retrieved is not None else {}
+            ),
+            leading_current_terms=leading_current_terms,
+        )
+        exact_related_task_ids = exact_history_task_ids & set(related_task_ids)
+        if (
+            str(path) not in graph_path_set
+            and (
+                not related_task_ids
+                or (
+                    (
+                        retrieved is None
+                        or not _has_direct_query_evidence(retrieved)
+                    )
+                    and not exact_related_task_ids
+                )
+            )
+        ):
             continue
         path_relations = relations_by_path.get(str(path), [])
         scoring_relations = _section_coherent_graph_relations(
@@ -2342,6 +2624,14 @@ def _graph_context_candidates(
             evidence_kinds.add(ContextEvidenceKind.GRAPH_SEED)
         if scoring_relations:
             evidence_kinds.add(ContextEvidenceKind.GRAPH_RELATION)
+        if related_task_ids:
+            evidence_kinds.add(ContextEvidenceKind.HISTORY_CORROBORATION)
+            reasons.append(
+                "completion receipt corroborated current path: "
+                + ", ".join(related_task_ids)
+            )
+        if exact_related_task_ids:
+            evidence_kinds.add(ContextEvidenceKind.EXACT_TASK)
         candidates.append(
             ContextCandidate(
                 source_ref=chunk.source_ref,
@@ -2354,9 +2644,22 @@ def _graph_context_candidates(
                 selection_reasons=reasons or ["Graph direct file relation"],
                 graph_path=scoring_relations[:3],
                 evidence_kinds=tuple(sorted(evidence_kinds, key=lambda kind: kind.value)),
-                anchor_strength=retrieved.anchor_strength if retrieved is not None else ContextAnchorStrength.NONE,
+                anchor_strength=(
+                    ContextAnchorStrength.EXACT
+                    if exact_related_task_ids
+                    else retrieved.anchor_strength
+                    if retrieved is not None
+                    else ContextAnchorStrength.NONE
+                ),
                 query_term_matches=retrieved.query_term_matches if retrieved is not None else {},
-                related_record_ids=retrieved.related_record_ids if retrieved is not None else (),
+                related_record_ids=tuple(
+                    sorted(
+                        {
+                            *(retrieved.related_record_ids if retrieved is not None else ()),
+                            *related_task_ids,
+                        }
+                    )
+                ),
                 document_role=retrieved.document_role if retrieved is not None else chunk.document_role,
             )
         )
@@ -2391,6 +2694,7 @@ def _direct_query_graph_support(
     snapshot: Any = None,
     excluded_paths: set[str] | None = None,
     projection_index: Any = None,
+    additional_paths: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if snapshot is None:
         return {}
@@ -2402,6 +2706,11 @@ def _direct_query_graph_support(
         and candidate.source_ref.path.startswith(product_prefix)
         and _has_direct_query_evidence(candidate)
     }
+    paths.update(
+        path
+        for raw_path in (additional_paths or set())
+        if (path := str(raw_path))
+    )
     if not paths:
         return {}
     return context_path_support_profiles(
@@ -3653,21 +3962,101 @@ def _coverage_profile_contributes(
     return _coverage_profile_contribution(profile, selected=selected).contributes
 
 
-def _coverage_profile_direct_rank_key(profile: dict[str, Any]) -> tuple[Any, ...]:
-    """Order direct owner candidates by their preserved retrieval rank."""
+def _coverage_profile_direct_rank_key(
+    profile: dict[str, Any],
+    *,
+    history_active: bool = False,
+) -> tuple[Any, ...]:
+    """Preserve ordinary retrieval order; refine it only for a history-backed cohort."""
     rank = profile.get("rank")
+    if not history_active:
+        if isinstance(rank, int) and rank > 0:
+            return (0, rank, str(profile.get("path") or ""))
+        item = profile.get("item") if isinstance(profile.get("item"), dict) else {}
+        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+        return (
+            1,
+            -_coverage_profile_anchor_priority(profile),
+            -float(breakdown.get("fts") or 0.0),
+            -float(breakdown.get("exact") or 0.0),
+            -float(profile.get("score") or getattr(profile.get("primary"), "score", 0.0)),
+            str(profile.get("path") or ""),
+        )
+
+    strong_owner = bool(
+        _coverage_profile_has_explicit_identity(profile)
+        or (
+            _coverage_profile_anchor_priority(profile)
+            >= CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.STRONG]
+            and _coverage_profile_provider_owner_supported(profile)
+        )
+    )
+    structural_terms = {
+        term
+        for field_name, term in _coverage_profile_structural_pairs(profile)
+        if field_name in {"path", "section"}
+    }
+    query_plausibility_priority = (
+        0
+        if len(structural_terms) >= 2
+        else 1
+        if _coverage_term_breadth_tier(_coverage_profile_terms(profile)) >= 2
+        else 2
+    )
+    history_priority = 0 if _coverage_profile_history_corroborated(profile) else 1
     if isinstance(rank, int) and rank > 0:
-        return (0, rank, str(profile.get("path") or ""))
+        return (
+            0 if strong_owner else 1,
+            query_plausibility_priority,
+            history_priority,
+            0,
+            rank,
+            str(profile.get("path") or ""),
+        )
 
     item = profile.get("item") if isinstance(profile.get("item"), dict) else {}
     breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
     return (
+        0 if strong_owner else 1,
+        query_plausibility_priority,
+        history_priority,
         1,
         -_coverage_profile_anchor_priority(profile),
         -float(breakdown.get("fts") or 0.0),
         -float(breakdown.get("exact") or 0.0),
         -float(profile.get("score") or getattr(profile.get("primary"), "score", 0.0)),
         str(profile.get("path") or ""),
+    )
+
+
+def _coverage_profile_history_corroborated(profile: dict[str, Any]) -> bool:
+    return bool(profile.get("history_corroborated"))
+
+
+def _coverage_profile_related_record_ids(profile: dict[str, Any]) -> set[str]:
+    record_ids = profile.get("related_record_ids")
+    if not isinstance(record_ids, (set, list, tuple)):
+        return set()
+    return {str(record_id) for record_id in record_ids if str(record_id)}
+
+
+def _coverage_profile_shares_history(
+    profile: dict[str, Any],
+    *,
+    reference_profiles: list[dict[str, Any]],
+) -> bool:
+    if not _coverage_profile_history_corroborated(profile):
+        return False
+    record_ids = _coverage_profile_related_record_ids(profile)
+    return bool(
+        record_ids
+        and record_ids
+        & {
+            record_id
+            for reference in reference_profiles
+            if _coverage_profile_history_corroborated(reference)
+            for record_id in _coverage_profile_related_record_ids(reference)
+        }
     )
 
 
@@ -3784,6 +4173,12 @@ def _coverage_profile_reference_key(
         0 if profile.get("strong_symbol") else 1,
         connection_priority,
         0 if profile.get("direct_query", True) else 1,
+        0
+        if _coverage_profile_shares_history(
+            profile,
+            reference_profiles=reference_profiles,
+        )
+        else 1,
         -_coverage_term_breadth_tier(shared_terms),
         -_coverage_pair_weight(shared_pairs, frequencies),
         _coverage_profile_initial_key(profile, frequencies=frequencies),
@@ -3834,16 +4229,30 @@ def _select_coverage_profiles(
         isinstance(profile.get("item"), dict)
         for profile in selectable
     )
+    history_active = bool(
+        compact_working_set
+        and not references
+        and any(_coverage_profile_history_corroborated(profile) for profile in selectable)
+    )
     ranked_direct_owners = sorted(
         (profile for profile in selectable if _coverage_profile_is_direct_owner(profile)),
-        key=_coverage_profile_direct_rank_key,
+        key=lambda profile: _coverage_profile_direct_rank_key(
+            profile,
+            history_active=history_active,
+        ),
     )
     compact_direct_matches = [
         profile for profile in selectable if _coverage_profile_is_direct_source(profile)
     ]
     if compact_working_set and not references and compact_direct_matches:
         selected = [
-            min(compact_direct_matches, key=_coverage_profile_direct_rank_key)
+            min(
+                compact_direct_matches,
+                key=lambda profile: _coverage_profile_direct_rank_key(
+                    profile,
+                    history_active=history_active,
+                ),
+            )
         ]
     else:
         reserved_count = min(len(ranked_direct_owners), 1)
@@ -4627,6 +5036,8 @@ def _candidate_group_item(candidate: ContextCandidate, *, target: RepoTarget, st
         "evidence_role": roles[0],
         "evidence_roles": roles,
     }
+    if candidate.related_record_ids:
+        item["related_record_ids"] = sorted(set(candidate.related_record_ids))
     if candidate.document_role != DocumentRole.UNSPECIFIED:
         item["document_role"] = candidate.document_role.value
     graph_provenance = _graph_relation_provenance(candidate.graph_path)
@@ -4726,6 +5137,7 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
     breakdown: dict[str, float] = {}
     query_term_matches: dict[str, set[str]] = {}
     evidence_kinds: set[ContextEvidenceKind] = set()
+    related_record_ids: set[str] = set()
     anchor_strength = ContextAnchorStrength.NONE
     for candidate in ranked:
         section = _candidate_section(candidate)
@@ -4749,6 +5161,7 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
         for field_name, terms in candidate.query_term_matches.items():
             query_term_matches.setdefault(field_name, set()).update(terms)
         evidence_kinds.update(candidate.evidence_kinds)
+        related_record_ids.update(candidate.related_record_ids)
         if CONTEXT_ANCHOR_STRENGTH_PRIORITY[candidate.anchor_strength] > CONTEXT_ANCHOR_STRENGTH_PRIORITY[anchor_strength]:
             anchor_strength = candidate.anchor_strength
     ordered_roles = sorted(roles, key=lambda role: (_evidence_role_priority(role), role))
@@ -4773,6 +5186,8 @@ def _merge_path_candidates(candidates: list[ContextCandidate], *, target: RepoTa
             "evidence_roles": ordered_roles,
         }
     )
+    if related_record_ids:
+        item["related_record_ids"] = sorted(related_record_ids)
     graph_provenance = _graph_relation_provenance(merged_graph_paths)
     if graph_provenance:
         item["provenance"] = graph_provenance
