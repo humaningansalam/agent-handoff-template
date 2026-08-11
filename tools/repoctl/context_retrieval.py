@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 
 from .context_chunks import DocumentChunk
 from .context_model import (
     CONTEXT_ANCHOR_STRENGTH_PRIORITY,
+    CONTEXT_SOURCE_KIND_VALUES,
+    LEXICAL_CONTEXT_SOURCE_KIND_VALUES,
     ContextAnchorStrength,
     ContextCandidate,
     ContextEvidenceKind,
     ContextSectionKind,
+    ContextSourceKind,
 )
 from .document_roles import (
     ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES,
@@ -58,6 +62,7 @@ STOPWORDS = {
 class ContextRetrievalLane(StrEnum):
     PRODUCT_SOURCE = "product_source"
     PRODUCT_TEST = "product_test"
+    PRODUCT_DATA = "product_data"
     PRODUCT_DOCUMENT = "product_document"
     PROJECT_CANONICAL = "project_canonical"
     PROJECT_GOVERNANCE = "project_governance"
@@ -70,6 +75,7 @@ class ContextRetrievalLane(StrEnum):
 AUTO_RETRIEVAL_LANE_LIMITS = {
     ContextRetrievalLane.PRODUCT_SOURCE: 12,
     ContextRetrievalLane.PRODUCT_TEST: 3,
+    ContextRetrievalLane.PRODUCT_DATA: 1,
     ContextRetrievalLane.PRODUCT_DOCUMENT: 2,
     ContextRetrievalLane.PROJECT_CANONICAL: 2,
     ContextRetrievalLane.PROJECT_GOVERNANCE: 2,
@@ -119,7 +125,7 @@ def retrieve_context_balanced(
         )
         by_lane[lane].append(candidate)
 
-    selected: dict[tuple[str, str, str, str, int, int, str], ContextCandidate] = {}
+    selected: dict[tuple[str, str, str, str, int, int, str, str, str], ContextCandidate] = {}
 
     def add(candidate: ContextCandidate) -> None:
         if len(selected) < limit:
@@ -196,12 +202,14 @@ def context_retrieval_lane(
     is_product_path = bool(product_prefix and normalized_path.startswith(product_prefix))
     if is_product_path:
         if kind == "verification_hint" or (
-            kind in {"current_source", "config"}
+            kind in LEXICAL_CONTEXT_SOURCE_KIND_VALUES
             and is_test_path(normalized_path, repository_path=normalized_repository)
         ):
             return ContextRetrievalLane.PRODUCT_TEST
-        if kind in {"current_source", "config"}:
+        if kind in LEXICAL_CONTEXT_SOURCE_KIND_VALUES:
             return ContextRetrievalLane.PRODUCT_SOURCE
+        if kind == ContextSourceKind.STRUCTURED_DATA.value:
+            return ContextRetrievalLane.PRODUCT_DATA
         if kind == "product_manifest":
             return ContextRetrievalLane.PRODUCT_DOCUMENT
 
@@ -228,7 +236,12 @@ def rank_context_chunks(
     terms = context_query_terms(query)
     ordered_terms = _ordered_query_terms(query)
     selectors = context_identity_selectors(query)
-    fts_scores = _fts_scores(query, chunks)
+    corpus_fts_scores = {
+        chunk.source_ref.key(): float(chunk.corpus_fts_score)
+        for chunk in chunks
+        if chunk.corpus_fts_score is not None
+    }
+    fts_scores = corpus_fts_scores or _fts_scores(query, chunks)
     candidates: list[ContextCandidate] = []
 
     for chunk in chunks:
@@ -269,6 +282,11 @@ def rank_context_chunks(
             section=chunk.source_ref.section,
             section_kind=chunk.source_ref.section_kind,
         )
+        if (
+            chunk.source_ref.kind == ContextSourceKind.STRUCTURED_DATA.value
+            and not identity_kinds
+        ):
+            continue
         if document_role in SOURCE_EXCLUDED_DOCUMENT_ROLES:
             continue
         if (
@@ -493,16 +511,92 @@ def _anchor_strength(
 
 
 def _distinct_paths_first(candidates: list[ContextCandidate]) -> list[ContextCandidate]:
-    first_by_path: list[ContextCandidate] = []
-    remaining: list[ContextCandidate] = []
-    seen_paths: set[str] = set()
+    candidates_by_path: dict[str, list[ContextCandidate]] = {}
+    path_order: list[str] = []
     for candidate in candidates:
-        if candidate.source_ref.path in seen_paths:
-            remaining.append(candidate)
-            continue
-        first_by_path.append(candidate)
-        seen_paths.add(candidate.source_ref.path)
+        path = candidate.source_ref.path
+        if path not in candidates_by_path:
+            candidates_by_path[path] = []
+            path_order.append(path)
+        candidates_by_path[path].append(candidate)
+
+    first_by_path: list[ContextCandidate] = []
+    selected_ids: set[int] = set()
+    for path in path_order:
+        path_candidates = candidates_by_path[path]
+        provider_owner = (
+            provider_symbol_owner_candidate(path_candidates)
+            if not is_test_path(path)
+            else None
+        )
+        selected = provider_owner or path_candidates[0]
+        first_by_path.append(selected)
+        selected_ids.add(id(selected))
+    remaining = [candidate for candidate in candidates if id(candidate) not in selected_ids]
     return [*first_by_path, *remaining]
+
+
+def provider_symbol_owner_candidate(
+    candidates: list[ContextCandidate],
+    *,
+    corroborated: bool = False,
+) -> ContextCandidate | None:
+    provider_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.source_ref.section_kind == ContextSectionKind.PROVIDER_SYMBOL
+        and candidate.source_ref.provider
+        and candidate.source_ref.provider_symbol_id
+        and any(candidate.query_term_matches.values())
+    ]
+    if not provider_candidates:
+        return None
+    exact = [
+        candidate
+        for candidate in provider_candidates
+        if ContextEvidenceKind.EXACT_SYMBOL in set(candidate.evidence_kinds)
+    ]
+    if exact:
+        return min(exact, key=_retrieval_sort_key)
+
+    owner_supported = [
+        candidate
+        for candidate in provider_candidates
+        if provider_symbol_owner_supported(candidate)
+    ]
+    if owner_supported:
+        return min(owner_supported, key=_retrieval_sort_key)
+    return min(provider_candidates, key=_retrieval_sort_key) if corroborated else None
+
+
+def provider_symbol_query_supported(
+    *,
+    anchor_strength: ContextAnchorStrength,
+    query_term_matches: Mapping[str, Iterable[str]],
+) -> bool:
+    """Return whether query evidence supports using a provider symbol as an owner."""
+    if (
+        CONTEXT_ANCHOR_STRENGTH_PRIORITY[anchor_strength]
+        >= CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.STRONG]
+    ):
+        return True
+    matches = {
+        field_name: {str(term) for term in terms if str(term)}
+        for field_name, terms in query_term_matches.items()
+    }
+    section_terms = matches.get("section", set())
+    independent_body_terms = matches.get("body", set()) - section_terms
+    return bool(section_terms and independent_body_terms)
+
+
+def provider_symbol_owner_supported(candidate: ContextCandidate) -> bool:
+    """Return whether a provider identity has enough query evidence for an owner slot."""
+    if candidate.source_ref.section_kind != ContextSectionKind.PROVIDER_SYMBOL:
+        return False
+    return provider_symbol_query_supported(
+        anchor_strength=candidate.anchor_strength,
+        query_term_matches=candidate.query_term_matches,
+    )
 
 
 def _retrieval_sort_key(candidate: ContextCandidate) -> tuple[int, float, str, int]:
@@ -539,7 +633,7 @@ def _authority_score(
         return 0.35
     if kind == "task_artifact":
         return 0.3
-    if kind in {"current_source", "config"}:
+    if kind in CONTEXT_SOURCE_KIND_VALUES:
         return 0.25
     if _is_product_doc_path(path) or kind == "product_manifest":
         return 0.3
@@ -550,7 +644,7 @@ def _authority_score(
     return 0.1
 
 
-def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str, str, str, int, int, str], float]:
+def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str, str, str, int, int, str, str, str], float]:
     if not query.strip() or not chunks:
         return {}
     connection = sqlite3.connect(":memory:")
@@ -563,7 +657,7 @@ def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str,
         phrase = " OR ".join(_escape_fts(token) for token in sorted(context_query_terms(query)))
         if not phrase:
             return {}
-        result: dict[tuple[str, str, str, str, int, int, str], float] = {}
+        result: dict[tuple[str, str, str, str, int, int, str, str, str], float] = {}
         cursor = connection.execute(
             "SELECT rowid, bm25(chunks, ?, ?, ?) AS rank FROM chunks WHERE chunks MATCH ? ORDER BY rank, rowid",
             (*FTS_FIELD_WEIGHTS, phrase),
@@ -583,23 +677,15 @@ def _escape_fts(token: str) -> str:
 
 
 def _current_source_priority(chunk: DocumentChunk) -> float:
-    if chunk.source_ref.kind not in {"current_source", "config"}:
-        return 0.0
-    path = chunk.source_ref.path.lower()
-    name = path.rsplit("/", 1)[-1]
-    if name == "__init__.py":
-        return -0.6
-    if path.endswith(("_state.json", "-state.json")) or "/data/" in path and path.endswith(".json"):
-        return -1.5
-    if chunk.source_ref.kind == "config":
+    if chunk.source_ref.kind == ContextSourceKind.CONFIG.value:
         return 0.25
-    if name.startswith(".") or path.endswith((".lock", ".log")):
-        return -0.6
-    if is_test_path(path):
+    if chunk.source_ref.kind == ContextSourceKind.STRUCTURED_DATA.value:
+        return 0.0
+    if chunk.source_ref.kind != ContextSourceKind.CURRENT_SOURCE.value:
+        return 0.0
+    if is_test_path(chunk.source_ref.path):
         return 0.35
-    if path.endswith((".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".dart", ".cs", ".java", ".kt", ".go", ".rs", ".sql", ".sh")):
-        return 0.3
-    return 0.0
+    return 0.3
 
 
 def _is_product_doc_path(path: str) -> bool:

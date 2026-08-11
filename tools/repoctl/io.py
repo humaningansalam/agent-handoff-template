@@ -4,6 +4,8 @@ import json
 import os
 import socket
 import time
+import uuid
+from collections.abc import Collection
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,10 +15,18 @@ from typing import Iterator
 class RepoctlError(RuntimeError):
     """Base error for repoctl user-facing failures."""
 
-    def __init__(self, message: str, *, code: str = "repoctl_error", path: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "repoctl_error",
+        path: str | None = None,
+        cause_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.path = path
+        self.cause_code = cause_code
 
 
 LOCK_REL = Path("docs/tasks/.repoctl.lock.d")
@@ -113,14 +123,40 @@ def _recover_dead_lock(lock_dir: Path) -> None:
 def atomic_write(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = write_temporary_text(path, text)
     try:
-        with tmp.open("w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
         os.replace(tmp, path)
     except Exception:
         if tmp.exists() and not tmp.is_symlink():
             tmp.unlink()
         raise
+
+
+def write_temporary_text(path: Path, text: str, *, suffix: str = ".tmp") -> Path:
+    """Create one durable, collision-free sibling file for an atomic publish step."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}{suffix}")
+        try:
+            handle = temporary.open("x", encoding="utf-8", newline="")
+        except FileExistsError:
+            continue
+        break
+    try:
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+        raise
+    return temporary
+
+
+def decode_schema_version(value: object, *, supported: Collection[int]) -> int:
+    """Return an exact JSON integer schema version without numeric coercion."""
+    if type(value) is not int or value not in supported:
+        raise ValueError("schema version is not a supported exact integer")
+    return value

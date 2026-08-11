@@ -334,7 +334,7 @@ def test_graph_materialization_reuses_unchanged_source_evidence(tmp_path: Path) 
     assert meta["materialization"]["status"] == "reused"
     assert meta["materialization"]["code_index"]["changed_paths"] == []
 
-    mismatched_target = RepoTarget("main", repo, "repos/renamed", "registry")
+    mismatched_target = RepoTarget("main", repo, "repos/renamed", "pinned")
     loaded, load_problems, load_meta = load_materialized_graph(tmp_path, target=mismatched_target)
     assert loaded is None
     assert [problem.code for problem in load_problems] == ["graph_materialization_repository_mismatch"]

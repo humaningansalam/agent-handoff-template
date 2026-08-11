@@ -29,7 +29,8 @@ from .knowledge_render import render_knowledge
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, unbound_repository_state_namespaces
-from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
+from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_selections, graph_result_selections, write_result_receipt
+from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -103,6 +104,18 @@ def _json(data: Any, *, compact: bool = False) -> None:
         print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     else:
         print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _public_result_receipt(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if receipt is None:
+        return None
+    return {
+        "producer": receipt["producer"],
+        "result_id": receipt["result_id"],
+        "receipt_digest": receipt["receipt_digest"],
+        "request": receipt["request"],
+        "selectable": receipt["selectable"],
+    }
 
 
 def _complete_json_envelope(data: Any) -> None:
@@ -283,12 +296,34 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             seen.add(key)
             actions.append(action)
 
-    def add_context_graph_recovery(kind: NextActionKind, *, source: str) -> None:
+    def context_bundle_and_repo() -> tuple[dict[str, Any], str]:
         bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
         repository = (data or {}).get("repository") if isinstance((data or {}).get("repository"), dict) else {}
         if not repository and isinstance(bundle.get("repository"), dict):
             repository = bundle["repository"]
-        repo_id = str(repository.get("id") or "<id>")
+        return bundle, str(repository.get("id") or "<id>")
+
+    def add_context_resume(*, label: str, source: str) -> None:
+        bundle, repo_id = context_bundle_and_repo()
+        query = bundle.get("query") if isinstance(bundle.get("query"), dict) else {}
+        query_text = str(query.get("text") or "")
+        if not query_text:
+            return
+        mode = str(query.get("mode") or "auto")
+        mode_arg = f" --mode {shlex.quote(mode.replace('_', '-'))}" if mode != "auto" else ""
+        explain_arg = " --explain" if bool(query.get("explain")) else ""
+        add(
+            label,
+            command=(
+                f"./scripts/repoctl context query {shlex.quote(query_text)} --repo-id {repo_id}"
+                f"{mode_arg}{explain_arg} --json"
+            ),
+            kind=NextActionKind.CONTEXT_RESUME,
+            source=source,
+        )
+
+    def add_context_graph_recovery(kind: NextActionKind, *, source: str) -> None:
+        _bundle, repo_id = context_bundle_and_repo()
         rebuild = kind == NextActionKind.GRAPH_REBUILD
         label = {
             NextActionKind.GRAPH_BUILD: "Build the materialized Graph and evidence index",
@@ -302,20 +337,8 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             source=source,
         )
 
-        query = bundle.get("query") if isinstance(bundle.get("query"), dict) else {}
-        query_text = str(query.get("text") or "")
-        if not query_text:
-            return
-        mode = str(query.get("mode") or "auto")
-        mode_arg = f" --mode {shlex.quote(mode.replace('_', '-'))}" if mode != "auto" else ""
-        explain_arg = " --explain" if bool(query.get("explain")) else ""
-        add(
-            "Rerun the same Context query after Graph recovery",
-            command=(
-                f"./scripts/repoctl context query {shlex.quote(query_text)} --repo-id {repo_id}"
-                f"{mode_arg}{explain_arg} --json"
-            ),
-            kind=NextActionKind.CONTEXT_RESUME,
+        add_context_resume(
+            label="Rerun the same Context query after Graph recovery",
             source="data.bundle.query",
         )
 
@@ -479,6 +502,33 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 NextActionKind.GRAPH_REFRESH,
                 source="problems[].code",
             )
+        elif code == "context_graph_seed_identity_unavailable":
+            add_context_resume(
+                label="Rerun the same Context query to recover the typed seed identity",
+                source="data.bundle.completeness.graph_anchor.identity_coverage",
+            )
+            bundle, repo_id = context_bundle_and_repo()
+            identity_coverage = _mapping_at(bundle, "completeness", "graph_anchor", "identity_coverage")
+            selectors = identity_coverage.get("recovery_selectors") if isinstance(identity_coverage.get("recovery_selectors"), list) else []
+            for selector in selectors:
+                if not isinstance(selector, dict):
+                    continue
+                selector_kind = str(selector.get("kind") or "")
+                selector_value = str(selector.get("value") or "")
+                if selector_kind == "file" and selector_value:
+                    command = f"./scripts/repoctl graph query --repo-id {repo_id} --file {shlex.quote(selector_value)} --json"
+                elif selector_kind == "symbol" and selector_value and str(selector.get("in_file") or ""):
+                    command = (
+                        f"./scripts/repoctl graph query --repo-id {repo_id} --symbol {shlex.quote(selector_value)} "
+                        f"--in-file {shlex.quote(str(selector['in_file']))} --json"
+                    )
+                else:
+                    continue
+                add(
+                    "Continue from the unresolved typed Graph seed",
+                    command=command,
+                    source="data.bundle.completeness.graph_anchor.identity_coverage.recovery_selectors",
+                )
         elif code == "graph_snapshot_stale":
             add_context_graph_recovery(
                 NextActionKind.GRAPH_REFRESH,
@@ -619,6 +669,14 @@ def _fixture_has_repository(fixture: Path, repo_id: str) -> bool:
 
 def _problem_dicts(problems: list[Problem]) -> list[dict[str, str]]:
     return [problem.to_dict() for problem in problems]
+
+
+def _dedupe_problems(problems: list[Problem]) -> list[Problem]:
+    unique = {
+        (problem.severity, problem.code, problem.path or "", problem.cause_code or ""): problem
+        for problem in problems
+    }
+    return [unique[key] for key in sorted(unique)]
 
 
 def _problem_code_counts(problems: list[Problem]) -> dict[str, int]:
@@ -1915,7 +1973,11 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         target = _repo_target_for_task_command(root, task)
     except RepoctlError:
         target = None
-    delta = repo_changes_since_task_start(root, task.id) if task.status in {"todo", "doing", "blocked"} else None
+    delta = (
+        repo_changes_since_task_start(root, task.id)
+        if task.status in {"todo", "doing", "blocked"}
+        else None
+    )
     warnings: list[dict[str, Any]] = []
     if delta:
         baseline_warning = _task_baseline_conflict_warning(task, delta)
@@ -1925,6 +1987,14 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         if scope_warning is not None:
             warnings.append(scope_warning)
     resume_guidance, resume_warnings, resume_problems = _task_resume_guidance(root, task, target=target)
+    show_problems = [
+        *resume_problems,
+        *(
+            problem
+            for problem in (delta or {}).get("integrity_problems", ())
+            if isinstance(problem, Problem)
+        ),
+    ]
     warnings.extend(resume_warnings)
     repo_changes = (
         _repo_change_summary(
@@ -1950,30 +2020,30 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         section = find_section(text, args.section)
         body = text[section.body_start : section.end].strip()
         payload = {
-            "ok": not _has_errors(resume_problems),
+            "ok": not _has_errors(show_problems),
             "command": "task.show",
             "data": {**summary, "section": {"name": args.section, "body": body}},
-            "problems": [problem.to_dict() for problem in resume_problems],
+            "problems": [problem.to_dict() for problem in show_problems],
             "warnings": warnings,
         }
     elif args.summary:
         payload = {
-            "ok": not _has_errors(resume_problems),
+            "ok": not _has_errors(show_problems),
             "command": "task.show",
             "data": summary,
-            "problems": [problem.to_dict() for problem in resume_problems],
+            "problems": [problem.to_dict() for problem in show_problems],
             "warnings": warnings,
         }
     else:
         payload = {
-            "ok": not _has_errors(resume_problems),
+            "ok": not _has_errors(show_problems),
             "command": "task.show",
             "data": {**summary, "frontmatter": task.frontmatter, "body": task.body},
-            "problems": [problem.to_dict() for problem in resume_problems],
+            "problems": [problem.to_dict() for problem in show_problems],
             "warnings": warnings,
         }
     payload["next_actions"] = _next_actions_for_problems(
-        [*[problem.to_dict() for problem in resume_problems], *warnings],
+        [*[problem.to_dict() for problem in show_problems], *warnings],
         data={**summary, "task_id": task.id},
     )
     if args.json:
@@ -1987,7 +2057,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     else:
         print(f"Handoff status: {resume_guidance['status']} active={str(resume_guidance['handoff']['active']).lower()}")
         print(task.path.read_text(encoding="utf-8"))
-    return 1 if _has_errors(resume_problems) else 0
+    return 1 if _has_errors(show_problems) else 0
 
 
 def cmd_task_log_append(args: argparse.Namespace) -> int:
@@ -2182,6 +2252,11 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             if target is not None
             else repo_changes_since_task_start(root, task.id)
         )
+        doctor_problems.extend(
+            problem
+            for problem in delta.get("integrity_problems", ())
+            if isinstance(problem, Problem)
+        )
     except RepoctlError as exc:
         delta_preparation_failed = True
         doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
@@ -2216,7 +2291,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
             if not discovery_is_already_advisory and not scope_is_already_advisory:
                 doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
-    combined = [*task_problems, *doctor_problems]
+    combined = _dedupe_problems([*task_problems, *doctor_problems])
     blockers = [problem.code for problem in combined if problem.severity == "error"]
     advisory = [
         *[problem.code for problem in combined if problem.severity == "warning"],
@@ -2329,11 +2404,19 @@ def _repo_change_summary(
 ) -> dict[str, Any]:
     task_new_files = [entry[1] for entry in delta.get("changes", [])]
     visible_task_new, _task_new_count, task_new_truncated = _project_string_collection(task_new_files, compact=compact)
+    observed_committed_files = [entry[1] for entry in delta.get("observed_committed_changes", [])]
+    visible_observed, _observed_count, observed_truncated = _project_string_collection(
+        observed_committed_files,
+        compact=compact,
+    )
     visible_conflicts, conflict_count, conflicts_truncated = _project_string_collection(delta.get("baseline_conflicts"), compact=compact)
     summary = {
         "task_new": len(task_new_files),
         "task_new_files": visible_task_new,
         "task_new_files_truncated": task_new_truncated,
+        "observed_committed": len(observed_committed_files),
+        "observed_committed_files": visible_observed,
+        "observed_committed_files_truncated": observed_truncated,
         "preexisting_dirty": delta.get("preexisting_count", 0),
         "baseline_conflicts": visible_conflicts,
         "baseline_conflict_count": conflict_count,
@@ -2727,6 +2810,7 @@ def _task_finish_repo_delta(
         "ownership": ownership_evidence or task_baseline_ownership_evidence(root, task.id),
         "repo_git": range_state,
         "committed_range": {"base": start_head, "head": current_head},
+        "integrity_problems": tuple(delta.get("integrity_problems") or ()),
     }
 
 
@@ -2743,6 +2827,7 @@ def _finish_meta_gate(
         raise RepoctlError("committed diff finish requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
     if target is None:
         delta = repo_changes_since_task_start(root, task_id)
+        _require_no_integrity_problems(delta)
         if delta.get("baseline_conflicts"):
             conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
             suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
@@ -2790,6 +2875,7 @@ def _finish_meta_gate(
         target,
         use_committed_diff=use_committed_diff,
     )
+    _require_no_integrity_problems(delta)
     if delta.get("baseline_conflicts"):
         conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
         suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
@@ -2896,6 +2982,11 @@ def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[st
     repo_git = delta.get("repo_git")
     task_new_files = [str(entry[1]) for entry in delta.get("changes", [])]
     visible_task_new, _task_new_count, task_new_truncated = _project_string_collection(task_new_files, compact=True)
+    observed_committed_files = [str(entry[1]) for entry in delta.get("observed_committed_changes", [])]
+    visible_observed, _observed_count, observed_truncated = _project_string_collection(
+        observed_committed_files,
+        compact=True,
+    )
     visible_conflicts, conflict_count, conflicts_truncated = _project_string_collection(delta.get("baseline_conflicts"), compact=True)
     unused_chosen = (delta.get("scope") or {}).get("unused_chosen_paths") if isinstance(delta.get("scope"), dict) else []
     visible_unused, unused_count, unused_truncated = _project_string_collection(unused_chosen, compact=True)
@@ -2905,6 +2996,9 @@ def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[st
         "task_new_changes": len(task_new_files),
         "task_new_files": visible_task_new,
         "task_new_files_truncated": task_new_truncated,
+        "observed_committed_changes": len(observed_committed_files),
+        "observed_committed_files": visible_observed,
+        "observed_committed_files_truncated": observed_truncated,
         "current_dirty_files": int(delta.get("current_count") or 0),
         "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
         "child_attributed_changes": int(delta.get("child_attributed_count") or 0),
@@ -3623,7 +3717,18 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     )
     query_status = str((result or {}).get("query_status") or "unavailable")
     outcome_ok = query_status in {"found", "not_found"}
-    result_data = result if args.full or result is None else _compact_graph_query_result(result, freshness=freshness)
+    compact_result = _compact_graph_query_result(result, freshness=freshness) if result is not None else None
+    result_data = result if args.full or result is None else compact_result
+    result_receipt: dict[str, Any] | None = None
+    if result is not None and compact_result is not None and outcome_ok and not _has_errors(query_problems):
+        result_receipt = write_result_receipt(
+            root,
+            target=target,
+            producer=ResultProducer.GRAPH,
+            result_id=str(result.get("result_digest") or ""),
+            request=GraphResultRequest.from_query(result.get("query")),
+            selections=graph_result_selections(compact_result),
+        )
     completeness = result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness
     result_warnings = result.get("warnings", []) if isinstance(result, dict) and isinstance(result.get("warnings"), list) else []
     freshness_data = freshness if args.full else compact_graph_freshness(freshness)
@@ -3648,6 +3753,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             "repository": target.to_dict(),
             "snapshot_digest": snapshot.snapshot_digest,
             "freshness": freshness_data,
+            "result_receipt": _public_result_receipt(result_receipt),
         },
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
@@ -4257,9 +4363,27 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     target = require_repo_target(root, repo_id=args.repo_id)
     bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, explain=args.explain, mode=args.mode or "")
     bundle_data = None
+    result_receipt: dict[str, Any] | None = None
     if bundle is not None:
-        bundle_data = bundle.to_dict() if args.full else compact_context_bundle(bundle)
-    data = {"bundle": bundle_data, "repository": target.to_dict()}
+        compact_bundle_data = compact_context_bundle(bundle)
+        bundle_data = bundle.to_dict() if args.full else compact_bundle_data
+        if not _has_errors(problems):
+            result_receipt = write_result_receipt(
+                root,
+                target=target,
+                producer=ResultProducer.CONTEXT,
+                result_id=bundle.bundle_digest,
+                request=ContextResultRequest(
+                    query=str(bundle.query.get("text") or "").strip(),
+                    mode=str(bundle.query.get("mode") or ""),
+                ),
+                selections=context_result_selections(compact_bundle_data),
+            )
+    data = {
+        "bundle": bundle_data,
+        "repository": target.to_dict(),
+        "result_receipt": _public_result_receipt(result_receipt),
+    }
     if args.full or args.explain:
         data.update(meta)
     payload = {
@@ -4270,7 +4394,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
         "warnings": [
             {
                 "code": "context_not_authoritative",
-                "message": "context query returns a read-only evidence bundle; source authorities remain repo registry, source documents, .repometa, task receipts, and reviewed Knowledge records",
+                "message": "context query returns a non-authoritative evidence bundle; product/task state is unchanged and only a regenerable result receipt is stored",
             }
         ],
     }
@@ -6390,6 +6514,8 @@ def main(argv: list[str] | None = None) -> int:
             problem = {"severity": "error", "code": error.code, "message": str(error)}
             if error.path:
                 problem["path"] = error.path
+            if error.cause_code:
+                problem["cause_code"] = error.cause_code
             error_data = _error_data(args)
             _json({"ok": False, "command": _command_name(args), "data": error_data, "problems": [problem], "warnings": []})
         else:

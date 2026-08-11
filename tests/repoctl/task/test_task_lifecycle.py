@@ -6,7 +6,11 @@ import subprocess
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.graph_model import digest_data
 from tools.repoctl.markdown import find_section, replace_frontmatter_line, replace_section
+from tools.repoctl.repositories import require_repo_target
+from tools.repoctl.result_receipts import ContextResultRequest, GraphResultRequest, ResultAuthority, ResultProducer, ResultSelection, write_result_receipt
+from tools.repoctl.tasks import DiscoveryResultSelection, resolve_task, task_discovery_result_selections
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
     init_committed_product_repo,
@@ -347,7 +351,7 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
     assert not any(warning["code"] == "missing_discovery_evidence" for warning in check_payload["warnings"])
 
 
-def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reason(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_discovery_starts_a_new_episode_and_replaces_active_chosen_with_reason(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     init_repo(tmp_path / "repos")
     text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
@@ -372,7 +376,8 @@ def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reas
     assert main(["task", "discovery", "add", "T-20260609184046Z", "--replace-chosen", "repos/b.py", "--reason", "implementation moved", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["discovery"]["candidate_query_history"] == ["q1", "q2"]
+    assert payload["data"]["discovery"]["candidate_query_history"] == ["q2"]
+    assert payload["data"]["discovery"]["candidate_files_reviewed"] == ["repos/b.py"]
     assert payload["data"]["discovery"]["chosen_files"] == ["repos/b.py"]
     assert payload["data"]["update"]["chosen_files"] == {
         "mode": "replace",
@@ -386,13 +391,13 @@ def test_task_discovery_keeps_query_history_and_replaces_active_chosen_with_reas
     assert "scope changed: removed repos/a.py; added repos/b.py; reason=implementation moved" in task_body
 
 
-def test_task_discovery_records_only_explicit_selected_result_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_discovery_accepts_only_receipt_backed_selected_result_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     init_repo(tmp_path / "repos")
     text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    result_id = "sha256:" + "a" * 64
+    result_id = digest_data({"context": "selected source"})
 
     assert main(
         [
@@ -408,19 +413,76 @@ def test_task_discovery_records_only_explicit_selected_result_evidence(tmp_path:
             "source",
             "--result-ref",
             "repos/lib/client.dart",
+            "--json",
+        ]
+    ) == 2
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["problems"][0]["code"] == "result_receipt_missing"
+
+    target = require_repo_target(tmp_path, repo_id="main")
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=result_id,
+        request=ContextResultRequest(query="selected source", mode="auto"),
+        selections=[
+            ResultSelection(ResultAuthority.SOURCE, "repos/lib/Client.dart"),
+            ResultSelection(ResultAuthority.SOURCE, "repos/lib/client.dart"),
+        ],
+    )
+
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            "T-20260609184046Z",
+            "--result-producer",
+            "context",
+            "--result-id",
+            result_id,
+            "--result-authority",
+            "source",
+            "--result-ref",
+            "repos/lib/Client.dart",
+            "--result-ref",
+            "repos/lib/client.dart",
             "--full",
             "--json",
         ]
     ) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["discovery"]["selected_result_evidence"] == [
-        {
+    selected = payload["data"]["discovery"]["selected_result_evidence"]
+    assert len(selected) == 2
+    assert {item["ref"] for item in selected} == {
+        "repos/lib/Client.dart",
+        "repos/lib/client.dart",
+    }
+    assert all(
+        item
+        | {
+            "episode_id": "<episode>",
+            "ref": "<case-sensitive-ref>",
+        }
+        == {
+            "schema_version": 2,
             "producer": "context",
             "result_id": result_id,
+            "episode_id": "<episode>",
+            "request": {"kind": "context_query", "query": "selected source", "mode": "auto"},
             "authority": "source",
-            "ref": "repos/lib/client.dart",
+            "ref": "<case-sensitive-ref>",
         }
-    ]
+        for item in selected
+    )
+    assert len({item["episode_id"] for item in selected}) == 1
+    assert selected[0]["episode_id"].startswith("sha256:")
+    reloaded = task_discovery_result_selections(resolve_task(tmp_path, "T-20260609184046Z"))
+    assert {item.ref for item in reloaded} == {
+        "repos/lib/Client.dart",
+        "repos/lib/client.dart",
+    }
     body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "Selected result evidence" in body
     assert '"authority":"source"' in body
@@ -440,6 +502,232 @@ def test_task_discovery_records_only_explicit_selected_result_evidence(tmp_path:
     ) == 2
     failure = json.loads(capsys.readouterr().out)
     assert failure["problems"][0]["code"] == "incomplete_discovery_result_evidence"
+
+
+def test_task_discovery_reads_legacy_result_evidence_without_inventing_request_ownership() -> None:
+    legacy_text = json.dumps(
+        {
+            "producer": "context",
+            "result_id": "sha256:" + ("1" * 64),
+            "authority": "source",
+            "ref": "repos/legacy.py",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    selection = DiscoveryResultSelection.from_text(legacy_text)
+
+    assert selection.schema_version == 1
+    assert selection.episode_id == ""
+    assert selection.request is None
+    assert selection.to_text() == legacy_text
+
+
+def test_task_discovery_result_evidence_round_trips_markdown_sensitive_refs() -> None:
+    selection = DiscoveryResultSelection(
+        producer=ResultProducer.CONTEXT,
+        result_id="sha256:" + ("1" * 64),
+        episode_id="sha256:" + ("2" * 64),
+        request={"kind": "context_query", "query": "owner`file.py", "mode": "auto"},
+        authority=ResultAuthority.SOURCE,
+        ref="repos/owner`file.py",
+    )
+
+    encoded = selection.to_text()
+
+    assert "`" not in encoded
+    assert DiscoveryResultSelection.from_text(f"`{encoded}`") == selection
+
+
+def test_task_discovery_uses_context_receipt_as_episode_owner_and_accumulates_graph_followups(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    task_id = "T-20260609184046Z"
+    text = task_text(task_id, status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, f"{task_id}--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    def add_receipt_result(
+        producer: ResultProducer,
+        result_id: str,
+        authority: ResultAuthority,
+        ref: str,
+        *,
+        query: str = "",
+        note: str = "",
+    ) -> tuple[int, dict[str, object]]:
+        args = [
+            "task", "discovery", "add", task_id,
+            "--result-producer", producer.value,
+            "--result-id", result_id,
+            "--result-authority", authority.value,
+            "--result-ref", ref,
+            "--full", "--json",
+        ]
+        if query:
+            args.extend(["--query", query])
+        if note:
+            args.extend(["--note", note])
+        code = main(args)
+        return code, json.loads(capsys.readouterr().out)
+
+    context_q1_id = digest_data({"context": "q1"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=context_q1_id,
+        request=ContextResultRequest(query="q1", mode="auto"),
+        selections=[ResultSelection(ResultAuthority.SOURCE, "repos/q1.py")],
+    )
+    code, q1 = add_receipt_result(ResultProducer.CONTEXT, context_q1_id, ResultAuthority.SOURCE, "repos/q1.py", note="context q1")
+    assert code == 0
+    context_episode_id = q1["data"]["discovery"]["selected_result_evidence"][0]["episode_id"]
+
+    graph_requests = [
+        GraphResultRequest.from_query({"type": "symbol", "symbol": "owner"}),
+        GraphResultRequest.from_query({"type": "callers_of", "symbol": "owner", "in_file": "src/service.py"}),
+    ]
+    for index, request in enumerate(graph_requests, start=1):
+        graph_id = digest_data({"graph": index})
+        write_result_receipt(
+            tmp_path,
+            target=target,
+            producer=ResultProducer.GRAPH,
+            result_id=graph_id,
+            request=request,
+            selections=[ResultSelection(ResultAuthority.GRAPH, f"graph-ref-{index}")],
+        )
+        code, graph_payload = add_receipt_result(
+            ResultProducer.GRAPH,
+            graph_id,
+            ResultAuthority.GRAPH,
+            f"graph-ref-{index}",
+            note=f"graph follow-up {index}",
+        )
+        assert code == 0
+
+    discovery = graph_payload["data"]["discovery"]
+    assert discovery["candidate_query_history"] == ["q1"]
+    assert discovery["notes"] == ["context q1", "graph follow-up 1", "graph follow-up 2"]
+    assert len(discovery["selected_result_evidence"]) == 3
+    assert {item["episode_id"] for item in discovery["selected_result_evidence"]} == {context_episode_id}
+
+    context_q1_impact_id = digest_data({"context": "q1-file-impact"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=context_q1_impact_id,
+        request=ContextResultRequest(query="q1", mode="file_impact"),
+        selections=[ResultSelection(ResultAuthority.SOURCE, "repos/q1-impact.py")],
+    )
+    code, q1_impact = add_receipt_result(
+        ResultProducer.CONTEXT,
+        context_q1_impact_id,
+        ResultAuthority.SOURCE,
+        "repos/q1-impact.py",
+        note="context q1 file impact",
+    )
+    assert code == 0
+    q1_impact_discovery = q1_impact["data"]["discovery"]
+    assert q1_impact_discovery["candidate_query_history"] == ["q1"]
+    assert len(q1_impact_discovery["selected_result_evidence"]) == 4
+    assert {item["episode_id"] for item in q1_impact_discovery["selected_result_evidence"]} == {context_episode_id}
+    assert {
+        item["request"]["mode"]
+        for item in q1_impact_discovery["selected_result_evidence"]
+        if item["producer"] == "context"
+    } == {"auto", "file_impact"}
+
+    context_q2_id = digest_data({"context": "q2"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=context_q2_id,
+        request=ContextResultRequest(query="q2", mode="code_location"),
+        selections=[ResultSelection(ResultAuthority.SOURCE, "repos/q2.py")],
+    )
+    code, mismatch = add_receipt_result(
+        ResultProducer.CONTEXT,
+        context_q2_id,
+        ResultAuthority.SOURCE,
+        "repos/q2.py",
+        query="q1",
+    )
+    assert code == 2
+    assert mismatch["problems"][0]["code"] == "discovery_result_episode_mismatch"
+
+    code, q2 = add_receipt_result(ResultProducer.CONTEXT, context_q2_id, ResultAuthority.SOURCE, "repos/q2.py", note="context q2")
+    assert code == 0
+    assert q2["data"]["discovery"]["candidate_query_history"] == ["q2"]
+    assert q2["data"]["discovery"]["notes"] == ["context q2"]
+    assert [item["result_id"] for item in q2["data"]["discovery"]["selected_result_evidence"]] == [context_q2_id]
+
+
+def test_task_discovery_seeds_graph_only_episode_from_selector_and_context_adopts_exact_query(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    task_id = "T-20260609184046Z"
+    text = task_text(task_id, status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, f"{task_id}--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    graph_id = digest_data({"graph": "graph-only"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.GRAPH,
+        result_id=graph_id,
+        request=GraphResultRequest.from_query({"type": "callers_of", "symbol": "resolve_owner", "in_file": "src/service.py"}),
+        selections=[ResultSelection(ResultAuthority.GRAPH, "resolve_owner")],
+    )
+    assert main(
+        [
+            "task", "discovery", "add", task_id,
+            "--result-producer", "graph",
+            "--result-id", graph_id,
+            "--result-authority", "graph",
+            "--result-ref", "resolve_owner",
+            "--note", "graph-only seed",
+            "--full", "--json",
+        ]
+    ) == 0
+    graph_discovery = json.loads(capsys.readouterr().out)["data"]["discovery"]
+    assert graph_discovery["candidate_query_history"] == ["resolve_owner"]
+    graph_episode_id = graph_discovery["selected_result_evidence"][0]["episode_id"]
+
+    context_id = digest_data({"context": "adopt graph-only"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=context_id,
+        request=ContextResultRequest(query="resolve_owner", mode="auto"),
+        selections=[ResultSelection(ResultAuthority.SOURCE, "repos/service.py")],
+    )
+    assert main(
+        [
+            "task", "discovery", "add", task_id,
+            "--result-producer", "context",
+            "--result-id", context_id,
+            "--result-authority", "source",
+            "--result-ref", "repos/service.py",
+            "--note", "context owner adopted",
+            "--full", "--json",
+        ]
+    ) == 0
+    adopted = json.loads(capsys.readouterr().out)["data"]["discovery"]
+    assert adopted["candidate_query_history"] == ["resolve_owner"]
+    assert adopted["notes"] == ["graph-only seed", "context owner adopted"]
+    assert len(adopted["selected_result_evidence"]) == 2
+    adopted_episode_ids = {item["episode_id"] for item in adopted["selected_result_evidence"]}
+    assert len(adopted_episode_ids) == 1
+    assert graph_episode_id not in adopted_episode_ids
 
 
 def test_task_discovery_query_returns_compact_context_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -593,6 +881,40 @@ def test_task_start_records_dirty_repo_for_root_task_without_force(tmp_path: Pat
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "dirty repo state recorded" in task_body
     assert (tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json").is_file()
+
+
+def test_root_task_records_readable_baseline_for_unbound_collection_candidates(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "docs"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    init_repo(tmp_path / "repos/web")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "show", "T-20260609184046Z", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["repo_changes"]["observed_since_baseline"] == "observed"
+    state = json.loads((tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json").read_text(encoding="utf-8"))
+    assert state["initial"]["repositories"][0]["repo_id"] == ""
+    assert state["initial"]["repositories"][0]["identity_source"] == "unbound"
+
+
+def test_task_state_schema_version_requires_an_exact_json_integer(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="todo"))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    state_path = tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["schema_version"] = 4.0
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["task", "show", "T-20260609184046Z", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "task_state_schema_unsupported"
 
 
 def test_task_start_force_dirty_records_dirty_files(tmp_path: Path, monkeypatch) -> None:

@@ -707,6 +707,101 @@ def test_graph_query_js_ts_impact_is_file_level(tmp_path: Path, monkeypatch, cap
     assert not any(path["edge"] == "CALLS" for path in result["paths"])
 
 
+def test_graph_and_context_follow_typescript_barrel_calls_inside_anonymous_callbacks(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "src").mkdir()
+    (repo / "test").mkdir()
+    (repo / "tsconfig.json").write_text(
+        json.dumps(
+            {
+                "compilerOptions": {
+                    "target": "ES2022",
+                    "module": "ESNext",
+                    "moduleResolution": "Bundler",
+                    "strict": True,
+                },
+                "include": ["src/**/*.ts", "test/**/*.ts"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (repo / "src/projections.ts").write_text(
+        "export function applyEvents(): string {\n"
+        "  return 'atomic event batch projection invalid rollback no partial state';\n"
+        "}\n\n"
+        "export function loadProjection(): string {\n"
+        "  return 'stored projection';\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (repo / "src/index.ts").write_text(
+        'export { applyEvents, loadProjection } from "./projections";\n',
+        encoding="utf-8",
+    )
+    (repo / "test/replay-envelope.test.ts").write_text(
+        'import { applyEvents } from "../src";\n\n'
+        "function register(callback: () => void): void { callback(); }\n"
+        "function expectFailure(callback: () => unknown): void { callback(); }\n\n"
+        "register(() => {\n"
+        "  expectFailure(() => applyEvents());\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    (repo / "test/sqlite-persistence.test.ts").write_text(
+        'import { loadProjection } from "../src";\n\n'
+        "const competingLexicalEvidence = "
+        "'atomic event batch projection invalid rollback no partial state '.repeat(3);\n"
+        "void competingLexicalEvidence;\n"
+        "loadProjection();\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "build", "--full", "--json"]) == 0
+
+    snapshot = _snapshot(json.loads(capsys.readouterr().out))
+    direct_test_edges = [
+        edge
+        for edge in snapshot["edges"]
+        if edge["kind"] == "TESTS_FILE"
+        and edge["from"] == file_id("main", "test/replay-envelope.test.ts")
+        and edge["to"] == file_id("main", "src/projections.ts")
+    ]
+    assert len(direct_test_edges) == 1
+    assert direct_test_edges[0]["source"] == "typescript_compiler"
+    assert direct_test_edges[0]["facts"]["evidence_type"] == "direct_test_call"
+
+    assert main(
+        [
+            "context",
+            "query",
+            "atomic event batch projection invalid rollback no partial state",
+            "--repo-id",
+            "main",
+            "--json",
+        ]
+    ) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+        "repos/src/projections.ts"
+    )
+    assert bundle["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/test/replay-envelope.test.ts"
+    )
+    assert not any(
+        section.get("section_kind") == "provider_symbol"
+        and section.get("section") == "test/replay-envelope.test.ts"
+        for section in bundle["groups"]["tests_and_verification"][0]["sections"]
+    )
+
+
 def test_graph_and_context_prioritize_owner_source_and_direct_test(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

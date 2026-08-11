@@ -98,9 +98,9 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
     LanguageProfile(id="html", display_name="HTML", suffixes=(".html", ".htm"), capability="text context evidence", context_source=True),
     LanguageProfile(id="stylesheet", display_name="Stylesheets", suffixes=(".css", ".scss", ".sass", ".less"), capability="text context evidence", context_source=True),
     LanguageProfile(id="markdown", display_name="Markdown", suffixes=(".md", ".markdown"), capability="document evidence"),
-    LanguageProfile(id="json", display_name="JSON", suffixes=(".json",), capability="manifest/config evidence"),
-    LanguageProfile(id="toml", display_name="TOML", suffixes=(".toml",), capability="manifest/config evidence"),
-    LanguageProfile(id="yaml", display_name="YAML", suffixes=(".yaml", ".yml"), capability="manifest/config evidence"),
+    LanguageProfile(id="json", display_name="JSON", suffixes=(".json",), capability="manifest or structured-data evidence"),
+    LanguageProfile(id="toml", display_name="TOML", suffixes=(".toml",), capability="manifest or structured-data evidence"),
+    LanguageProfile(id="yaml", display_name="YAML", suffixes=(".yaml", ".yml"), capability="manifest or structured-data evidence"),
 )
 
 COMMON_EXCLUDE_PATTERNS: tuple[str, ...] = (

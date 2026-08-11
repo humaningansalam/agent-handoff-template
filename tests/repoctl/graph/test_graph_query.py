@@ -39,6 +39,13 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
 
     compact_payload = json.loads(capsys.readouterr().out)
     compact_result = compact_payload["data"]["result"]
+    compact_receipt = compact_payload["data"]["result_receipt"]
+    assert compact_receipt["producer"] == "graph"
+    assert compact_receipt["request"] == {
+        "kind": "graph_query",
+        "selector": {"type": "file", "path": "src/app.py"},
+    }
+    assert {item["ref"] for item in compact_receipt["selectable"]} >= {"src/app.py"}
     assert "nodes" not in compact_result
     assert "edges" not in compact_result
     assert "node_count" not in compact_result
@@ -57,7 +64,9 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
 
     assert main(["graph", "query", "--file", "src/app.py", "--full", "--json"]) == 0
 
-    result = json.loads(capsys.readouterr().out)["data"]["result"]
+    full_payload = json.loads(capsys.readouterr().out)
+    result = full_payload["data"]["result"]
+    assert full_payload["data"]["result_receipt"] == compact_receipt
     assert result["query"] == {"type": "file", "path": "src/app.py"}
     assert any(node["id"] == file_id("main", "src/app.py") for node in result["nodes"])
     assert any(edge["kind"] == "CONTAINS" and edge["to"] == file_id("main", "src/app.py") for edge in result["edges"])
@@ -175,6 +184,16 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     assert missing["data"]["query_status"] == "not_found"
     assert missing["data"]["completeness"]["status"] in {"complete", "partial"}
     assert missing["data"]["result"]["candidates"] == []
+
+    assert main(["graph", "query", "--impact-symbol", "missing_owner", "--depth", "2", "--json"]) == 0
+    missing_impact = json.loads(capsys.readouterr().out)
+    expected_selector = {"type": "impact_symbol", "symbol": "missing_owner", "depth": 2}
+    assert missing_impact["data"]["query_status"] == "not_found"
+    assert missing_impact["data"]["result"]["query"] == expected_selector
+    assert missing_impact["data"]["result_receipt"]["request"] == {
+        "kind": "graph_query",
+        "selector": expected_selector,
+    }
 
     assert main(["graph", "query", "--file", "missing/app.py", "--json"]) == 0
     same_name = json.loads(capsys.readouterr().out)

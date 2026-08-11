@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from .code_index import CodeIndexEntry
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_markdown_text, chunk_text_source, sha256_text
-from .context_model import ContextSectionKind, ContextSourceRef
+from .context_model import CONTEXT_SOURCE_KIND_VALUES, LEXICAL_CONTEXT_SOURCE_KIND_VALUES, ContextSectionKind, ContextSourceKind, ContextSourceRef
 from .context_retrieval import (
     AUTO_RETRIEVAL_LANE_LIMITS,
     FTS_FIELD_WEIGHTS,
@@ -31,8 +32,13 @@ from .tasks import CompletionReceiptCollection, Problem
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
-EVIDENCE_INDEX_SCHEMA_VERSION = 5
+EVIDENCE_INDEX_SCHEMA_VERSION = 7
 STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
+
+
+class EvidenceRetrievalChannel(StrEnum):
+    FTS = "fts"
+    EXACT_IDENTITY = "exact_identity"
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,8 @@ class _SourceChunkRange:
     line_end: int
     section_kind: ContextSectionKind
     source_fact_id: str = ""
+    provider: str = ""
+    provider_symbol_id: str = ""
 
 
 def _evidence_index_schema_is_current(metadata: dict[str, Any]) -> bool:
@@ -92,6 +100,8 @@ def _initialize(connection: sqlite3.Connection) -> None:
             line_start INTEGER NOT NULL,
             line_end INTEGER NOT NULL,
             source_fact_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_symbol_id TEXT NOT NULL,
             content_sha256 TEXT NOT NULL,
             body TEXT NOT NULL,
             title TEXT NOT NULL,
@@ -159,6 +169,8 @@ def _source_key(chunk: DocumentChunk) -> str:
             "line_start": chunk.source_ref.line_start,
             "line_end": chunk.source_ref.line_end,
             "source_fact_id": chunk.source_ref.source_fact_id,
+            "provider": chunk.source_ref.provider,
+            "provider_symbol_id": chunk.source_ref.provider_symbol_id,
         }
     )
 
@@ -168,8 +180,9 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
         """
         INSERT INTO chunks(
             source_key, kind, path, section, section_kind, line_start, line_end,
-            source_fact_id, content_sha256, body, title, file_fingerprint
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            source_fact_id, provider, provider_symbol_id, content_sha256, body,
+            title, file_fingerprint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_key) DO UPDATE SET
             kind=excluded.kind,
             path=excluded.path,
@@ -178,6 +191,8 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
             line_start=excluded.line_start,
             line_end=excluded.line_end,
             source_fact_id=excluded.source_fact_id,
+            provider=excluded.provider,
+            provider_symbol_id=excluded.provider_symbol_id,
             content_sha256=excluded.content_sha256,
             body=excluded.body,
             title=excluded.title,
@@ -193,6 +208,8 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
                 chunk.source_ref.line_start,
                 chunk.source_ref.line_end,
                 chunk.source_ref.source_fact_id,
+                chunk.source_ref.provider,
+                chunk.source_ref.provider_symbol_id,
                 chunk.source_ref.content_sha256,
                 chunk.text,
                 chunk.title,
@@ -297,15 +314,28 @@ def _source_ranges(snapshot: GraphSnapshot, path: str) -> list[_SourceChunkRange
         anchor = nodes.get(anchor_ids.get(symbol_id, ""))
         if symbol is None or anchor is None:
             continue
-        provider = symbol.facts.get("provider") if isinstance(symbol.facts.get("provider"), dict) else {}
-        section = str(provider.get("qualified_name") or provider.get("name") or "symbol")
+        provider_facts = symbol.facts.get("provider") if isinstance(symbol.facts.get("provider"), dict) else {}
+        if provider_facts.get("kind") == "module":
+            continue
+        section = str(provider_facts.get("qualified_name") or provider_facts.get("name") or "symbol")
+        provider = str(symbol.identity.get("provider") or "")
+        provider_symbol_id = str(symbol.identity.get("provider_symbol_id") or "")
         try:
             start = int(anchor.identity.get("start_line") or 0)
             end = int(anchor.identity.get("end_line") or 0)
         except (TypeError, ValueError):
             continue
-        if start > 0 and end >= start:
-            ranges.append(_SourceChunkRange(section, start, end, ContextSectionKind.PROVIDER_SYMBOL))
+        if start > 0 and end >= start and provider and provider_symbol_id:
+            ranges.append(
+                _SourceChunkRange(
+                    section,
+                    start,
+                    end,
+                    ContextSectionKind.PROVIDER_SYMBOL,
+                    provider=provider,
+                    provider_symbol_id=provider_symbol_id,
+                )
+            )
     file_node = next(
         (
             node
@@ -351,26 +381,26 @@ def _source_ranges(snapshot: GraphSnapshot, path: str) -> list[_SourceChunkRange
 
 
 def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot) -> tuple[list[DocumentChunk], Problem | None]:
+    kind = context_source_kind(entry.path, entry.classification)
+    if not kind:
+        return [], None
     path = root / entry.workspace_path
     try:
         if path.stat().st_size > MAX_CONTEXT_SOURCE_BYTES:
             return [], Problem(
                 "warning",
-                "context_current_source_too_large",
-                f"current source exceeds {MAX_CONTEXT_SOURCE_BYTES} byte indexing limit",
+                "context_source_too_large",
+                f"{kind.value} exceeds {MAX_CONTEXT_SOURCE_BYTES} byte indexing limit",
                 entry.workspace_path,
             )
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return [], None
     except OSError as exc:
-        return [], Problem("warning", "context_current_source_unreadable", str(exc), entry.workspace_path)
+        return [], Problem("warning", "context_source_unreadable", str(exc), entry.workspace_path)
     if not text.strip():
         return [], None
-    kind = context_source_kind(entry.path, entry.classification)
-    if not kind:
-        return [], None
-    if kind == "config":
+    if kind == ContextSourceKind.CONFIG:
         return [
             chunk_text_source(
                 root,
@@ -379,6 +409,17 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
                 kind="config",
                 section=entry.path,
                 section_kind=ContextSectionKind.CONFIG,
+            )
+        ], None
+    if kind == ContextSourceKind.STRUCTURED_DATA:
+        return [
+            chunk_text_source(
+                root,
+                entry.workspace_path,
+                text,
+                kind=ContextSourceKind.STRUCTURED_DATA.value,
+                section=entry.path,
+                section_kind=ContextSectionKind.STRUCTURED_DATA,
             )
         ], None
     lines = text.splitlines()
@@ -418,6 +459,8 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
                     line_start=bounded_start,
                     line_end=bounded_end,
                     source_fact_id=source_range.source_fact_id,
+                    provider=source_range.provider,
+                    provider_symbol_id=source_range.provider_symbol_id,
                     content_sha256=digest,
                 ),
                 text=body,
@@ -447,7 +490,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
 def _source_manifest(connection: sqlite3.Connection, kinds: set[str]) -> str:
     placeholders = ",".join("?" for _ in kinds)
     rows = connection.execute(
-        f"SELECT kind, path, section, section_kind, line_start, line_end, source_fact_id, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end, source_fact_id",
+        f"SELECT kind, path, section, section_kind, line_start, line_end, source_fact_id, provider, provider_symbol_id, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end, source_fact_id, provider, provider_symbol_id",
         tuple(sorted(kinds)),
     ).fetchall()
     return digest_data([dict(row) for row in rows])
@@ -520,9 +563,14 @@ def materialize_evidence_index(
 
             entries_by_path = {entry.path: entry for entry in entries}
             update_paths = set(entries_by_path) if rebuild else set(changed_paths)
+            source_kind_values = tuple(sorted(CONTEXT_SOURCE_KIND_VALUES))
+            source_kind_placeholders = ",".join("?" for _ in source_kind_values)
             for repo_path in sorted(update_paths):
                 workspace_path = f"{target.display_path.rstrip('/')}/{repo_path}"
-                connection.execute("DELETE FROM chunks WHERE path = ? AND kind IN ('current_source', 'config')", (workspace_path,))
+                connection.execute(
+                    f"DELETE FROM chunks WHERE path = ? AND kind IN ({source_kind_placeholders})",
+                    (workspace_path, *source_kind_values),
+                )
                 entry = entries_by_path.get(repo_path)
                 if (
                     entry is None
@@ -550,7 +598,7 @@ def materialize_evidence_index(
                 "source_path_counts": source_path_counts,
                 "document_manifest_digest": _source_manifest(connection, {"document", "product_manifest", "verification_hint"}),
                 "receipt_manifest_digest": _source_manifest(connection, {"completion_receipt", "task_artifact"}),
-                "current_source_manifest_digest": _source_manifest(connection, {"current_source", "config"}),
+                "current_source_manifest_digest": _source_manifest(connection, CONTEXT_SOURCE_KIND_VALUES),
                 "problems": [
                     problem.to_dict()
                     for problem in problems
@@ -621,9 +669,20 @@ def evidence_index_binding_problems(
     return []
 
 
-def _row_chunk(row: sqlite3.Row, *, repository_path: str) -> DocumentChunk:
+def _row_chunk(
+    row: sqlite3.Row,
+    *,
+    repository_path: str,
+    corpus_fts_rank: int = 0,
+) -> DocumentChunk:
     kind = str(row["kind"])
     path = str(row["path"])
+    row_keys = set(row.keys())
+    corpus_fts_score = (
+        -float(row["rank"])
+        if "rank" in row_keys and row["rank"] is not None
+        else None
+    )
     return DocumentChunk(
         source_ref=ContextSourceRef(
             kind=kind,
@@ -633,6 +692,8 @@ def _row_chunk(row: sqlite3.Row, *, repository_path: str) -> DocumentChunk:
             line_start=int(row["line_start"]),
             line_end=int(row["line_end"]),
             source_fact_id=str(row["source_fact_id"]),
+            provider=str(row["provider"]),
+            provider_symbol_id=str(row["provider_symbol_id"]),
             content_sha256=str(row["content_sha256"]),
         ),
         text=str(row["body"]),
@@ -642,18 +703,42 @@ def _row_chunk(row: sqlite3.Row, *, repository_path: str) -> DocumentChunk:
             path=path,
             repository_path=repository_path,
         ),
+        corpus_fts_score=corpus_fts_score,
+        corpus_fts_rank=corpus_fts_rank if corpus_fts_score is not None else 0,
     )
 
 
-def _retrieval_filter(mode: str, target: RepoTarget) -> tuple[str, list[Any]]:
+def _retrieval_filter(
+    mode: str,
+    target: RepoTarget,
+    *,
+    channel: EvidenceRetrievalChannel,
+) -> tuple[str, list[Any]]:
     prefix = f"{target.display_path.rstrip('/')}/%"
+    source_kinds = (
+        LEXICAL_CONTEXT_SOURCE_KIND_VALUES
+        if channel is EvidenceRetrievalChannel.FTS
+        else CONTEXT_SOURCE_KIND_VALUES
+    )
     if mode == "auto":
-        return "1 = 1", []
+        if channel is EvidenceRetrievalChannel.EXACT_IDENTITY:
+            return "1 = 1", []
+        exact_only_kinds = sorted(CONTEXT_SOURCE_KIND_VALUES - LEXICAL_CONTEXT_SOURCE_KIND_VALUES)
+        placeholders = ",".join("?" for _ in exact_only_kinds)
+        return f"c.kind NOT IN ({placeholders})", exact_only_kinds
     if mode in {"code_location", "call_impact", "file_impact"}:
-        return "c.path LIKE ? AND c.kind IN ('current_source', 'config', 'product_manifest', 'verification_hint')", [prefix]
+        allowed_kinds = (*sorted(source_kinds), "product_manifest", "verification_hint")
+        placeholders = ",".join("?" for _ in allowed_kinds)
+        return f"c.path LIKE ? AND c.kind IN ({placeholders})", [prefix, *allowed_kinds]
     if mode in {"past_decision", "failure_mode"}:
-        return "1 = 1", []
-    return "c.kind NOT IN ('completion_receipt', 'task_artifact')", []
+        base_sql, base_params = "1 = 1", []
+    else:
+        base_sql, base_params = "c.kind NOT IN ('completion_receipt', 'task_artifact')", []
+    if channel is EvidenceRetrievalChannel.EXACT_IDENTITY:
+        return base_sql, base_params
+    exact_only_kinds = sorted(CONTEXT_SOURCE_KIND_VALUES - LEXICAL_CONTEXT_SOURCE_KIND_VALUES)
+    placeholders = ",".join("?" for _ in exact_only_kinds)
+    return f"({base_sql}) AND c.kind NOT IN ({placeholders})", [*base_params, *exact_only_kinds]
 
 
 def query_evidence_index(
@@ -666,6 +751,8 @@ def query_evidence_index(
     graph_input_digest: str = "",
     limit: int = 24,
     database_path: Path | None = None,
+    overlay_chunks: list[DocumentChunk] | None = None,
+    replaced_paths: set[str] | None = None,
 ) -> tuple[list[DocumentChunk], dict[str, Any], list[Problem]]:
     metadata, problems = load_evidence_index_metadata(root, target=target, database_path=database_path)
     if problems:
@@ -687,34 +774,71 @@ def query_evidence_index(
         return [], metadata, []
     path = _database_path(root, target, database_path)
     connection = _connect(path, read_only=True)
+    effective_connection: sqlite3.Connection | None = None
     try:
-        if not isinstance(metadata.get("source_path_counts"), dict):
-            metadata = {**metadata, "source_path_counts": _source_path_counts(connection)}
-        filter_sql, filter_params = _retrieval_filter(mode, target)
+        query_connection = connection
+        replacement_paths = {str(value) for value in (replaced_paths or set()) if str(value)}
+        current_overlays = list(overlay_chunks or [])
+        if replacement_paths or current_overlays:
+            effective_connection = sqlite3.connect(":memory:")
+            effective_connection.row_factory = sqlite3.Row
+            connection.backup(effective_connection)
+            with effective_connection:
+                if replacement_paths:
+                    placeholders = ",".join("?" for _value in replacement_paths)
+                    effective_connection.execute(
+                        f"DELETE FROM chunks WHERE path IN ({placeholders})",
+                        tuple(sorted(replacement_paths)),
+                    )
+                _insert_chunks(effective_connection, current_overlays)
+            query_connection = effective_connection
+        if not isinstance(metadata.get("source_path_counts"), dict) or effective_connection is not None:
+            metadata = {**metadata, "source_path_counts": _source_path_counts(query_connection)}
+        fts_filter_sql, fts_filter_params = _retrieval_filter(
+            mode,
+            target,
+            channel=EvidenceRetrievalChannel.FTS,
+        )
+        exact_filter_sql, exact_filter_params = _retrieval_filter(
+            mode,
+            target,
+            channel=EvidenceRetrievalChannel.EXACT_IDENTITY,
+        )
         fts_rows = _path_diverse_fts_rows(
-            connection,
+            query_connection,
             terms=terms,
-            filter_sql=filter_sql,
-            filter_params=filter_params,
+            filter_sql=fts_filter_sql,
+            filter_params=fts_filter_params,
             limit=limit,
             mode=mode,
             repository_path=target.display_path,
         )
         exact_rows = _exact_identity_rows(
-            connection,
+            query_connection,
             selectors=selectors,
-            filter_sql=filter_sql,
-            filter_params=filter_params,
+            filter_sql=exact_filter_sql,
+            filter_params=exact_filter_params,
             limit=limit,
         )
-        rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in [*fts_rows, *exact_rows]}
+        rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in exact_rows}
+        fts_ranks: dict[int, int] = {}
+        for rank, row in enumerate(fts_rows, start=1):
+            row_id = int(row["id"])
+            rows[row_id] = row
+            fts_ranks[row_id] = rank
         return [
-            _row_chunk(row, repository_path=target.display_path)
-            for _row_id, row in sorted(rows.items())
+            _row_chunk(
+                row,
+                repository_path=target.display_path,
+                corpus_fts_rank=fts_ranks.get(row_id, 0),
+            )
+            for row_id, row in sorted(rows.items())
         ], metadata, []
     except (sqlite3.Error, ValueError) as exc:
         return [], metadata, [Problem("error", "evidence_index_query_failed", str(exc), _path_label(root, path))]
     finally:
+        if effective_connection is not None:
+            effective_connection.close()
         connection.close()
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_markdown_text, chunk_text_source
-from .context_model import ContextSectionKind
+from .context_model import ContextSectionKind, ContextSourceKind
 from .git import normalize_repo_path
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints, is_context_source_language, language_for_path, product_manifest_patterns
@@ -36,9 +36,11 @@ CONFIG_SUFFIXES = {
     ".conf",
     ".env",
     ".ini",
+    ".properties",
+}
+STRUCTURED_DATA_SUFFIXES = {
     ".json",
     ".jsonc",
-    ".properties",
     ".toml",
     ".xml",
     ".yaml",
@@ -56,25 +58,30 @@ CONFIG_NAMES = {
 CONFIG_DOTFILE_EXCLUDES = {".ds_store", ".git", ".gitkeep"}
 
 
-def context_source_kind(repo_path: str, classification: str) -> str:
+def context_source_kind(repo_path: str, classification: str) -> ContextSourceKind | None:
     if (
         not repo_path
         or "\\" in repo_path
         or normalize_repo_path(repo_path) != repo_path
         or classification == "excluded"
     ):
-        return ""
-    if is_context_source_language(language_for_path(repo_path)):
-        return "current_source"
+        return None
+    language = language_for_path(repo_path)
+    if is_context_source_language(language):
+        return ContextSourceKind.CURRENT_SOURCE
+    if language == "markdown":
+        return None
     path = Path(repo_path)
     name = path.name.casefold()
     suffix = path.suffix.casefold()
     is_workflow = len(path.parts) >= 3 and tuple(part.casefold() for part in path.parts[:2]) == (".github", "workflows")
     is_dockerfile = name == "dockerfile" or name.startswith("dockerfile.")
     is_config_dotfile = name.startswith(".") and name not in CONFIG_DOTFILE_EXCLUDES
-    if name in CONFIG_NAMES or suffix in CONFIG_SUFFIXES or is_workflow or is_dockerfile or is_config_dotfile:
-        return "config"
-    return ""
+    if name in CONFIG_NAMES or name in CONFIG_SUFFIXES or suffix in CONFIG_SUFFIXES or is_workflow or is_dockerfile or is_config_dotfile:
+        return ContextSourceKind.CONFIG
+    if suffix in STRUCTURED_DATA_SUFFIXES:
+        return ContextSourceKind.STRUCTURED_DATA
+    return None
 
 
 def collect_context_sources(
@@ -182,7 +189,8 @@ def collect_context_sources(
 
     graph_context_problems = context_graph_problems(
         [problem for problem in graph_problems if problem.code != "invalid_completion_receipt"]
-        + invalid_receipt_problems
+        + invalid_receipt_problems,
+        graph_available=snapshot is not None,
     )
     problems.extend(graph_context_problems)
     inventory, inventory_problems, _inventory_meta = meta_inventory(
@@ -246,8 +254,8 @@ def _current_source_chunks_from_records(
                 problems.append(
                     Problem(
                         "warning",
-                        "context_current_source_too_large",
-                        f"current source exceeds {MAX_CONTEXT_SOURCE_BYTES} byte indexing limit",
+                        "context_source_too_large",
+                        f"{kind.value} exceeds {MAX_CONTEXT_SOURCE_BYTES} byte indexing limit",
                         workspace_path,
                     )
                 )
@@ -256,7 +264,7 @@ def _current_source_chunks_from_records(
         except UnicodeDecodeError:
             continue
         except OSError as exc:
-            problems.append(Problem("warning", "context_current_source_unreadable", str(exc), workspace_path))
+            problems.append(Problem("warning", "context_source_unreadable", str(exc), workspace_path))
             continue
         if not text.strip():
             continue
@@ -265,9 +273,15 @@ def _current_source_chunks_from_records(
                 root,
                 workspace_path,
                 text,
-                kind=kind,
+                kind=kind.value,
                 section=repo_path or path.name,
-                section_kind=ContextSectionKind.CONFIG if kind == "config" else ContextSectionKind.FILE,
+                section_kind=(
+                    ContextSectionKind.CONFIG
+                    if kind == ContextSourceKind.CONFIG
+                    else ContextSectionKind.STRUCTURED_DATA
+                    if kind == ContextSourceKind.STRUCTURED_DATA
+                    else ContextSectionKind.FILE
+                ),
             )
         )
     return chunks, problems
@@ -414,7 +428,11 @@ def context_product_manifest_paths(root: Path, *, target: RepoTarget) -> list[Pa
     return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
 
 
-def context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:
+def context_graph_problems(
+    graph_problems: list[Problem],
+    *,
+    graph_available: bool = False,
+) -> list[Problem]:
     mapped: list[Problem] = []
     for problem in graph_problems:
         if problem.code == "invalid_completion_receipt":
@@ -427,6 +445,8 @@ def context_graph_problems(graph_problems: list[Problem]) -> list[Problem]:
                     problem.code,
                 )
             )
+        elif graph_available:
+            mapped.append(problem)
         else:
             mapped.append(
                 Problem(

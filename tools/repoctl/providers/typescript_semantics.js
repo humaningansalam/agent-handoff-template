@@ -278,6 +278,38 @@ function main() {
       return descriptor;
     }
 
+    function moduleDescriptorFor(sourceFile, relativePath) {
+      if (descriptorByDeclaration.has(sourceFile)) {
+        return descriptorByDeclaration.get(sourceFile);
+      }
+      const anchor = sourceAnchor(sourceFile, sourceFile, relativePath);
+      const providerSymbolId = [
+        "typescript_compiler",
+        relativePath,
+        "module",
+        anchor.start_line,
+        anchor.start_col,
+        anchor.end_line,
+        anchor.end_col,
+      ].join(":");
+      const descriptor = {
+        path: relativePath,
+        provider: "typescript_compiler",
+        provider_symbol_id: providerSymbolId,
+        language: /\.[cm]?tsx?$/.test(relativePath) ? "typescript" : "javascript",
+        kind: "module",
+        name: relativePath,
+        qualified_name: relativePath,
+        anchor,
+        declaration: sourceFile,
+        module_scope: true,
+      };
+      descriptorByDeclaration.set(sourceFile, descriptor);
+      groupDescriptors.set(providerSymbolId, descriptor);
+      symbols.set(providerSymbolId, descriptor);
+      return descriptor;
+    }
+
     function declarationsForSymbol(rawSymbol) {
       let symbol = rawSymbol;
       if (symbol && (symbol.flags & ts.SymbolFlags.Alias)) {
@@ -313,10 +345,14 @@ function main() {
     function collectCalls(caller) {
       const declaration = caller.declaration;
       const sourceFile = declaration.getSourceFile();
-      const body = declaration.body;
+      const body = caller.module_scope ? declaration : declaration.body;
       if (!body) return;
       function visit(node) {
-        if (node !== body && ts.isFunctionLike(node)) return;
+        if (
+          node !== body
+          && isCallableDeclaration(ts, node)
+          && isSupportedDeclaration(ts, node)
+        ) return;
         if (ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node) || ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
           const callee = targetForCall(node);
           if (callee && callee.provider_symbol_id !== caller.provider_symbol_id) {
@@ -357,6 +393,7 @@ function main() {
         continue;
       }
       analyzedPaths.add(relativePath);
+      moduleDescriptorFor(sourceFile, relativePath);
       function collect(node) {
         if (isSupportedDeclaration(ts, node)) descriptorFor(node);
         ts.forEachChild(node, collect);
@@ -365,7 +402,10 @@ function main() {
     }
 
     for (const descriptor of groupDescriptors.values()) {
-      if (analyzedPaths.has(descriptor.path) && isCallableDeclaration(ts, descriptor.declaration)) {
+      if (
+        analyzedPaths.has(descriptor.path)
+        && (descriptor.module_scope || isCallableDeclaration(ts, descriptor.declaration))
+      ) {
         collectCalls(descriptor);
       }
     }
@@ -381,10 +421,10 @@ function main() {
     referencedSymbolIds.add(value.callee_provider_symbol_id);
   }
   const retainedSymbols = [...symbols.values()].filter(
-    (value) => analyzedPaths.has(value.path) || referencedSymbolIds.has(value.provider_symbol_id),
+    (value) => !value.module_scope || referencedSymbolIds.has(value.provider_symbol_id),
   );
   const retainedSymbolIds = new Set(retainedSymbols.map((value) => value.provider_symbol_id));
-  const publicSymbols = retainedSymbols.map(({ declaration, ...value }) => value);
+  const publicSymbols = retainedSymbols.map(({ declaration, module_scope, ...value }) => value);
   publicSymbols.sort((a, b) => a.provider_symbol_id.localeCompare(b.provider_symbol_id));
   const publicCalls = [...calls.values()].filter(
     (value) => retainedSymbolIds.has(value.caller_provider_symbol_id) && retainedSymbolIds.has(value.callee_provider_symbol_id),

@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
-from tools.repoctl.context_task_pack import render_task_context_pack_markdown
+from tools.repoctl.context_task_pack import compact_task_context_pack, render_task_context_pack_markdown
 from tools.repoctl.graph_model import digest_data
 from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.repositories import require_repo_target
+from tools.repoctl.result_receipts import ResultProducer, result_receipt_path
 from tests.repoctl.context_test_helpers import (
     _setup_context_workspace,
+    _setup_context_multirepo_workspace,
     _write_context_pack_task,
 )
 
@@ -39,7 +41,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     data = payload["data"]
     assert artifact == payload
     assert payload["command"] == "context pack"
-    assert data["schema_version"] == 3
+    assert data["schema_version"] == 4
     assert data["authoritative"] is False
     assert data["view"] == "compact"
     assert data["pack_digest"].startswith("sha256:")
@@ -48,7 +50,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
         "pack_digest": data["pack_digest"],
     }
     assert data["stage"] == "scoped"
-    assert data["seed"]["source"] == "discovery_query_history_only"
+    assert data["seed"]["source"] == "current_discovery_episode"
     assert data["input_digest"].startswith("sha256:")
     assert data["render_projection"] == "full"
     assert data["stop_reason"] in {"required_evidence_satisfied", "budget_reached"}
@@ -77,10 +79,35 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     assert binding["data"]["resume_guidance"]["context_pack"]["status"] == "current"
 
 
+def test_context_pack_rejects_task_repository_mismatch_before_evidence_collection(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_context_multirepo_workspace(tmp_path, monkeypatch)
+    task_id = "T-20260622010102Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="repository-mismatch",
+        title="Keep Context Pack in its task repository",
+        query="repository owner",
+        goal="Reject a target repository other than the task repository.",
+    )
+    task_path = next((tmp_path / "docs/tasks").glob(f"{task_id}--*.md"))
+    task_path.write_text(task_path.read_text(encoding="utf-8").replace('repo_id: "main"', 'repo_id: "web"'), encoding="utf-8")
+    monkeypatch.setattr(
+        "tools.repoctl.context_task_pack.load_materialized_graph",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("repository evidence collection started")),
+    )
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "api", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "context_pack_repo_mismatch"
+    assert payload["problems"][0]["path"] == f"docs/tasks/{task_id}--repository-mismatch.md"
+
+
 def test_context_pack_keeps_chosen_and_supporting_sets_disjoint(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
-    (repo / "b.py").write_text("def beta():\n    return 2\n", encoding="utf-8")
+    (repo / "evidence.csv").write_text("name,value\nbeta,2\n", encoding="utf-8")
     task_id = "T-20260622010121Z"
     _write_context_pack_task(
         tmp_path,
@@ -96,7 +123,7 @@ def test_context_pack_keeps_chosen_and_supporting_sets_disjoint(tmp_path: Path, 
     task_path.write_text(
         task_path.read_text(encoding="utf-8").replace(
             "- Candidate files reviewed: `repos/a.py`",
-            "- Candidate files reviewed:\n  - `repos/a.py`\n  - `repos/b.py`",
+            "- Candidate files reviewed:\n  - `repos/a.py`\n  - `repos/evidence.csv`",
         ),
         encoding="utf-8",
     )
@@ -107,13 +134,99 @@ def test_context_pack_keeps_chosen_and_supporting_sets_disjoint(tmp_path: Path, 
     edit = {item["source_ref"]["path"] for item in groups["edit_candidates"]}
     supporting = {item["source_ref"]["path"] for item in groups["supporting_evidence"]}
     assert edit == {"repos/a.py"}
-    assert supporting == {"repos/b.py"}
+    assert supporting == {"repos/evidence.csv"}
     assert edit.isdisjoint(supporting)
+
+
+def test_context_pack_uses_only_current_discovery_episode_and_does_not_revalidate_recorded_receipts(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "stable.py").write_text("def stable_scope():\n    return True\n", encoding="utf-8")
+    (repo / "old.py").write_text("def old_owner():\n    return True\n", encoding="utf-8")
+    (repo / "new.py").write_text("def new_owner():\n    return True\n", encoding="utf-8")
+    task_id = "T-20260622010123Z"
+    _write_context_pack_task(
+        tmp_path,
+        task_id=task_id,
+        slug="current-discovery-episode",
+        title="Use the current discovery episode",
+        query="old_owner",
+        goal="Keep only current discovery evidence in the Task Pack.",
+        reviewed="repos/old.py",
+        chosen="repos/stable.py",
+    )
+
+    assert main(["context", "query", "old_owner", "--repo-id", "main", "--json"]) == 0
+    old_receipt = json.loads(capsys.readouterr().out)["data"]["result_receipt"]
+    old_selection = next(item for item in old_receipt["selectable"] if item == {"authority": "source", "ref": "repos/old.py"})
+    assert main(
+        [
+            "task", "discovery", "add", task_id,
+            "--note", "old episode note",
+            "--result-producer", old_receipt["producer"],
+            "--result-id", old_receipt["result_id"],
+            "--result-authority", old_selection["authority"],
+            "--result-ref", old_selection["ref"],
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert main(["context", "query", "new_owner", "--repo-id", "main", "--json"]) == 0
+    new_receipt = json.loads(capsys.readouterr().out)["data"]["result_receipt"]
+    new_selection = next(item for item in new_receipt["selectable"] if item == {"authority": "source", "ref": "repos/new.py"})
+    assert main(
+        [
+            "task", "discovery", "add", task_id,
+            "--reviewed", "repos/new.py",
+            "--note", "new episode note",
+            "--result-producer", new_receipt["producer"],
+            "--result-id", new_receipt["result_id"],
+            "--result-authority", new_selection["authority"],
+            "--result-ref", new_selection["ref"],
+            "--full", "--json",
+        ]
+    ) == 0
+    discovery = json.loads(capsys.readouterr().out)["data"]["discovery"]
+    assert discovery["candidate_query_history"] == ["new_owner"]
+    assert discovery["candidate_files_reviewed"] == ["repos/new.py"]
+    assert discovery["chosen_files"] == ["repos/stable.py"]
+    assert discovery["notes"] == ["new episode note"]
+    assert discovery["selected_result_evidence"] == [
+        {
+            "schema_version": 2,
+            "producer": "context",
+            "result_id": new_receipt["result_id"],
+            "episode_id": discovery["selected_result_evidence"][0]["episode_id"],
+            "request": new_receipt["request"],
+            "authority": "source",
+            "ref": "repos/new.py",
+        }
+    ]
+
+    target = require_repo_target(tmp_path, repo_id="main")
+    result_receipt_path(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=new_receipt["result_id"],
+    ).unlink()
+
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--full", "--json"]) == 0
+    pack = json.loads(capsys.readouterr().out)["data"]
+    assert pack["seed"]["query"] == "new_owner"
+    assert pack["seed"]["notes"] == ["new episode note"]
+    assert pack["seed"]["selected_result_evidence"] == discovery["selected_result_evidence"]
+    assert "old_owner" not in json.dumps(pack["seed"], sort_keys=True)
+    edit_paths = {item["source_ref"]["path"] for item in pack["groups"]["edit_candidates"]}
+    support_paths = {item["source_ref"]["path"] for item in pack["groups"]["supporting_evidence"]}
+    assert edit_paths == {"repos/stable.py"}
+    assert support_paths == {"repos/new.py"}
 
 
 def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
-    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (repo / "app.py").write_text("def execute():\n    return 'invoice settlement owner'\n", encoding="utf-8")
+    _materialize(tmp_path)
     context_docs = []
     for index in range(14):
         rel = f"docs/contracts/required-{index}.md"
@@ -125,7 +238,7 @@ def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path
         task_id=task_id,
         slug="required-budget",
         title="Preserve required evidence",
-        query="run",
+        query="invoice settlement owner",
         goal="Keep all required startup evidence visible.",
         context_doc=context_docs[0],
     )
@@ -155,18 +268,25 @@ def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path
     assert data["stop_reason"] == "budget_reached"
     assert data["budget"]["final_render_estimated_tokens"] <= data["budget"]["maximum_estimated_tokens"]
     rendered = render_task_context_pack_markdown(data)
+    assert {item["path"] for item in data["seed"]["graph_seed_refs"]} == {"app.py"}
+    assert data["seed"]["graph_seed_refs"][0]["provenance"] == "lexical_file"
+    assert "## Graph Seed Identities" in rendered
+    assert "Rank 1: `app.py`; provenance `lexical_file`; strength" in rendered
+    assert "Graph seeds are ranked traversal evidence only; they do not define edit scope or authority." in rendered
+    assert "Open every source in the required sections below directly" in rendered
     assert all(path in rendered for path in context_docs)
     assert "AGENTS.md" in rendered
     assert f"docs/tasks/{task_id}--required-budget.md" in rendered
     assert "repos/app.py" in rendered
-    assert "details and digests remain in full JSON" in rendered
+    assert "full evidence and digests remain in JSON" in rendered
 
     exact_budget = data["budget"]["final_render_estimated_tokens"]
-    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", str(exact_budget), "--full", "--json"]) == 0
+    assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", str(exact_budget), "--json"]) == 0
     exact = json.loads(capsys.readouterr().out)["data"]
     assert exact["render_projection"] == "required_reference_manifest"
     assert exact["stop_reason"] == "budget_reached"
     assert exact["budget"]["final_render_estimated_tokens"] <= exact_budget
+    assert exact["seed"]["graph_seed_refs"] == data["seed"]["graph_seed_refs"]
 
     output = tmp_path / ".repoctl-state/context-pack/reference-compact.json"
     assert main(
@@ -259,6 +379,54 @@ def test_context_pack_compact_filters_noisy_graph_items(tmp_path: Path, monkeypa
     assert payload["data"]["summary"]["read_first_count"] >= 1
     assert len(compact_text) < 24000
     assert any(warning["code"] == "context_pack_graph_unavailable" for warning in payload["warnings"])
+
+
+def test_context_pack_compact_bounds_human_text_and_content_binds_request_preview() -> None:
+    long_text = "owner routing evidence " * 6000
+    request = {"kind": "context_query", "query": long_text.strip(), "mode": "auto"}
+    data = {
+        "schema": "repoctl.context.task_pack",
+        "schema_version": 4,
+        "authoritative": False,
+        "stage": "scoped",
+        "render_projection": "full",
+        "input_digest": digest_data({"input": long_text}),
+        "stop_reason": "required_evidence_satisfied",
+        "budget": {"maximum_estimated_tokens": 1500, "final_render_estimated_tokens": 900},
+        "task": {"id": "T-20260811010101Z", "repo_id": "main"},
+        "seed": {
+            "source": "current_discovery_episode",
+            "query": long_text,
+            "notes": [long_text],
+            "selected_result_evidence": [
+                {
+                    "schema_version": 2,
+                    "producer": "context",
+                    "result_id": digest_data({"result": long_text}),
+                    "episode_id": digest_data({"episode": long_text}),
+                    "request": request,
+                    "authority": "source",
+                    "ref": "repos/src/owner.py",
+                }
+            ],
+            "graph_seed_refs": [],
+            "used_sections": ["Discovery"],
+        },
+        "groups": {},
+        "metrics": {"requested_tokens": 1500, "estimated_tokens": 900},
+        "warnings": [],
+        "pack_digest": digest_data({"pack": long_text}),
+    }
+
+    compact = compact_task_context_pack(data)
+
+    assert len(compact["seed"]["query_preview"]) <= 240
+    assert len(compact["seed"]["notes"][0]) <= 320
+    selected = compact["seed"]["selected_result_evidence"][0]
+    assert selected["request_preview"]["query"].endswith("...")
+    assert selected["request_digest"] == digest_data(request)
+    assert "request" not in selected
+    assert len(json.dumps(compact, ensure_ascii=False)) < 12000
 
 
 def test_context_pack_uses_startup_fallback_without_discovery(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -866,7 +1034,7 @@ def test_required_reference_manifest_markdown_has_verifiable_envelope_and_binds(
     assert first_line.startswith(prefix) and first_line.endswith(" -->")
     envelope = json.loads(first_line[len(prefix) : -4])
     assert envelope["schema"] == "repoctl.context.task_pack.markdown_envelope"
-    assert envelope["task_pack_schema_version"] == 3
+    assert envelope["task_pack_schema_version"] == 4
     assert envelope["task_id"] == task_id
     assert envelope["repo_id"] == "main"
     assert set(envelope) == {
@@ -879,7 +1047,8 @@ def test_required_reference_manifest_markdown_has_verifiable_envelope_and_binds(
         "body_sha256",
     }
     assert len(first_line) < 600
-    assert "details and digests remain in full JSON" in text
+    assert "Open every source in the required sections below directly" in text
+    assert "full evidence and digests remain in JSON" in text
 
     assert main(["task", "handoff", "bind", task_id, "--context-pack", output.as_posix(), "--json"]) == 0
     binding = json.loads(capsys.readouterr().out)

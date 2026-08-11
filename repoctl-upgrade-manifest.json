@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -136,6 +136,7 @@
     "tests/repoctl/task_lifecycle_helpers.py",
     "tests/repoctl/test_cli_discoverability.py",
     "tests/repoctl/test_code_index.py",
+    "tests/repoctl/test_result_receipts.py",
     "tests/repoctl/test_upgrade.py",
     "tests/repoctl/workspace/__init__.py",
     "tests/repoctl/workspace/test_backlog.py",
@@ -208,6 +209,7 @@
     "tools/repoctl/path_roles.py",
     "tools/repoctl/release.py",
     "tools/repoctl/repositories.py",
+    "tools/repoctl/result_receipts.py",
     "tools/repoctl/settings.py",
     "tools/repoctl/tasks.py",
     "tools/repoctl/upgrade.py",

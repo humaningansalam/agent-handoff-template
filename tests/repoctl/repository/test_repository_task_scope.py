@@ -35,10 +35,11 @@ def test_task_start_freezes_configured_repo_identity(tmp_path: Path, monkeypatch
     payload = json.loads(capsys.readouterr().out)
     state_path = tmp_path / "docs/tasks/.repoctl-state" / f"{payload['data']['task_id']}.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["schema_version"] == 3
+    assert state["schema_version"] == 4
     assert state["initial"]["repo_id"] == "web"
     assert state["initial"]["repo_path"] == "repos/web"
     assert state["initial"]["git_toplevel"] == web.resolve().as_posix()
+    assert state["initial"]["identity_source"] == "pinned"
 
 
 def test_task_start_blocks_when_registry_becomes_unready(tmp_path: Path, monkeypatch, capsys) -> None:

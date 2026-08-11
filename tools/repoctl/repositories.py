@@ -20,18 +20,27 @@ TASK_AREAS = frozenset({"", "repo", "backend", "frontend", "infra", "docs", "ops
 REPO_REQUIRED_TASK_AREAS = frozenset({"repo", "backend", "frontend", "infra", "mobile"})
 
 
+class RepositoryIdentitySource(StrEnum):
+    RESERVED = "reserved"
+    PINNED = "pinned"
+    UNBOUND = "unbound"
+
+
 @dataclass(frozen=True)
 class RepoTarget:
     id: str
     root_path: Path
     display_path: str
-    identity_source: str
+    identity_source: RepositoryIdentitySource
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "identity_source", RepositoryIdentitySource(self.identity_source))
 
     def to_dict(self) -> dict[str, str]:
         return {
             "id": self.id,
             "path": self.display_path,
-            "identity_source": self.identity_source,
+            "identity_source": self.identity_source.value,
         }
 
 

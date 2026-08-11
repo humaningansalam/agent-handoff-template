@@ -18,6 +18,8 @@ class DocumentChunk:
     text: str
     title: str
     document_role: DocumentRole = DocumentRole.UNSPECIFIED
+    corpus_fts_score: float | None = None
+    corpus_fts_rank: int = 0
 
 
 def sha256_text(text: str) -> str:

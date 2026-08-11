@@ -7,6 +7,8 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 - `task lifecycle` owns task frontmatter, Board membership, archive transitions, start baselines, finish gates, Handoff, Execution Log, Verification updates, and the compact machine-owned Handoff binding receipt.
 - `task lifecycle` also owns exact completion-receipt artifact resolution across live and archived task locations. Knowledge, Graph, Context, and llmwiki consume that typed identity result instead of guessing archive paths or rewriting immutable provenance.
 - `Context / Task Pack` owns canonical Pack input collection, source-identity projection, artifact rendering, and read-only Pack integrity/freshness inspection. It does not write Handoff or task lifecycle state.
+- `context_sources` owns the typed `current_source | config | structured_data` classification used by both live fallback and the persistent evidence index. Retrieval and compact projection consume that role; they must not reclassify paths with folder keywords or error-text heuristics.
+- `result receipts` own the canonical producer request, repository/result identity, compact selectable membership, and atomic idempotent regenerable cache. Discovery consumes this typed contract instead of reconstructing query provenance.
 - `backlog` owns opaque raw block CRUD only.
 - `meta` owns `.repometa` policy, annotations, exclusions, move repair, and metadata validation.
 - `index` owns read-only technical facts such as language, imports, symbols, calls, syntax-resolved structured file dependencies, and observed effect hints.

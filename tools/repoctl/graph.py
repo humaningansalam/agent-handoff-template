@@ -7,7 +7,7 @@ from typing import Any
 from .code_index import CodeIndexEntry, build_code_index, semantic_provider_entries
 from .git import normalize_repo_path
 from .graph_import_resolver import IMPORT_RESOLVER_LANGUAGES, resolve_code_imports
-from .graph_model import GraphContextAnchor, GraphContextAnchorKind, GraphEdge, GraphNode, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, change_event_id, digest_data, document_id, file_id, import_ref_id, knowledge_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
+from .graph_model import GRAPH_QUERY_SELECTOR_SCHEMAS, GraphContextAnchor, GraphContextAnchorKind, GraphContinuation, GraphEdge, GraphNode, GraphQuerySelectorKind, GraphSnapshot, ProviderCoverage, anchor_id, artifact_id, canonical_graph_query_selector, change_event_id, digest_data, document_id, file_id, import_ref_id, knowledge_id, repository_id, symbol_id, task_id as graph_task_id, topic_id
 from .graph_semantic_model import SemanticProviderResult
 from .graph_semantic_provider import build_semantic_providers
 from .graph_structured_relations import RpcResolutionOutcome, STRUCTURED_EDGE_KIND, build_structured_file_relations
@@ -617,7 +617,14 @@ def build_graph(
         (call for result in semantic_results for call in result.calls),
         key=lambda item: (item.provider, item.caller_provider_symbol_id, item.callee_provider_symbol_id, item.anchor.start_line, item.anchor.start_col),
     )
+    direct_test_import_pairs = {
+        (resolution.importer_path, resolution.target_path)
+        for resolution in import_resolutions
+        if is_test_path(resolution.importer_path)
+        and not is_test_path(resolution.target_path)
+    }
     precise_symbol_node_ids: dict[tuple[str, str], str] = {}
+    precise_symbol_paths: dict[tuple[str, str], str] = {}
     for precise_symbol in precise_symbols:
         file_node_id = file_id(repo_id, precise_symbol.path)
         if file_node_id not in nodes:
@@ -654,6 +661,7 @@ def build_graph(
         add_edge(GraphEdge("DEFINES", file_node_id, symbol_node_id, "resolved", precise_symbol.provider))
         add_edge(GraphEdge("ANCHORS", symbol_node_id, anchor_node_id, "resolved", precise_symbol.provider))
         precise_symbol_node_ids[(precise_symbol.provider, precise_symbol.provider_symbol_id)] = symbol_node_id
+        precise_symbol_paths[(precise_symbol.provider, precise_symbol.provider_symbol_id)] = precise_symbol.path
 
     for precise_call in precise_calls:
         caller_node_id = precise_symbol_node_ids.get((precise_call.provider, precise_call.caller_provider_symbol_id))
@@ -670,6 +678,37 @@ def build_graph(
                 {"scope": precise_call.scope, "anchor": precise_call.anchor.to_dict()},
             )
         )
+        caller_path = precise_symbol_paths.get(
+            (precise_call.provider, precise_call.caller_provider_symbol_id),
+            "",
+        )
+        callee_path = precise_symbol_paths.get(
+            (precise_call.provider, precise_call.callee_provider_symbol_id),
+            "",
+        )
+        if (
+            caller_path
+            and callee_path
+            and caller_path != callee_path
+            and is_test_path(caller_path)
+            and not is_test_path(callee_path)
+            and (caller_path, callee_path) not in direct_test_import_pairs
+        ):
+            add_edge(
+                GraphEdge(
+                    "TESTS_FILE",
+                    file_id(repo_id, caller_path),
+                    file_id(repo_id, callee_path),
+                    "resolved",
+                    precise_call.provider,
+                    {
+                        "evidence_type": "direct_test_call",
+                        "confidence": "medium",
+                        "call_confidence": "high",
+                        "test_role_evidence": "path_role",
+                    },
+                )
+            )
 
     for resolution in import_resolutions:
         importer_node_id = file_id(repo_id, resolution.importer_path)
@@ -1296,6 +1335,7 @@ class _ContextProjectionIndex:
     symbol_files: dict[str, str]
     anchor_nodes_by_symbol: dict[str, GraphNode]
     file_relations_by_file: dict[str, list[tuple[GraphEdge, str, str, str, str]]]
+    call_relations_by_symbol: dict[str, list[tuple[GraphEdge, str, str, str, str]]]
     changes_by_file: dict[str, list[str]]
     tasks_by_change: dict[str, list[tuple[str, GraphEdge]]]
     artifact_paths_by_task: dict[str, set[str]]
@@ -1339,12 +1379,19 @@ def _build_context_projection_index(snapshot: GraphSnapshot) -> _ContextProjecti
             file_relations.append((edge, from_file_id, to_file_id, edge.from_id, edge.to_id))
 
     file_relations_by_file: dict[str, list[tuple[GraphEdge, str, str, str, str]]] = {}
+    call_relations_by_symbol: dict[str, list[tuple[GraphEdge, str, str, str, str]]] = {}
     for relation in file_relations:
-        _edge, from_file_id, to_file_id, _from_symbol_id, _to_symbol_id = relation
+        edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id = relation
         file_relations_by_file.setdefault(from_file_id, []).append(relation)
         if to_file_id != from_file_id:
             file_relations_by_file.setdefault(to_file_id, []).append(relation)
+        if edge.kind == "CALLS" and from_symbol_id and to_symbol_id:
+            call_relations_by_symbol.setdefault(from_symbol_id, []).append(relation)
+            if to_symbol_id != from_symbol_id:
+                call_relations_by_symbol.setdefault(to_symbol_id, []).append(relation)
     for relations in file_relations_by_file.values():
+        relations.sort(key=lambda item: _edge_key(item[0]))
+    for relations in call_relations_by_symbol.values():
         relations.sort(key=lambda item: _edge_key(item[0]))
 
     return _ContextProjectionIndex(
@@ -1353,6 +1400,7 @@ def _build_context_projection_index(snapshot: GraphSnapshot) -> _ContextProjecti
         symbol_files=symbol_files,
         anchor_nodes_by_symbol=anchor_nodes_by_symbol,
         file_relations_by_file=file_relations_by_file,
+        call_relations_by_symbol=call_relations_by_symbol,
         changes_by_file=changes_by_file,
         tasks_by_change=tasks_by_change,
         artifact_paths_by_task=artifact_paths_by_task,
@@ -1383,8 +1431,11 @@ def context_path_support_profiles(
     profiles: dict[str, dict[str, Any]] = {}
     for path in sorted(candidate_paths):
         current_file_id = file_id(repo_id, path)
-        relations: dict[tuple[str, str, str, str, str], tuple[GraphEdge, str, str]] = {}
-        for edge, from_file_id, to_file_id, _from_symbol_id, _to_symbol_id in index.file_relations_by_file.get(current_file_id, []):
+        relations: dict[
+            tuple[str, str, str, str, str],
+            tuple[GraphEdge, str, str, str, str],
+        ] = {}
+        for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id in index.file_relations_by_file.get(current_file_id, []):
             from_node = index.nodes.get(from_file_id)
             to_node = index.nodes.get(to_file_id)
             from_path = normalize_repo_path(str(from_node.identity.get("path") or "")) if from_node is not None else ""
@@ -1393,23 +1444,61 @@ def context_path_support_profiles(
                 continue
             if from_path in excluded or to_path in excluded:
                 continue
-            relations[_edge_key(edge)] = (edge, from_path, to_path)
+            relations[_edge_key(edge)] = (
+                edge,
+                from_path,
+                to_path,
+                from_symbol_id,
+                to_symbol_id,
+            )
         if not relations:
             continue
         values = list(relations.values())
         candidate_neighbors = {
             to_path if from_path == path else from_path
-            for _edge, from_path, to_path in values
+            for _edge, from_path, to_path, _from_symbol_id, _to_symbol_id in values
             if (to_path if from_path == path else from_path) in candidate_paths
         }
+        candidate_connections = [
+            {
+                "edge": edge.kind,
+                "from_path": from_path,
+                "to_path": to_path,
+                **({"from_id": from_symbol_id} if from_symbol_id else {}),
+                **({"to_id": to_symbol_id} if to_symbol_id else {}),
+                "assertion": edge.assertion,
+                "provider": edge.source,
+            }
+            for edge, from_path, to_path, from_symbol_id, to_symbol_id in values
+            if from_path in candidate_paths and to_path in candidate_paths
+        ]
         profiles[path] = {
             "direct_relation_count": len(values),
-            "direct_test_count": sum(1 for edge, _from_path, _to_path in values if edge.kind == "TESTS_FILE"),
+            "direct_test_count": sum(
+                1
+                for edge, _from_path, _to_path, _from_symbol_id, _to_symbol_id in values
+                if edge.kind == "TESTS_FILE"
+            ),
             "candidate_neighbor_count": len(candidate_neighbors),
             "candidate_neighbor_paths": sorted(candidate_neighbors),
-            "incoming_relation_count": sum(1 for _edge, _from_path, to_path in values if to_path == path),
-            "outgoing_relation_count": sum(1 for _edge, from_path, _to_path in values if from_path == path),
-            "relation_kinds": sorted({edge.kind for edge, _from_path, _to_path in values}),
+            "candidate_connection_count": len(candidate_connections),
+            "candidate_connections": candidate_connections,
+            "incoming_relation_count": sum(
+                1
+                for _edge, _from_path, to_path, _from_symbol_id, _to_symbol_id in values
+                if to_path == path
+            ),
+            "outgoing_relation_count": sum(
+                1
+                for _edge, from_path, _to_path, _from_symbol_id, _to_symbol_id in values
+                if from_path == path
+            ),
+            "relation_kinds": sorted(
+                {
+                    edge.kind
+                    for edge, _from_path, _to_path, _from_symbol_id, _to_symbol_id in values
+                }
+            ),
         }
     return profiles
 
@@ -1419,12 +1508,32 @@ def _context_anchor_symbol_ids(
     repo_id: str,
     index: _ContextProjectionIndex,
     anchors: list[GraphContextAnchor],
-) -> dict[str, set[str]]:
-    resolved: dict[str, set[str]] = {}
+) -> dict[tuple[str, str, str, int, int, str, str], set[str]]:
+    resolved: dict[tuple[str, str, str, int, int, str, str], set[str]] = {}
     for anchor in anchors:
         if anchor.kind != GraphContextAnchorKind.SYMBOL:
             continue
         current_file_id = file_id(repo_id, anchor.path)
+        if anchor.provider and anchor.provider_symbol_id:
+            symbol_node_id = symbol_id(repo_id, anchor.provider, anchor.provider_symbol_id)
+            symbol_node = index.nodes.get(symbol_node_id)
+            source_anchor = index.anchor_nodes_by_symbol.get(symbol_node_id)
+            if (
+                symbol_node is not None
+                and source_anchor is not None
+                and index.symbol_files.get(symbol_node_id) == current_file_id
+                and str(source_anchor.identity.get("path") or "") == anchor.path
+                and (
+                    not anchor.line_start
+                    or int(source_anchor.identity.get("start_line") or 0) == anchor.line_start
+                )
+                and (
+                    not anchor.line_end
+                    or int(source_anchor.identity.get("end_line") or 0) == anchor.line_end
+                )
+            ):
+                resolved[anchor.key()] = {symbol_node_id}
+            continue
         for symbol_node_id in index.symbols_by_file.get(current_file_id, []):
             symbol_node = index.nodes.get(symbol_node_id)
             source_anchor = index.anchor_nodes_by_symbol.get(symbol_node_id)
@@ -1440,7 +1549,7 @@ def _context_anchor_symbol_ids(
                 continue
             if anchor.line_end and int(source_anchor.identity.get("end_line") or 0) != anchor.line_end:
                 continue
-            resolved.setdefault(current_file_id, set()).add(symbol_node_id)
+            resolved.setdefault(anchor.key(), set()).add(symbol_node_id)
     return resolved
 
 
@@ -1463,7 +1572,7 @@ def project_context_neighborhood(
         raise ValueError(f"unsupported Context Graph projection mode: {mode}")
     normalized_anchors: list[GraphContextAnchor] = []
     unresolved_anchors: list[GraphContextAnchor] = []
-    seen_anchor_keys: set[tuple[str, str, str, int, int]] = set()
+    seen_anchor_keys: set[tuple[str, str, str, int, int, str, str]] = set()
     for raw_anchor in anchors:
         normalized = normalize_repo_path(raw_anchor.path)
         anchor = GraphContextAnchor(
@@ -1472,6 +1581,8 @@ def project_context_neighborhood(
             symbol=raw_anchor.symbol,
             line_start=raw_anchor.line_start,
             line_end=raw_anchor.line_end,
+            provider=raw_anchor.provider,
+            provider_symbol_id=raw_anchor.provider_symbol_id,
         )
         if anchor.key() in seen_anchor_keys:
             continue
@@ -1491,7 +1602,7 @@ def project_context_neighborhood(
     for anchor in normalized_anchors:
         current_file_id = file_id(repo_id, anchor.path)
         if anchor.kind == GraphContextAnchorKind.SYMBOL:
-            symbol_count = len(anchored_symbol_ids.get(current_file_id, set()))
+            symbol_count = len(anchored_symbol_ids.get(anchor.key(), set()))
             if symbol_count == 0:
                 unresolved_anchors.append(anchor)
                 continue
@@ -1586,9 +1697,22 @@ def project_context_neighborhood(
         relations_by_key[key] = relation
         return True
 
-    frontier: dict[str, set[str]] = {seed_id: {seed_id} for seed_id in seed_ids}
+    file_seed_ids = {
+        file_id(repo_id, anchor.path)
+        for anchor in resolved_anchors
+        if anchor.kind == GraphContextAnchorKind.FILE
+    }
+    symbol_seed_origins: dict[str, set[str]] = {}
+    for anchor in resolved_anchors:
+        if anchor.kind != GraphContextAnchorKind.SYMBOL:
+            continue
+        origin_file_id = file_id(repo_id, anchor.path)
+        for symbol_node_id in anchored_symbol_ids.get(anchor.key(), set()):
+            symbol_seed_origins.setdefault(symbol_node_id, set()).add(origin_file_id)
+
+    frontier: dict[str, set[str]] = {seed_id: {seed_id} for seed_id in file_seed_ids}
     seen_origins_by_file: dict[str, set[str]] = {
-        seed_id: {seed_id} for seed_id in seed_ids
+        seed_id: {seed_id} for seed_id in file_seed_ids
     }
     relation_priority = {"TESTS_FILE": 0, "IMPORTS_FILE": 1, STRUCTURED_EDGE_KIND: 2, "CALLS": 3}
     max_depth = max((policy.max_depth for policy in mode_policy.values()), default=0)
@@ -1615,23 +1739,12 @@ def project_context_neighborhood(
             inbound_origins = (
                 set(frontier.get(to_file_id, set())) if edge_policy.inbound else set()
             )
-            if distance == 1:
-                if edge.kind == "CALLS":
-                    if outbound_origins and anchored_symbol_ids.get(from_file_id) and from_symbol_id not in anchored_symbol_ids[from_file_id]:
-                        outbound_origins.clear()
-                    if inbound_origins and anchored_symbol_ids.get(to_file_id) and to_symbol_id not in anchored_symbol_ids[to_file_id]:
-                        inbound_origins.clear()
-                elif edge.kind in {"IMPORTS_FILE", STRUCTURED_EDGE_KIND}:
-                    if outbound_origins and anchored_symbol_ids.get(from_file_id):
-                        outbound_origins.clear()
-                    if inbound_origins and anchored_symbol_ids.get(to_file_id):
-                        inbound_origins.clear()
             if outbound_origins or inbound_origins:
                 eligible.append((*relation, outbound_origins, inbound_origins))
         eligible.sort(
             key=lambda item: (
-                0 if item[5] else 1,
                 relation_priority.get(item[0].kind, 9),
+                0 if item[5] else 1,
                 0 if item[1] == item[2] else 1,
                 str(nodes.get(item[1]).identity.get("path") if nodes.get(item[1]) is not None else ""),
                 str(nodes.get(item[2]).identity.get("path") if nodes.get(item[2]) is not None else ""),
@@ -1665,6 +1778,99 @@ def project_context_neighborhood(
                 next_frontier.setdefault(destination_file_id, set()).update(new_origins)
         frontier = next_frontier
         if not frontier:
+            break
+
+    test_policy = mode_policy.get("TESTS_FILE")
+    if test_policy is not None and test_policy.max_depth >= 1:
+        for symbol_node_id, origin_file_ids in sorted(symbol_seed_origins.items()):
+            symbol_file_id = index.symbol_files.get(symbol_node_id, "")
+            if not symbol_file_id:
+                continue
+            for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id in index.file_relations_by_file.get(symbol_file_id, []):
+                if edge.kind != "TESTS_FILE" or from_symbol_id or to_symbol_id:
+                    continue
+                traversable = bool(
+                    (test_policy.outbound and from_file_id == symbol_file_id)
+                    or (test_policy.inbound and to_file_id == symbol_file_id)
+                )
+                if not traversable:
+                    continue
+                add_relation(
+                    edge=edge,
+                    from_file_id=from_file_id,
+                    to_file_id=to_file_id,
+                    distance=1,
+                    origin_file_distances={origin_id: 1 for origin_id in origin_file_ids},
+                )
+
+    call_policy = mode_policy.get("CALLS")
+    symbol_frontier = {symbol_node_id: set(origins) for symbol_node_id, origins in symbol_seed_origins.items()}
+    seen_origins_by_symbol = {
+        symbol_node_id: set(origins) for symbol_node_id, origins in symbol_seed_origins.items()
+    }
+    for distance in range(1, (call_policy.max_depth if call_policy is not None else 0) + 1):
+        candidate_relations: dict[
+            tuple[str, str, str, str, str],
+            tuple[GraphEdge, str, str, str, str],
+        ] = {}
+        for frontier_symbol_id in symbol_frontier:
+            for relation in index.call_relations_by_symbol.get(frontier_symbol_id, []):
+                candidate_relations.setdefault(_edge_key(relation[0]), relation)
+
+        eligible_symbol_relations: list[
+            tuple[GraphEdge, str, str, str, str, set[str], set[str]]
+        ] = []
+        for relation in candidate_relations.values():
+            edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id = relation
+            outbound_origins = (
+                set(symbol_frontier.get(from_symbol_id, set()))
+                if call_policy is not None and call_policy.outbound
+                else set()
+            )
+            inbound_origins = (
+                set(symbol_frontier.get(to_symbol_id, set()))
+                if call_policy is not None and call_policy.inbound
+                else set()
+            )
+            if outbound_origins or inbound_origins:
+                eligible_symbol_relations.append(
+                    (*relation, outbound_origins, inbound_origins)
+                )
+        eligible_symbol_relations.sort(
+            key=lambda item: (
+                0 if item[5] else 1,
+                str(nodes.get(item[1]).identity.get("path") if nodes.get(item[1]) is not None else ""),
+                str(nodes.get(item[2]).identity.get("path") if nodes.get(item[2]) is not None else ""),
+                item[0].from_id,
+                item[0].to_id,
+            )
+        )
+        next_symbol_frontier: dict[str, set[str]] = {}
+        for edge, from_file_id, to_file_id, from_symbol_id, to_symbol_id, outbound_origins, inbound_origins in eligible_symbol_relations:
+            relation_origins = outbound_origins | inbound_origins
+            accepted = add_relation(
+                edge=edge,
+                from_file_id=from_file_id,
+                to_file_id=to_file_id,
+                from_symbol_id=from_symbol_id,
+                to_symbol_id=to_symbol_id,
+                distance=distance,
+                origin_file_distances={origin_id: distance for origin_id in relation_origins},
+            )
+            if not accepted:
+                continue
+            for destination_symbol_id, propagating_origins in (
+                (from_symbol_id, inbound_origins),
+                (to_symbol_id, outbound_origins),
+            ):
+                seen_origins = seen_origins_by_symbol.setdefault(destination_symbol_id, set())
+                new_origins = propagating_origins - seen_origins
+                if not new_origins:
+                    continue
+                seen_origins.update(new_origins)
+                next_symbol_frontier.setdefault(destination_symbol_id, set()).update(new_origins)
+        symbol_frontier = next_symbol_frontier
+        if not symbol_frontier:
             break
 
     relations = sorted(
@@ -1771,6 +1977,7 @@ def _query_payload(
     query_status: str = "found",
     excluded_candidate_paths: set[str] | None = None,
 ) -> dict[str, Any]:
+    canonical_query = canonical_graph_query_selector(query)
     nodes = _node_by_id(snapshot)
     for edge in edges:
         node_ids.add(edge.from_id)
@@ -1789,7 +1996,7 @@ def _query_payload(
     payload = {
         "repository": snapshot.repository,
         "snapshot_digest": snapshot.snapshot_digest,
-        "query": query,
+        "query": canonical_query,
         "query_status": query_status,
         "matches": matches or [],
         "candidates": candidates or [],
@@ -1818,6 +2025,66 @@ def _query_payload(
     return payload
 
 
+def _provider_capability_status(
+    completeness: dict[str, Any],
+    *,
+    capability_name: str,
+    in_file: str,
+) -> str:
+    if in_file:
+        provider_coverage = completeness.get("provider_coverage")
+        provider_coverage = provider_coverage if isinstance(provider_coverage, dict) else {}
+        capability_coverage = provider_coverage.get(capability_name)
+        capability_coverage = capability_coverage if isinstance(capability_coverage, dict) else {}
+        analyzed_paths = {path for path in capability_coverage.get("analyzed_paths", []) if isinstance(path, str)}
+        failed_paths = {path for path in capability_coverage.get("failed_paths", []) if isinstance(path, str)}
+        if in_file in analyzed_paths:
+            return "found"
+        if in_file in failed_paths:
+            return "unavailable"
+        return "unsupported"
+    capabilities = completeness.get("capabilities")
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    status = capabilities.get(capability_name)
+    return status if status in {"unsupported", "unavailable"} else "found"
+
+
+def graph_anchor_continuation(
+    anchor: GraphContextAnchor,
+    *,
+    completeness: dict[str, Any],
+) -> GraphContinuation | None:
+    if anchor.kind == GraphContextAnchorKind.FILE and anchor.path:
+        return GraphContinuation(
+            kind=GraphContextAnchorKind.FILE,
+            value=anchor.path,
+            query_types=(GraphQuerySelectorKind.FILE, GraphQuerySelectorKind.IMPACT_FILE),
+            actions=("workspace.open", "graph.file", "graph.impact_file"),
+        )
+    if anchor.kind != GraphContextAnchorKind.SYMBOL or not anchor.symbol:
+        return None
+    query_types = [GraphQuerySelectorKind.SYMBOL]
+    if _provider_capability_status(
+        completeness,
+        capability_name="calls",
+        in_file=anchor.path,
+    ) == "found":
+        query_types.extend(
+            (
+                GraphQuerySelectorKind.CALLERS_OF,
+                GraphQuerySelectorKind.CALLEES_OF,
+                GraphQuerySelectorKind.IMPACT_SYMBOL,
+            )
+        )
+    return GraphContinuation(
+        kind=GraphContextAnchorKind.SYMBOL,
+        value=anchor.symbol,
+        in_file=anchor.path,
+        query_types=tuple(query_types),
+        actions=tuple(f"graph.{query_type.value}" for query_type in query_types),
+    )
+
+
 def _query_continuations(snapshot: GraphSnapshot, node_ids: set[str]) -> list[dict[str, Any]]:
     nodes = _node_by_id(snapshot)
     continuations: list[dict[str, Any]] = []
@@ -1833,24 +2100,33 @@ def _query_continuations(snapshot: GraphSnapshot, node_ids: set[str]) -> list[di
             value = str(node.identity.get("path") or "")
             if not value:
                 continue
-            selector = {"kind": "file", "value": value}
-            query_types = ["file", "impact_file"]
-            actions = ["workspace.open", "graph.file", "graph.impact_file"]
+            continuation = graph_anchor_continuation(
+                GraphContextAnchor(kind=GraphContextAnchorKind.FILE, path=value),
+                completeness=snapshot.completeness,
+            )
+            if continuation is None:
+                continue
+            continuation_data = continuation.to_dict()
+            selector = continuation_data["selector"]
+            query_types = continuation_data["query_types"]
+            actions = continuation_data["actions"]
             label = value
         elif node.kind == "symbol":
             match = _symbol_match_dict(snapshot, node)
             value = str(match.get("qualified_name") or match.get("name") or "")
             if not value:
                 continue
-            selector = {"kind": "symbol", "value": value}
             path = str(match.get("path") or "")
-            if path:
-                selector["in_file"] = path
-            query_types = ["symbol"]
-            capabilities = snapshot.completeness.get("capabilities") if isinstance(snapshot.completeness.get("capabilities"), dict) else {}
-            if capabilities.get("calls") not in {"unsupported", "unavailable"}:
-                query_types.extend(["callers_of", "callees_of", "impact_symbol"])
-            actions = [f"graph.{query_type}" for query_type in query_types]
+            continuation = graph_anchor_continuation(
+                GraphContextAnchor(kind=GraphContextAnchorKind.SYMBOL, path=path, symbol=value),
+                completeness=snapshot.completeness,
+            )
+            if continuation is None:
+                continue
+            continuation_data = continuation.to_dict()
+            selector = continuation_data["selector"]
+            query_types = continuation_data["query_types"]
+            actions = continuation_data["actions"]
             label = value
         elif node.kind == "import_ref":
             value = str(node.identity.get("raw_import") or "")
@@ -2051,16 +2327,19 @@ def _semantic_query_status(snapshot: GraphSnapshot, *, capability_name: str, in_
                 "code": "graph_query_unsupported",
                 "message": f"semantic analysis is excluded by policy for {in_file}",
             }
-        analyzed_paths = {str(path) for path in capability_coverage.get("analyzed_paths", [])}
-        failed_paths = {str(path) for path in capability_coverage.get("failed_paths", [])}
-        unsupported_paths = {str(path) for path in capability_coverage.get("unsupported_paths", [])}
-        if in_file in analyzed_paths:
+        status = _provider_capability_status(
+            snapshot.completeness,
+            capability_name=capability_name,
+            in_file=in_file,
+        )
+        if status == "found":
             return "found", None
-        if in_file in failed_paths:
+        if status == "unavailable":
             return "unavailable", {
                 "code": "graph_query_unavailable",
                 "message": f"the {capability_name} provider could not analyze {in_file}",
             }
+        unsupported_paths = {path for path in capability_coverage.get("unsupported_paths", []) if isinstance(path, str)}
         if in_file in unsupported_paths:
             language = language_for_path(in_file)
             return "unsupported", {
@@ -2071,9 +2350,11 @@ def _semantic_query_status(snapshot: GraphSnapshot, *, capability_name: str, in_
             "code": "graph_query_unsupported",
             "message": f"{in_file} is not eligible for provider-confirmed {capability_name} queries",
         }
-    capability_statuses = snapshot.completeness.get("capabilities")
-    capability_statuses = capability_statuses if isinstance(capability_statuses, dict) else {}
-    coverage_status = str(capability_statuses.get(capability_name) or "")
+    coverage_status = _provider_capability_status(
+        snapshot.completeness,
+        capability_name=capability_name,
+        in_file="",
+    )
     if coverage_status == "unsupported":
         return "unsupported", {
             "code": "graph_query_unsupported",
@@ -2104,21 +2385,22 @@ def query_graph(
     depth: int = 1,
     stale_paths: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[Problem]]:
+    selector_inputs = {
+        GraphQuerySelectorKind.FILE: file,
+        GraphQuerySelectorKind.TOPIC: topic,
+        GraphQuerySelectorKind.IMPORT: import_ref,
+        GraphQuerySelectorKind.SYMBOL: symbol,
+        GraphQuerySelectorKind.CALLERS_OF: callers_of,
+        GraphQuerySelectorKind.CALLEES_OF: callees_of,
+        GraphQuerySelectorKind.IMPACT_FILE: impact_file,
+        GraphQuerySelectorKind.IMPACT_SYMBOL: impact_symbol,
+        GraphQuerySelectorKind.TASK: task,
+        GraphQuerySelectorKind.ARTIFACT: artifact,
+    }
     selectors = [
-        (name, value)
-        for name, value in (
-            ("file", file),
-            ("topic", topic),
-            ("import", import_ref),
-            ("symbol", symbol),
-            ("callers_of", callers_of),
-            ("callees_of", callees_of),
-            ("impact_file", impact_file),
-            ("impact_symbol", impact_symbol),
-            ("task", task),
-            ("artifact", artifact),
-        )
-        if value
+        (kind, selector_inputs[kind])
+        for kind in GRAPH_QUERY_SELECTOR_SCHEMAS
+        if selector_inputs[kind]
     ]
     if not selectors:
         return None, [
@@ -2155,7 +2437,7 @@ def query_graph(
 
     repo_id = str(snapshot.repository.get("id") or "")
     repository_path = str(snapshot.repository.get("path") or "")
-    selector, value = selectors[0]
+    selector_kind, value = selectors[0]
     known_file_paths = {
         str(node.identity.get("path") or "")
         for node in snapshot.nodes
@@ -2170,7 +2452,7 @@ def query_graph(
         and edge.from_id in nodes
         and str(nodes[edge.from_id].identity.get("path") or "")
     }
-    if selector == "file":
+    if selector_kind is GraphQuerySelectorKind.FILE:
         normalized, resolution_result, resolution_problems = _resolve_graph_query_path(
             snapshot,
             value=value,
@@ -2191,14 +2473,14 @@ def query_graph(
         ]
         return query_payload(query={"type": "file", "path": normalized}, node_ids={wanted}, edges=matched_edges, matches=[_node_summary(nodes[wanted], symbol_paths=symbol_paths)], paths=paths), []
 
-    if selector == "topic":
+    if selector_kind is GraphQuerySelectorKind.TOPIC:
         wanted = topic_id(repo_id, value)
         if wanted not in nodes:
             return empty_query_payload(query={"type": "topic", "topic": value}, query_status="not_found"), []
         matched_edges = [edge for edge in snapshot.edges if edge.kind == "HAS_TOPIC" and edge.to_id == wanted]
         return query_payload(query={"type": "topic", "topic": value}, node_ids={wanted}, edges=matched_edges, matches=[_node_summary(nodes[wanted], symbol_paths=symbol_paths)]), []
 
-    if selector == "import":
+    if selector_kind is GraphQuerySelectorKind.IMPORT:
         matched_import_nodes = [
             node
             for node in snapshot.nodes
@@ -2228,7 +2510,7 @@ def query_graph(
         ]
         return [*direct, *affected]
 
-    if selector == "task":
+    if selector_kind is GraphQuerySelectorKind.TASK:
         normalized_task = normalize_task_id(value)
         wanted = graph_task_id(normalized_task)
         if wanted not in nodes:
@@ -2243,7 +2525,7 @@ def query_graph(
             paths=paths,
         ), []
 
-    if selector == "artifact":
+    if selector_kind is GraphQuerySelectorKind.ARTIFACT:
         matched_artifacts = [
             node
             for node in snapshot.nodes
@@ -2274,9 +2556,15 @@ def query_graph(
             paths=paths,
         ), []
 
-    if selector in {"symbol", "callers_of", "callees_of", "impact_symbol"} and in_file:
-        query_base: dict[str, Any] = {"type": selector, "symbol": value}
-        if selector == "impact_symbol":
+    symbol_selector_kinds = {
+        GraphQuerySelectorKind.SYMBOL,
+        GraphQuerySelectorKind.CALLERS_OF,
+        GraphQuerySelectorKind.CALLEES_OF,
+        GraphQuerySelectorKind.IMPACT_SYMBOL,
+    }
+    if selector_kind in symbol_selector_kinds and in_file:
+        query_base: dict[str, Any] = {"type": selector_kind.value, "symbol": value}
+        if selector_kind is GraphQuerySelectorKind.IMPACT_SYMBOL:
             query_base["depth"] = depth
         normalized_in_file, resolution_result, resolution_problems = _resolve_graph_query_path(
             snapshot,
@@ -2291,9 +2579,14 @@ def query_graph(
         if resolution_result is not None or resolution_problems:
             return resolution_result, resolution_problems
 
-    def resolve_one_symbol(query_type: str, raw_symbol: str) -> tuple[GraphNode | None, dict[str, Any] | None, list[Problem]]:
+    def resolve_one_symbol(
+        query_type: GraphQuerySelectorKind,
+        raw_symbol: str,
+    ) -> tuple[GraphNode | None, dict[str, Any] | None, list[Problem]]:
         matches = _match_symbols(snapshot, raw_symbol, in_file=normalized_in_file)
-        query = {"type": query_type, "symbol": raw_symbol}
+        query: dict[str, Any] = {"type": query_type.value, "symbol": raw_symbol}
+        if query_type is GraphQuerySelectorKind.IMPACT_SYMBOL:
+            query["depth"] = depth
         if normalized_in_file:
             query["in_file"] = normalized_in_file
         if not matches:
@@ -2304,17 +2597,19 @@ def query_graph(
             return None, result, [Problem("error", "graph_query_ambiguous_symbol", f"graph symbol query matched {len(matches)} symbols; pass --in-file or a qualified name")]
         return matches[0], query_payload(query=query, node_ids={matches[0].id}, edges=_definition_edges(snapshot, {matches[0].id}), matches=match_payloads), []
 
-    if selector in {"symbol", "callers_of", "callees_of", "impact_symbol"}:
-        capability_name = "symbols" if selector == "symbol" else "calls"
+    if selector_kind in symbol_selector_kinds:
+        capability_name = "symbols" if selector_kind is GraphQuerySelectorKind.SYMBOL else "calls"
         semantic_status, semantic_warning = _semantic_query_status(snapshot, capability_name=capability_name, in_file=normalized_in_file)
         if semantic_status in {"unsupported", "unavailable"}:
-            query = {"type": selector, "symbol": value}
+            query = {"type": selector_kind.value, "symbol": value}
+            if selector_kind is GraphQuerySelectorKind.IMPACT_SYMBOL:
+                query["depth"] = depth
             if normalized_in_file:
                 query["in_file"] = normalized_in_file
             return empty_query_payload(query=query, query_status=semantic_status, warning=semantic_warning), []
 
-    if selector == "symbol":
-        symbol_node, base_result, problems = resolve_one_symbol("symbol", value)
+    if selector_kind is GraphQuerySelectorKind.SYMBOL:
+        symbol_node, base_result, problems = resolve_one_symbol(GraphQuerySelectorKind.SYMBOL, value)
         if symbol_node is None:
             return base_result, problems
         call_edges = [edge for edge in snapshot.edges if edge.kind == "CALLS" and (edge.from_id == symbol_node.id or edge.to_id == symbol_node.id)]
@@ -2337,11 +2632,11 @@ def query_graph(
             paths=paths,
         ), problems
 
-    if selector in {"callers_of", "callees_of"}:
-        symbol_node, base_result, problems = resolve_one_symbol(selector, value)
+    if selector_kind in {GraphQuerySelectorKind.CALLERS_OF, GraphQuerySelectorKind.CALLEES_OF}:
+        symbol_node, base_result, problems = resolve_one_symbol(selector_kind, value)
         if symbol_node is None:
             return base_result, problems
-        if selector == "callers_of":
+        if selector_kind is GraphQuerySelectorKind.CALLERS_OF:
             call_edges = [edge for edge in snapshot.edges if edge.kind == "CALLS" and edge.to_id == symbol_node.id]
             reason = "caller invokes selected symbol"
         else:
@@ -2351,7 +2646,7 @@ def query_graph(
         edges = [*call_edges, *_definition_edges(snapshot, {symbol_node.id, *(edge.from_id for edge in call_edges), *(edge.to_id for edge in call_edges)})]
         paths = [_path_from_edge(nodes, edge, reason=reason, symbol_paths=symbol_paths) for edge in sorted(call_edges, key=_edge_key)]
         return query_payload(
-            query=base_result["query"] if base_result else {"type": selector, "symbol": value},
+            query=base_result["query"] if base_result else {"type": selector_kind.value, "symbol": value},
             node_ids=node_ids,
             edges=edges,
             matches=base_result["matches"] if base_result else [],
@@ -2420,7 +2715,7 @@ def query_graph(
                 break
         return visited, collected_edges, paths
 
-    if selector == "impact_file":
+    if selector_kind is GraphQuerySelectorKind.IMPACT_FILE:
         normalized, resolution_result, resolution_problems = _resolve_graph_query_path(
             snapshot,
             value=value,
@@ -2447,7 +2742,7 @@ def query_graph(
             paths=paths,
         ), []
 
-    symbol_node, base_result, problems = resolve_one_symbol("impact_symbol", value)
+    symbol_node, base_result, problems = resolve_one_symbol(GraphQuerySelectorKind.IMPACT_SYMBOL, value)
     if symbol_node is None:
         return base_result, problems
     node_ids, edges, paths = impact_walk(

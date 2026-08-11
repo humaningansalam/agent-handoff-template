@@ -526,7 +526,7 @@ def test_receipt_knowledge_resolves_byte_identical_parent_archive_move(tmp_path:
     commit_all(repo)
     parent_id = "T-20260609184046Z"
     child_id = "T-20260609184047Z"
-    add_task(tmp_path, f"{parent_id}--parent.md", task_text(parent_id, status="doing"))
+    add_task(tmp_path, f"{parent_id}--parent.md", task_text(parent_id))
     child_body = (
         task_text(child_id, status="todo", parent=parent_id)
         .replace('repo_id: ""', 'repo_id: "main"')
@@ -541,6 +541,8 @@ def test_receipt_knowledge_resolves_byte_identical_parent_archive_move(tmp_path:
     verification.write_text("- Command: pytest\n- Result: pass\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
     assert main(["task", "start", child_id, "--json"]) == 0
     capsys.readouterr()
     assert main(

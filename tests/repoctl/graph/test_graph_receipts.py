@@ -127,7 +127,7 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
     )
 
 
-def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_graph_legacy_receipt_preserves_paths_and_rejects_null_ownership(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -186,6 +186,14 @@ def test_graph_receipt_edges_preserve_deleted_and_renamed_paths(tmp_path: Path, 
     ) == 0
     artifact_result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert artifact_result["query_status"] == "found"
+
+    receipt["repo_evidence"]["ownership"] = None
+    (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert main(["graph", "build", "--full", "--json"]) == 0
+    invalid = json.loads(capsys.readouterr().out)
+    assert invalid["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
+    assert not any(node["id"] == "task:T-20260609184046Z" for node in invalid["data"]["snapshot"]["nodes"])
+    assert any(warning["code"] == "invalid_completion_receipt" for warning in invalid["warnings"])
 
 
 def test_graph_localizes_invalid_receipt_to_selected_repo_task_history(tmp_path: Path, monkeypatch, capsys) -> None:

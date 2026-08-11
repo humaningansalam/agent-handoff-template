@@ -5,7 +5,34 @@ from enum import StrEnum
 from typing import Any
 
 from .document_roles import DocumentRole
-from .graph_model import GraphContextAnchor, digest_data
+from .graph_model import GraphContextAnchor, GraphContinuation, digest_data
+
+
+class ContextResultMode(StrEnum):
+    AUTO = "auto"
+    STARTUP_READING = "startup_reading"
+    CODE_LOCATION = "code_location"
+    CALL_IMPACT = "call_impact"
+    FILE_IMPACT = "file_impact"
+    AUTHORITY_OR_CONTRACT = "authority_or_contract"
+    PAST_DECISION = "past_decision"
+    INVARIANT = "invariant"
+    FAILURE_MODE = "failure_mode"
+
+
+class ContextSourceKind(StrEnum):
+    CURRENT_SOURCE = "current_source"
+    CONFIG = "config"
+    STRUCTURED_DATA = "structured_data"
+
+
+CONTEXT_SOURCE_KIND_VALUES = frozenset(kind.value for kind in ContextSourceKind)
+LEXICAL_CONTEXT_SOURCE_KIND_VALUES = frozenset(
+    {
+        ContextSourceKind.CURRENT_SOURCE.value,
+        ContextSourceKind.CONFIG.value,
+    }
+)
 
 
 class ContextSectionKind(StrEnum):
@@ -15,6 +42,7 @@ class ContextSectionKind(StrEnum):
     PROVIDER_RELATIONSHIP = "provider_relationship"
     DOCUMENT = "document"
     CONFIG = "config"
+    STRUCTURED_DATA = "structured_data"
     TASK = "task"
     VERIFICATION = "verification"
 
@@ -79,9 +107,11 @@ class ContextSourceRef:
     line_start: int = 0
     line_end: int = 0
     source_fact_id: str = ""
+    provider: str = ""
+    provider_symbol_id: str = ""
     content_sha256: str = ""
 
-    def key(self) -> tuple[str, str, str, str, int, int, str]:
+    def key(self) -> tuple[str, str, str, str, int, int, str, str, str]:
         return (
             self.kind,
             self.path,
@@ -90,6 +120,8 @@ class ContextSourceRef:
             self.line_start,
             self.line_end,
             self.source_fact_id,
+            self.provider,
+            self.provider_symbol_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -108,6 +140,10 @@ class ContextSourceRef:
             data["line_end"] = self.line_end
         if self.source_fact_id:
             data["source_fact_id"] = self.source_fact_id
+        if self.provider:
+            data["provider"] = self.provider
+        if self.provider_symbol_id:
+            data["provider_symbol_id"] = self.provider_symbol_id
         return data
 
 
@@ -177,6 +213,35 @@ class ContextAnchorResolution:
 
 
 @dataclass(frozen=True)
+class ContextGraphSeedRef:
+    anchor: GraphContextAnchor
+    source_ref: ContextSourceRef
+    provenance: ContextGraphAnchorProvenance
+    anchor_strength: ContextAnchorStrength
+    continuation: GraphContinuation
+
+    @property
+    def identity_digest(self) -> str:
+        return digest_data(
+            {
+                "anchor": self.anchor.to_dict(),
+                "source_ref": self.source_ref.to_dict(),
+            }
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.anchor.path,
+            "source_ref": self.source_ref.to_dict(),
+            "anchor": self.anchor.to_dict(),
+            "provenance": self.provenance.value,
+            "anchor_strength": self.anchor_strength.value,
+            "continuation": self.continuation.to_dict(),
+            "identity_digest": self.identity_digest,
+        }
+
+
+@dataclass(frozen=True)
 class ContextCandidate:
     source_ref: ContextSourceRef
     text: str
@@ -223,8 +288,13 @@ class ContextBundle:
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     relationship_candidates: list[dict[str, Any]] = field(default_factory=list)
+    graph_seed_refs: list[ContextGraphSeedRef] = field(default_factory=list)
+    preselection_graph_support_by_path: dict[str, dict[str, Any]] = field(
+        default_factory=dict,
+        repr=False,
+    )
     schema: str = "repoctl.context.bundle"
-    schema_version: int = 13
+    schema_version: int = 15
     authoritative: bool = False
     bundle_digest: str = ""
 
@@ -243,6 +313,7 @@ class ContextBundle:
             "relationship_candidates": self.relationship_candidates,
             "relationship_candidate_count": len(self.relationship_candidates),
             "relationship_candidates_truncated": False,
+            "graph_seed_refs": [seed.to_dict() for seed in self.graph_seed_refs],
             "selection": self.selection,
         }
         if include_digest:
@@ -260,6 +331,8 @@ class ContextBundle:
             knowledge_results=self.knowledge_results,
             groups=self.groups,
             relationship_candidates=self.relationship_candidates,
+            graph_seed_refs=self.graph_seed_refs,
+            preselection_graph_support_by_path=self.preselection_graph_support_by_path,
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,

@@ -23,8 +23,8 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 
 For repo-scoped implementation tasks, use this order before editing product files:
 
-1. Explore read-only using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query` as the integrated discovery view; known file -> Graph or direct read; known exact string or symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
-2. Read `completeness.graph_anchor.seed_anchors` before acting: `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are explicit anchors, while `lexical_file` is a ranked hypothesis. Treat a coherent returned source/test/relation set as the initial working set after inspecting the source; `resolved` means the typed path exists in Graph, not that semantic ownership is proven. Follow typed Graph continuations repeatedly when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
+1. Explore without changing product source or task scope using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query` as the integrated discovery view; known file -> Graph or direct read; known exact string or symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
+2. Use top-level `graph_seed_refs` as ranked, source-bound Graph continuation inputs. Read `completeness.graph_anchor.seed_anchors` only to interpret coverage and provenance: `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are explicit anchors, while `lexical_file` is a ranked hypothesis. Treat a coherent returned source/test/relation set as the initial working set after inspecting the source; `resolved` means the typed path exists in Graph, not that semantic ownership is proven. Follow typed Graph continuations repeatedly when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
 3. Do not restart the same broad repository discovery with `rg` after Context already returned a coherent working set. Narrow `rg` checks and direct reads remain appropriate for confirmation; refine the query or refresh Graph when Context reports ambiguity, missing coverage, or stale evidence.
 4. Create or resume the task and start it before the first product mutation. Exploration is not gated on task creation or task start.
 5. Record the explicit Candidate query and the files actually reviewed/chosen in `## Discovery` once task scope becomes concrete.
@@ -35,6 +35,8 @@ Do not require agents to log which discovery features they used or justify why a
 ```bash
 ./scripts/repoctl task discovery add T-... --query "<query>" --json
 ./scripts/repoctl context query "<query>" --repo-id main --json
+# When a returned result informed scope, copy its data.result_receipt producer/result_id and one exact selectable authority/ref tuple:
+./scripts/repoctl task discovery add T-... --result-producer context --result-id "sha256:..." --result-authority source --result-ref repos/path --json
 ./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl task discovery add T-... --reviewed repos/path --chosen repos/path --json
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
@@ -85,7 +87,7 @@ Scope matrix:
 - Parent-child authority: child `parent` frontmatter is source of truth; parent child lists are convenience summaries.
 - `owner` and `depends_on` are informational metadata, not locks/enforcement.
 - Worker agents must not set lifecycle-managed fields such as `status: done`; use `repoctl task finish`.
-- Humans and agents write task meaning: Goal, Discovery, Execution Log, Verification, and Handoff. Do not hand-edit `.repoctl-state` baselines, fingerprints, ownership decisions, completion receipts, or archive metadata; repoctl owns those machine records.
+- Humans and agents write task meaning: Goal, Discovery, Execution Log, Verification, and Handoff. Do not hand-edit `.repoctl-state` baselines, fingerprints, ownership decisions, completion receipts, regenerable query-result receipts, or archive metadata; repoctl owns those machine records.
 - A Handoff binding records that the exact four-field Handoff, structured task inputs, and observed repository state were reviewed together. It does not certify the semantic correctness of the prose. Any later Handoff, task contract, Discovery, Execution Log, Verification, or observed repository-content change makes it stale until explicitly reviewed and rebound.
 
 ## repoctl Boundary
@@ -104,7 +106,7 @@ Scope matrix:
 
 ## Working Commands
 
-- Code search: `cd <selected-product-repo> && rg ...` (`repos/` for direct layout, `repos/<repo-id>/` for collection layout)
+- Exact string/symbol confirmation: `cd <selected-product-repo> && rg ...` (`repos/` for direct layout, `repos/<repo-id>/` for collection layout)
 - Code Git: `cd <selected-product-repo> && git ...`
 - Docker: `cd <selected-product-repo> && docker compose ...`
 - Root checks: `./scripts/repoctl check --json`

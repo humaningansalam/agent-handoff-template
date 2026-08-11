@@ -82,6 +82,73 @@ class GraphContextAnchorKind(StrEnum):
     SYMBOL = "symbol"
 
 
+class GraphQuerySelectorKind(StrEnum):
+    FILE = "file"
+    TOPIC = "topic"
+    IMPORT = "import"
+    SYMBOL = "symbol"
+    CALLERS_OF = "callers_of"
+    CALLEES_OF = "callees_of"
+    IMPACT_FILE = "impact_file"
+    IMPACT_SYMBOL = "impact_symbol"
+    TASK = "task"
+    ARTIFACT = "artifact"
+
+
+@dataclass(frozen=True)
+class GraphQuerySelectorSchema:
+    value_field: str
+    required_fields: frozenset[str] = frozenset()
+    optional_fields: frozenset[str] = frozenset()
+
+
+GRAPH_QUERY_SELECTOR_SCHEMAS: dict[GraphQuerySelectorKind, GraphQuerySelectorSchema] = {
+    GraphQuerySelectorKind.FILE: GraphQuerySelectorSchema("path"),
+    GraphQuerySelectorKind.TOPIC: GraphQuerySelectorSchema("topic"),
+    GraphQuerySelectorKind.IMPORT: GraphQuerySelectorSchema("raw_import"),
+    GraphQuerySelectorKind.SYMBOL: GraphQuerySelectorSchema("symbol", optional_fields=frozenset({"in_file"})),
+    GraphQuerySelectorKind.CALLERS_OF: GraphQuerySelectorSchema("symbol", optional_fields=frozenset({"in_file"})),
+    GraphQuerySelectorKind.CALLEES_OF: GraphQuerySelectorSchema("symbol", optional_fields=frozenset({"in_file"})),
+    GraphQuerySelectorKind.IMPACT_FILE: GraphQuerySelectorSchema("path", required_fields=frozenset({"depth"})),
+    GraphQuerySelectorKind.IMPACT_SYMBOL: GraphQuerySelectorSchema(
+        "symbol",
+        required_fields=frozenset({"depth"}),
+        optional_fields=frozenset({"in_file"}),
+    ),
+    GraphQuerySelectorKind.TASK: GraphQuerySelectorSchema("task_id"),
+    GraphQuerySelectorKind.ARTIFACT: GraphQuerySelectorSchema("path"),
+}
+
+
+def canonical_graph_query_selector(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("graph query selector must be an object")
+    raw_kind = value.get("type")
+    if not isinstance(raw_kind, str):
+        raise ValueError("graph query selector type must be a string")
+    kind = GraphQuerySelectorKind(raw_kind)
+    schema = GRAPH_QUERY_SELECTOR_SCHEMAS[kind]
+    expected_fields = {"type", schema.value_field, *schema.required_fields, *schema.optional_fields}
+    present_fields = set(value)
+    if not {"type", schema.value_field, *schema.required_fields}.issubset(present_fields) or not present_fields.issubset(expected_fields):
+        raise ValueError("graph query selector fields do not match its type")
+    primary_value = value.get(schema.value_field)
+    if not isinstance(primary_value, str) or not primary_value.strip() or primary_value != primary_value.strip():
+        raise ValueError("graph query selector value must be canonical")
+    result: dict[str, Any] = {"type": kind.value, schema.value_field: primary_value}
+    if "in_file" in present_fields:
+        in_file = value.get("in_file")
+        if not isinstance(in_file, str) or not in_file.strip() or in_file != in_file.strip():
+            raise ValueError("graph query selector in_file must be canonical")
+        result["in_file"] = in_file
+    if "depth" in present_fields:
+        depth = value.get("depth")
+        if not isinstance(depth, int) or isinstance(depth, bool) or depth < 1:
+            raise ValueError("graph query selector depth must be a positive integer")
+        result["depth"] = depth
+    return result
+
+
 @dataclass(frozen=True)
 class GraphContextAnchor:
     kind: GraphContextAnchorKind
@@ -89,9 +156,19 @@ class GraphContextAnchor:
     symbol: str = ""
     line_start: int = 0
     line_end: int = 0
+    provider: str = ""
+    provider_symbol_id: str = ""
 
-    def key(self) -> tuple[str, str, str, int, int]:
-        return (self.kind.value, self.path, self.symbol, self.line_start, self.line_end)
+    def key(self) -> tuple[str, str, str, int, int, str, str]:
+        return (
+            self.kind.value,
+            self.path,
+            self.symbol,
+            self.line_start,
+            self.line_end,
+            self.provider,
+            self.provider_symbol_id,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"kind": self.kind.value, "path": self.path}
@@ -101,7 +178,33 @@ class GraphContextAnchor:
             data["line_start"] = self.line_start
         if self.line_end:
             data["line_end"] = self.line_end
+        if self.provider:
+            data["provider"] = self.provider
+        if self.provider_symbol_id:
+            data["provider_symbol_id"] = self.provider_symbol_id
         return data
+
+
+@dataclass(frozen=True)
+class GraphContinuation:
+    kind: GraphContextAnchorKind
+    value: str
+    in_file: str = ""
+    query_types: tuple[GraphQuerySelectorKind, ...] = ()
+    actions: tuple[str, ...] = ()
+
+    def selector_dict(self) -> dict[str, str]:
+        data = {"kind": self.kind.value, "value": self.value}
+        if self.in_file:
+            data["in_file"] = self.in_file
+        return data
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selector": self.selector_dict(),
+            "query_types": [query_type.value for query_type in self.query_types],
+            "actions": list(self.actions),
+        }
 
 
 @dataclass(frozen=True)

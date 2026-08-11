@@ -13,7 +13,7 @@ from .context import (
     context_graph_freshness_warnings,
 )
 from .context_chunks import chunk_markdown_file, chunk_text_source
-from .context_model import ContextBundle, ContextCandidate, ContextSourceRef
+from .context_model import CONTEXT_SOURCE_KIND_VALUES, ContextBundle, ContextCandidate, ContextGraphSeedRef, ContextSourceRef
 from .context_retrieval import rank_context_chunks
 from .context_sources import context_graph_problems
 from .document_roles import (
@@ -26,16 +26,20 @@ from .graph import project_context_neighborhood
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import graph_materialization_freshness, graph_stale_paths, load_materialized_graph
 from .git import normalize_repo_path, repo_change_fingerprint_records, repo_changed_entries, repo_git_head
+from .io import RepoctlError
 from .language_profiles import collect_verification_hints
 from .markdown import find_section
 from .path_roles import PathRole, classify_path_role
 from .repositories import RepoTarget
-from .tasks import Problem, Task, normalize_task_id, repo_changes_since_task_start, resolve_task, task_discovery_values
+from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, parse_result_request
+from .tasks import Problem, Task, normalize_task_id, repo_changes_since_task_start, resolve_task, task_discovery_result_selections, task_discovery_values
 
 
-TASK_CONTEXT_PACK_SCHEMA_VERSION = 3
+TASK_CONTEXT_PACK_SCHEMA_VERSION = 4
 TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_SCHEMA_VERSION = 1
 TASK_CONTEXT_PACK_MARKDOWN_ENVELOPE_PREFIX = "<!-- repoctl-context-pack-envelope "
+COMPACT_SEED_NOTE_CHARS = 320
+COMPACT_RESULT_REQUEST_CHARS = 240
 
 
 @dataclass(frozen=True)
@@ -51,11 +55,14 @@ class _TaskContextPackInputs:
     discovery: dict[str, list[str]]
     reviewed: list[str]
     chosen: list[str]
+    notes: list[str]
+    selected_results: list[dict[str, str]]
     stage: str
     query: str
     snapshot: Any
     graph_meta: dict[str, Any]
     bundle: ContextBundle | None
+    graph_seed_refs: list[ContextGraphSeedRef]
     explicit_candidates: list[ContextCandidate]
     required_candidates: list[ContextCandidate]
     discovery_candidates: list[ContextCandidate]
@@ -121,6 +128,9 @@ def _task_context_pack_input_projection(
     discovery: dict[str, list[str]],
     reviewed: list[str],
     chosen: list[str],
+    notes: list[str],
+    selected_results: list[dict[str, str]],
+    graph_seed_refs: list[ContextGraphSeedRef],
     explicit_candidates: list[ContextCandidate],
     source_candidates: list[ContextCandidate],
     snapshot: Any,
@@ -128,9 +138,12 @@ def _task_context_pack_input_projection(
     graph_completeness = snapshot.completeness if snapshot is not None else {}
     return {
         "task_content_digest": _task_content_digest(task),
-        "candidate_query_history": _without_discovery_placeholders(discovery.get("Candidate query", [])),
+        "candidate_query": _task_seed_query(task),
         "reviewed_files": reviewed,
         "chosen_files": chosen,
+        "notes": notes,
+        "selected_result_evidence": selected_results,
+        "graph_seed_refs": [seed.to_dict() for seed in graph_seed_refs],
         "context_docs": _context_doc_digest_inputs(explicit_candidates),
         "source_inputs": _context_pack_source_digest_inputs(source_candidates),
         "repository_state": _task_context_pack_repository_input(root, target=target, task=task),
@@ -229,9 +242,18 @@ def _collect_task_context_pack_inputs(
     explain: bool = False,
 ) -> _TaskContextPackInputs:
     task = resolve_task(root, task_id)
+    task_repo_id = str(task.frontmatter.get("repo_id") or "")
+    if task_repo_id and task_repo_id != target.id:
+        raise RepoctlError(
+            f"task repository is {task_repo_id}, but Context Pack target is {target.id}",
+            code="context_pack_repo_mismatch",
+            path=task.rel_path,
+        )
     discovery = task_discovery_values(task)
     chosen = _without_discovery_placeholders(discovery.get("Chosen files", []))
     reviewed = _without_discovery_placeholders(discovery.get("Candidate files reviewed", []))
+    notes = _without_discovery_placeholders(discovery.get("Notes", []))
+    selected_results = [selection.to_dict() for selection in task_discovery_result_selections(task)]
     stage = "scoped" if chosen else "bootstrap"
     query = _task_seed_query(task)
     problems: list[Problem] = []
@@ -251,7 +273,12 @@ def _collect_task_context_pack_inputs(
         )
         problems.extend(bundle_problems)
     else:
-        problems.extend(context_graph_problems(graph_problems))
+        problems.extend(
+            context_graph_problems(
+                graph_problems,
+                graph_available=snapshot is not None,
+            )
+        )
     explicit_candidates, explicit_problems = _explicit_context_doc_candidates(
         root,
         target=target,
@@ -305,11 +332,14 @@ def _collect_task_context_pack_inputs(
         discovery=discovery,
         reviewed=reviewed,
         chosen=chosen,
+        notes=notes,
+        selected_results=selected_results,
         stage=stage,
         query=query,
         snapshot=snapshot,
         graph_meta=graph_meta,
         bundle=bundle,
+        graph_seed_refs=list(bundle.graph_seed_refs) if bundle is not None else [],
         explicit_candidates=explicit_candidates,
         required_candidates=required_candidates,
         discovery_candidates=discovery_candidates,
@@ -330,6 +360,9 @@ def _task_context_pack_input_digest(root: Path, *, target: RepoTarget, inputs: _
             discovery=inputs.discovery,
             reviewed=inputs.reviewed,
             chosen=inputs.chosen,
+            notes=inputs.notes,
+            selected_results=inputs.selected_results,
+            graph_seed_refs=inputs.graph_seed_refs,
             explicit_candidates=inputs.explicit_candidates,
             source_candidates=_dedupe_candidates(
                 [
@@ -366,6 +399,8 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
     task = inputs.task
     chosen = inputs.chosen
     reviewed = inputs.reviewed
+    notes = inputs.notes
+    selected_results = inputs.selected_results
     chosen_paths = {normalize_repo_path(path) for path in chosen}
     reviewed_paths = {normalize_repo_path(path) for path in reviewed} - chosen_paths
     stage = inputs.stage
@@ -465,8 +500,11 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
             "content_digest": _task_content_digest(task),
         },
         "seed": {
-            "source": "discovery_query_history_only",
+            "source": "current_discovery_episode",
             "query": query,
+            "notes": notes,
+            "selected_result_evidence": selected_results,
+            "graph_seed_refs": [seed.to_dict() for seed in inputs.graph_seed_refs],
             "used_sections": _used_sections(task),
         },
         "groups": groups,
@@ -555,6 +593,23 @@ def _render_task_context_pack_markdown_body(data: dict[str, Any]) -> str:
         "```",
         "",
     ]
+    lines.extend(_graph_seed_manifest_lines(seed))
+    notes = seed.get("notes") if isinstance(seed.get("notes"), list) else []
+    if notes:
+        lines.extend(["## Current Discovery Notes", ""])
+        lines.extend(f"- {str(note)[:320]}" for note in notes[:4])
+        lines.append("")
+    selected_results = seed.get("selected_result_evidence") if isinstance(seed.get("selected_result_evidence"), list) else []
+    if selected_results:
+        lines.extend(["## Selected Result Provenance", ""])
+        for selection in selected_results[:8]:
+            if not isinstance(selection, dict):
+                continue
+            lines.append(
+                f"- `{selection.get('producer', '')}` `{selection.get('authority', '')}` "
+                f"`{selection.get('ref', '')}` from `{selection.get('result_id', '')}`"
+            )
+        lines.append("")
     sections = [
         ("must_read", "Read First"),
         ("edit_candidates", "Active Edit Candidates"),
@@ -588,6 +643,7 @@ def _render_task_context_pack_markdown_body(data: dict[str, Any]) -> str:
 
 def _render_required_reference_manifest(data: dict[str, Any]) -> str:
     task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    seed = data.get("seed") if isinstance(data.get("seed"), dict) else {}
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
     budget = data.get("budget") if isinstance(data.get("budget"), dict) else {}
     lines = [
@@ -599,9 +655,10 @@ def _render_required_reference_manifest(data: dict[str, Any]) -> str:
         f"- Stop reason: `{data.get('stop_reason', '')}`",
         f"- Maximum estimated tokens: {budget.get('maximum_estimated_tokens', 0)}",
         "",
-        "Open every source directly; details and digests remain in full JSON.",
+        "Open every source in the required sections below directly; full evidence and digests remain in JSON.",
         "",
     ]
+    lines.extend(_graph_seed_manifest_lines(seed))
     sections = (
         ("must_read", "Read First"),
         ("edit_candidates", "Active Edit Candidates"),
@@ -636,6 +693,31 @@ def _render_required_reference_manifest(data: dict[str, Any]) -> str:
             lines.append(f"- `{path}`{section}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _graph_seed_manifest_lines(seed: dict[str, Any]) -> list[str]:
+    refs = seed.get("graph_seed_refs") if isinstance(seed.get("graph_seed_refs"), list) else []
+    if not refs:
+        return []
+    lines = [
+        "## Graph Seed Identities",
+        "",
+        "Graph seeds are ranked traversal evidence only; they do not define edit scope or authority. Inspect source before choosing one.",
+        "",
+    ]
+    for selection_rank, ref in enumerate(refs, start=1):
+        if not isinstance(ref, dict):
+            continue
+        continuation = ref.get("continuation") if isinstance(ref.get("continuation"), dict) else {}
+        selector = continuation.get("selector") if isinstance(continuation.get("selector"), dict) else {}
+        selector_text = json.dumps(selector, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        lines.append(
+            f"- Rank {selection_rank}: `{ref.get('path', '')}`; provenance `{ref.get('provenance', '')}`; "
+            f"strength `{ref.get('anchor_strength', '')}`; identity `{ref.get('identity_digest', '')}`; "
+            f"continue `{selector_text}`"
+        )
+    lines.append("")
+    return lines
 
 
 COMPACT_GROUP_LIMITS = {
@@ -695,20 +777,11 @@ def compact_task_context_pack(data: dict[str, Any], *, excerpt_chars: int = 180)
 
 
 def _compact_group_items(items: list[Any], group: str) -> list[dict[str, Any]]:
-    return _limited_group_items(items, limit=COMPACT_GROUP_LIMITS[group], filter_noisy=True)
+    return _limited_group_items(items, limit=COMPACT_GROUP_LIMITS[group])
 
 
-def _limited_group_items(items: list[Any], *, limit: int, filter_noisy: bool = False) -> list[dict[str, Any]]:
-    filtered = [
-        item
-        for item in items
-        if isinstance(item, dict)
-        and (
-            not filter_noisy
-            or item.get("requirement") == "required"
-            or not _is_noisy_pack_item(item)
-        )
-    ]
+def _limited_group_items(items: list[Any], *, limit: int) -> list[dict[str, Any]]:
+    filtered = [item for item in items if isinstance(item, dict)]
     required = [item for item in filtered if item.get("requirement") == "required"]
     optional = [item for item in filtered if item.get("requirement") != "required"]
     return [*required, *optional[: max(0, limit - len(required))]]
@@ -719,9 +792,62 @@ def _compact_seed(seed: dict[str, Any]) -> dict[str, Any]:
     compact = {
         "source": seed.get("source", ""),
         "used_sections": seed.get("used_sections", []),
+        "notes": [
+            _truncate_text(str(note), COMPACT_SEED_NOTE_CHARS)
+            for note in seed.get("notes", [])
+            if str(note)
+        ][:4],
+        "selected_result_evidence": [
+            _compact_selected_result_evidence(item)
+            for item in seed.get("selected_result_evidence", [])
+            if isinstance(item, dict)
+        ][:8],
+        "graph_seed_refs": [
+            item
+            for item in seed.get("graph_seed_refs", [])
+            if isinstance(item, dict)
+        ],
     }
     if query.strip():
         compact["query_preview"] = _truncate_text(query, 240)
+    return compact
+
+
+def _compact_selected_result_evidence(item: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: item[key]
+        for key in (
+            "schema_version",
+            "producer",
+            "result_id",
+            "episode_id",
+            "authority",
+            "ref",
+        )
+        if key in item
+    }
+    request = item.get("request")
+    if not isinstance(request, dict):
+        return compact
+    producer = ResultProducer(item.get("producer"))
+    parsed = parse_result_request(producer, request)
+    compact["request_digest"] = digest_data(request)
+    if isinstance(parsed, ContextResultRequest):
+        compact["request_preview"] = {
+            "kind": "context_query",
+            "query": _truncate_text(parsed.query, COMPACT_RESULT_REQUEST_CHARS),
+            "mode": parsed.mode,
+        }
+    elif isinstance(parsed, GraphResultRequest):
+        compact["request_preview"] = {
+            "kind": "graph_query",
+            "selector": {
+                key: _truncate_text(value, COMPACT_RESULT_REQUEST_CHARS)
+                if isinstance(value, str)
+                else value
+                for key, value in parsed.selector.items()
+            },
+        }
     return compact
 
 
@@ -775,39 +901,6 @@ def _compact_pack_item(item: dict[str, Any], *, excerpt_chars: int, reference_on
     if isinstance(graph_path, list) and graph_path:
         compact["graph_path_count"] = len(graph_path)
     return compact
-
-
-def _is_noisy_pack_item(item: dict[str, Any]) -> bool:
-    ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
-    path = str(ref.get("path") or "").lower()
-    text = str(item.get("excerpt") or item.get("selection_reason") or "").lower()
-    noisy_parts = (
-        "/.cxx/",
-        "/.dart_tool/",
-        "/.firebase/",
-        "/.gradle/",
-        "/.next/",
-        "/.nuxt/",
-        "/.parcel-cache/",
-        "/.playwright-browsers/",
-        "/.pytest_cache/",
-        "/.svelte-kit/",
-        "/.temp/",
-        "/.turbo/",
-        "/__pycache__/",
-        "/build/",
-        "/builds/",
-        "/dist/",
-        "/library/",
-        "/logs/",
-        "/node_modules/",
-        "/obj/",
-        "/target/",
-        "/temp/",
-        "/usersettings/",
-    )
-    noisy_suffixes = (".csv", ".ipynb", ".lock", ".log", ".pkl", ".pyc", ".svg", ".tsbuildinfo", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb")
-    return any(part in path for part in noisy_parts) or path.endswith(noisy_suffixes) or "parse_status" in text and any(marker in text for marker in ("skipped", "unsupported"))
 
 
 def _truncate_text(value: str, limit: int) -> str:
@@ -952,7 +1045,8 @@ def compare_task_context_pack_benchmarks(
 
 def _task_seed_query(task: Task) -> str:
     discovery = task_discovery_values(task)
-    return "\n".join(_without_discovery_placeholders(discovery.get("Candidate query", [])))
+    queries = _without_discovery_placeholders(discovery.get("Candidate query", []))
+    return queries[-1] if queries else ""
 
 
 def _without_discovery_placeholders(values: list[str]) -> list[str]:
@@ -1470,7 +1564,12 @@ def _task_pack_bundle_candidates(
 ) -> list[ContextCandidate]:
     if bundle is None or limit <= 0:
         return []
-    allowed_kinds = {"current_source", "config", "product_manifest", "verification_hint", "graph_relation"}
+    allowed_kinds = {
+        *CONTEXT_SOURCE_KIND_VALUES,
+        "product_manifest",
+        "verification_hint",
+        "graph_relation",
+    }
     eligible = [
         candidate
         for candidate in bundle.evidence
@@ -2336,14 +2435,6 @@ def _pack_warnings(
             "message": "task context pack uses structured Discovery as retrieval input; it does not set task scope or create knowledge",
         }
     ]
-    task_repo_id = str(task.frontmatter.get("repo_id") or "")
-    if task_repo_id and bundle is not None and str(bundle.repository.get("id") or "") != task_repo_id:
-        warnings.append(
-            {
-                "code": "context_pack_repo_mismatch",
-                "message": f"task repo_id is {task_repo_id}, but context pack used {bundle.repository.get('id')}",
-            }
-        )
     warnings.extend(
         _task_pack_freshness_warnings(
             bundle,

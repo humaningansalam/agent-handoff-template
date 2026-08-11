@@ -38,9 +38,10 @@ Example:
 ## Discovery
 
 <!-- For repo work, record candidate-file discovery evidence before editing.
-Record the Candidate query, run compact `repoctl context query`, and inspect suggested files directly. Refine and repeat the query before choosing scope when evidence is insufficient.
+The current Candidate query owns one Discovery episode. The same query accumulates evidence; a distinct query keeps Chosen scope and replaces earlier Reviewed, note, and selected-result evidence.
+Run compact `repoctl context query` and inspect suggested files directly. Refine and repeat before choosing scope when evidence is insufficient.
 Prefer `./scripts/repoctl task discovery add T-... --query "..." --json`, then add `--reviewed` and `--chosen` after inspection.
-If a particular Context or Graph result was selected, the same command may attach its digest, authority class, and selected ref; this is optional.
+If a particular Context or Graph result was selected, copy its public `data.result_receipt` producer/result ID and one exact selectable authority/ref tuple into the same command; this is optional.
 A scoped Context Pack is optional when a durable handoff or relationship summary is useful.
 Each required field may be one line or an indented sub-list; include at least one `repos/...` path under Chosen files.
 This section may be empty for root-only or already-obvious work. -->
