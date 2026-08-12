@@ -66,6 +66,56 @@ def test_task_show_and_log_append_use_repoctl_lifecycle_boundary(tmp_path: Path,
     assert "frontmatter" not in summary_payload["data"]
 
 
+def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    archived = tmp_path / "docs/archive/tasks/T-20260609184045Z--finished.md"
+    archived.write_text(task_text("T-20260609184045Z", status="done"), encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "resume", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"] == {
+        "selection": {"status": "no_live", "live_task_count": 0},
+        "task": None,
+        "resume_guidance": None,
+        "candidates": [],
+    }
+
+    first = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{first}--alpha.md", task_text(first, status="doing"))
+    assert main(["task", "resume", "--json"]) == 0
+    unbound = json.loads(capsys.readouterr().out)["data"]
+    assert unbound["selection"] == {"status": "single_live", "live_task_count": 1}
+    assert unbound["resume_guidance"]["status"] == "unbound"
+    assert unbound["resume_guidance"]["handoff"]["body"] == ""
+
+    assert main(["task", "handoff", "bind", first, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "resume", "--json"]) == 0
+    current = json.loads(capsys.readouterr().out)["data"]
+    assert current["resume_guidance"]["status"] == "current"
+    assert current["resume_guidance"]["handoff"]["active"] is True
+    assert "Next exact step" in current["resume_guidance"]["handoff"]["body"]
+
+    assert main(["task", "log", "append", first, "changed the live task", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "resume", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]
+    assert stale["resume_guidance"]["status"] == "stale"
+    assert stale["resume_guidance"]["handoff"]["body"] == ""
+
+    second = "T-20260609184047Z"
+    second_path = tmp_path / f"docs/tasks/{second}--beta.md"
+    second_path.write_text(task_text(second, status="todo"), encoding="utf-8")
+    assert main(["task", "resume", "--json"]) == 1
+    ambiguous = json.loads(capsys.readouterr().out)
+    assert ambiguous["data"]["selection"] == {"status": "ambiguous", "live_task_count": 2}
+    assert ambiguous["data"]["task"] is None
+    assert ambiguous["data"]["resume_guidance"] is None
+    assert [candidate["id"] for candidate in ambiguous["data"]["candidates"]] == [first, second]
+    assert ambiguous["problems"][0]["code"] == "task_resume_ambiguous"
+
+
 def test_task_show_accepts_canonical_id_filename_and_path_with_section_projection(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     filename = "T-20260609184046Z--alpha.md"

@@ -39,7 +39,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 1. Read `AGENTS.md`
 2. Open `docs/BOARD.md`
 3. Open the live task file
-4. Run `./scripts/repoctl task show T-... --summary --json`
+4. Run `./scripts/repoctl task resume --json`, then inspect the selected task with `task show` when needed
 5. Continue from `## Handoff` only when resume guidance is `current`; otherwise inspect the reported drift and review/rebind before transfer
 
 ## Minimal structure

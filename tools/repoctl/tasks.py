@@ -44,6 +44,12 @@ class TaskHandoffStatus(StrEnum):
     HISTORICAL = "historical"
 
 
+class TaskResumeSelectionStatus(StrEnum):
+    NO_LIVE = "no_live"
+    SINGLE_LIVE = "single_live"
+    AMBIGUOUS = "ambiguous"
+
+
 class _CompletionEvidenceMode(StrEnum):
     NONE = "none"
     WORKING_TREE_DIFF = "working_tree_diff"
@@ -503,6 +509,14 @@ class Task:
             "follow_up_of": str(self.frontmatter.get("follow_up_of") or ""),
             "depends_on": depends_on,
         }
+
+
+@dataclass(frozen=True)
+class TaskResumeSelection:
+    status: TaskResumeSelectionStatus
+    live_task_count: int
+    task: Task | None
+    candidates: tuple[Task, ...]
 
 
 @dataclass(frozen=True)
@@ -4677,6 +4691,15 @@ def create_task_file(
 
 def live_tasks(tasks: list[Task]) -> list[Task]:
     return [task for task in tasks if not task.archived and task.status in LIVE]
+
+
+def select_task_for_resume(tasks: list[Task]) -> TaskResumeSelection:
+    candidates = tuple(sorted(live_tasks(tasks), key=lambda task: task.rel_path))
+    if not candidates:
+        return TaskResumeSelection(TaskResumeSelectionStatus.NO_LIVE, 0, None, ())
+    if len(candidates) == 1:
+        return TaskResumeSelection(TaskResumeSelectionStatus.SINGLE_LIVE, 1, candidates[0], ())
+    return TaskResumeSelection(TaskResumeSelectionStatus.AMBIGUOUS, len(candidates), None, candidates)
 
 
 def children_by_parent(tasks: list[Task]) -> dict[str, list[Task]]:

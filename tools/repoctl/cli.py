@@ -30,7 +30,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inven
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, unbound_repository_state_namespaces
 from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_selections, graph_result_selections, write_result_receipt
-from .tasks import Problem, REPO_REQUIRED_AREAS, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -1802,6 +1802,83 @@ def cmd_task_list(args: argparse.Namespace) -> int:
         if payload["data"]["board"]["stale"]:
             print("BOARD is stale. Run: repoctl check --fix-board")
     return 0
+
+
+def build_task_resume_projection(root: Path) -> dict[str, Any]:
+    tasks = load_tasks(root)
+    selection = select_task_for_resume(tasks)
+    selection_data = {
+        "status": selection.status.value,
+        "live_task_count": selection.live_task_count,
+    }
+    data: dict[str, Any] = {
+        "selection": selection_data,
+        "task": None,
+        "resume_guidance": None,
+        "candidates": [task.to_list_dict() for task in selection.candidates],
+    }
+    if selection.status is TaskResumeSelectionStatus.NO_LIVE:
+        return {
+            "ok": True,
+            "command": "task.resume",
+            "data": data,
+            "problems": [],
+            "warnings": [],
+            "next_actions": [],
+        }
+    if selection.status is TaskResumeSelectionStatus.AMBIGUOUS:
+        problem = Problem(
+            "error",
+            "task_resume_ambiguous",
+            "multiple live tasks exist; select a task explicitly before resuming",
+        )
+        return {
+            "ok": False,
+            "command": "task.resume",
+            "data": data,
+            "problems": [problem.to_dict()],
+            "warnings": [],
+            "next_actions": [],
+        }
+
+    task = selection.task
+    if task is None:  # pragma: no cover - closed by TaskResumeSelectionStatus
+        raise RepoctlError("single-live resume selection is missing its task", code="task_resume_selection_invalid")
+    try:
+        target = _repo_target_for_task_command(root, task)
+    except RepoctlError:
+        target = None
+    guidance, warnings, problems = _task_resume_guidance(root, task, target=target)
+    handoff = dict(guidance.get("handoff") or {})
+    if guidance.get("status") != "current" or handoff.get("active") is not True:
+        handoff["body"] = ""
+        guidance = {**guidance, "handoff": handoff}
+    data.update({"task": task.to_list_dict(), "resume_guidance": guidance})
+    return {
+        "ok": not _has_errors(problems),
+        "command": "task.resume",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": warnings,
+        "next_actions": [],
+    }
+
+
+def cmd_task_resume(args: argparse.Namespace) -> int:
+    payload = build_task_resume_projection(find_workspace_root())
+    if args.json:
+        _json(payload)
+    else:
+        selection = payload["data"]["selection"]
+        task = payload["data"].get("task")
+        if task is not None:
+            guidance = payload["data"]["resume_guidance"]
+            print(f"{task['id']} {task['status']} {task['path']} handoff={guidance['status']}")
+        else:
+            print(f"task resume: {selection['status']} live_tasks={selection['live_task_count']}")
+            for candidate in payload["data"]["candidates"]:
+                print(f"{candidate['id']} {candidate['status']} {candidate['path']}")
+    return 0 if payload["ok"] else 1
 
 
 def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> dict[str, Any] | None:
@@ -6043,6 +6120,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_list = task_sub.add_parser("list")
     task_list.add_argument("--json", action="store_true")
     task_list.set_defaults(func=cmd_task_list)
+    task_resume = task_sub.add_parser("resume")
+    task_resume.add_argument("--json", action="store_true")
+    task_resume.set_defaults(func=cmd_task_resume)
     task_show = task_sub.add_parser("show")
     task_show.add_argument("task_id")
     task_show.add_argument("--summary", action="store_true", help="omit task body and frontmatter from output")
