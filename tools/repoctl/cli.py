@@ -1850,9 +1850,17 @@ def build_task_resume_projection(root: Path) -> dict[str, Any]:
         target = None
     guidance, warnings, problems = _task_resume_guidance(root, task, target=target)
     handoff = dict(guidance.get("handoff") or {})
-    if guidance.get("status") != "current" or handoff.get("active") is not True:
-        handoff["body"] = ""
-        guidance = {**guidance, "handoff": handoff}
+    handoff_body = handoff.pop("body", "")
+    executable_handoff = (
+        handoff_body
+        if guidance.get("status") == "current" and handoff.get("active") is True
+        else None
+    )
+    guidance = {
+        **guidance,
+        "handoff": handoff,
+        "executable_handoff": executable_handoff,
+    }
     data.update({"task": task.to_list_dict(), "resume_guidance": guidance})
     return {
         "ok": not _has_errors(problems),

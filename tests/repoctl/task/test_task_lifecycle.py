@@ -87,7 +87,8 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     unbound = json.loads(capsys.readouterr().out)["data"]
     assert unbound["selection"] == {"status": "single_live", "live_task_count": 1}
     assert unbound["resume_guidance"]["status"] == "unbound"
-    assert unbound["resume_guidance"]["handoff"]["body"] == ""
+    assert unbound["resume_guidance"]["executable_handoff"] is None
+    assert "body" not in unbound["resume_guidance"]["handoff"]
 
     assert main(["task", "handoff", "bind", first, "--json"]) == 0
     capsys.readouterr()
@@ -95,14 +96,14 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     current = json.loads(capsys.readouterr().out)["data"]
     assert current["resume_guidance"]["status"] == "current"
     assert current["resume_guidance"]["handoff"]["active"] is True
-    assert "Next exact step" in current["resume_guidance"]["handoff"]["body"]
+    assert "Next exact step" in current["resume_guidance"]["executable_handoff"]
 
     assert main(["task", "log", "append", first, "changed the live task", "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "resume", "--json"]) == 0
     stale = json.loads(capsys.readouterr().out)["data"]
     assert stale["resume_guidance"]["status"] == "stale"
-    assert stale["resume_guidance"]["handoff"]["body"] == ""
+    assert stale["resume_guidance"]["executable_handoff"] is None
 
     second = "T-20260609184047Z"
     second_path = tmp_path / f"docs/tasks/{second}--beta.md"

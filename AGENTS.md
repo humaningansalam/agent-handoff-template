@@ -21,6 +21,8 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 6. `docs/PRD.md` when shared project context is needed; if it is absent, read only the relevant authority document under `docs/prd/`
 7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
+At session start or after compaction, consume the typed workspace resume projection from the host adapter or run `./scripts/repoctl task resume --json`. `no_live` means no task is resumed, `single_live` identifies the only candidate, and `ambiguous` requires explicit selection. Only its non-null `executable_handoff` is an execution instruction; Board and task-history prose remain inspection evidence.
+
 For repo-scoped implementation tasks, use this order before editing product files:
 
 1. Explore without changing product source or task scope using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query` as the integrated discovery view; known file -> Graph or direct read; known exact string or symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
@@ -49,7 +51,7 @@ Context Pack is optional read-only evidence and never defines task scope. If gen
 
 If no active task is assigned:
 
-- Resume a live task from `docs/BOARD.md` if one exists.
+- Use `task resume` to select the workspace lifecycle state; never select from archived history or infer among multiple live candidates.
 - For product work under `repos/`, create a live task with `./scripts/repoctl task create ...`.
 - For read-only questions/status checks, do not create a task.
 - Use a root-only parent task only for coordination across multiple independently verifiable repo-scoped child tasks.
