@@ -192,10 +192,9 @@ def test_range_observed_receipt_does_not_claim_task_changed_files(tmp_path: Path
         snapshot,
         anchors=[GraphContextAnchor(kind=GraphContextAnchorKind.FILE, path="app.py")],
         mode="auto",
-        related_task_ids=[task_id],
     )
 
-    assert projection["history_path_support"] == {}
+    assert "history_path_support" not in projection
     assert any(
         item["task_id"] == task_id and item["attribution"] == "range_observed"
         for item in projection["history"]
@@ -506,11 +505,10 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
         snapshot,
         anchors=[GraphContextAnchor(kind=GraphContextAnchorKind.FILE, path="app.py")],
         mode="auto",
-        related_task_ids=["T-20260609184046Z", newer_task_id],
     )
-    assert projection["history_path_support"] == {
-        "app.py": ["T-20260609184046Z"],
-        "sibling.py": ["T-20260609184046Z"],
+    assert {item["task_id"] for item in projection["history"]} == {
+        "T-20260609184046Z",
+        newer_task_id,
     }
     assert any(item["task_id"] == newer_task_id for item in projection["history"])
     assert "sibling.py" not in projection["related_paths"]

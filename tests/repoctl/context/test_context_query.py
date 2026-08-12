@@ -334,7 +334,7 @@ def test_compact_context_scans_until_group_limits_and_keeps_warnings() -> None:
     compact = compact_context_bundle(bundle)
 
     assert compact == compact_context_bundle(bundle)
-    assert [item["source_ref"]["path"] for item in compact["groups"]["callers_and_dependents"]] == ["<new-symbol-0>"]
+    assert compact["groups"]["callers_and_dependents"] == []
     assert [item["record_id"] for item in compact["groups"]["reviewed_knowledge"]] == ["K-2"]
     assert compact["groups"]["supporting_evidence"] == []
     assert compact["groups"]["warnings_and_completeness"] == []
@@ -345,7 +345,7 @@ def test_compact_context_scans_until_group_limits_and_keeps_warnings() -> None:
     }
     assert continuations[("file", "src/module-0.py")] == ["workspace.open", "graph.file"]
     assert continuations[("file", "src/module-1.py")] == ["workspace.open", "graph.file"]
-    assert ("symbol", "new_symbol_0") in continuations
+    assert ("symbol", "new_symbol_0") not in continuations
 
 
 def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1556,6 +1556,65 @@ def test_context_query_preserves_ranked_graph_seed_order_in_full_and_compact_vie
     assert all(item["continuation"]["actions"] for item in compact["graph_seed_refs"])
 
 
+def test_context_query_promotes_weak_test_seed_connected_to_retained_source(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    source = repo / "src"
+    tests = repo / "tests"
+    source.mkdir()
+    tests.mkdir()
+    (source / "owner.py").write_text(
+        "def apply_projection():\n    return True\n",
+        encoding="utf-8",
+    )
+    (tests / "test_decoy.py").write_text(
+        "def test_decoy():\n    assert 'amber cobalt quartz meadow'\n",
+        encoding="utf-8",
+    )
+    (tests / "test_owner.py").write_text(
+        "from src.owner import apply_projection\n\n"
+        "def test_owner():\n"
+        "    marker = 'violet harbor'\n"
+        "    assert apply_projection() and marker\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "amber cobalt quartz meadow violet harbor"
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full_seed_paths = [item["path"] for item in full["graph_seed_refs"]]
+    assert full_seed_paths == [
+        "tests/test_owner.py",
+        "tests/test_decoy.py",
+    ]
+    assert any(
+        relation.get("assertion") == "resolved"
+        and relation.get("edge") == "TESTS_FILE"
+        and relation.get("from_path") == "tests/test_owner.py"
+        and relation.get("to_path") == "src/owner.py"
+        for item in full["evidence"]
+        for relation in item.get("graph_path", [])
+    )
+
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--json"]
+    ) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert [item["path"] for item in compact["graph_seed_refs"]] == full_seed_paths
+    assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+        "repos/src/owner.py"
+    )
+    assert compact["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/test_owner.py"
+    )
+
+
 def test_context_query_keeps_stronger_test_anchor_when_another_lane_matches_directory_scope(
     tmp_path: Path,
     monkeypatch,
@@ -2606,6 +2665,9 @@ def test_context_graph_corroborates_weak_provider_symbols_between_current_query_
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "handler.py").write_text(
         "from peer import peer_value\n\n"
+        "def state():\n"
+        "    marker = 'oauth handshake'\n"
+        "    return marker\n\n"
         "def handle():\n"
         "    marker = 'oauth handshake'\n"
         "    return peer_value()\n",
@@ -2664,30 +2726,30 @@ def test_context_graph_keeps_structural_owner_with_typed_candidate_coherence(
     services.mkdir()
     tests.mkdir()
     (services / "access_role_controller.py").write_text(
-        "def revoke_access_role():\n"
+        "def apply_transition():\n"
         "    return 'role'\n",
         encoding="utf-8",
     )
     (services / "access_role_contract.py").write_text(
-        "TRANSITION = 'revoke access role before replacement assignment race'\n",
+        "TRANSITION = 'revoke replacement'\n",
         encoding="utf-8",
     )
     (services / "access_role_bootstrap.py").write_text(
         "from services.access_role_coordinator import coordinate_access_role\n\n"
         "def bootstrap_access_role():\n"
-        "    marker = 'revoke'\n"
+        "    marker = 'assignment'\n"
         "    return coordinate_access_role(), marker\n",
         encoding="utf-8",
     )
     (services / "access_role_coordinator.py").write_text(
         "from services.access_role_bootstrap import bootstrap_access_role\n\n"
         "def coordinate_access_role():\n"
-        "    marker = 'revoke'\n"
+        "    marker = 'race'\n"
         "    return bootstrap_access_role(), marker\n",
         encoding="utf-8",
     )
     (tests / "test_behavior.py").write_text(
-        "from services.access_role_controller import revoke_access_role as subject\n\n"
+        "from services.access_role_controller import apply_transition as subject\n\n"
         "def test_behavior():\n"
         "    assert subject() == 'role'\n",
         encoding="utf-8",
@@ -2695,31 +2757,128 @@ def test_context_graph_keeps_structural_owner_with_typed_candidate_coherence(
     (tests / "test_access_role_pipeline.py").write_text(
         "from services.access_role_bootstrap import bootstrap_access_role\n"
         "from services.access_role_coordinator import coordinate_access_role\n\n"
-        "SCENARIO = 'revoke access role before replacement assignment race'\n",
+        "SCENARIO = 'revoke access role replacement'\n",
         encoding="utf-8",
     )
     _materialize(tmp_path)
 
     assert main(
-        [
-            "context",
-            "query",
-            query,
-            "--repo-id",
-            "main",
-            "--json",
-        ]
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
+    before_full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--json"]
+    ) == 0
+    before = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    before_sources = [
+        item["source_ref"]["path"]
+        for item in before["groups"]["likely_change_surface"]
+    ]
+    assert before_sources[0] != "repos/services/access_role_controller.py"
+    before_owner = next(
+        item
+        for item in before_full["groups"]["likely_change_surface"]
+        if item["source_ref"]["path"]
+        == "repos/services/access_role_controller.py"
+    )
+    assert "history_corroboration" not in before_owner["evidence_kinds"]
+    before_primary_anchor = before_full["selection"]["graph_anchor"]["anchors"][0]
+    assert before_primary_anchor["anchor_strength"] == "weak"
+    assert before_primary_anchor["anchor_provenance"] not in {
+        "exact_identity",
+        "reviewed_knowledge",
+    }
+    assert "services/access_role_controller.py" not in {
+        item["anchor"]["path"]
+        for item in before_full["selection"]["graph_anchor"]["anchors"]
+    }
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    assert "services/access_role_controller.py" in bundle["completeness"][
-        "graph_anchor"
-    ]["seed_paths"]
-    assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
+    _write_completion_receipt(
+        tmp_path,
+        changed_paths=[
+            "services/access_role_controller.py",
+            "tests/test_behavior.py",
+        ],
+    )
+    task_path = (
+        tmp_path
+        / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
+    )
+    task_path.write_text(
+        task_path.read_text(encoding="utf-8")
+        + f"\n## Discovery Evidence\n\n{query}\n",
+        encoding="utf-8",
+    )
+    receipt_path = (
+        tmp_path
+        / "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["content_sha256"] = "sha256:" + hashlib.sha256(
+        task_path.read_bytes()
+    ).hexdigest()
+    receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+    after_full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--json"]
+    ) == 0
+    after = json.loads(capsys.readouterr().out)["data"]["bundle"]
+
+    owner_path = "services/access_role_controller.py"
+    owner_workspace_path = f"repos/{owner_path}"
+    final_anchor_paths = [
+        item["anchor"]["path"]
+        for item in after_full["selection"]["graph_anchor"]["anchors"]
+    ]
+    assert final_anchor_paths[0] == owner_path
+    assert [item["path"] for item in after_full["graph_seed_refs"]] == (
+        final_anchor_paths
+    )
+    assert [item["path"] for item in after["graph_seed_refs"]] == final_anchor_paths
+    assert after["completeness"]["graph_anchor"]["seed_paths"] == (
+        final_anchor_paths
+    )
+    assert after["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/services/access_role_controller.py"
     )
-    assert bundle["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
-        "repos/tests/test_behavior.py"
+    selected_test = after["groups"]["tests_and_verification"][0]
+    assert selected_test["source_ref"]["path"] == "repos/tests/test_behavior.py"
+    assert "TESTS_FILE" in selected_test["provenance"]["edge_kinds"]
+    assert owner_path in selected_test["provenance"]["origin_paths"]
+    after_owner = next(
+        item
+        for item in after_full["groups"]["likely_change_surface"]
+        if item["source_ref"]["path"] == owner_workspace_path
+    )
+    assert "history_corroboration" in after_owner["evidence_kinds"]
+    assert after_owner["related_record_ids"] == ["T-20260625010101Z"]
+    assert after["groups"]["related_history"][0]["record_id"] == (
+        "T-20260625010101Z"
+    )
+    compact_relation = after["groups"]["callers_and_dependents"][0]
+    full_relation = next(
+        item
+        for item in after_full["groups"]["callers_and_dependents"]
+        if item["source_ref"] == compact_relation["source_ref"]
+    )
+    assert full_relation["graph_path"]
+    retained_sources = {
+        item["source_ref"]["path"].removeprefix("repos/")
+        for item in after["groups"]["likely_change_surface"]
+    }
+    assert all(
+        relation["assertion"] == "resolved"
+        and retained_sources
+        & {relation["from_path"], relation["to_path"]}
+        for relation in full_relation["graph_path"]
     )
 
 
@@ -3533,7 +3692,7 @@ def test_history_corroboration_requires_strong_task_match_and_is_disabled_for_ta
         kind.value for kind in exact_old_path.evidence_kinds
     }
     assert "exact_task" in exact_evidence_kinds
-    assert "history_corroboration" in exact_evidence_kinds
+    assert "history_corroboration" not in exact_evidence_kinds
 
     write_history_evidence(query)
     strong_bundle, strong_problems, _meta = context_module.build_context_bundle(
@@ -3620,7 +3779,7 @@ def test_history_corroboration_does_not_replace_dominating_current_owner(
     artifact = tmp_path / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
     artifact.write_text(
         artifact.read_text(encoding="utf-8")
-        + "\n## Match\n\nerror service response request\n",
+        + f"\n## Match\n\n{query}\n",
         encoding="utf-8",
     )
     receipt_path = (
@@ -3648,6 +3807,14 @@ def test_history_corroboration_does_not_replace_dominating_current_owner(
     assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/a_true_owner.py"
     )
+    history_owner = next(
+        candidate
+        for candidate in bundle.evidence
+        if candidate.source_ref.path == "repos/z_history_owner.py"
+    )
+    assert "history_corroboration" not in {
+        kind.value for kind in history_owner.evidence_kinds
+    }
 
 
 def test_context_query_reserves_task_history_when_other_lanes_are_saturated(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -3875,6 +4042,15 @@ def test_context_query_bridges_reviewed_knowledge_path_to_code_relations_and_tes
         "from service import execute_route\n\ndef test_execute_route():\n    assert execute_route() == 'dependency'\n",
         encoding="utf-8",
     )
+    _materialize(tmp_path)
+    assert main(["context", "query", "blue comet routing", "--repo-id", "main", "--full", "--json"]) == 0
+    before = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert before["knowledge_results"] == []
+    assert all(
+        item["source_ref"]["path"] != "repos/service.py"
+        for item in before["groups"]["likely_change_surface"]
+    )
+
     record_id = "K-20260719010101Z--blue-comet-routing"
     _write_reviewed_knowledge_record(
         tmp_path,

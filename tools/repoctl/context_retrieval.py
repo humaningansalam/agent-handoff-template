@@ -549,8 +549,9 @@ def _distinct_paths_first(candidates: list[ContextCandidate]) -> list[ContextCan
 def provider_symbol_owner_candidate(
     candidates: list[ContextCandidate],
     *,
-    corroborated: bool = False,
+    corroborated_provider_symbols: Iterable[tuple[str, str]] = (),
 ) -> ContextCandidate | None:
+    corroborated_identities = set(corroborated_provider_symbols)
     provider_candidates = [
         candidate
         for candidate in candidates
@@ -576,7 +577,16 @@ def provider_symbol_owner_candidate(
     ]
     if owner_supported:
         return min(owner_supported, key=_retrieval_sort_key)
-    return min(provider_candidates, key=_retrieval_sort_key) if corroborated else None
+    graph_corroborated = [
+        candidate
+        for candidate in provider_candidates
+        if (
+            candidate.source_ref.provider,
+            candidate.source_ref.provider_symbol_id,
+        )
+        in corroborated_identities
+    ]
+    return min(graph_corroborated, key=_retrieval_sort_key) if graph_corroborated else None
 
 
 def provider_symbol_query_supported(

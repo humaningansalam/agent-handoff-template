@@ -1422,6 +1422,75 @@ def build_context_projection_index(snapshot: GraphSnapshot) -> _ContextProjectio
     return _build_context_projection_index(snapshot)
 
 
+def context_task_path_support(
+    snapshot: GraphSnapshot,
+    *,
+    task_ids: list[str] | tuple[str, ...] | set[str] | None,
+    excluded_paths: set[str] | None = None,
+    max_paths_per_task: int = 24,
+    projection_index: _ContextProjectionIndex | None = None,
+) -> dict[str, list[str]]:
+    """Return bounded current paths owned by each requested completion task."""
+    if max_paths_per_task <= 0:
+        return {}
+    index = projection_index or build_context_projection_index(snapshot)
+    repo_id = str(snapshot.repository.get("id") or "")
+    excluded = {
+        path
+        for raw_path in (excluded_paths or set())
+        if (path := normalize_repo_path(raw_path))
+    }
+    raw_task_ids = sorted(task_ids) if isinstance(task_ids, set) else (task_ids or ())
+    normalized_task_ids = list(
+        dict.fromkeys(
+            str(task_id_value)
+            for task_id_value in raw_task_ids
+            if str(task_id_value)
+        )
+    )
+    task_path_support: dict[str, list[str]] = {}
+    for task_id_value in normalized_task_ids:
+        task_node_id = graph_task_id(task_id_value)
+        task_node = index.nodes.get(task_node_id)
+        if (
+            task_node is None
+            or task_node.kind != "task"
+            or str(task_node.identity.get("repo_id") or "") != repo_id
+        ):
+            continue
+        owned_paths: list[str] = []
+        for changed_file_id, changed_edge in index.changed_files_by_task.get(
+            task_node_id, []
+        ):
+            if len(owned_paths) >= max_paths_per_task:
+                break
+            if str(changed_edge.facts.get("role") or "") != "path":
+                continue
+            file_node = index.nodes.get(changed_file_id)
+            if file_node is None or file_node.kind != "file":
+                continue
+            path = normalize_repo_path(str(file_node.identity.get("path") or ""))
+            receipt_facts = (
+                file_node.facts.get("receipt")
+                if isinstance(file_node.facts.get("receipt"), dict)
+                else {}
+            )
+            if (
+                not path
+                or str(changed_edge.facts.get("change") or "") == "deleted"
+                or path in excluded
+                or str(file_node.identity.get("repo_id") or "") != repo_id
+                or file_id(repo_id, path) != changed_file_id
+                or receipt_facts.get("present_in_current_inventory") is False
+            ):
+                continue
+            if path not in owned_paths:
+                owned_paths.append(path)
+        if owned_paths:
+            task_path_support[task_id_value] = owned_paths
+    return task_path_support
+
+
 def context_path_support_profiles(
     snapshot: GraphSnapshot,
     *,
@@ -1570,9 +1639,6 @@ def project_context_neighborhood(
     mode: str,
     max_relations: int = 128,
     max_history: int = 5,
-    max_history_paths: int = 24,
-    related_task_ids: list[str] | tuple[str, ...] | set[str] | None = None,
-    explicit_task_ids: set[str] | frozenset[str] | None = None,
     excluded_candidate_paths: set[str] | None = None,
     projection_index: _ContextProjectionIndex | None = None,
 ) -> dict[str, Any]:
@@ -1959,55 +2025,6 @@ def project_context_neighborhood(
         for task_id in selected_task_ids
         for item in sorted(history_by_task[task_id], key=lambda value: str(value.get("path") or ""))
     ]
-    normalized_related_task_ids = list(
-        dict.fromkeys(
-            str(task_id_value)
-            for task_id_value in (related_task_ids or ())
-            if str(task_id_value)
-        )
-    )
-    normalized_explicit_task_ids = {
-        str(task_id_value)
-        for task_id_value in (explicit_task_ids or set())
-        if str(task_id_value)
-    }
-    support_task_ids = [
-        task_id_value
-        for task_id_value in normalized_related_task_ids
-        if task_id_value in history_by_task
-        or (
-            task_id_value in normalized_explicit_task_ids
-            and graph_task_id(task_id_value) in nodes
-        )
-    ][:1]
-    history_path_support: dict[str, list[str]] = {}
-    for task_id_value in support_task_ids:
-        task_node_id = graph_task_id(task_id_value)
-        for changed_file_id, changed_edge in index.changed_files_by_task.get(task_node_id, []):
-            if len(history_path_support) >= max_history_paths:
-                break
-            if str(changed_edge.facts.get("role") or "") != "path":
-                continue
-            file_node = nodes.get(changed_file_id)
-            if file_node is None or file_node.kind != "file":
-                continue
-            path = normalize_repo_path(str(file_node.identity.get("path") or ""))
-            receipt_facts = (
-                file_node.facts.get("receipt")
-                if isinstance(file_node.facts.get("receipt"), dict)
-                else {}
-            )
-            if (
-                not path
-                or path in excluded_paths
-                or str(file_node.identity.get("repo_id") or "") != repo_id
-                or file_id(repo_id, path) != changed_file_id
-                or receipt_facts.get("present_in_current_inventory") is False
-            ):
-                continue
-            history_path_support.setdefault(path, []).append(task_id_value)
-        if len(history_path_support) >= max_history_paths:
-            break
     return {
         "mode": mode,
         "policy": {
@@ -2030,10 +2047,6 @@ def project_context_neighborhood(
             excluded_paths=excluded_candidate_paths,
         ),
         "history": history,
-        "history_path_support": {
-            path: list(dict.fromkeys(task_ids))
-            for path, task_ids in sorted(history_path_support.items())
-        },
     }
 
 
