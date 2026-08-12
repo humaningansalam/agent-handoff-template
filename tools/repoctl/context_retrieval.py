@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 
 from .context_chunks import DocumentChunk
@@ -84,6 +85,14 @@ AUTO_RETRIEVAL_LANE_LIMITS = {
     ContextRetrievalLane.TASK_HISTORY: 2,
     ContextRetrievalLane.SUPPORTING: 1,
 }
+
+
+@dataclass(frozen=True)
+class ContextIdentityQuery:
+    """Analyzer-owned query identities; this is not a prose classifier."""
+
+    explicit_selectors: tuple[tuple[str, ...], ...]
+    ordered_natural_terms: tuple[str, ...]
 
 
 def retrieve_context(
@@ -235,7 +244,7 @@ def rank_context_chunks(
 ) -> list[ContextCandidate]:
     terms = context_query_terms(query)
     ordered_terms = _ordered_query_terms(query)
-    selectors = context_identity_selectors(query)
+    identity_query = context_identity_selectors(query)
     corpus_fts_scores = {
         chunk.source_ref.key(): float(chunk.corpus_fts_score)
         for chunk in chunks
@@ -277,7 +286,7 @@ def rank_context_chunks(
             "body": _matched_query_terms(ordered_terms, body_terms),
         }
         identity_kinds = context_identity_evidence(
-            selectors,
+            identity_query,
             path=chunk.source_ref.path,
             section=chunk.source_ref.section,
             section_kind=chunk.source_ref.section_kind,
@@ -310,6 +319,10 @@ def rank_context_chunks(
             reasons.append("exact provider relationship identity match")
         if ContextEvidenceKind.EXACT_TASK in identity_kinds:
             reasons.append("exact task identity match")
+        if ContextEvidenceKind.NAMED_FILE_IDENTITY in identity_kinds:
+            reasons.append("named file identity match")
+        if ContextEvidenceKind.NAMED_SYMBOL_IDENTITY in identity_kinds:
+            reasons.append("named provider symbol identity match")
         if path_coverage > 0:
             evidence_kinds.add(ContextEvidenceKind.PATH_TERMS)
             reasons.append("path term coverage")
@@ -381,7 +394,7 @@ def canonical_identifier_sequence(value: str) -> tuple[str, ...]:
     return tuple(part for part in parts if part)
 
 
-def context_identity_selectors(query: str) -> tuple[tuple[str, ...], ...]:
+def context_identity_selectors(query: str) -> ContextIdentityQuery:
     selectors: list[tuple[str, ...]] = []
     stripped = query.strip().strip("`'\"")
     whole = tuple(part for part in canonical_identifier_sequence(stripped) if part not in STOPWORDS)
@@ -399,7 +412,18 @@ def context_identity_selectors(query: str) -> tuple[tuple[str, ...], ...]:
         selector = canonical_identifier_sequence(token)
         if selector:
             selectors.append(selector)
-    return tuple(dict.fromkeys(sorted(selectors, key=lambda value: (-len(value), value))))
+    ordered_natural_terms = tuple(
+        part
+        for token in TOKEN_RE.findall(query)
+        for part in canonical_identifier_sequence(token)
+        if len(part) >= 2 and part not in STOPWORDS
+    )
+    return ContextIdentityQuery(
+        explicit_selectors=tuple(
+            dict.fromkeys(sorted(selectors, key=lambda value: (-len(value), value)))
+        ),
+        ordered_natural_terms=ordered_natural_terms,
+    )
 
 
 def _is_explicit_identity_token(token: str) -> bool:
@@ -411,7 +435,7 @@ def _is_explicit_identity_token(token: str) -> bool:
 
 
 def context_identity_evidence(
-    selectors: tuple[tuple[str, ...], ...],
+    identity_query: ContextIdentityQuery,
     *,
     path: str,
     section: str,
@@ -421,7 +445,7 @@ def context_identity_evidence(
     filename_identity = canonical_identifier_sequence(path.replace("\\", "/").rsplit("/", 1)[-1])
     section_identity = canonical_identifier_sequence(section.strip())
     kinds: set[ContextEvidenceKind] = set()
-    for selector in selectors:
+    for selector in identity_query.explicit_selectors:
         if selector == filename_identity:
             kinds.add(ContextEvidenceKind.EXACT_FILENAME)
         elif len(selector) > len(filename_identity) and _is_sequence_suffix(path_identity, selector):
@@ -444,7 +468,54 @@ def context_identity_evidence(
             and selector == section_identity
         ):
             kinds.add(ContextEvidenceKind.EXACT_TASK)
+
+    filename = path.replace("\\", "/").rsplit("/", 1)[-1]
+    filename_stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    named_file_identity = canonical_identifier_sequence(filename_stem)
+    if (
+        section_kind
+        in {
+            ContextSectionKind.FILE,
+            ContextSectionKind.CONFIG,
+            ContextSectionKind.PROVIDER_SYMBOL,
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+        }
+        and len(named_file_identity) >= 2
+        and _contains_identifier_sequence(
+            identity_query.ordered_natural_terms,
+            named_file_identity,
+        )
+    ):
+        kinds.add(ContextEvidenceKind.NAMED_FILE_IDENTITY)
+
+    if section_kind in {
+        ContextSectionKind.PROVIDER_SYMBOL,
+        ContextSectionKind.PROVIDER_RELATIONSHIP,
+    }:
+        for component in (part for part in re.split(r"[.:]+", section) if part):
+            named_symbol_identity = canonical_identifier_sequence(component)
+            if (
+                len(named_symbol_identity) >= 2
+                and _contains_identifier_sequence(
+                    identity_query.ordered_natural_terms,
+                    named_symbol_identity,
+                )
+            ):
+                kinds.add(ContextEvidenceKind.NAMED_SYMBOL_IDENTITY)
+                break
     return tuple(sorted(kinds, key=lambda kind: kind.value))
+
+
+def _contains_identifier_sequence(
+    value: tuple[str, ...],
+    identity: tuple[str, ...],
+) -> bool:
+    if not identity or len(identity) > len(value):
+        return False
+    return any(
+        value[index : index + len(identity)] == identity
+        for index in range(len(value) - len(identity) + 1)
+    )
 
 
 def _identity_score(query: str, chunk: DocumentChunk) -> tuple[float, str]:
@@ -468,6 +539,10 @@ def _identity_score_from_kinds(kinds: tuple[ContextEvidenceKind, ...]) -> tuple[
         return 1.35, "exact task identity match"
     if ContextEvidenceKind.EXACT_FILENAME in kinds:
         return 1.2, "exact filename match"
+    if ContextEvidenceKind.NAMED_SYMBOL_IDENTITY in kinds:
+        return 0.0, "named symbol identity match"
+    if ContextEvidenceKind.NAMED_FILE_IDENTITY in kinds:
+        return 0.0, "named file identity match"
     return 0.0, ""
 
 
@@ -513,8 +588,20 @@ def _anchor_strength(
     section_kind: ContextSectionKind,
     section_coverage: float,
 ) -> ContextAnchorStrength:
-    if identity_kinds:
+    exact_identity_kinds = {
+        ContextEvidenceKind.EXACT_PATH,
+        ContextEvidenceKind.EXACT_FILENAME,
+        ContextEvidenceKind.EXACT_SYMBOL,
+        ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ContextEvidenceKind.EXACT_TASK,
+    }
+    if set(identity_kinds) & exact_identity_kinds:
         return ContextAnchorStrength.EXACT
+    if set(identity_kinds) & {
+        ContextEvidenceKind.NAMED_FILE_IDENTITY,
+        ContextEvidenceKind.NAMED_SYMBOL_IDENTITY,
+    }:
+        return ContextAnchorStrength.STRONG
     if section_kind in {ContextSectionKind.PROVIDER_SYMBOL, ContextSectionKind.PROVIDER_RELATIONSHIP} and section_coverage == 1.0:
         return ContextAnchorStrength.STRONG
     return ContextAnchorStrength.WEAK

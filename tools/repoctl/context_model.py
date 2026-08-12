@@ -53,6 +53,8 @@ class ContextEvidenceKind(StrEnum):
     EXACT_SYMBOL = "exact_symbol"
     EXACT_RELATIONSHIP = "exact_relationship"
     EXACT_TASK = "exact_task"
+    NAMED_FILE_IDENTITY = "named_file_identity"
+    NAMED_SYMBOL_IDENTITY = "named_symbol_identity"
     PATH_TERMS = "path_terms"
     SECTION_TERMS = "section_terms"
     BODY_TERMS = "body_terms"
@@ -222,6 +224,33 @@ class ContextAnchorResolution:
 
 
 @dataclass(frozen=True)
+class ContextOwnerProjection:
+    """One producer-owned ordering for actionable Context paths."""
+
+    anchor_resolution: ContextAnchorResolution | None = None
+    source_order: tuple[str, ...] = ()
+    selected_source_paths: tuple[str, ...] = ()
+    test_order: tuple[str, ...] = ()
+    selected_test_paths: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "anchor_paths": [
+                candidate.anchor.path
+                for candidate in (
+                    self.anchor_resolution.anchors
+                    if self.anchor_resolution is not None
+                    else ()
+                )
+            ],
+            "source_order": list(self.source_order),
+            "selected_source_paths": list(self.selected_source_paths),
+            "test_order": list(self.test_order),
+            "selected_test_paths": list(self.selected_test_paths),
+        }
+
+
+@dataclass(frozen=True)
 class ContextGraphSeedRef:
     anchor: GraphContextAnchor
     source_ref: ContextSourceRef
@@ -302,6 +331,10 @@ class ContextBundle:
         default_factory=dict,
         repr=False,
     )
+    owner_projection: ContextOwnerProjection | None = field(
+        default=None,
+        repr=False,
+    )
     schema: str = "repoctl.context.bundle"
     schema_version: int = 15
     authoritative: bool = False
@@ -342,6 +375,7 @@ class ContextBundle:
             relationship_candidates=self.relationship_candidates,
             graph_seed_refs=self.graph_seed_refs,
             preselection_graph_support_by_path=self.preselection_graph_support_by_path,
+            owner_projection=self.owner_projection,
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,

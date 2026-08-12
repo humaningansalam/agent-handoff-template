@@ -13,6 +13,7 @@ from .context_model import CONTEXT_SOURCE_KIND_VALUES, LEXICAL_CONTEXT_SOURCE_KI
 from .context_retrieval import (
     AUTO_RETRIEVAL_LANE_LIMITS,
     FTS_FIELD_WEIGHTS,
+    ContextIdentityQuery,
     ContextRetrievalLane,
     context_identity_evidence,
     context_identity_selectors,
@@ -811,14 +812,14 @@ def query_evidence_index(
             mode=mode,
             repository_path=target.display_path,
         )
-        exact_rows = _exact_identity_rows(
+        identity_rows = _identity_rows(
             query_connection,
             selectors=selectors,
             filter_sql=exact_filter_sql,
             filter_params=exact_filter_params,
             limit=limit,
         )
-        rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in exact_rows}
+        rows: dict[int, sqlite3.Row] = {int(row["id"]): row for row in identity_rows}
         fts_ranks: dict[int, int] = {}
         for rank, row in enumerate(fts_rows, start=1):
             row_id = int(row["id"])
@@ -931,15 +932,15 @@ def _lane_balanced_fts_rows(
     return rows
 
 
-def _exact_identity_rows(
+def _identity_rows(
     connection: sqlite3.Connection,
     *,
-    selectors: tuple[tuple[str, ...], ...],
+    selectors: ContextIdentityQuery,
     filter_sql: str,
     filter_params: list[Any],
     limit: int,
 ) -> list[sqlite3.Row]:
-    if not selectors:
+    if not selectors.explicit_selectors and not selectors.ordered_natural_terms:
         return []
     identity_limit = max(64, max(1, limit) * 4)
     matching_ids: list[int] = []
