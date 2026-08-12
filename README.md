@@ -37,7 +37,7 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 ## 60-second start
 
 1. Read `AGENTS.md`
-2. Consume the host's `[REPOCTL_TASK_RESUME]` context or run `./scripts/repoctl task resume --json`
+2. Run `./scripts/repoctl task resume --json`
 3. Open the selected live task and `docs/BOARD.md` when inspection is needed
 4. Continue only from a non-null `executable_handoff`; otherwise inspect the typed selection or drift before acting
 

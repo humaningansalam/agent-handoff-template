@@ -79,7 +79,6 @@
     "scripts/claude-maintenance",
     "scripts/repoctl",
     "tests/conftest.py",
-    "tests/hooks/test_prompt_context.py",
     "tests/fixtures/context-benchmark-multirepo/corpus.json",
     "tests/fixtures/context-benchmark-multirepo/expected-sources.json",
     "tests/fixtures/context-benchmark-multirepo/mutation-cases.json",

@@ -21,7 +21,7 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 6. `docs/PRD.md` when shared project context is needed; if it is absent, read only the relevant authority document under `docs/prd/`
 7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
-At session start or after compaction, consume the typed workspace resume projection from the host adapter or run `./scripts/repoctl task resume --json`. `no_live` means no task is resumed, `single_live` identifies the only candidate, and `ambiguous` requires explicit selection. Only its non-null `executable_handoff` is an execution instruction; Board and task-history prose remain inspection evidence.
+At session start or after compaction, run `./scripts/repoctl task resume --json`. `no_live` means no task is resumed, `single_live` identifies the only candidate, and `ambiguous` requires explicit selection. Only its non-null `executable_handoff` is an execution instruction; Board and task-history prose remain inspection evidence.
 
 For repo-scoped implementation tasks, use this order before editing product files:
 
