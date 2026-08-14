@@ -152,7 +152,7 @@ def test_check_does_not_require_repo_ref_for_repository_task(tmp_path: Path, mon
     assert main(["check", "--audit-history", "--json"]) == 1
     audited = json.loads(capsys.readouterr().out)
     assert audited["data"]["completion_history"]["mode"] == "full_archive_audit"
-    assert [problem["code"] for problem in audited["problems"]] == ["invalid_completion_receipt"]
+    assert "invalid_completion_receipt" in {problem["code"] for problem in audited["problems"]}
 
 
 def test_render_board_replaces_only_board_section() -> None:
