@@ -4,18 +4,43 @@
 
 Graph is not authoritative. Source authorities remain repo registry, source files, `.repometa`, structured task completion receipts, and explicitly reviewed Knowledge records.
 
-The first build analyzes all eligible source files and materializes a persistent SQLite evidence index for source symbols, module text, documents, manifests, verification hints, and task artifacts. The manifest, snapshot, semantic-provider results, and evidence-index binding are admitted as one materialization; query and incremental build fail with a typed recovery action when any member is missing, invalid, or bound to another snapshot. Later builds compare Git/content identities and update only changed files plus the semantic dependents that can be affected by those changes. `graph query` reads the materialized snapshot and never runs a compiler provider or rescans product sources.
+The first build analyzes all eligible source files and materializes a persistent SQLite evidence index for source symbols, module text, documents, manifests, and verification hints. The manifest, snapshot, semantic-provider results, evidence-index binding, and bounded completion-catalogue identity are admitted as one materialization; query and incremental build fail with a typed recovery action when a required member is missing, invalid, or bound to another snapshot. Later builds compare Git/content identities and update only changed files plus semantic dependents that can be affected by those changes. `graph query` reads the materialized snapshot and never runs a compiler provider or rescans product sources. Ordinary build/freshness reads the catalogue head/checkpoint and committed finite hot projection; it never opens retained event sidecars or walks or hashes the completion-receipt archive. `repoctl history rebuild` is the separate explicit recovery boundary that owns full receipt enumeration.
+
+## Implementation boundary
+
+The implementation materializes the node/edge snapshot documented below and returns node-selector continuations. Graph build recognizes component declarations through an immutable manifest-provider registry, and Graph/Context query projections annotate current subjects and confirmed relations with set-aware component membership and crossings. There is no separate topology ledger or owner class. Discovery freezes exact canonical result members from the current flat producer receipt; the producer receipt itself remains a flat selection contract.
+
+### Derived topology projection
+
+Topology is an additive projection over canonical subjects and existing typed relations. Component identity exists only when a registered immutable provider recognizes a current manifest and reads a valid declared name or explicit module root. The shipped registry covers package manifests plus Unity assembly definitions, statically declared Swift package/target roots, and static Gradle settings modules/project-directory mappings; dynamic, ambiguous, unsupported, or malformed declarations contribute no component fact. A directory, filename pattern without a provider declaration, `.repometa` area, language, or extension does not create a component or ownership, and existing edge semantics do not change. The ordered provider IDs and explicit parser revisions are part of Graph materialization identity, so a parser contract change makes an older snapshot stale instead of silently reusing its topology.
+
+```text
+citable subject
+  component_ids[]
+
+typed relation
+  from_component_ids[]
+  to_component_ids[]
+  crossed_component_ids[]
+```
+
+Membership is a set: overlapping root and nested declarations are both preserved for every covered current subject. A crossing exists only when a fresh confirmed typed relation connects non-identical membership sets. A bridge remains the ordinary subject and relation path that participates in that crossing; there is no second boundary/bridge ledger or owner class. Compact output returns only query-relevant crossings, total counts, truncation, and the existing typed continuations alongside them; continuations do not duplicate component fields. Stale endpoints and relations without a typed continuation are omitted.
+
+### Exact result-member boundary
+
+The current result receipt stores a canonical request plus flat `{authority, ref}` entries. Discovery validates an explicitly selected tuple against that receipt and freezes its canonical member capsule.
 
 ## Command
 
 ```bash
 ./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl graph build --repo-id main --rebuild --json
+./scripts/repoctl history rebuild --repo-id main --json
 ```
 
 Direct single-repo layout may omit `--repo-id` when `repos/.git` is the only target. Configured multi-repo layouts must pass `--repo-id`.
 
-`--rebuild` discards reusable provider results and is reserved for explicit recovery or provider/schema changes. Normal updates omit it.
+Graph `--rebuild` discards reusable provider results and is reserved for Graph recovery or provider/schema changes. It does not scan completion receipts or repair the completion catalogue. `history rebuild` validates the selected repository's full cold receipt authority and regenerates only completion-catalogue state. Normal Graph/Context operations never invoke it implicitly.
 
 `graph query` filters the stored snapshot through typed selectors:
 
@@ -33,7 +58,7 @@ Direct single-repo layout may omit `--repo-id` when `repos/.git` is the only tar
 ./scripts/repoctl graph query --repo-id web --artifact docs/archive/tasks/T-...md --json
 ```
 
-Query never updates the Graph materialization. A successful query atomically records only a regenerable compact result receipt under `.repoctl-state/result-receipts/**`; it does not change source, task state, or Graph facts. If no snapshot exists, it returns `graph_snapshot_missing` and tells the caller to run `graph build`. Existing state that is unreadable, malformed, incomplete, incompatible, or bound to another repository identity is a typed hard failure and requires an explicit rebuild; it is never treated as an absent snapshot. Source changes become visible after the next explicit build; queries remain pinned to the returned `snapshot_digest` until then.
+Query never updates the Graph materialization. A successful query atomically records only a regenerable compact result receipt under `.repoctl-state/result-receipts/**`; it does not change source, task state, or Graph facts. The cache is bounded by finite count, byte, and age limits and is collected at write time; a machine-owned insertion sequence plus receipt digest defines count/byte eviction order, while file time is used only for maximum age. Eviction is deterministic and cannot invalidate evidence already frozen into a task citation. If no snapshot exists, the query returns `graph_snapshot_missing` and tells the caller to run `graph build`. Existing state that is unreadable, malformed, incomplete, incompatible, or bound to another repository identity is a typed hard failure and requires an explicit rebuild; it is never treated as an absent snapshot. Source changes become visible after the next explicit build; queries remain pinned to the returned `snapshot_digest` until then.
 
 Materialized implementation state lives under `.repoctl-state/graph/<repo-id>/`. It contains one canonical snapshot, one manifest, and one fixed result file per semantic provider. It does not create per-query or per-file ledgers.
 
@@ -44,18 +69,21 @@ Incremental invalidation follows semantic boundaries:
 - C# refreshes the affected `.csproj` compilation unit.
 - Provider configuration or provider input-version changes refresh that provider. Dart configuration includes root or nested `pubspec.yaml`, `pubspec.lock`, and the adjacent `.dart_tool/package_config.json`; changing any of them invalidates the affected Dart provider paths even when no indexed source file changed.
 - Deleted and renamed files remove their old symbols, calls, and RPC facts before updated facts are merged.
+- Completion history consumes only catalogue entries after the admitted checkpoint. Source freshness remains owned by the normal Graph inventory and provider invalidation paths; Context independently checks exact current file-version keys before showing outcome evidence. A gap or digest mismatch disables the history/outcome capability with an explicit recovery action; it does not trigger an implicit archive scan.
 
 Exactly one primary selector is required: `--file`, `--topic`, `--import`, `--symbol`, `--callers-of`, `--callees-of`, `--impact-file`, `--impact-symbol`, `--task`, or `--artifact`. File selectors and `--in-file` accept either canonical repo-relative paths or workspace-relative paths prefixed by the selected repository path; one resolver normalizes both forms against indexed file identities. If both interpretations exist and differ, the selector fails with `graph_query_ambiguous_path` and returns both canonical candidates. A not-found path returns at most three exact basename/suffix candidates and returns none when no canonical identity is related; it never dumps provider inventories or arbitrary fuzzy suggestions.
 
 Default build JSON contains the snapshot digest, node/edge counts, compact capability/provider status, materialization status, and updated-path counts. Provider path inventories and the raw snapshot are available only with `--full`.
 
-Default query JSON contains a stable `result_digest`, direct matches, at most three decision-relevant relations, at most three non-authoritative relationship candidates, and bounded reusable continuations. The command envelope's `data.result_receipt` content-binds the exact typed selector and only identities visible on this compact surface to the producer, repository, and result digest. `--full` exposes diagnostics but keeps the same receipt request and membership. Query-specific traversals are returned under `paths`; queries without a traversal projection return their compact edges under `relations`. It omits node/edge counts, displayed/omitted statistics, provider coverage, analyzed-path inventories, freshness counts, and materialization digests. Compact freshness contains only state and the root-evidence drift indicator. File and symbol queries traverse importers/imports, callers/callees, direct tests, related tasks/artifacts/documents, and reviewed Knowledge in both directions. Every compact relation preserves evidence type, assertion/provider, confidence, capability completeness, and per-relation freshness. Use `--full --json` for raw nodes/edges and provider diagnostics.
+Default query JSON contains a stable `result_digest`, direct matches, at most three decision-relevant relations, at most three non-authoritative relationship candidates, and bounded reusable continuations. Under the current result format, the command envelope's `data.result_receipt` content-binds the exact typed selector and flat identities visible on this compact surface to the producer, repository, and result digest. `--full` exposes diagnostics but keeps the same receipt request and membership. Query-specific traversals are returned under `paths`; queries without a traversal projection return their compact edges under `relations`. It omits node/edge counts, displayed/omitted statistics, provider coverage, analyzed-path inventories, freshness counts, and materialization digests. Compact freshness contains only state and the root-evidence drift indicator. File and symbol queries traverse importers/imports, callers/callees, direct tests, related tasks/artifacts/documents, and reviewed Knowledge in both directions. Every compact relation preserves evidence type, assertion/provider, confidence, capability completeness, and per-relation freshness. Use `--full --json` for raw nodes/edges and provider diagnostics.
 
 Context projection is a separate internal consumer of the same snapshot. `project_context_neighborhood()` accepts only typed file or provider-symbol anchors and an explicit Context mode policy; Graph never receives raw natural-language tokens or task-retrieval candidates. Task ownership is exposed by the separate typed `context_task_path_support()` lookup. For each requested task ID, in caller order, it returns at most 24 current, non-deleted, same-repository `TASK_CHANGED_FILE(role=path)` targets, excluding paths unavailable in the current inventory or explicitly excluded for freshness. This lookup does not inspect task prose or the query, choose an eligible task, rank current text, or add paths to neighborhood seeds, `related_paths`, relations, or authority. Context owns task matching and ordering, loads and ranks current source at those paths, and for natural-language recovery uses the first strong task with eligible current lexical owners. Exact typed task or artifact matches are projected by Context only as `EXACT_TASK` evidence after anchor and traversal selection; they are not `HISTORY_CORROBORATION` and cannot create Graph traversal seeds. A naturally corroborated current file may still be chosen as an ordinary lexical Context anchor; that follows from current query evidence and Context's eligibility guard, not from a Graph task edge. Context may derive a bounded `lexical_file` anchor from its structured retrieval fields before calling the neighborhood boundary. Every requested anchor is accounted as resolved, ambiguous, or unresolved; missing file nodes and non-unique provider symbols are never silently ignored. Symbol anchors restrict first-hop call edges to the resolved symbol. Conflicting exact ambiguity produces no traversal, while a multi-anchor lexical/Knowledge request may continue with its resolved anchors and report the others as unresolved. Each mode fixes relation direction and maximum depth before traversal begins. Traversal tracks visited state per `(file, origin seed)` rather than per file, so an origin can continue through a node that is also another seed; merged relations retain per-origin minimum distances for scoring.
 
 After freshness and projection resolution, Context turns each surviving anchor into one typed seed ref using the anchor's exact source ref and digest. Compact output and Task Pack carry that producer object outside excerpt budgets; neither reconstructs it from rankings, paths, language rules, or prose.
 
 `KNOWLEDGE_APPLIES_TO` is materialized only when the record's derived lifecycle status is `reviewed`, from its literal `applies_to.paths` entry or a `source_ref` explicitly typed as `current_source`, after the shared repository selector resolver finds exactly one current file in the selected repository. A stale record may remain in Graph as historical provenance, but it never emits code-applicability edges. Root-document and other provenance-only `source_refs`, legacy aliases, task-derived changed files, and Knowledge prose do not create this edge. Ambiguous, invalid, missing, or cross-repository paths produce no edge.
+
+The active snapshot materializes only completion events retained by the finite hot catalogue policy, not the full completion archive. Current source topology and current Reviewed Knowledge heads remain active. Exact `--task` / `--artifact` selectors validate the requested cold catalogue record and construct a query-local ephemeral projection; they do not add the record to the active snapshot, alter ordinary freshness, or seed unrelated traversal. Context `past_decision` / `failure_mode` selectors use the same explicit cold boundary and expose their matches only as `related_history`.
 
 ## Snapshot
 
@@ -241,12 +269,14 @@ Task edges are produced only from structured task completion receipts under `doc
 
 repoctl accepts `committed_range` only when `start_head` is an ancestor of `observed_head`. Branch switches, resets, or rebases that break this ancestry block finish with `repo_history_rewritten`. Committed-range evidence is not combined implicitly with task-new working-tree changes.
 
-Completion receipt shape:
+Current schema-v4 completion receipt shape (`discovery_outcome` is required and
+its full body is defined in the Discovery outcome contract; the compact example
+below shows a valid empty outcome):
 
 ```json
 {
   "schema": "repoctl.task.completion",
-  "schema_version": 3,
+  "schema_version": 4,
   "task_id": "T-...",
   "repo_id": "web",
   "status": "done",
@@ -298,6 +328,20 @@ Completion receipt shape:
     "normalized_sha256": "sha256:...",
     "stored_sha256": "sha256:...",
     "truncated": false
+  },
+  "discovery_outcome": {
+    "schema": "repoctl.task.discovery-completion-outcome",
+    "schema_version": 1,
+    "repository": {
+      "id": "web",
+      "path": "repos/web",
+      "identity_source": "pinned"
+    },
+    "subjects": [],
+    "active_chosen": [],
+    "episodes": [],
+    "verification_records": [],
+    "outcome_digest": "sha256:0938727814f8781e50f31fc3b54a00e05e86427cfea3e8fc0c443863bede5a80"
   }
 }
 ```
@@ -310,9 +354,11 @@ working_tree_diff / task_working_tree
 committed_range   / range_observed
 ```
 
-The receipt filename, `task_id`, and task ID encoded by `task_path_at_completion` must agree. `content_sha256` must bind to exactly one live or archived artifact for that task; a missing artifact, another task's artifact, or simultaneous live/archive matches are invalid. Current schema v3 records a microsecond execution interval and a stable before/after transition for every changed path; `none/none` uses an empty transition list. When present, `fingerprint_manifest.entry_fingerprints[]` covers `changed_entries` by exact `change + path + old_path` identity. `committed_range/range_observed` remains observed range evidence and never becomes task or child ownership evidence.
+The receipt filename, `task_id`, and task ID encoded by `task_path_at_completion` must agree. `content_sha256` must bind to exactly one live or archived artifact for that task; a missing artifact, another task's artifact, or simultaneous live/archive matches are invalid. Current schema v4 records a microsecond execution interval, a stable before/after transition for every changed path, and a valid completion-bound Discovery outcome; `none/none` uses an empty transition list. When present, `fingerprint_manifest.entry_fingerprints[]` covers `changed_entries` by exact `change + path + old_path` identity. `committed_range/range_observed` remains observed range evidence and never becomes task or child ownership evidence.
 
-Preserved schema-v2 receipts are accepted only at the isolated legacy boundary. `completed_at` and `repo_evidence.ownership` were not required by the published v2 shape; when present, the historical timestamp may use the compact workspace timestamp or an RFC3339 UTC timestamp and ownership must satisfy its original structured contract. Missing legacy fields remain absent evidence rather than acquiring inferred values. Schema-v2 receipts never gain invented v3 transitions: child attribution is possible only while the Git-owned verifier can still prove their recorded repository identity, unchanged HEAD, start state, and exact terminal fingerprint. A new task start records task-state v4 and therefore emits schema v3, including workspace-only and `none/none` completions.
+Preserved schema-v2 receipts are accepted only at the isolated legacy boundary. `completed_at` and `repo_evidence.ownership` were not required by the published v2 shape; when present, the historical timestamp may use the compact workspace timestamp or an RFC3339 UTC timestamp and ownership must satisfy its original structured contract. Missing legacy fields remain absent evidence rather than acquiring inferred values. Schema-v2 receipts never gain invented v3 transitions: child attribution is possible only while the Git-owned verifier can still prove their recorded repository identity, unchanged HEAD, start state, and exact terminal fingerprint. A new task start records task-state v4. Finish emits schema v4 when a valid Discovery outcome exists and otherwise emits transition schema v3; neither legacy shape acquires invented outcome facts.
+
+Schema-4 completion receipts carry the completion-bound Discovery outcome defined in `repoctl-discovery-outcome-contract.md`; catalogue projection exposes only its bounded recorded roles. Graph continues to consume structured receipt/catalogue evidence and must not parse task Markdown itself. Legacy v2/v3 receipts expose no Discovery-outcome capability and gain no inferred episode roles.
 
 Receipt-derived Knowledge uses the same artifact identity rule. Its immutable `source_refs` retain the declared path and digest, while `resolved_source_refs` may point navigation and `KNOWLEDGE_SOURCED_FROM` at the unique byte-identical archive artifact after a parent task archives a completed child. This relocation requires the exact task ID, repository ID, completion-receipt ref, declared verification artifact, receipt path, filename, and digest binding; it never follows a lookalike path or a digest-only match. Invalid, missing, duplicate, reversed, or content-changing moves remain stale/invalid and produce no current Knowledge behavior.
 
@@ -425,7 +471,7 @@ knowledge    -> knowledge show
 change_event -> owning graph task
 ```
 
-`--task` returns the recorded task, its completion artifact, change events, and affected current or historical file identities. Receipt `task_path_at_completion` remains historical evidence; the artifact node and continuation use the task's current canonical path after a parent archive moves it. `--artifact` follows that current artifact back through its task and recorded file evidence. These selectors consume structured completion receipts only; they do not parse task Markdown prose.
+`--task` first performs an exact cold lookup and returns a query-local projection of the recorded task, completion artifact, change events, and affected current or historical file identities. `--artifact` resolves the canonical task identity from the artifact selector, validates the same cold record, and follows it back through recorded file evidence. Receipt `task_path_at_completion` remains historical evidence. If no exact cold record exists, the selector may match a retained active-snapshot node. These selectors consume structured completion evidence only; their ephemeral nodes and edges are not persisted into the Graph snapshot.
 
 Every query payload includes `freshness`. `current` means product file identities, root evidence identities, provider configuration, and Graph/provider input versions still match the materialized manifest. `stale` emits `graph_snapshot_stale` and a typed `graph_refresh` action; the stored result remains queryable as historical derived evidence but must not be presented as current. Full freshness reports exact `changed_paths`, `changed_root_paths`, `changed_provider_configs`, provider-owned `provider_stale_paths`, their `semantic_stale_paths` union, the canonical relation-level `stale_paths`, `provider_state_changed`, and `graph_input_version_changed`. Source or target paths in `stale_paths` are excluded from Graph relationship candidates and Context Graph projections until rebuild; Context may still return live source text from a stale-path overlay. Rebuild explicitly before relying on changed relations. Root evidence probes reuse stored content digests when path kind, mode, size, and mtime are unchanged, so freshness checks do not reread every document or receipt body.
 

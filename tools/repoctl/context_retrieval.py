@@ -621,19 +621,19 @@ def _distinct_paths_first(candidates: list[ContextCandidate]) -> list[ContextCan
     selected_ids: set[int] = set()
     for path in path_order:
         path_candidates = candidates_by_path[path]
-        provider_owner = (
-            provider_symbol_owner_candidate(path_candidates)
+        provider_evidence = (
+            provider_symbol_evidence_candidate(path_candidates)
             if not is_test_path(path)
             else None
         )
-        selected = provider_owner or path_candidates[0]
+        selected = provider_evidence or path_candidates[0]
         first_by_path.append(selected)
         selected_ids.add(id(selected))
     remaining = [candidate for candidate in candidates if id(candidate) not in selected_ids]
     return [*first_by_path, *remaining]
 
 
-def provider_symbol_owner_candidate(
+def provider_symbol_evidence_candidate(
     candidates: list[ContextCandidate],
     *,
     corroborated_provider_symbols: Iterable[tuple[str, str]] = (),
@@ -657,13 +657,13 @@ def provider_symbol_owner_candidate(
     if exact:
         return min(exact, key=_retrieval_sort_key)
 
-    owner_supported = [
+    query_supported = [
         candidate
         for candidate in provider_candidates
-        if provider_symbol_owner_supported(candidate)
+        if provider_symbol_evidence_supported(candidate)
     ]
-    if owner_supported:
-        return min(owner_supported, key=_retrieval_sort_key)
+    if query_supported:
+        return min(query_supported, key=_retrieval_sort_key)
     graph_corroborated = [
         candidate
         for candidate in provider_candidates
@@ -681,7 +681,7 @@ def provider_symbol_query_supported(
     anchor_strength: ContextAnchorStrength,
     query_term_matches: Mapping[str, Iterable[str]],
 ) -> bool:
-    """Return whether query evidence supports using a provider symbol as an owner."""
+    """Return whether query evidence supports ranking a provider symbol."""
     if (
         CONTEXT_ANCHOR_STRENGTH_PRIORITY[anchor_strength]
         >= CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.STRONG]
@@ -696,8 +696,8 @@ def provider_symbol_query_supported(
     return bool(section_terms and independent_body_terms)
 
 
-def provider_symbol_owner_supported(candidate: ContextCandidate) -> bool:
-    """Return whether a provider identity has enough query evidence for an owner slot."""
+def provider_symbol_evidence_supported(candidate: ContextCandidate) -> bool:
+    """Return whether a provider identity has enough evidence for ranked visibility."""
     if candidate.source_ref.section_kind != ContextSectionKind.PROVIDER_SYMBOL:
         return False
     return provider_symbol_query_supported(

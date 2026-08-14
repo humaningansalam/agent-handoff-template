@@ -12,6 +12,7 @@ from tools.repoctl.cli import main
 from tools.repoctl.io import RepoctlError, repoctl_lock
 from tools.repoctl.markdown import find_section, replace_frontmatter_line
 from tools.repoctl.tasks import create_task_file
+from tests.repoctl.io_audit import reject_directory_enumeration
 
 
 
@@ -130,6 +131,30 @@ def test_check_does_not_require_repo_ref_for_repository_task(tmp_path: Path, mon
     payload = json.loads(capsys.readouterr().out)
     assert not any(warning["code"] == "missing_repo_ref" for warning in payload["warnings"])
 
+    receipt = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260609184046Z.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("not json\n", encoding="utf-8")
+    archive = tmp_path / "docs/archive/tasks"
+    (archive / "T-20260609184047Z--cold.md").write_text("not a task\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    with monkeypatch.context() as audit_patch:
+        with reject_directory_enumeration(audit_patch, receipt.parent, archive) as cold_reads:
+            assert main(["check", "--json"]) == 0
+
+    assert cold_reads == []
+    bounded = json.loads(capsys.readouterr().out)
+    assert bounded["data"]["completion_history"] == {
+        "mode": "bounded_catalogue",
+        "catalogues": [],
+    }
+
+    assert main(["check", "--audit-history", "--json"]) == 1
+    audited = json.loads(capsys.readouterr().out)
+    assert audited["data"]["completion_history"]["mode"] == "full_archive_audit"
+    assert [problem["code"] for problem in audited["problems"]] == ["invalid_completion_receipt"]
+
+
 def test_render_board_replaces_only_board_section() -> None:
     text = "# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--old.md\n\n## Backlog\n\n- keep\n"
     rendered = render_board(text, ["docs/tasks/T-20260609184047Z--new.md"])
@@ -162,15 +187,24 @@ def test_repoctl_script_uses_system_python_without_workspace_residue(tmp_path: P
         if not target.exists():
             target = Path("/bin") / name
         (fake_bin / name).symlink_to(target)
+    hostile_package = tmp_path / "tools/repoctl"
+    hostile_package.mkdir(parents=True)
+    (hostile_package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+    (hostile_package / "__main__.py").write_text("raise SystemExit('hostile cwd import')\n", encoding="utf-8")
     before = tree_snapshot()
-    for path_value in (os.environ.get("PATH", ""), str(fake_bin)):
+    for path_value, cwd in (
+        (os.environ.get("PATH", ""), root),
+        (str(fake_bin), root),
+        (os.environ.get("PATH", ""), tmp_path),
+    ):
         env = os.environ.copy()
         env["PATH"] = path_value
         env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
         env.pop("VIRTUAL_ENV", None)
         result = subprocess.run(
             [str(root / "scripts/repoctl"), "check", "--json"],
-            cwd=root,
+            cwd=cwd,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
@@ -182,6 +216,7 @@ def test_repoctl_script_uses_system_python_without_workspace_residue(tmp_path: P
 
     assert tree_snapshot() == before
     assert not (tmp_path / "uv-cache").exists()
+
 
 def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

@@ -101,10 +101,12 @@ Required sequence:
 Before editing `repos/`, fill the task's `## Discovery` section with:
 
 ```md
-- Candidate query: `<repoctl meta query/suggest commands used>`
+- Candidate query: `<the repository question this task must answer>`
 - Candidate files reviewed: `repos/path`, ...
 - Chosen files: `repos/path`, ...
 ```
+
+Record commands under Verification or the execution log when they matter; the Candidate query is the problem statement, not a feature-use log.
 
 Then implement the smallest complete change for that one item.
 

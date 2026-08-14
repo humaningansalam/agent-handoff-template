@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.completion_catalogue import rebuild_completion_catalogue
+from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projection
 from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo, write_settings
@@ -113,6 +115,10 @@ Keep token validation centralized.
     receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _rebuild_completion_history(root: Path, repo_id: str = "main") -> None:
+    rebuild_completion_catalogue(root, repo_id)
+
+
 def _write_context_pack_task(
     root: Path,
     *,
@@ -177,6 +183,12 @@ def _setup_context_workspace(root: Path, monkeypatch) -> Path:
     repo = root / "repos"
     init_repo(repo)
     write_repometa(repo)
+    projection, projection_problems = initialize_empty_knowledge_projection(
+        root,
+        repo_id="main",
+    )
+    assert projection
+    assert not projection_problems
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: root)
     return repo
 
@@ -189,6 +201,13 @@ def _setup_context_multirepo_workspace(root: Path, monkeypatch) -> None:
     write_repometa(root / "repos/web")
     write_repometa(root / "repos/api")
     write_settings(root, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
+    for repo_id in ("web", "api"):
+        projection, projection_problems = initialize_empty_knowledge_projection(
+            root,
+            repo_id=repo_id,
+        )
+        assert projection
+        assert not projection_problems
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: root)
 
 

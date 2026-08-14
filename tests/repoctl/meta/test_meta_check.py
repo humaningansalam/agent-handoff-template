@@ -91,6 +91,8 @@ def test_meta_check_changed_reports_repo_git_unavailable(tmp_path: Path, monkeyp
     assert main(["meta", "check", "--changed", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "meta.check"
+    assert payload["ok"] is False
     assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
 def test_meta_check_changed_allows_missing_repo_directory(tmp_path: Path, monkeypatch, capsys) -> None:

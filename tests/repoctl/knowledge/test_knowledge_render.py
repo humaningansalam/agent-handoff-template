@@ -5,7 +5,10 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
+from tools.repoctl.knowledge_projection import load_knowledge_projection
+from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.knowledge_test_helpers import (
+    _approve_knowledge_source,
     _read_event,
     _write_event,
     _write_knowledge_docs,
@@ -46,8 +49,11 @@ def test_knowledge_render_rejects_invalid_lifecycle_events(tmp_path: Path, monke
     assert main(["knowledge", "render", "--repo-id", "main", "--output", output.as_posix(), "--full", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["rendered"] == []
-    assert payload["data"]["event_checks"]["error_count"] == 1
-    assert payload["problems"][0]["code"] == "knowledge_event_record_digest_mismatch"
+    assert payload["data"]["event_checks"]["error_count"] == len(payload["problems"])
+    assert {problem["code"] for problem in payload["problems"]} == {
+        "knowledge_event_digest_mismatch",
+        "knowledge_event_record_digest_mismatch",
+    }
     assert not output.exists()
 
 
@@ -71,6 +77,7 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     rendered_paths = {item["path"] for item in render_payload["data"]["rendered"]}
     assert "docs/knowledge/generated/INDEX.md" in rendered_paths
     assert "docs/knowledge/generated/decisions.md" in rendered_paths
+    assert "docs/knowledge/generated/history.md" not in rendered_paths
     rendered_by_path = {item["path"]: item for item in render_payload["data"]["rendered"]}
     decisions_bundle = rendered_by_path["docs/knowledge/generated/decisions.md"]["source_bundle"]
     assert decisions_bundle["record_ids"]
@@ -99,6 +106,67 @@ def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, m
     assert "rendered" not in compact_payload["data"]
     assert compact_payload["data"]["page_counts"]["total"] == len(rendered_paths)
     assert compact_payload["data"]["page_counts"]["symbol_targets"] == 0
+
+
+def test_knowledge_render_uses_current_heads_without_scanning_cold_history(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+
+    old_record = _approve_knowledge_source(capsys)["data"]["record"]["id"]
+    replacement = _approve_knowledge_source(
+        capsys,
+        approve_args=["--supersedes", old_record],
+    )["data"]["record"]
+    deprecated_record = _approve_knowledge_source(
+        capsys,
+        claim="Temporary render guidance must leave the hot projection when retired.",
+    )["data"]["record"]
+    reason = tmp_path / "deprecate-render-guidance.md"
+    reason.write_text("No longer applies.\n", encoding="utf-8")
+    assert main(
+        [
+            "knowledge",
+            "deprecate",
+            deprecated_record["id"],
+            "--repo-id",
+            "main",
+            "--reason-file",
+            reason.as_posix(),
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    projection = load_knowledge_projection(tmp_path, repo_id="main")[0]
+    head = projection["heads"][0]
+    allowed = {
+        (tmp_path / "docs/knowledge/records" / f"{replacement['id']}.json").resolve(),
+        *{
+            (tmp_path / "docs/knowledge/events" / f"{event['id']}.json").resolve()
+            for event in head["binding_events"]
+        },
+    }
+    with reject_directory_enumeration(
+        monkeypatch,
+        tmp_path / "docs/knowledge/records",
+        tmp_path / "docs/knowledge/events",
+        allow_reads=allowed.__contains__,
+    ):
+        assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rendered_paths = {item["path"] for item in payload["data"]["rendered"]}
+
+    record_pages = {
+        path for path in rendered_paths if path.startswith("docs/knowledge/generated/records/")
+    }
+    assert record_pages == {f"docs/knowledge/generated/records/{replacement['id']}.md"}
+    search_index = json.loads(
+        (tmp_path / "docs/knowledge/generated/search-index.json").read_text(encoding="utf-8")
+    )
+    assert [item["record_id"] for item in search_index] == [replacement["id"]]
 
 
 def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
+from tools.repoctl.io import RepoctlError
 from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
 from tests.repoctl.meta.test_meta_check import write_repometa
 
@@ -66,6 +67,20 @@ def run_repoctl_json(workspace: Path, args: list[str]) -> dict:
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     return payload
+
+
+def add_legacy_follow_up(workspace: Path, *, previous_id: str = "T-20260608120000Z") -> tuple[Path, Path]:
+    live = workspace / "docs/tasks/T-20260609120000Z--live.md"
+    live.write_text(
+        live.read_text(encoding="utf-8").replace(
+            "depends_on: []",
+            f'follow_up_of: "{previous_id}"\ndepends_on: []',
+        ),
+        encoding="utf-8",
+    )
+    archive = workspace / f"docs/archive/tasks/{previous_id}--done.md"
+    locator = workspace / f"docs/tasks/.repoctl-state/archive/{previous_id}.json"
+    return archive, locator
 
 
 def test_upgrade_plan_is_read_only_and_reports_managed_changes(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -138,14 +153,6 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     assert main(["upgrade", "status", "--json"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["data"]["latest"]["backup"]["availability"] == "available"
-
-
-
-
-
-
-
-
 
 
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:
@@ -241,7 +248,28 @@ def test_upgrade_apply_blocks_stale_plan(tmp_path: Path, monkeypatch, capsys) ->
     assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "local edit after plan\n"
 
 
-def test_upgrade_apply_rolls_back_files_when_mid_apply_copy_fails(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_upgrade_apply_blocks_stale_archive_migration_before_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(source)
+    archive, locator = add_legacy_follow_up(workspace)
+    plan = plan_upgrade(workspace, source=source)
+    assert len(plan["migrations"]) == 1
+    write_plan(plan_file, plan)
+
+    archive.write_text(archive.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(RepoctlError) as error:
+        apply_upgrade(workspace, plan_file=plan_file)
+
+    assert error.value.code == "upgrade_plan_stale"
+    assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "old repoctl\n"
+    assert not locator.exists()
+
+
+def test_upgrade_apply_rolls_back_files_when_receipt_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     source = tmp_path / "source"
     plan_file = tmp_path / "plan.json"
@@ -257,22 +285,20 @@ def test_upgrade_apply_rolls_back_files_when_mid_apply_copy_fails(tmp_path: Path
         },
     )
     (source / "AGENTS.md").write_text("new rules\n", encoding="utf-8")
+    _archive, locator = add_legacy_follow_up(workspace)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 
     assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 0
     capsys.readouterr()
 
-    calls = 0
+    real_atomic_write = __import__("tools.repoctl.upgrade", fromlist=["atomic_write"]).atomic_write
 
-    def flaky_copy(source_path: Path, target_path: Path) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 3:
-            raise OSError("injected copy failure")
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(source_path.read_bytes())
+    def fail_receipt(path: Path, text: str) -> None:
+        if path.name == "receipt.json":
+            raise OSError("injected receipt failure")
+        real_atomic_write(path, text)
 
-    monkeypatch.setattr("tools.repoctl.upgrade._atomic_copy_file", flaky_copy)
+    monkeypatch.setattr("tools.repoctl.upgrade.atomic_write", fail_receipt)
 
     with pytest.raises(OSError):
         apply_upgrade(workspace, plan_file=plan_file)
@@ -280,10 +306,16 @@ def test_upgrade_apply_rolls_back_files_when_mid_apply_copy_fails(tmp_path: Path
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "rules\n"
     assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "old repoctl\n"
     assert not (workspace / "docs/tasks/TEMPLATE.md").exists()
+    assert not locator.exists()
     rollback_files = list((workspace / "docs/tasks/.repoctl-state/upgrades").glob("*/rollback.json"))
     assert len(rollback_files) == 1
     rollback = json.loads(rollback_files[0].read_text(encoding="utf-8"))
-    assert [entry["action"] for entry in rollback["rolled_back"]] == ["remove_created", "restore"]
+    assert [entry["action"] for entry in rollback["rolled_back"]] == [
+        "remove_created",
+        "restore",
+        "remove_created",
+        "restore",
+    ]
 
 
 def test_upgrade_manifest_rejects_managed_preserve_overlap(tmp_path: Path, monkeypatch, capsys) -> None:

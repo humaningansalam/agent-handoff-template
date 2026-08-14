@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -15,13 +16,19 @@ from .graph_model import (
     canonical_graph_query_selector,
     digest_data,
 )
-from .io import RepoctlError, decode_schema_version, write_temporary_text
+from .io import RepoctlError, atomic_write, decode_schema_version, repoctl_lock, write_temporary_text
 from .repositories import RepoTarget
 
 
 RESULT_RECEIPT_SCHEMA = "repoctl.repository-understanding.result-receipt"
 RESULT_RECEIPT_SCHEMA_VERSION = 2
 RESULT_RECEIPT_ROOT = Path(".repoctl-state/result-receipts")
+RESULT_CACHE_INDEX = RESULT_RECEIPT_ROOT / "index.json"
+RESULT_CACHE_INDEX_SCHEMA = "repoctl.repository-understanding.result-receipt-cache-index"
+RESULT_CACHE_INDEX_SCHEMA_VERSION = 1
+RESULT_CACHE_MAX_ENTRIES = 256
+RESULT_CACHE_MAX_BYTES = 8 * 1024 * 1024
+RESULT_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
@@ -127,28 +134,312 @@ def write_result_receipt(
     }
     receipt = {**basis, "receipt_digest": digest_data(basis)}
     path = result_receipt_path(root, target=target, producer=producer, result_id=result_id)
-    _validate_result_receipt_path(root, path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _validate_result_receipt_path(root, path)
-    candidate = write_temporary_text(path, _canonical_json(receipt), suffix=".candidate")
-    try:
+    receipt_text = _canonical_json(receipt)
+    receipt_path = _validate_result_receipt_path(root, path)
+    if len(receipt_text.encode("utf-8")) > RESULT_CACHE_MAX_BYTES:
+        raise RepoctlError(
+            "result receipt exceeds the finite result-cache byte limit",
+            code="result_receipt_too_large",
+            path=receipt_path,
+        )
+    with repoctl_lock(root):
+        index = _reconciled_cache_index(root)
+        _validate_result_receipt_path(root, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _validate_result_receipt_path(root, path)
+        candidate = write_temporary_text(path, receipt_text, suffix=".candidate")
         try:
-            os.link(candidate, path)
-            return receipt
-        except FileExistsError:
-            existing = read_result_receipt(root, path)
-            if existing != receipt:
-                raise RepoctlError(
-                    "result receipt identity already exists with different selectable content",
-                    code="result_receipt_conflict",
-                    path=path.relative_to(root).as_posix(),
-                )
-            return existing
-    finally:
+            try:
+                os.link(candidate, path)
+                stored = receipt
+            except FileExistsError:
+                stored = read_result_receipt(root, path)
+                if stored != receipt:
+                    raise RepoctlError(
+                        "result receipt identity already exists with different selectable content",
+                        code="result_receipt_conflict",
+                        path=path.relative_to(root).as_posix(),
+                    )
+            protected_key = _index_receipt(root, index=index, path=path, receipt=stored)
+            _collect_result_receipt_cache(
+                root,
+                index=index,
+                max_entries=RESULT_CACHE_MAX_ENTRIES,
+                max_bytes=RESULT_CACHE_MAX_BYTES,
+                max_age_seconds=RESULT_CACHE_MAX_AGE_SECONDS,
+                now=None,
+                protected_keys={protected_key},
+            )
+            return stored
+        finally:
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def collect_result_receipt_cache(
+    root: Path,
+    *,
+    max_entries: int = RESULT_CACHE_MAX_ENTRIES,
+    max_bytes: int = RESULT_CACHE_MAX_BYTES,
+    max_age_seconds: int = RESULT_CACHE_MAX_AGE_SECONDS,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Apply finite deterministic retention to the regenerable result cache."""
+
+    limits = (max_entries, max_bytes, max_age_seconds)
+    if any(type(value) is not int or value <= 0 for value in limits):
+        raise RepoctlError(
+            "result receipt retention limits must be positive finite integers",
+            code="result_receipt_retention_invalid",
+            path=RESULT_RECEIPT_ROOT.as_posix(),
+        )
+    with repoctl_lock(root):
+        return _collect_result_receipt_cache(
+            root,
+            index=_reconciled_cache_index(root),
+            max_entries=max_entries,
+            max_bytes=max_bytes,
+            max_age_seconds=max_age_seconds,
+            now=now,
+            protected_keys=set(),
+        )
+
+
+def _collect_result_receipt_cache(
+    root: Path,
+    *,
+    index: dict[str, Any],
+    max_entries: int,
+    max_bytes: int,
+    max_age_seconds: int,
+    now: float | None,
+    protected_keys: set[str],
+) -> dict[str, int]:
+    cache_root = root / RESULT_RECEIPT_ROOT
+    if not cache_root.exists():
+        return {"entries": 0, "bytes": 0, "removed": 0}
+    _validate_result_receipt_path(root, cache_root)
+    current_time = time.time() if now is None else float(now)
+    entries: list[tuple[int, str, str, Path, int, float]] = []
+    removed = 0
+    indexed_entries = index["entries"]
+    for key, item in list(indexed_entries.items()):
+        path = cache_root / key
+        _validate_result_receipt_path(root, path)
         try:
-            candidate.unlink()
+            stat_result = path.stat()
+        except OSError:
+            indexed_entries.pop(key, None)
+            continue
+        entries.append(
+            (
+                int(item["sequence"]),
+                str(item["receipt_digest"]),
+                key,
+                path,
+                stat_result.st_size,
+                stat_result.st_mtime,
+            )
+        )
+    retained: list[tuple[int, str, str, Path, int, float]] = []
+    for entry in sorted(entries, key=lambda item: (item[0], item[1], item[2])):
+        if entry[2] not in protected_keys and current_time - entry[5] > max_age_seconds:
+            try:
+                entry[3].unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+            indexed_entries.pop(entry[2], None)
+            continue
+        retained.append(entry)
+    total_bytes = sum(entry[4] for entry in retained)
+    while retained and (len(retained) > max_entries or total_bytes > max_bytes):
+        eviction_index = next(
+            (index for index, entry in enumerate(retained) if entry[2] not in protected_keys),
+            None,
+        )
+        if eviction_index is None:
+            break
+        _sequence, _digest, key, path, size, _mtime = retained.pop(eviction_index)
+        try:
+            path.unlink()
+            removed += 1
         except FileNotFoundError:
             pass
+        indexed_entries.pop(key, None)
+        total_bytes -= size
+    _write_cache_index(root, index)
+    return {"entries": len(retained), "bytes": max(0, total_bytes), "removed": removed}
+
+
+def _reconciled_cache_index(root: Path) -> dict[str, Any]:
+    """Load the bounded insertion index and deterministically adopt orphan receipts."""
+
+    cache_root = root / RESULT_RECEIPT_ROOT
+    index = _read_cache_index(root)
+    known: dict[str, dict[str, Any]] = index["entries"]
+    valid_receipts: dict[str, dict[str, Any]] = {}
+    if cache_root.exists():
+        _validate_result_receipt_path(root, cache_root)
+        for path in cache_root.glob("*/*/*.json"):
+            _validate_result_receipt_path(root, path)
+            try:
+                receipt = read_result_receipt(root, path)
+            except RepoctlError:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            valid_receipts[_cache_receipt_key(cache_root, path)] = receipt
+
+    reconciled: dict[str, dict[str, Any]] = {}
+    used_sequences: set[int] = set()
+    for key, item in sorted(known.items()):
+        receipt = valid_receipts.get(key)
+        sequence = item.get("sequence")
+        if (
+            receipt is None
+            or type(sequence) is not int
+            or sequence < 1
+            or sequence in used_sequences
+            or item.get("receipt_digest") != receipt.get("receipt_digest")
+        ):
+            continue
+        reconciled[key] = dict(item)
+        used_sequences.add(sequence)
+
+    next_sequence = max(int(index["next_sequence"]), max(used_sequences, default=0) + 1)
+    orphans = [
+        (str(receipt.get("receipt_digest") or ""), key)
+        for key, receipt in valid_receipts.items()
+        if key not in reconciled
+    ]
+    for receipt_digest, key in sorted(orphans):
+        while next_sequence in used_sequences:
+            next_sequence += 1
+        reconciled[key] = {
+            "sequence": next_sequence,
+            "receipt_digest": receipt_digest,
+        }
+        used_sequences.add(next_sequence)
+        next_sequence += 1
+    return {
+        "schema": RESULT_CACHE_INDEX_SCHEMA,
+        "schema_version": RESULT_CACHE_INDEX_SCHEMA_VERSION,
+        "next_sequence": next_sequence,
+        "entries": reconciled,
+    }
+
+
+def _read_cache_index(root: Path) -> dict[str, Any]:
+    path = root / RESULT_CACHE_INDEX
+    empty = {
+        "schema": RESULT_CACHE_INDEX_SCHEMA,
+        "schema_version": RESULT_CACHE_INDEX_SCHEMA_VERSION,
+        "next_sequence": 1,
+        "entries": {},
+    }
+    _validate_result_receipt_path(root, path)
+    if not path.exists():
+        return empty
+    if not path.is_file():
+        raise RepoctlError(
+            "result receipt cache index must be a regular file",
+            code="result_receipt_invalid",
+            path=RESULT_CACHE_INDEX.as_posix(),
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return empty
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"schema", "schema_version", "next_sequence", "entries", "index_digest"}
+        or data.get("schema") != RESULT_CACHE_INDEX_SCHEMA
+        or data.get("schema_version") != RESULT_CACHE_INDEX_SCHEMA_VERSION
+        or type(data.get("next_sequence")) is not int
+        or data["next_sequence"] < 1
+        or not isinstance(data.get("entries"), dict)
+    ):
+        return empty
+    basis = {key: value for key, value in data.items() if key != "index_digest"}
+    if data.get("index_digest") != digest_data(basis):
+        return empty
+    entries: dict[str, dict[str, Any]] = {}
+    for key, item in data["entries"].items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(item, dict)
+            or set(item) != {"sequence", "receipt_digest"}
+            or type(item.get("sequence")) is not int
+            or item["sequence"] < 1
+            or not isinstance(item.get("receipt_digest"), str)
+            or not _DIGEST_RE.fullmatch(item["receipt_digest"])
+            or not _canonical_cache_key(key)
+        ):
+            return empty
+        entries[key] = dict(item)
+    return {**basis, "entries": entries}
+
+
+def _index_receipt(root: Path, *, index: dict[str, Any], path: Path, receipt: dict[str, Any]) -> str:
+    cache_root = root / RESULT_RECEIPT_ROOT
+    key = _cache_receipt_key(cache_root, path)
+    existing = index["entries"].get(key)
+    if existing is not None and existing.get("receipt_digest") == receipt.get("receipt_digest"):
+        return key
+    sequence = int(index["next_sequence"])
+    index["entries"][key] = {
+        "sequence": sequence,
+        "receipt_digest": str(receipt["receipt_digest"]),
+    }
+    index["next_sequence"] = sequence + 1
+    return key
+
+
+def _write_cache_index(root: Path, index: dict[str, Any]) -> None:
+    path = root / RESULT_CACHE_INDEX
+    _validate_result_receipt_path(root, path)
+    basis = {
+        "schema": RESULT_CACHE_INDEX_SCHEMA,
+        "schema_version": RESULT_CACHE_INDEX_SCHEMA_VERSION,
+        "next_sequence": int(index["next_sequence"]),
+        "entries": {key: dict(value) for key, value in sorted(index["entries"].items())},
+    }
+    atomic_write(path, _canonical_json({**basis, "index_digest": digest_data(basis)}))
+
+
+def _cache_receipt_key(cache_root: Path, path: Path) -> str:
+    try:
+        key = path.relative_to(cache_root).as_posix()
+    except ValueError as exc:
+        raise RepoctlError(
+            "result receipt cache entry escapes its cache root",
+            code="result_receipt_invalid",
+            path=path.as_posix(),
+        ) from exc
+    if not _canonical_cache_key(key):
+        raise RepoctlError(
+            "result receipt cache entry has a non-canonical path",
+            code="result_receipt_invalid",
+            path=key,
+        )
+    return key
+
+
+def _canonical_cache_key(value: str) -> bool:
+    path = Path(value)
+    return (
+        value == path.as_posix()
+        and not path.is_absolute()
+        and len(path.parts) == 3
+        and ".." not in path.parts
+        and path.suffix == ".json"
+        and all(part not in {"", "."} for part in path.parts)
+    )
 
 
 def verify_result_selections(
@@ -184,7 +475,7 @@ def verify_result_selections(
     if missing:
         first = missing[0]
         raise RepoctlError(
-            f"selected result reference is not part of the producer compact surface: {first.authority.value}:{first.ref}",
+            f"selected result reference is not part of the producer evidence manifest: {first.authority.value}:{first.ref}",
             code="result_selection_not_in_receipt",
             path=first.ref,
         )
@@ -336,9 +627,11 @@ def parse_result_request(producer: ResultProducer, value: Any) -> ResultRequest:
     return _result_request_from_dict(producer, value)
 
 
-def context_result_selections(compact: dict[str, Any]) -> list[ResultSelection]:
+def context_result_citations(bundle: dict[str, Any]) -> list[ResultSelection]:
+    """Return citable Context evidence independently of compact visibility."""
+
     selections: set[ResultSelection] = set()
-    groups = compact.get("groups") if isinstance(compact.get("groups"), dict) else {}
+    groups = bundle.get("groups") if isinstance(bundle.get("groups"), dict) else {}
     for group, raw_items in groups.items():
         if group == "warnings_and_completeness" or not isinstance(raw_items, list):
             continue
@@ -348,7 +641,7 @@ def context_result_selections(compact: dict[str, Any]) -> list[ResultSelection]:
             authority, ref = _context_item_selection(str(group), item)
             if authority is not None and ref:
                 selections.add(ResultSelection(authority, ref))
-    for continuation in compact.get("continuations", []):
+    for continuation in _context_continuations(bundle, groups=groups):
         if not isinstance(continuation, dict):
             continue
         ref = _selector_ref(continuation.get("selector"))
@@ -356,9 +649,9 @@ def context_result_selections(compact: dict[str, Any]) -> list[ResultSelection]:
             selections.add(ResultSelection(ResultAuthority.GRAPH, ref))
     selections.update(
         ResultSelection(ResultAuthority.GRAPH, ref)
-        for ref in _relationship_candidate_refs(compact.get("relationship_candidates"))
+        for ref in _relationship_candidate_refs(bundle.get("relationship_candidates"))
     )
-    for seed in compact.get("graph_seed_refs", []):
+    for seed in bundle.get("graph_seed_refs", []):
         if not isinstance(seed, dict):
             continue
         if isinstance(seed.get("path"), str) and seed["path"].strip():
@@ -370,6 +663,30 @@ def context_result_selections(compact: dict[str, Any]) -> list[ResultSelection]:
         if selector_ref:
             selections.add(ResultSelection(ResultAuthority.GRAPH, selector_ref))
     return sorted(selections)
+
+
+def _context_continuations(
+    bundle: dict[str, Any],
+    *,
+    groups: dict[str, Any],
+) -> list[dict[str, Any]]:
+    values = [
+        continuation
+        for continuation in bundle.get("continuations", [])
+        if isinstance(continuation, dict)
+    ]
+    for raw_items in groups.values():
+        if not isinstance(raw_items, list):
+            continue
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            values.extend(
+                continuation
+                for continuation in item.get("continuations", [])
+                if isinstance(continuation, dict)
+            )
+    return values
 
 
 def graph_result_selections(compact: dict[str, Any]) -> list[ResultSelection]:

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projection
 from tests.repoctl.context_test_helpers import (
     _setup_context_multirepo_workspace,
     _write_context_benchmark_collection_corpus,
@@ -20,6 +21,7 @@ def _setup_benchmark_workspace(tmp_path: Path, monkeypatch) -> Path:
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    initialize_empty_knowledge_projection(tmp_path, repo_id="main")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     return Path("tests/fixtures/context-benchmark").resolve()
 

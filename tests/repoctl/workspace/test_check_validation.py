@@ -146,7 +146,7 @@ def test_check_keeps_archived_errors_visible(tmp_path: Path, monkeypatch, capsys
     archive_path.write_text(archived, encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["check", "--json"]) == 1
+    assert main(["check", "--include-archived-warnings", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert any(problem["path"] == "docs/archive/tasks/T-20260609184046Z--archived.md" and problem["code"] == "id_filename_mismatch" for problem in payload["problems"])
@@ -200,7 +200,7 @@ def test_check_rejects_archive_task_with_live_status(tmp_path: Path, monkeypatch
     archive.write_text(task_text("T-20260609184046Z", status="todo"), encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    exit_code = main(["check", "--json"])
+    exit_code = main(["check", "--include-archived-warnings", "--json"])
 
     assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)

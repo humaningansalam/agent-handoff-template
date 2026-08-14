@@ -1,6 +1,6 @@
 ---
 id: T-20260403093000Z
-title: "Launch handoff template v1 (example)"
+title: "Coordinate product search delivery (example)"
 status: doing # todo, doing, blocked, done, canceled (see AGENTS.md)
 owner: "agent"
 repo_ref: ""
@@ -11,7 +11,7 @@ parent: ""
 depends_on: []
 ---
 
-# T-20260403093000Z - Launch handoff template v1 (example)
+# T-20260403093000Z - Coordinate product search delivery (example)
 
 ## Context Docs
 
@@ -24,9 +24,16 @@ Example:
 
 Demonstrate a root-only parent task that coordinates independently verifiable repo-scoped child tasks toward one integrated product outcome.
 
+## Discovery
+
+- Candidate query: `coordinate product search indexing and API integration`
+- Candidate files reviewed: none; this parent coordinates child outcomes and does not select product files
+- Chosen files: none; each repo-scoped child owns its own explicit product scope
+- Notes: Child links below are illustrative task IDs inside this example, not paths expected to exist in a copied workspace.
+
 ## Work Area
 
-- Task record: `examples/tasks/T-20260403093000Z--launch-handoff-template-v1-example.md`
+- Task record: `examples/tasks/T-20260403093000Z--coordinate-product-search-delivery-example.md`
 - Primary surface: Root coordination only; product implementation remains in repo-scoped child tasks
 - Area hint: docs
 
@@ -53,12 +60,12 @@ Demonstrate a root-only parent task that coordinates independently verifiable re
 This list is a coordination summary, NOT the authoritative source.
 The child's `parent` frontmatter field is the authoritative link.
 -->
-- `docs/tasks/T-20260403093100Z--build-product-search-index.md`
-- `docs/tasks/T-20260403093200Z--integrate-product-search-api.md`
+- `T-20260403093100Z` — build product search index (illustrative child)
+- `T-20260403093200Z` — integrate product search API (illustrative child)
 
 ## Non-Live Child Tasks
 
-- `docs/tasks/T-20260403092900Z--define-product-search-contract.md`
+- `T-20260403092900Z` — define product search contract (illustrative child)
 
 ## Shared Interfaces / Decisions
 
@@ -86,6 +93,6 @@ The child's `parent` frontmatter field is the authoritative link.
 ## Handoff
 
 - Next exact step: Check each repo-scoped child task's status and integration evidence, then update the coordination summary.
-- First file to open: `examples/tasks/T-20260403093000Z--launch-handoff-template-v1-example.md`
+- First file to open: `examples/tasks/T-20260403093000Z--coordinate-product-search-delivery-example.md`
 - First command to run: `rg -n "^parent:|^repo_id:|T-20260403093" docs/tasks/ examples/tasks/`
 - Done when: The parent reflects current child-task state, each live implementation child has repository scope and verification evidence, and the integrated contract is ready to check.

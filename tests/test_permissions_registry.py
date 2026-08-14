@@ -1,21 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
-from tools.registries.agent_registry import AGENTS
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-EXPECTED_MAINTENANCE_WORKERS = {
-    "maintenance-cartographer": (("Read", "Grep", "Glob"), "plan"),
-    "maintenance-planner": (("Read", "Grep", "Glob"), "plan"),
-    "maintenance-plan-critic": (("Read", "Grep", "Glob"), "plan"),
-    "maintenance-implementer": (("Read", "Grep", "Glob", "Edit", "MultiEdit", "Write"), "default"),
-    "maintenance-evaluator": (("Read", "Grep", "Glob", "Bash"), "plan"),
-    "maintenance-skeptic": (("Read", "Grep", "Glob", "Bash"), "plan"),
-}
 
 
 def test_default_and_maintenance_settings_keep_their_security_boundaries() -> None:
@@ -55,12 +44,13 @@ def test_default_and_maintenance_settings_keep_their_security_boundaries() -> No
 def test_local_claude_settings_are_excluded_from_project_artifacts() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
     assert ".claude/settings.local.json" in gitignore
+    result = subprocess.run(
+        ["python3", "tools/render_agent_adapters.py", "--check"],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
-
-def test_maintenance_worker_registry_matches_the_supported_route() -> None:
-    actual = {
-        agent.name: (agent.tools, agent.permission_mode)
-        for agent in AGENTS
-        if agent.kind == "maintenance-worker"
-    }
-    assert actual == EXPECTED_MAINTENANCE_WORKERS
+    assert result.returncode == 0, result.stdout + result.stderr

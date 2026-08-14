@@ -21,7 +21,7 @@ Canonical operating rules for this workspace. Tool-specific adapters (`CLAUDE.md
 6. `docs/PRD.md` when shared project context is needed; if it is absent, read only the relevant authority document under `docs/prd/`
 7. `docs/workflows/INDEX.md` only when a reusable/high-risk/repeated procedure may apply
 
-At session start or after compaction, run `./scripts/repoctl task resume --json`. `no_live` means no task is resumed, `single_live` identifies the only candidate, and `ambiguous` requires explicit selection. Only its non-null `executable_handoff` is an execution instruction; Board and task-history prose remain inspection evidence.
+At session start or after compaction, run `./scripts/repoctl task resume --json`. `no_live` means no task is resumed, `single_live` identifies the only candidate, and `ambiguous` requires explicit selection. Only its non-null `executable_handoff` is an execution instruction; Board and task-history prose remain inspection evidence. Handoff freshness and repository lifecycle health are independent: a current Handoff does not make an unhealthy task safe to continue without resolving the reported health problems.
 
 For repo-scoped implementation tasks, use this order before editing product files:
 
@@ -29,18 +29,22 @@ For repo-scoped implementation tasks, use this order before editing product file
 2. Use top-level `graph_seed_refs` as ranked, source-bound Graph continuation inputs. Read `completeness.graph_anchor.seed_anchors` only to interpret coverage and provenance: `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are explicit anchors, while `lexical_file` is a ranked hypothesis. Treat a coherent returned source/test/relation set as the initial working set after inspecting the source; `resolved` means the typed path exists in Graph, not that semantic ownership is proven. Follow typed Graph continuations repeatedly when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
 3. Do not restart the same broad repository discovery with `rg` after Context already returned a coherent working set. Narrow `rg` checks and direct reads remain appropriate for confirmation; refine the query or refresh Graph when Context reports ambiguity, missing coverage, or stale evidence.
 4. Create or resume the task and start it before the first product mutation. Exploration is not gated on task creation or task start.
-5. Record the explicit Candidate query and the files actually reviewed/chosen in `## Discovery` once task scope becomes concrete.
+5. Record the explicit Candidate query and the files actually reviewed/chosen in `## Discovery` once task scope becomes concrete. A reviewed file that is not Chosen remains neutral supporting evidence; record `--excluded` only for a file explicitly rejected for the active episode.
 6. Edit and verify. Generate a scoped Context Pack only when a durable handoff or relationship summary is useful.
 
 Do not require agents to log which discovery features they used or justify why a feature was skipped.
 
+The completion-bound outcome contract is specified in `docs/contracts/repoctl-discovery-outcome-contract.md`. Discovery can record explicit exclusions and selected result members, and `task verification add` can bind structured check outcomes to recorded subjects or claims. Do not infer exclusion from Reviewed minus Chosen. Ordinary Context queries join only independently retrieved current candidates to the bounded, freshness-checked outcome frontier; prior outcomes are corroboration, never automatic scope, ownership, or a substitute for current evidence.
+
 ```bash
 ./scripts/repoctl task discovery add T-... --query "<query>" --json
 ./scripts/repoctl context query "<query>" --repo-id main --json
-# When a returned result informed scope, copy its data.result_receipt producer/result_id and one exact selectable authority/ref tuple:
+# Current result format: when a returned result informed scope, copy its producer/result_id and one exact selectable authority/ref tuple:
 ./scripts/repoctl task discovery add T-... --result-producer context --result-id "sha256:..." --result-authority source --result-ref repos/path --json
 ./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl task discovery add T-... --reviewed repos/path --chosen repos/path --json
+./scripts/repoctl task discovery add T-... --reviewed repos/decoy --excluded repos/decoy --json
+./scripts/repoctl task verification add T-... --status passed --evidence-ref verification.txt --subject repos/path --json
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ./scripts/repoctl task handoff bind T-... --context-pack .repoctl-state/context-pack/T-....md --json
 ```

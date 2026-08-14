@@ -242,6 +242,22 @@ def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, mo
     previous_path = tmp_path / f"docs/archive/tasks/{previous_id}--completed.md"
     previous_text = task_text(previous_id, status="done")
     previous_path.write_text(previous_text, encoding="utf-8")
+    locator = tmp_path / f"docs/tasks/.repoctl-state/archive/{previous_id}.json"
+    locator.parent.mkdir(parents=True, exist_ok=True)
+    locator.write_text(
+        json.dumps(
+            {
+                "schema": "repoctl.task.archive",
+                "schema_version": 1,
+                "task_id": previous_id,
+                "task_path": previous_path.relative_to(tmp_path).as_posix(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "create", "--follow-up-of", previous_id, "--slug", "completed-follow-up", "Completed follow-up", "--json"]) == 0

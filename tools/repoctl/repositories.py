@@ -505,20 +505,12 @@ def _completion_receipt_task_scope(root: Path, receipt_path: Path, payload: Mapp
         return TaskRepositoryScope.INVALID
 
     exact = root / raw_task_path
-    if exact.is_file():
-        candidates = [exact]
-    else:
-        candidates = [
-            *sorted((root / "docs/tasks").glob(f"{task_id}--*.md")),
-            *sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")),
-        ]
-        candidates = [candidate for candidate in candidates if candidate.is_file()]
-        if len(candidates) != 1:
-            return TaskRepositoryScope.INVALID
+    if not exact.is_file():
+        return TaskRepositoryScope.INVALID
 
     try:
         root_resolved = root.resolve()
-        resolved = candidates[0].resolve(strict=True)
+        resolved = exact.resolve(strict=True)
         relative = resolved.relative_to(root_resolved)
         if PurePosixPath(relative.as_posix()).parent.as_posix() not in {"docs/tasks", "docs/archive/tasks"}:
             return TaskRepositoryScope.INVALID

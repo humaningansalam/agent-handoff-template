@@ -54,6 +54,8 @@ This contract freezes the common envelope, not every command's full payload.
 Command-specific values exist only under `data`. Commands must not mirror `task`, `result`, `repository`, counters, paths, or any other payload field at the top level for compatibility.
 Serialization validates this boundary and rejects missing `command`, non-object `data`, or unknown top-level fields instead of silently relocating producer mistakes.
 
+Task Handoff freshness and repository lifecycle health are separate machine contracts. `task show` returns lifecycle health at `data.health`; `task resume` returns it at `data.resume_guidance.health`, beside the independent `data.resume_guidance.status` Handoff freshness value. A current Handoff may therefore accompany unhealthy lifecycle evidence and does not suppress the corresponding problems or make the command successful.
+
 ## Problem object
 
 ```json

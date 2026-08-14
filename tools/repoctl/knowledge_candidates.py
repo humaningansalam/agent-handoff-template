@@ -13,6 +13,13 @@ from typing import Any
 from .context_chunks import chunk_markdown_file
 from .graph_model import digest_data
 from .io import RepoctlError, atomic_write
+from .knowledge_projection import (
+    apply_knowledge_projection_tail,
+    empty_knowledge_projection,
+    knowledge_projection_path,
+    load_knowledge_projection,
+    verify_current_knowledge_projection,
+)
 from .markdown import find_section, parse_frontmatter
 from .repositories import RepoSelectorStatus, require_repo_target, resolve_repo_selector_path
 from .tasks import CompletionReceiptCollection, Problem, completion_receipt_artifact_for_task, normalize_task_id
@@ -1092,36 +1099,6 @@ def refresh_stale_knowledge_candidates(root: Path, *, repo_id: str, include_reco
     }, problems
 
 
-def _approval_lifecycle_events(events: list[dict[str, Any]], *, record_id: str) -> list[dict[str, Any]]:
-    return [
-        event
-        for event in events
-        if str(event.get("type") or "") in {"approved", "deprecated", "superseded", "refreshed_record_candidate"}
-        and (
-            str(event.get("record_id") or "") == record_id
-            or str(event.get("superseded_by") or "") == record_id
-        )
-    ]
-
-
-def _approval_event_for_record(
-    root: Path,
-    *,
-    repo_id: str,
-    record: dict[str, Any],
-    candidate_id: str,
-    events: list[dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any] | None, Problem | None]:
-    binding = _knowledge_approval_binding(
-        record,
-        events if events is not None else _load_events(root, repo_id=repo_id),
-        candidate_id=candidate_id,
-    )
-    if binding.problems:
-        return None, binding.problems[0]
-    return binding.event, None
-
-
 def _commit_knowledge_approval(
     root: Path,
     artifacts: list[tuple[Path, dict[str, Any]]],
@@ -1179,6 +1156,174 @@ def _commit_knowledge_approval(
     return []
 
 
+def _rollback_knowledge_mutation(
+    root: Path,
+    *,
+    artifact_paths: list[Path],
+    projection_path: Path,
+    projection_before: bytes | None,
+    cause_code: str,
+) -> list[Problem]:
+    failures: list[Problem] = []
+    try:
+        if projection_before is None:
+            if projection_path.exists():
+                projection_path.unlink()
+        else:
+            atomic_write(projection_path, projection_before.decode("utf-8"))
+    except (OSError, UnicodeError):
+        failures.append(
+            Problem(
+                "error",
+                "knowledge_projection_rollback_failed",
+                "knowledge mutation failed and the current-head projection could not be restored",
+                projection_path.relative_to(root).as_posix(),
+                cause_code=cause_code,
+            )
+        )
+    for path in reversed(artifact_paths):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            failures.append(
+                Problem(
+                    "error",
+                    "knowledge_approval_rollback_failed",
+                    "knowledge mutation failed and a new immutable artifact could not be removed",
+                    path.relative_to(root).as_posix(),
+                    cause_code=cause_code,
+                )
+            )
+    return failures
+
+
+def _knowledge_mutation_recovery_path(root: Path, *, repo_id: str) -> Path:
+    return root / ".repoctl-state/knowledge" / repo_id / "mutation-recovery.json"
+
+
+def _knowledge_mutation_recovery_problem(root: Path, *, repo_id: str) -> Problem | None:
+    path = _knowledge_mutation_recovery_path(root, repo_id=repo_id)
+    if not path.exists():
+        return None
+    return Problem(
+        "error",
+        "knowledge_approval_incomplete",
+        "a previous Knowledge mutation could not be rolled back completely; inspect the bounded recovery receipt before retrying",
+        path.relative_to(root).as_posix(),
+        cause_code="rollback_failed",
+    )
+
+
+def _write_knowledge_mutation_recovery(
+    root: Path,
+    *,
+    repo_id: str,
+    operation: str,
+    artifact_paths: list[Path],
+    problems: list[Problem],
+) -> Problem | None:
+    path = _knowledge_mutation_recovery_path(root, repo_id=repo_id)
+    payload = {
+        "schema": "repoctl.knowledge.mutation-recovery",
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "operation": operation,
+        "artifact_paths": sorted(
+            item.relative_to(root).as_posix()
+            for item in artifact_paths
+            if item.exists()
+        ),
+        "problem_codes": sorted({str(problem.code) for problem in problems}),
+    }
+    try:
+        atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    except OSError:
+        return Problem(
+            "error",
+            "knowledge_approval_rollback_failed",
+            "knowledge mutation rollback failed and its bounded recovery receipt could not be written",
+            path.relative_to(root).as_posix(),
+            cause_code="recovery_receipt_write_failed",
+        )
+    return None
+
+
+def _load_projection_for_mutation(
+    root: Path,
+    *,
+    repo_id: str,
+    allow_empty_initialize: bool,
+) -> tuple[dict[str, Any], bytes | None, list[Problem]]:
+    path = knowledge_projection_path(root, repo_id=repo_id)
+    recovery_problem = _knowledge_mutation_recovery_problem(root, repo_id=repo_id)
+    if recovery_problem is not None:
+        return {}, path.read_bytes() if path.is_file() else None, [recovery_problem]
+    before = path.read_bytes() if path.is_file() else None
+    projection, problems = load_knowledge_projection(root, repo_id=repo_id)
+    durable_record_count, durable_record_problems = _durable_knowledge_record_count(
+        root,
+        repo_id=repo_id,
+    )
+    if durable_record_problems:
+        return {}, before, durable_record_problems
+    projection_missing = bool(problems) and all(
+        problem.code == "knowledge_projection_unavailable" and problem.cause_code == "missing"
+        for problem in problems
+    )
+    checkpoint = projection.get("checkpoint") if isinstance(projection.get("checkpoint"), dict) else {}
+    if projection_missing and allow_empty_initialize and durable_record_count == 0:
+        projection, problems = empty_knowledge_projection(repo_id=repo_id), []
+        checkpoint = projection["checkpoint"]
+    if not problems and checkpoint.get("record_count") != durable_record_count:
+        problems = [
+            Problem(
+                "error",
+                "knowledge_projection_unavailable",
+                "knowledge projection record count does not match durable reviewed records; rebuild it explicitly",
+                path.relative_to(root).as_posix(),
+                cause_code="cold_record_count_mismatch",
+            )
+        ]
+    if problems:
+        return {}, before, problems
+    projection, problems = verify_current_knowledge_projection(
+        root,
+        repo_id=repo_id,
+        projection=projection,
+    )
+    return projection, before, problems
+
+
+def _durable_knowledge_record_count(
+    root: Path,
+    *,
+    repo_id: str,
+) -> tuple[int, list[Problem]]:
+    """Validate and count reviewed records only at the mutation boundary."""
+
+    count = 0
+    problems: list[Problem] = []
+    for path in sorted(_record_dir(root).glob("K-*.json")):
+        read = _read_knowledge_artifact(root, path, kind=KnowledgeArtifactKind.RECORD)
+        if read.problem is not None:
+            problems.append(read.problem)
+            continue
+        record = read.data or {}
+        declared_repo_id = str(record.get("repo_id") or "")
+        contract_problems = _knowledge_record_contract_problems(
+            record,
+            record_id=path.stem,
+            repo_id=declared_repo_id or repo_id,
+        )
+        if contract_problems:
+            problems.extend(contract_problems)
+            continue
+        if declared_repo_id == repo_id:
+            count += 1
+    return count, problems
+
+
 def approve_knowledge_candidate(
     root: Path,
     *,
@@ -1197,10 +1342,91 @@ def approve_knowledge_candidate(
     if quality_problems:
         return {}, quality_problems
     supersedes = supersedes or _default_supersedes_for_candidate(candidate)
-    relation_problems = _validate_supersedes(root, repo_id=repo_id, supersedes=supersedes)
+    projection_path = knowledge_projection_path(root, repo_id=repo_id)
+    projection, projection_before, projection_problems = _load_projection_for_mutation(
+        root,
+        repo_id=repo_id,
+        allow_empty_initialize=True,
+    )
+    if projection_problems:
+        return {}, projection_problems
+    current_heads = {
+        str(head.get("record", {}).get("id") or ""): head["record"]
+        for head in projection.get("heads", [])
+        if isinstance(head, dict) and isinstance(head.get("record"), dict)
+    }
+    relation_problems = _validate_projection_supersedes(
+        repo_id=repo_id,
+        supersedes=supersedes,
+        current_heads=current_heads,
+    )
     if relation_problems:
         return {}, relation_problems
     record_id = "K" + candidate_id[2:]
+    record_path = _record_dir(root) / f"{record_id}.json"
+    if record_path.exists():
+        existing = _require_knowledge_artifact(root, record_path, kind=KnowledgeArtifactKind.RECORD)
+        existing_created_from = existing.get("created_from") if isinstance(existing.get("created_from"), dict) else {}
+        if (
+            str(existing.get("repo_id") or "") == repo_id
+            and str(existing_created_from.get("candidate_id") or "") == candidate_id
+            and str(existing_created_from.get("candidate_digest") or "") == str(candidate.get("candidate_digest") or "")
+        ):
+            existing_head = current_heads.get(record_id)
+            if existing_head != existing:
+                return {}, [
+                    Problem(
+                        "error",
+                        "knowledge_approval_incomplete",
+                        "reviewed knowledge record is not the admitted current head",
+                        record_id,
+                    )
+                ]
+            projected_head = next(
+                head
+                for head in projection["heads"]
+                if str(head.get("record", {}).get("id") or "") == record_id
+            )
+            approved_event = next(
+                (
+                    event
+                    for event in projected_head.get("binding_events", [])
+                    if event.get("type") == "approved"
+                ),
+                None,
+            )
+            if approved_event is None:
+                return {}, [Problem("error", "knowledge_approval_incomplete", "reviewed knowledge record has no admitted approval event", record_id)]
+            event_path = _event_dir(root) / f"{approved_event['id']}.json"
+            return {
+                "record": existing,
+                "record_path": record_path.relative_to(root).as_posix(),
+                "event": approved_event,
+                "event_path": event_path.relative_to(root).as_posix(),
+                "superseded_events": [],
+                "already_approved": True,
+            }, []
+        return {}, [Problem("error", "knowledge_record_exists", f"knowledge record already exists: {record_id}", record_path.relative_to(root).as_posix())]
+    candidate_claim = str(candidate.get("claim") or "").strip().casefold()
+    duplicate_head = next(
+        (
+            current_id
+            for current_id, current_record in current_heads.items()
+            if str(current_record.get("kind") or "") == str(candidate.get("kind") or "")
+            and str(current_record.get("claim") or "").strip().casefold() == candidate_claim
+            and current_id not in supersedes
+        ),
+        "",
+    )
+    if duplicate_head:
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_duplicate_current_claim",
+                "an equivalent reviewed claim is already current; explicitly supersede it to replace the head",
+                duplicate_head,
+            )
+        ]
     if record_id in supersedes:
         return {}, [Problem("error", "knowledge_supersedes_self", "knowledge record cannot supersede itself", record_id)]
     reviewer = reviewed_by.strip() or "human"
@@ -1244,46 +1470,6 @@ def approve_knowledge_candidate(
         "authoritative": True,
     }
     record["record_digest"] = _knowledge_record_digest(record)
-    record_path = _record_dir(root) / f"{record_id}.json"
-    existing_events = _load_events(root, repo_id=repo_id)
-    if record_path.exists():
-        existing = _require_knowledge_artifact(root, record_path, kind=KnowledgeArtifactKind.RECORD)
-        existing_created_from = existing.get("created_from") if isinstance(existing.get("created_from"), dict) else {}
-        if (
-            str(existing.get("repo_id") or "") == repo_id
-            and str(existing_created_from.get("candidate_id") or "") == candidate_id
-            and str(existing_created_from.get("candidate_digest") or "") == str(candidate.get("candidate_digest") or "")
-        ):
-            approved_event, approval_problem = _approval_event_for_record(
-                root,
-                repo_id=repo_id,
-                record=existing,
-                candidate_id=candidate_id,
-                events=existing_events,
-            )
-            if approval_problem is not None or approved_event is None:
-                return {}, [approval_problem] if approval_problem is not None else []
-            event_path = _event_dir(root) / f"{approved_event['id']}.json"
-            return {
-                "record": existing,
-                "record_path": record_path.relative_to(root).as_posix(),
-                "event": approved_event,
-                "event_path": event_path.relative_to(root).as_posix(),
-                "superseded_events": [],
-                "already_approved": True,
-            }, []
-        return {}, [Problem("error", "knowledge_record_exists", f"knowledge record already exists: {record_id}", record_path.relative_to(root).as_posix())]
-    lifecycle_residue = _approval_lifecycle_events(existing_events, record_id=record_id)
-    if lifecycle_residue:
-        return {}, [
-            Problem(
-                "error",
-                "knowledge_approval_incomplete",
-                "knowledge approval lifecycle artifacts exist without the reviewed record",
-                str(lifecycle_residue[0].get("id") or record_id),
-            )
-        ]
-
     event = {
         "schema": "repoctl.knowledge.event",
         "schema_version": 1,
@@ -1328,7 +1514,47 @@ def approve_knowledge_candidate(
     ]
     write_problems = _commit_knowledge_approval(root, artifacts)
     if write_problems:
+        if projection_before is None and projection_path.exists():
+            projection_path.unlink()
+        if any(problem.code == "knowledge_approval_rollback_failed" for problem in write_problems):
+            recovery_problem = _write_knowledge_mutation_recovery(
+                root,
+                repo_id=repo_id,
+                operation="approve",
+                artifact_paths=[path for path, _payload in artifacts],
+                problems=write_problems,
+            )
+            if recovery_problem is not None:
+                write_problems.append(recovery_problem)
         return {}, write_problems
+    _updated, projection_problems = apply_knowledge_projection_tail(
+        root,
+        repo_id=repo_id,
+        records=[record],
+        events=[event, *(item["event"] for item in superseded_events)],
+        expected_generation=int(projection["generation"]),
+        expected_projection_digest=str(projection["projection_digest"]),
+        base_projection=projection if projection_before is None else None,
+    )
+    if projection_problems:
+        rollback_problems = _rollback_knowledge_mutation(
+            root,
+            artifact_paths=[path for path, _payload in artifacts],
+            projection_path=projection_path,
+            projection_before=projection_before,
+            cause_code=projection_problems[0].code,
+        )
+        if rollback_problems:
+            recovery_problem = _write_knowledge_mutation_recovery(
+                root,
+                repo_id=repo_id,
+                operation="approve",
+                artifact_paths=[path for path, _payload in artifacts],
+                problems=rollback_problems,
+            )
+            if recovery_problem is not None:
+                rollback_problems.append(recovery_problem)
+        return {}, rollback_problems or projection_problems
     return {
         "record": record,
         "record_path": record_path.relative_to(root).as_posix(),
@@ -1367,18 +1593,36 @@ def reject_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, r
 
 
 def deprecate_knowledge_record(root: Path, *, repo_id: str, record_id: str, reason_file: Path) -> tuple[dict[str, Any], list[Problem]]:
-    record_data, problems = show_knowledge_record(root, record_id=record_id, repo_id=repo_id)
-    if problems:
-        return {}, problems
     reason_path = reason_file if reason_file.is_absolute() else root / reason_file
     if not reason_path.is_file():
         return {}, [Problem("error", "knowledge_deprecate_reason_missing", "deprecation reason file is missing", reason_path.as_posix())]
     reason = reason_path.read_text(encoding="utf-8").strip()
     if not reason:
         return {}, [Problem("error", "knowledge_deprecate_reason_empty", "deprecation reason file is empty", reason_path.as_posix())]
-    if record_id in _deprecated_ids(root, repo_id=repo_id):
-        return {}, [Problem("error", "knowledge_record_already_deprecated", "knowledge record is already deprecated", record_id)]
-    record = record_data["record"]
+    projection_path = knowledge_projection_path(root, repo_id=repo_id)
+    projection, projection_before, projection_problems = _load_projection_for_mutation(
+        root,
+        repo_id=repo_id,
+        allow_empty_initialize=False,
+    )
+    if projection_problems:
+        return {}, projection_problems
+    current_heads = {
+        str(head.get("record", {}).get("id") or ""): head["record"]
+        for head in projection.get("heads", [])
+        if isinstance(head, dict) and isinstance(head.get("record"), dict)
+    }
+    record = current_heads.get(record_id)
+    if record is None:
+        deprecated_count = int(projection.get("lifecycle_counts", {}).get("deprecated") or 0)
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_record_already_deprecated" if deprecated_count else "knowledge_record_not_current",
+                "knowledge record is already deprecated or is not a current head",
+                record_id,
+            )
+        ]
     event = {
         "schema": "repoctl.knowledge.event",
         "schema_version": 1,
@@ -1391,8 +1635,45 @@ def deprecate_knowledge_record(root: Path, *, repo_id: str, record_id: str, reas
     }
     event["event_digest"] = digest_data(event)
     event_path = _event_dir(root) / f"{event['id']}.json"
-    event_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(event_path, json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    write_problems = _commit_knowledge_approval(root, [(event_path, event)])
+    if write_problems:
+        if any(problem.code == "knowledge_approval_rollback_failed" for problem in write_problems):
+            recovery_problem = _write_knowledge_mutation_recovery(
+                root,
+                repo_id=repo_id,
+                operation="deprecate",
+                artifact_paths=[event_path],
+                problems=write_problems,
+            )
+            if recovery_problem is not None:
+                write_problems.append(recovery_problem)
+        return {}, write_problems
+    _updated, projection_problems = apply_knowledge_projection_tail(
+        root,
+        repo_id=repo_id,
+        events=[event],
+        expected_generation=int(projection["generation"]),
+        expected_projection_digest=str(projection["projection_digest"]),
+    )
+    if projection_problems:
+        rollback_problems = _rollback_knowledge_mutation(
+            root,
+            artifact_paths=[event_path],
+            projection_path=projection_path,
+            projection_before=projection_before,
+            cause_code=projection_problems[0].code,
+        )
+        if rollback_problems:
+            recovery_problem = _write_knowledge_mutation_recovery(
+                root,
+                repo_id=repo_id,
+                operation="deprecate",
+                artifact_paths=[event_path],
+                problems=rollback_problems,
+            )
+            if recovery_problem is not None:
+                rollback_problems.append(recovery_problem)
+        return {}, rollback_problems or projection_problems
     return {"event": event, "event_path": event_path.relative_to(root).as_posix()}, []
 
 
@@ -1492,6 +1773,129 @@ def _candidate_record_derivation(candidate: dict[str, Any]) -> dict[str, Any]:
     return derived
 
 
+def _empty_public_knowledge_query(*, repo_id: str, query: str) -> dict[str, Any]:
+    return {
+        "schema": "repoctl.knowledge.query",
+        "schema_version": 2,
+        "repo_id": repo_id,
+        "query": {"text": query},
+        "lifecycle": {
+            "available_statuses": {},
+            "excluded_statuses": {},
+            "returned_statuses": {},
+            "default_excludes": ["stale", "superseded", "deprecated"],
+        },
+        "results": [],
+        "result_count": 0,
+        "available_record_count": 0,
+    }
+
+
+def _knowledge_query_source_views(
+    root: Path,
+    records: list[dict[str, Any]],
+) -> dict[str, tuple[list[KnowledgeSourceResolution], list[dict[str, Any]]]]:
+    views: dict[str, tuple[list[KnowledgeSourceResolution], list[dict[str, Any]]]] = {}
+    for record in records:
+        record_id = str(record.get("id") or "")
+        resolutions = knowledge_source_ref_resolutions(root, record)
+        views[record_id] = (
+            resolutions,
+            resolved_knowledge_source_refs(
+                root,
+                record,
+                resolutions=resolutions,
+            ),
+        )
+    return views
+
+
+def _knowledge_query_result(
+    root: Path,
+    *,
+    record: dict[str, Any],
+    status: str,
+    lifecycle_events: list[dict[str, Any]],
+    query: str,
+    fts_score: float,
+    source_resolutions: list[KnowledgeSourceResolution],
+    resolved_source_refs: list[dict[str, Any]],
+    wanted_paths: set[str],
+    require_related: bool,
+    explain: bool,
+) -> dict[str, Any] | None:
+    matched_paths = sorted(
+        wanted_paths
+        & _record_related_paths(
+            record,
+            resolved_source_refs=resolved_source_refs,
+        )
+    )
+    if require_related and not matched_paths:
+        return None
+    score, breakdown, selection_reasons = _record_score(
+        query,
+        record,
+        fts=fts_score,
+        resolved_source_refs=resolved_source_refs,
+    )
+    query_matched = any(
+        float(breakdown.get(key) or 0.0) > 0
+        for key in (
+            "exact_identity",
+            "exact_title",
+            "exact_claim",
+            "exact_summary",
+            "exact_source",
+            "fts",
+        )
+    )
+    if matched_paths:
+        breakdown["path_relation"] = 1.0
+        score += 1.0
+        selection_reasons.append("explicit source/path relation")
+    if not query_matched and not matched_paths:
+        return None
+    result = {
+        "record": _public_record(
+            root,
+            record,
+            status=status,
+            lifecycle_relations=_record_lifecycle_relations(
+                record,
+                lifecycle_events,
+            ),
+            source_resolutions=source_resolutions,
+            resolved_source_refs=resolved_source_refs,
+        ),
+        "score": round(score, 6),
+        "score_breakdown": {
+            key: round(value, 6)
+            for key, value in sorted(breakdown.items())
+        },
+        "selection_reasons": selection_reasons,
+        "query_match_strength": _knowledge_query_match_strength(
+            breakdown,
+            query_matched=query_matched,
+        ).value,
+    }
+    if matched_paths:
+        result["matched_paths"] = matched_paths
+    if explain:
+        result["explain"] = {
+            "status": status,
+            "source_ref_statuses": _source_ref_statuses(
+                root,
+                record,
+                resolutions=source_resolutions,
+            ),
+            "superseded": status == "superseded",
+            "stale": status == "stale",
+            "deprecated": status == "deprecated",
+        }
+    return result
+
+
 def query_knowledge_records(
     root: Path,
     *,
@@ -1505,6 +1909,152 @@ def query_knowledge_records(
     related_paths: set[str] | None = None,
     require_related: bool = False,
 ) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
+    if not include_stale and not include_superseded and not include_deprecated:
+        projection, projection_problems = load_knowledge_projection(root, repo_id=repo_id)
+        if projection_problems and not _record_dir(root).exists() and all(
+            problem.code == "knowledge_projection_unavailable" and problem.cause_code == "missing"
+            for problem in projection_problems
+        ):
+            return _empty_public_knowledge_query(repo_id=repo_id, query=query), [], []
+        if projection_problems:
+            unavailable = _empty_public_knowledge_query(repo_id=repo_id, query=query)
+            unavailable["lifecycle"]["event_checks"] = {
+                "error_count": len(projection_problems)
+            }
+            return unavailable, projection_problems, []
+        wanted_paths = {
+            str(path).strip()
+            for path in (related_paths or set())
+            if str(path).strip()
+        }
+        projection, projection_problems = verify_current_knowledge_projection(
+            root,
+            repo_id=repo_id,
+            projection=projection,
+        )
+        if projection_problems:
+            unavailable = _empty_public_knowledge_query(repo_id=repo_id, query=query)
+            unavailable["lifecycle"]["event_checks"] = {
+                "error_count": len(projection_problems)
+            }
+            return unavailable, projection_problems, []
+        lifecycle_counts = projection.get("lifecycle_counts") if isinstance(projection.get("lifecycle_counts"), dict) else {}
+        current_head_count = int(lifecycle_counts.get("current") or 0)
+        superseded_count = int(lifecycle_counts.get("superseded") or 0)
+        deprecated_count = int(lifecycle_counts.get("deprecated") or 0)
+        available_statuses: dict[str, int] = {}
+        excluded_statuses: dict[str, int] = {}
+        warnings: list[Problem] = []
+        scored_public_results: list[dict[str, Any]] = []
+        stale_count = 0
+        records = [head["record"] for head in projection["heads"]]
+        source_views = _knowledge_query_source_views(root, records)
+        fts_scores = _record_fts_scores(
+            query,
+            records,
+            resolved_source_refs_by_id={
+                record_id: view[1]
+                for record_id, view in source_views.items()
+            },
+        )
+        for head in projection["heads"]:
+            record = head["record"]
+            record_id = str(record.get("id") or "")
+            source_resolutions, resolved_source_refs = source_views[record_id]
+            status = (
+                "stale"
+                if _source_digest_problems(
+                    root,
+                    record,
+                    record_id=str(record.get("id") or ""),
+                    resolutions=source_resolutions,
+                )
+                else "reviewed"
+            )
+            if status == "stale":
+                stale_count += 1
+                warnings.append(
+                    Problem(
+                        "warning",
+                        "knowledge_stale_record_excluded",
+                        "stale knowledge record excluded from default query",
+                        str(record.get("id") or ""),
+                    )
+                )
+                continue
+            result = _knowledge_query_result(
+                root,
+                record=record,
+                status=status,
+                lifecycle_events=list(head.get("binding_events") or []),
+                query=query,
+                fts_score=fts_scores.get(record_id, 0.0),
+                source_resolutions=source_resolutions,
+                resolved_source_refs=resolved_source_refs,
+                wanted_paths=wanted_paths,
+                require_related=require_related,
+                explain=explain,
+            )
+            if result is not None:
+                scored_public_results.append(result)
+        scored_public_results.sort(
+            key=lambda item: (
+                -float(item.get("score") or 0.0),
+                str(item.get("record", {}).get("id") or ""),
+            )
+        )
+        public_results = scored_public_results[: max(0, int(limit))]
+        reviewed_count = max(0, current_head_count - stale_count)
+        if reviewed_count:
+            available_statuses["reviewed"] = reviewed_count
+        if stale_count:
+            available_statuses["stale"] = stale_count
+            excluded_statuses["stale"] = stale_count
+        if superseded_count:
+            available_statuses["superseded"] = superseded_count
+            excluded_statuses["superseded"] = superseded_count
+            warnings.append(
+                Problem(
+                    "warning",
+                    "knowledge_superseded_record_excluded",
+                    "superseded knowledge records excluded from default query",
+                    repo_id,
+                )
+            )
+        if deprecated_count:
+            available_statuses["deprecated"] = deprecated_count
+            excluded_statuses["deprecated"] = deprecated_count
+            warnings.append(
+                Problem(
+                    "warning",
+                    "knowledge_deprecated_record_excluded",
+                    "deprecated knowledge records excluded from default query",
+                    repo_id,
+                )
+            )
+        returned_statuses = {"reviewed": len(public_results)} if public_results else {}
+        return {
+            "schema": "repoctl.knowledge.query",
+            "schema_version": 2,
+            "repo_id": repo_id,
+            "query": {
+                "text": query,
+                "include_stale": False,
+                "include_superseded": False,
+                "include_deprecated": False,
+                "explain": explain,
+                "require_related": require_related,
+            },
+            "lifecycle": {
+                "available_statuses": dict(sorted(available_statuses.items())),
+                "excluded_statuses": dict(sorted(excluded_statuses.items())),
+                "returned_statuses": returned_statuses,
+                "default_excludes": ["stale", "superseded", "deprecated"],
+            },
+            "results": public_results,
+            "result_count": len(public_results),
+            "available_record_count": sum(int(value) for value in lifecycle_counts.values()),
+        }, [], warnings
     problems: list[Problem] = []
     warnings: list[Problem] = []
     records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
@@ -1532,14 +2082,7 @@ def query_knowledge_records(
     available_statuses: dict[str, int] = {}
     excluded_statuses: dict[str, int] = {}
     scored: list[dict[str, Any]] = []
-    source_views: dict[str, tuple[list[KnowledgeSourceResolution], list[dict[str, Any]]]] = {}
-    for record in records:
-        record_id = str(record.get("id") or "")
-        resolutions = knowledge_source_ref_resolutions(root, record)
-        source_views[record_id] = (
-            resolutions,
-            resolved_knowledge_source_refs(root, record, resolutions=resolutions),
-        )
+    source_views = _knowledge_query_source_views(root, records)
     fts_scores = _record_fts_scores(
         query,
         records,
@@ -1571,51 +2114,21 @@ def query_knowledge_records(
             continue
         if status not in {"reviewed", "stale", "superseded", "deprecated"}:
             continue
-        matched_paths = sorted(wanted_paths & _record_related_paths(record, resolved_source_refs=resolved_source_refs))
-        if require_related and not matched_paths:
-            continue
-        score, breakdown, reasons = _record_score(
-            query,
-            record,
-            fts=fts_scores.get(str(record.get("id") or ""), 0.0),
+        item = _knowledge_query_result(
+            root,
+            record=record,
+            status=status,
+            lifecycle_events=events,
+            query=query,
+            fts_score=fts_scores.get(record_id, 0.0),
+            source_resolutions=source_resolutions,
             resolved_source_refs=resolved_source_refs,
+            wanted_paths=wanted_paths,
+            require_related=require_related,
+            explain=explain,
         )
-        query_matched = any(
-            float(breakdown.get(key) or 0.0) > 0
-            for key in ("exact_identity", "exact_title", "exact_claim", "exact_summary", "exact_source", "fts")
-        )
-        match_strength = _knowledge_query_match_strength(breakdown, query_matched=query_matched)
-        if matched_paths:
-            breakdown["path_relation"] = 1.0
-            reasons.append("explicit source/path relation")
-            score += 1.0
-        if not query_matched and not matched_paths:
-            continue
-        item = {
-            "record": _public_record(
-                root,
-                record,
-                status=status,
-                lifecycle_relations=_record_lifecycle_relations(record, events),
-                source_resolutions=source_resolutions,
-                resolved_source_refs=resolved_source_refs,
-            ),
-            "score": round(score, 6),
-            "score_breakdown": {key: round(value, 6) for key, value in sorted(breakdown.items())},
-            "selection_reasons": reasons,
-            "query_match_strength": match_strength.value,
-        }
-        if matched_paths:
-            item["matched_paths"] = matched_paths
-        if explain:
-            item["explain"] = {
-                "status": status,
-                "source_ref_statuses": _source_ref_statuses(root, record, resolutions=source_resolutions),
-                "superseded": status == "superseded",
-                "stale": status == "stale",
-                "deprecated": status == "deprecated",
-            }
-        scored.append(item)
+        if item is not None:
+            scored.append(item)
     scored.sort(key=lambda item: (-float(item["score"]), str(item["record"].get("id") or "")))
     returned = scored[:limit]
     returned_statuses: dict[str, int] = {}
@@ -1669,41 +2182,43 @@ def knowledge_records_for_graph(
     repo_id: str,
     receipt_collection: CompletionReceiptCollection | None = None,
 ) -> tuple[list[dict[str, Any]], list[Problem]]:
-    records = [record for record in _load_records(root) if str(record.get("repo_id") or "") == repo_id]
-    events = _load_events(root, repo_id=repo_id)
-    event_problems = event_integrity_problems(root, repo_id=repo_id, records=records, events=events)
-    if any(problem.severity == "error" for problem in event_problems):
-        return [], event_problems
-    superseded_ids = _superseded_ids(records)
-    deprecated_ids = _deprecated_ids(root, repo_id=repo_id)
-    projected: list[dict[str, Any]] = []
-    for record in records:
+    projection, projection_problems = load_knowledge_projection(root, repo_id=repo_id)
+    if projection_problems:
+        return [], projection_problems
+    graph_record_ids = [
+        str(head.get("record", {}).get("id") or "")
+        for head in projection.get("heads", [])
+        if isinstance(head, dict) and isinstance(head.get("record"), dict)
+    ]
+    projection, projection_problems = verify_current_knowledge_projection(
+        root,
+        repo_id=repo_id,
+        projection=projection,
+        record_ids=graph_record_ids,
+    )
+    if projection_problems:
+        return [], projection_problems
+    projected_current: list[dict[str, Any]] = []
+    for head in projection["heads"]:
+        record = head["record"]
         source_resolutions = knowledge_source_ref_resolutions(
             root,
             record,
             receipt_collection=receipt_collection,
         )
-        resolved_source_refs = resolved_knowledge_source_refs(root, record, resolutions=source_resolutions)
-        status = _derived_status(
-            root,
-            record,
-            superseded_ids=superseded_ids,
-            deprecated_ids=deprecated_ids,
-            source_resolutions=source_resolutions,
-        )
-        if status not in {"reviewed", "stale"}:
+        if _source_digest_problems(root, record, resolutions=source_resolutions):
             continue
-        projected.append(
+        projected_current.append(
             _public_record(
                 root,
                 record,
-                status=status,
-                lifecycle_relations=_record_lifecycle_relations(record, events),
+                status="reviewed",
+                lifecycle_relations={"superseded_by": [], "deprecated_by": []},
                 source_resolutions=source_resolutions,
-                resolved_source_refs=resolved_source_refs,
+                resolved_source_refs=resolved_knowledge_source_refs(root, record, resolutions=source_resolutions),
             )
         )
-    return sorted(projected, key=lambda item: str(item.get("id") or "")), event_problems
+    return sorted(projected_current, key=lambda item: str(item.get("id") or "")), []
 
 
 def _source_rel(root: Path, source: Path) -> str:
@@ -2285,21 +2800,45 @@ def _default_supersedes_for_candidate(candidate: dict[str, Any]) -> list[str]:
     return [record_id] if record_id else []
 
 
-def _validate_supersedes(root: Path, *, repo_id: str, supersedes: list[str]) -> list[Problem]:
+def _validate_projection_supersedes(
+    *,
+    repo_id: str,
+    supersedes: list[str],
+    current_heads: dict[str, dict[str, Any]],
+) -> list[Problem]:
     problems: list[Problem] = []
-    records = {str(record.get("id") or ""): record for record in _load_records(root)}
     seen: set[str] = set()
     for record_id in supersedes:
         if record_id in seen:
-            problems.append(Problem("error", "knowledge_supersedes_duplicate", "duplicate supersedes record id", record_id))
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_supersedes_duplicate",
+                    "duplicate supersedes record id",
+                    record_id,
+                )
+            )
             continue
         seen.add(record_id)
-        record = records.get(record_id)
+        record = current_heads.get(record_id)
         if record is None:
-            problems.append(Problem("error", "knowledge_supersedes_missing", "superseded record does not exist", record_id))
-            continue
-        if str(record.get("repo_id") or "") != repo_id:
-            problems.append(Problem("error", "knowledge_supersedes_repo_mismatch", "superseded record belongs to a different repo", record_id))
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_supersedes_missing",
+                    "superseded record is not a current Knowledge head",
+                    record_id,
+                )
+            )
+        elif str(record.get("repo_id") or "") != repo_id:
+            problems.append(
+                Problem(
+                    "error",
+                    "knowledge_supersedes_repo_mismatch",
+                    "superseded record belongs to a different repo",
+                    record_id,
+                )
+            )
     return problems
 
 

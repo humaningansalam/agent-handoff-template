@@ -7,6 +7,10 @@ import tools.repoctl.knowledge_candidates as knowledge_candidates
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
 from tools.repoctl.knowledge_candidates import knowledge_records_for_graph
+from tools.repoctl.knowledge_projection import (
+    initialize_empty_knowledge_projection,
+    knowledge_projection_path,
+)
 from tests.repoctl.knowledge_test_helpers import (
     _approve_knowledge_source,
     _read_event,
@@ -152,6 +156,58 @@ def test_knowledge_approve_show_check_and_drift(tmp_path: Path, monkeypatch, cap
     assert status_payload["data"]["record_statuses"] == {"stale": 1}
     assert status_payload["data"]["record_checks"]["error_count"] == 1
     assert status_payload["data"]["record_checks"]["problem_codes"] == {"knowledge_source_digest_drift": 1}
+
+
+def test_knowledge_rebuild_recovers_missing_projection_before_new_approval(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    first_record = _approve_knowledge_source(capsys)["data"]["record"]
+
+    assert main(
+        [
+            "knowledge",
+            "candidate",
+            "build",
+            "--source",
+            "docs/contracts/repoctl-context-contract.md",
+            "--repo-id",
+            "main",
+            "--claim",
+            "A second reviewed decision must preserve prior durable Knowledge.",
+            "--json",
+        ]
+    ) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+    projection_path = knowledge_projection_path(tmp_path, repo_id="main")
+    projection_path.unlink()
+
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["problems"][0]["code"] == "knowledge_projection_unavailable"
+    assert missing["problems"][0]["cause_code"] == "missing"
+    rebuild_action = next(action for action in missing["next_actions"] if action.get("kind") == "knowledge_rebuild")
+    assert rebuild_action["command"] == "./scripts/repoctl knowledge rebuild --repo-id main --json"
+    assert not projection_path.exists()
+
+    empty, empty_problems = initialize_empty_knowledge_projection(tmp_path, repo_id="main")
+    assert empty["heads"] == []
+    assert empty_problems == []
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 1
+    empty_projection = json.loads(capsys.readouterr().out)
+    assert empty_projection["problems"][0]["cause_code"] == "cold_record_count_mismatch"
+
+    assert main(["knowledge", "rebuild", "--repo-id", "main", "--json"]) == 0
+    rebuilt = json.loads(capsys.readouterr().out)
+    assert rebuilt["data"]["head_count"] == 1
+    assert rebuilt["data"]["checkpoint"]["kind"] == "full_rebuild"
+    assert rebuilt["warnings"][0]["code"] == "knowledge_projection_rebuild_scanned_cold_history"
+
+    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert approved["data"]["record"]["id"] != first_record["id"]
 
 
 def test_knowledge_check_reports_event_digest_mismatch(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -304,8 +360,11 @@ def test_knowledge_query_rejects_invalid_lifecycle_events(tmp_path: Path, monkey
     assert main(["knowledge", "query", "authoritative knowledge approval", "--repo-id", "main", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["result_count"] == 0
-    assert payload["data"]["lifecycle"]["event_checks"]["error_count"] == 1
-    assert payload["problems"][0]["code"] == "knowledge_event_record_digest_mismatch"
+    assert payload["data"]["lifecycle"]["event_checks"]["error_count"] == 2
+    assert [problem["code"] for problem in payload["problems"]] == [
+        "knowledge_event_digest_mismatch",
+        "knowledge_event_record_digest_mismatch",
+    ]
 
 
 def test_knowledge_query_ranks_more_specific_record_first(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -473,19 +532,18 @@ def test_knowledge_supersession_excludes_old_record_by_default(tmp_path: Path, m
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
-    assert render_payload["data"]["event_count"] == 3
+    assert render_payload["data"]["record_count"] == 1
+    assert render_payload["data"]["event_count"] == 2
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert f"records/{old_record}.md" in decisions_text
+    assert f"records/{old_record}.md" not in decisions_text
     assert f"records/{new_record}.md" in decisions_text
-    old_record_text = (tmp_path / "docs/knowledge/generated/records" / f"{old_record}.md").read_text(encoding="utf-8")
     new_record_text = (tmp_path / "docs/knowledge/generated/records" / f"{new_record}.md").read_text(encoding="utf-8")
-    assert f"- Record: `{old_record}`" in old_record_text
-    assert "- Status: `superseded`" in old_record_text
-    assert f"- Superseded by: [{new_record}]" in old_record_text
-    assert f"- Supersedes: [{old_record}]" in new_record_text
-    assert "- Lifecycle events: `" in old_record_text
+    assert not (tmp_path / "docs/knowledge/generated/records" / f"{old_record}.md").exists()
+    assert f"- Supersedes: `{old_record}`" in new_record_text
+    assert "- Lifecycle events: `" in new_record_text
     assert f"- Approved from candidate: `{second_candidate}`" in new_record_text
     assert f"- Related at approval: `{old_record} status=reviewed relation=same_claim`" in new_record_text
+    assert not (tmp_path / "docs/knowledge/generated/history.md").exists()
 
 
 def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -565,15 +623,16 @@ def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatc
     assert history_query["data"]["query"]["include_deprecated"] is True
 
     assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    render_payload = json.loads(capsys.readouterr().out)
+    assert render_payload["data"]["record_count"] == 0
+    assert render_payload["data"]["event_count"] == 0
     index_text = (tmp_path / "docs/knowledge/generated/INDEX.md").read_text(encoding="utf-8")
     assert "- reviewed: 0" in index_text
-    assert "- deprecated: 1" in index_text
-    assert "### Deprecated" in index_text
+    assert "deprecated" not in index_text
     decisions_text = (tmp_path / "docs/knowledge/generated/decisions.md").read_text(encoding="utf-8")
-    assert f"records/{record['id']}.md" in decisions_text
-    record_text = (tmp_path / "docs/knowledge/generated/records" / f"{record['id']}.md").read_text(encoding="utf-8")
-    assert "- Status: `deprecated`" in record_text
+    assert f"records/{record['id']}.md" not in decisions_text
+    assert not (tmp_path / "docs/knowledge/generated/records" / f"{record['id']}.md").exists()
+    assert not (tmp_path / "docs/knowledge/generated/history.md").exists()
 
     assert main(["knowledge", "status", "--repo-id", "main", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)

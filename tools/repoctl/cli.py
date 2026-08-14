@@ -9,12 +9,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
+from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCatalogueUnavailableReason, audit_completion_catalogue, completion_catalogue_namespaces, completion_catalogue_status, rebuild_completion_catalogue
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
@@ -25,12 +27,18 @@ from .graph_store import compact_graph_freshness, graph_materialization_freshnes
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
 from .knowledge_candidates import KnowledgeArtifactErrorCode, approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, prepare_knowledge_candidate_from_completion, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_projection import (
+    initialize_empty_knowledge_projection,
+    knowledge_projection_path,
+    load_knowledge_projection,
+    rebuild_knowledge_projection,
+)
 from .knowledge_render import render_knowledge
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, unbound_repository_state_namespaces
-from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_selections, graph_result_selections, write_result_receipt
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipts, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file
+from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, graph_result_selections, write_result_receipt
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -69,6 +77,8 @@ class NextActionKind(StrEnum):
     GRAPH_BUILD = "graph_build"
     GRAPH_REBUILD = "graph_rebuild"
     GRAPH_REFRESH = "graph_refresh"
+    COMPLETION_CATALOGUE_REBUILD = "completion_catalogue_rebuild"
+    KNOWLEDGE_REBUILD = "knowledge_rebuild"
     CONTEXT_RESUME = "context_resume"
     TASK_HANDOFF_BIND = "task_handoff_bind"
     CONTEXT_PACK_REFRESH = "context_pack_refresh"
@@ -86,6 +96,28 @@ class TaskScopeResolution(StrEnum):
 
 
 COMPACT_PATH_LIMIT = 20
+COMPLETION_CATALOGUE_UNAVAILABLE_CODES = frozenset(
+    reason.value for reason in CompletionCatalogueUnavailableReason
+)
+
+
+@dataclass(frozen=True)
+class TaskHealth:
+    """Repository lifecycle health, independent from Handoff freshness."""
+
+    status: str
+    problems: tuple[Problem, ...]
+
+    @property
+    def executable(self) -> bool:
+        return self.status == "healthy"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "executable": self.executable,
+            "codes": sorted({problem.code for problem in self.problems}),
+        }
 
 
 class RepoctlArgumentParser(argparse.ArgumentParser):
@@ -303,6 +335,31 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             repository = bundle["repository"]
         return bundle, str(repository.get("id") or "<id>")
 
+    def selected_repo_id() -> str:
+        payload = data or {}
+        repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+        if "id" in repository:
+            return str(repository["id"])
+        if "repo_id" in payload:
+            return str(payload["repo_id"])
+        bundle = payload.get("bundle") if isinstance(payload.get("bundle"), dict) else {}
+        bundle_repository = bundle.get("repository") if isinstance(bundle.get("repository"), dict) else {}
+        return str(bundle_repository["id"]) if "id" in bundle_repository else "<id>"
+
+    def add_completion_catalogue_recovery(
+        *,
+        source: str,
+        repo_id_override: str | None = None,
+    ) -> None:
+        repo_id = selected_repo_id() if repo_id_override is None else repo_id_override
+        selector = f" --repo-id {repo_id}" if repo_id else " --workspace"
+        add(
+            "Rebuild completion history from validated cold receipts",
+            command=f"./scripts/repoctl history rebuild{selector} --json",
+            kind=NextActionKind.COMPLETION_CATALOGUE_REBUILD,
+            source=source,
+        )
+
     def add_context_resume(*, label: str, source: str) -> None:
         bundle, repo_id = context_bundle_and_repo()
         query = bundle.get("query") if isinstance(bundle.get("query"), dict) else {}
@@ -320,6 +377,19 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             ),
             kind=NextActionKind.CONTEXT_RESUME,
             source=source,
+        )
+
+    def add_knowledge_projection_recovery(*, source: str) -> None:
+        repo_id = selected_repo_id()
+        add(
+            "Rebuild Reviewed Knowledge from validated records and events",
+            command=f"./scripts/repoctl knowledge rebuild --repo-id {repo_id} --json",
+            kind=NextActionKind.KNOWLEDGE_REBUILD,
+            source=source,
+        )
+        add_context_resume(
+            label="Rerun the same Context query after Knowledge recovery",
+            source="data.bundle.query",
         )
 
     def add_context_graph_recovery(kind: NextActionKind, *, source: str) -> None:
@@ -346,6 +416,38 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         code = _problem_code(problem)
         path = _problem_path(problem)
         cause_code = _problem_cause_code(problem)
+        catalogue_reason = (
+            code
+            if code in COMPLETION_CATALOGUE_UNAVAILABLE_CODES
+            else cause_code if cause_code in COMPLETION_CATALOGUE_UNAVAILABLE_CODES else ""
+        )
+        if catalogue_reason:
+            history = _mapping_at(data, "completion_history")
+            entries = [
+                entry
+                for key in ("catalogues", "audited_catalogues")
+                for entry in history.get(key, [])
+                if isinstance(entry, dict)
+                and str(entry.get("problem_code") or "") == catalogue_reason
+            ]
+            if entries:
+                for entry in entries:
+                    add_completion_catalogue_recovery(
+                        source=f"data.completion_history.{('catalogues' if entry in history.get('catalogues', []) else 'audited_catalogues')}[].problem_code",
+                        repo_id_override=str(entry.get("repo_id") or ""),
+                    )
+            else:
+                add_completion_catalogue_recovery(
+                    source="problems_or_warnings[].code" if code == catalogue_reason else "problems_or_warnings[].cause_code"
+                )
+        if code in {
+            "knowledge_projection_unavailable",
+            "knowledge_projection_schema_mismatch",
+            "knowledge_projection_digest_mismatch",
+            "knowledge_projection_tail_gap",
+            "knowledge_projection_tail_digest_mismatch",
+        }:
+            add_knowledge_projection_recovery(source="problems_or_warnings[].code")
         if code == "missing_verification_file":
             add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
             add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --json")
@@ -563,6 +665,11 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
     bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
     completeness = bundle.get("completeness") if isinstance(bundle.get("completeness"), dict) else {}
+    prior_outcome = completeness.get("prior_task_outcome") if isinstance(completeness.get("prior_task_outcome"), dict) else {}
+    if str(prior_outcome.get("reason") or "") in COMPLETION_CATALOGUE_UNAVAILABLE_CODES:
+        add_completion_catalogue_recovery(
+            source="data.bundle.completeness.prior_task_outcome.reason"
+        )
     freshness = completeness.get("graph_freshness") if isinstance(completeness.get("graph_freshness"), dict) else {}
     if str(freshness.get("status") or "") == "stale":
         add_context_graph_recovery(
@@ -755,10 +862,14 @@ def _context_materialize_cleanup_entries(root: Path, data: dict[str, Any]) -> li
 def _pack_materialize_cleanup_entries(root: Path, data: dict[str, Any]) -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
     created = data.get("created") if isinstance(data.get("created"), list) else []
-    stop_at = root / "docs/archive/tasks"
     for rel in created:
         if not isinstance(rel, str) or not rel:
             continue
+        stop_at = (
+            root / "docs/tasks/.repoctl-state/archive"
+            if rel.startswith("docs/tasks/.repoctl-state/archive/")
+            else root / "docs/archive/tasks"
+        )
         entry = _cleanup_entry(root, root / rel, stop_at=stop_at)
         if entry is not None:
             entries.append(entry)
@@ -956,6 +1067,17 @@ def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirecto
         source_metadata = target.root_path / ".repometa"
         if (source_metadata / "policy.json").is_file():
             shutil.copytree(source_metadata, repo / ".repometa", dirs_exist_ok=True)
+        _projection, projection_problems = initialize_empty_knowledge_projection(
+            isolated,
+            repo_id=target.id,
+        )
+        if projection_problems:
+            temporary.cleanup()
+            raise RepoctlError(
+                "cannot initialize isolated benchmark knowledge projection",
+                code="field_gate_benchmark_workspace_unavailable",
+                path=target.id,
+            )
     return temporary, isolated
 
 
@@ -1460,6 +1582,53 @@ def _warnings(problems: list[Problem]) -> list[dict[str, str]]:
     return [problem.to_dict() for problem in problems if problem.severity == "warning"]
 
 
+def _task_health(
+    root: Path,
+    task: Any,
+    *,
+    delta: dict[str, Any] | None = None,
+    observation_error: RepoctlError | None = None,
+) -> TaskHealth:
+    """Evaluate whether a live task can safely continue on current evidence."""
+    if task.archived or task.status not in {"todo", "doing", "blocked"}:
+        return TaskHealth("historical", ())
+    state_path = root / "docs/tasks/.repoctl-state" / f"{task.id}.json"
+    if not state_path.is_file() and delta is None and observation_error is None:
+        return TaskHealth("healthy", ())
+    problems: list[Problem] = []
+    if observation_error is not None:
+        problems.append(
+            Problem(
+                "error",
+                observation_error.code or "repoctl_error",
+                str(observation_error),
+                observation_error.path or task.rel_path,
+                observation_error.cause_code,
+            )
+        )
+    elif delta is None:
+        try:
+            delta = repo_changes_since_task_start(root, task.id)
+        except RepoctlError as exc:
+            problems.append(
+                Problem(
+                    "error",
+                    exc.code or "repoctl_error",
+                    str(exc),
+                    exc.path or task.rel_path,
+                    exc.cause_code,
+                )
+            )
+    if delta is not None:
+        problems.extend(
+            problem
+            for problem in delta.get("integrity_problems", ())
+            if isinstance(problem, Problem) and problem.severity == "error"
+        )
+    ordered = tuple(_dedupe_problems(problems))
+    return TaskHealth("healthy" if not ordered else "unhealthy", ordered)
+
+
 def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget | None:
     repo_id = getattr(args, "repo_id", None)
     if repo_id:
@@ -1468,7 +1637,7 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
 
 
 def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "field_gate_command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "backlog_command", "meta_command", "index_command", "graph_command", "context_command", "knowledge_command", "knowledge_candidate_command", "knowledge_event_command", "upgrade_command") if getattr(args, name, None)]
+    parts = [str(getattr(args, name)) for name in ("command", "field_gate_command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "task_verification_command", "backlog_command", "meta_command", "index_command", "graph_command", "history_command", "context_command", "knowledge_command", "knowledge_candidate_command", "knowledge_event_command", "upgrade_command") if getattr(args, name, None)]
     return ".".join(parts) if parts else "repoctl"
 
 
@@ -1483,13 +1652,158 @@ def _error_data(args: argparse.Namespace) -> dict[str, Any]:
     return data
 
 
-def _check_payload(root: Path, *, include_archived_warnings: bool = False, full: bool = False) -> tuple[dict[str, Any], list[Problem], list[str]]:
-    tasks = load_tasks(root)
+def _completion_catalogue_problem(
+    repo_id: str,
+    exc: CompletionCatalogueUnavailable,
+) -> Problem:
+    namespace = repo_id or "workspace"
+    return Problem(
+        "error",
+        exc.code,
+        f"completion history projection is unavailable for {namespace}: {exc}",
+        exc.path,
+        exc.cause_code,
+    )
+
+
+def _completion_catalogue_summary(repo_id: str, status: Any) -> dict[str, Any]:
+    return {
+        "repo_id": repo_id,
+        "status": status.status,
+        "head_sequence": status.head_sequence,
+        "checkpoint_sequence": status.checkpoint_sequence,
+        "retained_event_count": status.retained_event_count,
+        "history_complete": status.history_complete,
+    }
+
+
+def _bounded_completion_history_check(
+    root: Path,
+) -> tuple[list[dict[str, Any]], list[Problem], tuple[str, ...]]:
+    """Validate fixed-size completion projections without reading cold receipts."""
+
+    layout = repo_layout(root)
+    repo_ids = ("", *sorted({target.id for target in layout.targets}))
+    catalogues: list[dict[str, Any]] = []
+    problems: list[Problem] = []
+    for repo_id in repo_ids:
+        try:
+            status = completion_catalogue_status(root, repo_id)
+        except CompletionCatalogueUnavailable as exc:
+            catalogues.append(
+                {
+                    "repo_id": repo_id,
+                    "status": "unavailable",
+                    "problem_code": exc.code,
+                }
+            )
+            problems.append(_completion_catalogue_problem(repo_id, exc))
+            continue
+        if status.status != "empty":
+            catalogues.append(_completion_catalogue_summary(repo_id, status))
+    return catalogues, problems, repo_ids
+
+
+def _full_completion_history_audit(
+    root: Path,
+    *,
+    repo_ids: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[Problem]]:
+    """Audit cold authority once, then verify every catalogue namespace."""
+
+    collection = collect_completion_receipt_collection(root)
+    problems = list(collection.problems)
+    artifacts_by_repo: dict[str, list[Any]] = {}
+    for artifact in collection.artifacts:
+        repo_id = str(artifact.receipt.get("repo_id") or "")
+        artifacts_by_repo.setdefault(repo_id, []).append(artifact)
+
+    audited: list[dict[str, Any]] = []
+    try:
+        persisted_namespaces = completion_catalogue_namespaces(root)
+    except CompletionCatalogueUnavailable as exc:
+        problems.append(_completion_catalogue_problem("", exc))
+        persisted_namespaces = ()
+    namespaces = sorted(
+        set(repo_ids) | set(artifacts_by_repo) | set(persisted_namespaces),
+        key=lambda value: (value != "", value),
+    )
+    for repo_id in namespaces:
+        try:
+            status = completion_catalogue_status(root, repo_id)
+        except CompletionCatalogueUnavailable as exc:
+            problems.append(_completion_catalogue_problem(repo_id, exc))
+            continue
+        artifacts = artifacts_by_repo.get(repo_id, [])
+        if status.status == "empty" and not artifacts:
+            if repo_id in persisted_namespaces:
+                problems.append(
+                    Problem(
+                        "error",
+                        CompletionCatalogueUnavailableReason.SOURCE_MISMATCH,
+                        f"persisted completion catalogue namespace has no auditable state for {repo_id or 'workspace'}",
+                        "docs/tasks/.repoctl-state/completion-catalogue",
+                    )
+                )
+            continue
+        if status.status == "empty":
+            problems.append(
+                Problem(
+                    "error",
+                    CompletionCatalogueUnavailableReason.SOURCE_MISMATCH,
+                    f"completion receipt authority has no catalogue for {repo_id or 'workspace'}",
+                    "docs/tasks/.repoctl-state/completions",
+                )
+            )
+            continue
+        try:
+            audit = audit_completion_catalogue(
+                root,
+                repo_id,
+                receipt_artifacts=artifacts,
+            )
+        except CompletionCatalogueUnavailable as exc:
+            problems.append(_completion_catalogue_problem(repo_id, exc))
+            continue
+        audited.append(
+            {
+                "repo_id": repo_id,
+                "status": "audited",
+                "event_count": audit.event_count,
+                "last_sequence": audit.last_sequence,
+                "source_checked": audit.source_checked,
+            }
+        )
+    return audited, problems
+
+
+def _check_payload(
+    root: Path,
+    *,
+    include_archived_warnings: bool = False,
+    full: bool = False,
+    audit_history: bool = False,
+) -> tuple[dict[str, Any], list[Problem], list[str]]:
+    tasks = load_tasks(root, include_archived=include_archived_warnings)
     board_path = root / "docs/BOARD.md"
     board_text = board_path.read_text(encoding="utf-8")
     board_paths = parse_board(board_text)
-    _receipts, receipt_problems = collect_completion_receipts(root)
-    problems = validate_tasks(tasks, include_archived_warnings=include_archived_warnings) + validate_live_task_states(root, tasks) + check_board(root, board_paths, tasks, board_text) + receipt_problems + _generated_adapter_problems(root)
+    catalogues, catalogue_problems, repo_ids = _bounded_completion_history_check(root)
+    history_problems: list[Problem] = []
+    audited_catalogues: list[dict[str, Any]] = []
+    if audit_history:
+        audited_catalogues, history_problems = _full_completion_history_audit(
+            root,
+            repo_ids=repo_ids,
+        )
+    problems = _dedupe_problems(
+        validate_tasks(tasks, include_archived_warnings=include_archived_warnings)
+        + validate_live_task_states(root, tasks)
+        + check_board(root, board_paths, tasks, board_text)
+        + catalogue_problems
+        + history_problems
+        + _generated_adapter_problems(root)
+    )
     live_paths = [task.rel_path for task in live_tasks(tasks)]
     release_gates = _release_candidate_field_gates(root)
     release_gate_data: dict[str, Any] = {
@@ -1514,6 +1828,11 @@ def _check_payload(root: Path, *, include_archived_warnings: bool = False, full:
                 "stale": set(board_paths) != set(live_paths),
                 "missing": sorted(set(live_paths) - set(board_paths)),
                 "extra": sorted(set(board_paths) - set(live_paths)),
+            },
+            "completion_history": {
+                "mode": "full_archive_audit" if audit_history else "bounded_catalogue",
+                "catalogues": catalogues,
+                **({"audited_catalogues": audited_catalogues} if audit_history else {}),
             },
         },
         "problems": [problem.to_dict() for problem in problems],
@@ -1580,7 +1899,12 @@ def _generated_adapter_problems(root: Path) -> list[Problem]:
 
 def cmd_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    payload, problems, live_paths = _check_payload(root, include_archived_warnings=args.include_archived_warnings, full=args.full)
+    payload, problems, live_paths = _check_payload(
+        root,
+        include_archived_warnings=args.include_archived_warnings,
+        full=args.full,
+        audit_history=args.audit_history and not args.fix_board,
+    )
     if args.fix_board:
         with repoctl_lock(root):
             _locked_payload, _locked_problems, live_paths = _check_payload(root, include_archived_warnings=args.include_archived_warnings, full=args.full)
@@ -1589,7 +1913,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             fixed = render_board(board_text, live_paths)
             if fixed != board_text:
                 atomic_write(board_path, fixed)
-        payload, problems, _ = _check_payload(root, include_archived_warnings=args.include_archived_warnings, full=args.full)
+        payload, problems, _ = _check_payload(
+            root,
+            include_archived_warnings=args.include_archived_warnings,
+            full=args.full,
+            audit_history=args.audit_history,
+        )
     if args.json:
         _json(payload)
     else:
@@ -1775,7 +2104,7 @@ def cmd_repo_adopt(args: argparse.Namespace) -> int:
 
 def cmd_task_list(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    tasks = load_tasks(root)
+    tasks = load_tasks(root, include_archived=False)
     board_text = (root / "docs/BOARD.md").read_text(encoding="utf-8")
     board_paths = parse_board(board_text)
     live_paths = [task.rel_path for task in live_tasks(tasks)]
@@ -1805,7 +2134,7 @@ def cmd_task_list(args: argparse.Namespace) -> int:
 
 
 def build_task_resume_projection(root: Path) -> dict[str, Any]:
-    tasks = load_tasks(root)
+    tasks = load_tasks(root, include_archived=False)
     selection = select_task_for_resume(tasks)
     selection_data = {
         "status": selection.status.value,
@@ -1844,11 +2173,9 @@ def build_task_resume_projection(root: Path) -> dict[str, Any]:
     task = selection.task
     if task is None:  # pragma: no cover - closed by TaskResumeSelectionStatus
         raise RepoctlError("single-live resume selection is missing its task", code="task_resume_selection_invalid")
-    try:
-        target = _repo_target_for_task_command(root, task)
-    except RepoctlError:
-        target = None
+    target, _delta, health = _task_lifecycle_observation(root, task)
     guidance, warnings, problems = _task_resume_guidance(root, task, target=target)
+    problems = _dedupe_problems([*problems, *health.problems])
     handoff = dict(guidance.get("handoff") or {})
     handoff_body = handoff.pop("body", "")
     executable_handoff = (
@@ -1858,6 +2185,7 @@ def build_task_resume_projection(root: Path) -> dict[str, Any]:
     )
     guidance = {
         **guidance,
+        "health": health.to_dict(),
         "handoff": handoff,
         "executable_handoff": executable_handoff,
     }
@@ -1896,7 +2224,12 @@ def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> d
         return None
     if target is None or not _repo_scoped_frontmatter(task) or not discovery_recorded(task, target):
         return None
-    scope = discovery_scope_delta(task, target, list(delta.get("changes") or []))
+    scope = discovery_scope_delta(
+        task,
+        target,
+        list(delta.get("changes") or []),
+        observed_committed_changes=list(delta.get("observed_committed_changes") or []),
+    )
     delta["scope"] = scope
     if not scope["unchosen_actual_paths"]:
         return None
@@ -1906,6 +2239,25 @@ def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> d
         "message": "current repository changes include paths outside the active Chosen files; this is advisory until task finish",
         "path": task.rel_path,
     }
+
+
+def _task_lifecycle_observation(
+    root: Path,
+    task: Any,
+) -> tuple[RepoTarget | None, dict[str, Any] | None, TaskHealth]:
+    """Resolve one task target and one repository observation for all consumers."""
+    if task.archived or task.status not in {"todo", "doing", "blocked"}:
+        try:
+            target = _repo_target_for_task_command(root, task)
+        except RepoctlError:
+            target = None
+        return target, None, TaskHealth("historical", ())
+    try:
+        target = _repo_target_for_task_command(root, task)
+        delta = repo_changes_since_task_start(root, task.id)
+    except RepoctlError as exc:
+        return None, None, _task_health(root, task, observation_error=exc)
+    return target, delta, _task_health(root, task, delta=delta)
 
 
 def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[str, Any] | None:
@@ -2054,15 +2406,7 @@ def _task_resume_guidance(
 def cmd_task_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task = resolve_task(root, args.task_id)
-    try:
-        target = _repo_target_for_task_command(root, task)
-    except RepoctlError:
-        target = None
-    delta = (
-        repo_changes_since_task_start(root, task.id)
-        if task.status in {"todo", "doing", "blocked"}
-        else None
-    )
+    target, delta, health = _task_lifecycle_observation(root, task)
     warnings: list[dict[str, Any]] = []
     if delta:
         baseline_warning = _task_baseline_conflict_warning(task, delta)
@@ -2074,12 +2418,9 @@ def cmd_task_show(args: argparse.Namespace) -> int:
     resume_guidance, resume_warnings, resume_problems = _task_resume_guidance(root, task, target=target)
     show_problems = [
         *resume_problems,
-        *(
-            problem
-            for problem in (delta or {}).get("integrity_problems", ())
-            if isinstance(problem, Problem)
-        ),
+        *health.problems,
     ]
+    show_problems = _dedupe_problems(show_problems)
     warnings.extend(resume_warnings)
     repo_changes = (
         _repo_change_summary(
@@ -2094,6 +2435,7 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         "task": task.to_list_dict(),
         "path": task.rel_path,
         "repo_changes": repo_changes,
+        "health": health.to_dict(),
         "resume_guidance": resume_guidance,
     }
     if delta:
@@ -2220,6 +2562,7 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
             args.task_id,
             query=args.query or "",
             reviewed=args.reviewed or [],
+            excluded=args.excluded or [],
             chosen=args.chosen or [],
             replace_chosen=args.replace_chosen or [],
             reason=args.reason or "",
@@ -2229,7 +2572,26 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
             result_authority=args.result_authority or "",
             result_refs=args.result_ref or [],
         )
-        atomic_write(result["task"].path, result["text"])
+        task_path = result["task"].path
+        original_task_text = task_path.read_text(encoding="utf-8")
+        state_writes = result.get("state_writes") or []
+        original_state = {
+            state_path: state_path.read_text(encoding="utf-8") if state_path.is_file() else None
+            for state_path, _state_text in state_writes
+        }
+        try:
+            for state_path, state_text in state_writes:
+                atomic_write(state_path, state_text)
+            atomic_write(task_path, result["text"])
+        except Exception:
+            for state_path, original_text in original_state.items():
+                if original_text is None:
+                    if state_path.is_file():
+                        state_path.unlink()
+                else:
+                    atomic_write(state_path, original_text)
+            atomic_write(task_path, original_task_text)
+            raise
     next_actions: list[dict[str, str]] = []
     task_id = result["task"].id
     chosen_files = result["discovery"]["chosen_files"]
@@ -2269,6 +2631,38 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         _json(payload)
     else:
         print(f"Updated Discovery: {task_id}")
+    return 0
+
+
+def cmd_task_verification_add(args: argparse.Namespace) -> int:
+    root = find_workspace_root()
+    with repoctl_lock(root):
+        result = record_task_verification_outcome(
+            root,
+            args.task_id,
+            status=args.status,
+            evidence_ref=args.evidence_ref,
+            subject_refs=args.subject or [],
+            claim_ids=args.claim_id or [],
+        )
+        for state_path, state_text in result["state_writes"]:
+            atomic_write(state_path, state_text)
+    payload = {
+        "ok": True,
+        "command": "task.verification.add",
+        "data": {
+            "task_id": result["task"].id,
+            "record": result["state"]["verification_records"][-1],
+            "record_count": len(result["state"]["verification_records"]),
+        },
+        "problems": [],
+        "warnings": [],
+        "next_actions": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"Recorded verification outcome: {result['task'].id}")
     return 0
 
 
@@ -2316,8 +2710,14 @@ def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
 
 def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool = False) -> dict[str, Any]:
     task = resolve_task(root, task_id)
-    all_tasks = load_tasks(root)
-    task_problems = [problem for problem in validate_tasks(all_tasks, include_archived_warnings=True) if problem.path == task.rel_path]
+    related_tasks = load_tasks(root, include_archived=False)
+    if task.archived:
+        related_tasks.append(task)
+    task_problems = [
+        problem
+        for problem in validate_tasks(related_tasks, include_archived_warnings=True)
+        if problem.path == task.rel_path
+    ]
     doctor_problems: list[Problem] = []
     verification: VerificationInput | None = None
     verification_ready = True
@@ -2329,6 +2729,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
     target: RepoTarget | None = None
     repository: dict[str, Any] = {}
     delta_preparation_failed = False
+    delta_observation_error: RepoctlError | None = None
     try:
         target = _repo_target_for_task_command(root, task)
         repository = target.to_dict() if target is not None else {}
@@ -2344,6 +2745,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         )
     except RepoctlError as exc:
         delta_preparation_failed = True
+        delta_observation_error = exc
         doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
         delta = {
             "changes": [],
@@ -2376,7 +2778,13 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
             if not discovery_is_already_advisory and not scope_is_already_advisory:
                 doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
-    combined = _dedupe_problems([*task_problems, *doctor_problems])
+    health = _task_health(
+        root,
+        task,
+        delta=None if delta_preparation_failed else delta,
+        observation_error=delta_observation_error,
+    )
+    combined = _dedupe_problems([*task_problems, *doctor_problems, *health.problems])
     blockers = [problem.code for problem in combined if problem.severity == "error"]
     advisory = [
         *[problem.code for problem in combined if problem.severity == "warning"],
@@ -2387,6 +2795,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "task_id": task.id,
         "status": task.status,
         "path": task.rel_path,
+        "health": health.to_dict(),
         "finish_ready": finish_ready,
         "blocked_by": blockers,
         "advisory": advisory,
@@ -2431,7 +2840,13 @@ def _scope_summary(scope: Any, *, compact: bool) -> dict[str, Any]:
     if not isinstance(scope, dict):
         return {}
     summary: dict[str, Any] = {}
-    for key in ("actual_paths", "chosen_paths", "unchosen_actual_paths", "unused_chosen_paths"):
+    for key in (
+        "actual_paths",
+        "observed_committed_paths",
+        "chosen_paths",
+        "unchosen_actual_paths",
+        "unused_chosen_paths",
+    ):
         visible, count, truncated = _project_string_collection(scope.get(key), compact=compact)
         summary[key] = visible
         summary[f"{key}_count"] = count
@@ -2842,6 +3257,16 @@ def _task_finish_repo_delta(
     *,
     use_committed_diff: bool,
 ) -> dict[str, Any]:
+    delta = repo_changes_since_task_start(root, task.id)
+    health = _task_health(root, task, delta=delta)
+    if not health.executable:
+        problem = health.problems[0]
+        raise RepoctlError(
+            problem.message,
+            code=problem.code,
+            path=problem.path or task.rel_path,
+            cause_code=problem.cause_code,
+        )
     if _repo_scoped_frontmatter(task) and not use_committed_diff:
         start_head = task_repo_head_at_start(root, task.id)
         current_head, head_state = repo_git_head(root, target)
@@ -2851,7 +3276,6 @@ def _task_finish_repo_delta(
                 code="repo_head_changed_since_start",
                 path=task.rel_path,
             )
-    delta = repo_changes_since_task_start(root, task.id)
     if not use_committed_diff:
         delta["ownership"] = task_baseline_ownership_evidence(root, task.id)
         return delta
@@ -2973,7 +3397,16 @@ def _finish_meta_gate(
     if task_changes and _repo_scoped_frontmatter(task):
         if not discovery_recorded(task, target):
             raise RepoctlError("repo task must record candidate discovery before finish", code="placeholder_discovery", path=task.rel_path)
-        scope_delta = discovery_scope_delta(task, target, task_changes)
+        scope_delta = discovery_scope_delta(
+            task,
+            target,
+            task_changes,
+            observed_committed_changes=(
+                list(delta.get("observed_committed_changes") or [])
+                if not use_committed_diff
+                else []
+            ),
+        )
         delta["scope"] = scope_delta
         if scope_delta["unchosen_actual_paths"]:
             missing = ", ".join(scope_delta["unchosen_actual_paths"][:8])
@@ -3153,6 +3586,19 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
             if target.exists() and target.is_file():
                 target.unlink()
 
+    receipt_writes = result.get("receipt_writes") or []
+    if not receipt_writes and result.get("receipt_path") is not None and result.get("receipt_text"):
+        receipt_writes = [(result["receipt_path"], str(result["receipt_text"]))]
+    state_writes = [
+        *receipt_writes,
+        *(result.get("archive_writes") or []),
+        *(result.get("additional_state_writes") or []),
+    ]
+    for _source, target in result["moves"]:
+        validate_workspace_write_path(root, target, boundary=root / "docs/archive/tasks")
+    for state_path, _state_text in state_writes:
+        validate_workspace_write_path(root, state_path, boundary=root)
+
     if result["archived"]:
         try:
             for _source, target in result["moves"]:
@@ -3169,10 +3615,6 @@ def _write_task_result(root: Path, result: dict[str, Any]) -> None:
         original_task_text = result["task"].path.read_text(encoding="utf-8")
         atomic_write(result["task"].path, result["text"])
         task_written = True
-    receipt_writes = result.get("receipt_writes") or []
-    if not receipt_writes and result.get("receipt_path") is not None and result.get("receipt_text"):
-        receipt_writes = [(result["receipt_path"], str(result["receipt_text"]))]
-    state_writes = [*receipt_writes, *(result.get("additional_state_writes") or [])]
     original_state: dict[Path, str | None] = {}
 
     def restore_state() -> None:
@@ -3688,6 +4130,54 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
+def cmd_history_rebuild(args: argparse.Namespace) -> int:
+    """Explicitly rebuild the completion catalogue from validated cold receipts."""
+
+    root = find_workspace_root()
+    layout = repo_layout(root)
+    workspace_history = args.workspace or (not args.repo_id and not layout.targets)
+    target = None if workspace_history else require_repo_target(root, repo_id=args.repo_id)
+    repo_id = target.id if target is not None else ""
+    with repoctl_lock(root):
+        refresh = rebuild_completion_catalogue(root, repo_id)
+    repository = target.to_dict() if target is not None else {
+        "id": "",
+        "path": ".",
+        "identity_source": "workspace",
+    }
+    data = {
+        "repository": repository,
+        "mode": refresh.mode,
+        "changed": refresh.changed,
+        "ingested_count": refresh.ingested_count,
+        "last_sequence": refresh.last_sequence,
+        "last_event_id": refresh.last_event_id,
+        "prefix_digest": refresh.prefix_digest,
+        "checkpoint_path": refresh.checkpoint_path,
+        "projection_path": refresh.projection_path,
+    }
+    payload = {
+        "ok": True,
+        "command": "history rebuild",
+        "data": data,
+        "problems": [],
+        "warnings": [
+            {
+                "code": "completion_catalogue_rebuild_scanned_cold_history",
+                "message": "history rebuild is an explicit recovery operation that validates and scans all completion receipts for the selected repository",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(
+            f"completion history rebuilt repository={repo_id or 'workspace'} "
+            f"events={refresh.ingested_count} checkpoint={refresh.checkpoint_path}"
+        )
+    return 0
+
+
 def _graph_snapshot_summary(snapshot: Any) -> dict[str, Any]:
     node_counts: dict[str, int] = {}
     edge_counts: dict[str, int] = {}
@@ -3786,6 +4276,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
 
     result, query_problems = query_graph(
         snapshot,
+        root=root,
         file=args.file or "",
         topic=args.topic or "",
         import_ref=args.import_ref or "",
@@ -3844,7 +4335,18 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         "warnings": [
             *[problem.to_dict() for problem in build_problems if problem.severity == "warning"],
             *[problem.to_dict() for problem in freshness_problems],
-            *(result_warnings if args.full else _compact_graph_query_warnings(completeness)),
+            *(
+                result_warnings
+                if args.full
+                else [
+                    *_compact_graph_query_warnings(completeness),
+                    *[
+                        warning
+                        for warning in result_warnings
+                        if _problem_code(warning) in COMPLETION_CATALOGUE_UNAVAILABLE_CODES
+                    ],
+                ]
+            ),
             *(
                 [
                     stale_warning
@@ -3963,6 +4465,14 @@ def _compact_graph_query_result(result: dict[str, Any], *, freshness: dict[str, 
         "relationship_candidates": relationship_candidate_projection["items"],
         "relationship_candidate_count": relationship_candidate_projection["total_count"],
         "relationship_candidates_truncated": relationship_candidate_projection["truncated"],
+        "component_crossings": [
+            crossing
+            for crossing in result.get("component_crossings", [])[:3]
+            if isinstance(crossing, dict)
+        ],
+        "component_crossing_count": int(result.get("component_crossing_count") or 0),
+        "component_crossings_truncated": bool(result.get("component_crossings_truncated"))
+        or int(result.get("component_crossing_count") or 0) > 3,
         "paths": displayed_paths,
         "continuations": displayed_continuations,
     }
@@ -4462,7 +4972,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
                     query=str(bundle.query.get("text") or "").strip(),
                     mode=str(bundle.query.get("mode") or ""),
                 ),
-                selections=context_result_selections(compact_bundle_data),
+                selections=context_result_citations(bundle.to_dict()),
             )
     data = {
         "bundle": bundle_data,
@@ -4791,7 +5301,8 @@ def cmd_context_pack_benchmark_materialize(args: argparse.Namespace) -> int:
     fixture = Path(args.fixture)
     if not fixture.is_absolute():
         fixture = root / fixture
-    data, problems = materialize_task_context_pack_benchmark_tasks(root, fixture=fixture, force=args.force)
+    with repoctl_lock(root):
+        data, problems = materialize_task_context_pack_benchmark_tasks(root, fixture=fixture, force=args.force)
     payload = {
         "ok": not _has_errors(problems),
         "command": "context pack-benchmark-materialize",
@@ -5028,6 +5539,47 @@ def cmd_knowledge_status(args: argparse.Namespace) -> int:
     else:
         print(f"knowledge status repo_id={args.repo_id} candidates={data['candidate_count']} records={data['record_count']} events={data['event_count']}")
     return 0
+
+
+def cmd_knowledge_rebuild(args: argparse.Namespace) -> int:
+    """Explicitly rebuild the current-head projection from validated cold authority."""
+
+    root = find_workspace_root()
+    target = require_repo_target(root, repo_id=args.repo_id)
+    with repoctl_lock(root):
+        projection, problems = rebuild_knowledge_projection(root, repo_id=target.id)
+    path = knowledge_projection_path(root, repo_id=target.id)
+    data = {
+        "repository": target.to_dict(),
+        "projection_path": path.relative_to(root).as_posix(),
+        "generation": int(projection.get("generation") or 0),
+        "projection_digest": str(projection.get("projection_digest") or ""),
+        "head_count": len(projection.get("heads", [])) if isinstance(projection.get("heads"), list) else 0,
+        "lifecycle_counts": dict(projection.get("lifecycle_counts") or {}),
+        "checkpoint": dict(projection.get("checkpoint") or {}),
+    }
+    payload = {
+        "ok": not _has_errors(problems),
+        "command": "knowledge rebuild",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": [
+            {
+                "code": "knowledge_projection_rebuild_scanned_cold_history",
+                "message": "knowledge rebuild is an explicit recovery operation that validates and scans all durable records and events for the selected repository",
+            }
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(
+            f"knowledge projection rebuilt repo_id={target.id} "
+            f"heads={data['head_count']} path={data['projection_path']}"
+        )
+        for problem in problems:
+            print(problem.message)
+    return 1 if _has_errors(problems) else 0
 
 
 def cmd_knowledge_event_list(args: argparse.Namespace) -> int:
@@ -5367,6 +5919,8 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
                     "command": f"./scripts/repoctl knowledge render --repo-id {args.repo_id} --json",
                 }
             )
+    elif _has_errors(problems):
+        next_actions.extend(_next_actions_for_problems(problems, data={"repository": target.to_dict()}))
     payload = {
         "ok": not _has_errors(all_problems),
         "command": "knowledge approve",
@@ -5445,7 +5999,7 @@ def cmd_knowledge_reject(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_deprecate(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
+    target = require_repo_target(root, repo_id=args.repo_id)
     with repoctl_lock(root):
         data, problems = deprecate_knowledge_record(root, repo_id=args.repo_id, record_id=args.record_id, reason_file=Path(args.reason_file))
     payload = {
@@ -5459,6 +6013,7 @@ def cmd_knowledge_deprecate(args: argparse.Namespace) -> int:
                 "message": "deprecation writes a lifecycle event and does not edit the record body",
             }
         ],
+        "next_actions": _next_actions_for_problems(problems, data={"repository": target.to_dict()}),
     }
     if args.json:
         _json(payload)
@@ -5503,7 +6058,7 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
     include_superseded = args.include_superseded or args.include_history
     include_deprecated = args.include_deprecated or args.include_history
     data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=include_stale, include_superseded=include_superseded, include_deprecated=include_deprecated, limit=args.limit, explain=args.explain)
-    if int(data.get("available_record_count") or 0) == 0:
+    if not _has_errors(problems) and int(data.get("available_record_count") or 0) == 0:
         warnings.append(
             Problem(
                 "warning",
@@ -5726,6 +6281,44 @@ def _knowledge_artifact_postflight_action(*, repo_id: str, problem: Problem) -> 
     return None
 
 
+def _upgrade_completion_history_status(
+    root: Path,
+    *,
+    repo_id: str,
+) -> tuple[dict[str, Any], list[Problem]]:
+    problems: list[Problem] = []
+    try:
+        status = completion_catalogue_status(root, repo_id)
+    except CompletionCatalogueUnavailable as exc:
+        problems.append(_completion_catalogue_problem(repo_id, exc))
+        return {
+            "repo_id": repo_id,
+            "status": "rebuild_required",
+            "catalogue_status": "unavailable",
+            "problem_codes": _problem_code_counts(problems),
+        }, problems
+
+    if status.status == "empty":
+        legacy_receipts = collect_completion_receipt_collection(root, repo_id=repo_id)
+        problems.extend(legacy_receipts.problems)
+        if legacy_receipts.artifacts:
+            namespace = repo_id or "workspace"
+            problems.append(
+                Problem(
+                    "error",
+                    CompletionCatalogueUnavailableReason.MISSING.value,
+                    f"preserved completion receipts for {namespace} have no completion catalogue; rebuild history before Graph",
+                    "docs/tasks/.repoctl-state/completions",
+                )
+            )
+    return {
+        "repo_id": repo_id,
+        "status": "rebuild_required" if problems else "ready",
+        "catalogue_status": status.status,
+        "problem_codes": _problem_code_counts(problems),
+    }, problems
+
+
 def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
     layout = repo_layout(root)
     namespaces, namespace_problem_dicts = repository_state_namespaces(root)
@@ -5758,9 +6351,48 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
 
     repositories: list[dict[str, Any]] = []
     recovery_actions: list[dict[str, str]] = []
+    completion_history: list[dict[str, Any]] = []
+    workspace_history, workspace_history_problems = _upgrade_completion_history_status(
+        root,
+        repo_id="",
+    )
+    completion_history.append(workspace_history)
+    problems.extend(workspace_history_problems)
+    if workspace_history_problems:
+        recovery_actions.append(
+            {
+                "kind": "history_rebuild",
+                "repo_id": "",
+                "command": "./scripts/repoctl history rebuild --workspace --json",
+            }
+        )
     for target in layout.targets:
         metadata_problems = check_meta(root, target=target)
+        completion_history_summary, completion_history_problems = _upgrade_completion_history_status(
+            root,
+            repo_id=target.id,
+        )
+        completion_history.append(completion_history_summary)
         record_data, record_problems = check_knowledge_records(root, repo_id=target.id)
+        projection: dict[str, Any] = {}
+        projection_problems: list[Problem] = []
+        durable_record_count = int(record_data.get("record_count") or 0)
+        if durable_record_count and not _has_errors(record_problems):
+            projection, projection_problems = load_knowledge_projection(root, repo_id=target.id)
+            checkpoint = projection.get("checkpoint") if isinstance(projection.get("checkpoint"), dict) else {}
+            if (
+                not projection_problems
+                and checkpoint.get("record_count") != durable_record_count
+            ):
+                projection_problems = [
+                    Problem(
+                        "error",
+                        "knowledge_projection_unavailable",
+                        "knowledge projection record count does not match durable reviewed records; rebuild it explicitly",
+                        knowledge_projection_path(root, repo_id=target.id).relative_to(root).as_posix(),
+                        cause_code="cold_record_count_mismatch",
+                    )
+                ]
         candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=target.id, pending_only=True)
         snapshot, graph_problems, graph_meta = load_materialized_graph(root, target=target)
         freshness: dict[str, Any] = {"status": str((graph_meta.get("materialization") or {}).get("status") or "missing")}
@@ -5778,7 +6410,9 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                 )
         repository_problems = [
             *metadata_problems,
+            *completion_history_problems,
             *record_problems,
+            *projection_problems,
             *candidate_problems,
             *graph_problems,
             *freshness_problems,
@@ -5787,30 +6421,25 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
 
         materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
         graph_status = str(materialization.get("status") or "missing")
+        graph_recovery: dict[str, str] | None = None
         if graph_status == "missing":
-            recovery_actions.append(
-                {
-                    "kind": "graph_build",
-                    "repo_id": target.id,
-                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
-                }
-            )
+            graph_recovery = {
+                "kind": "graph_build",
+                "repo_id": target.id,
+                "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+            }
         elif graph_status != "materialized":
-            recovery_actions.append(
-                {
-                    "kind": "graph_rebuild",
-                    "repo_id": target.id,
-                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --rebuild --json",
-                }
-            )
+            graph_recovery = {
+                "kind": "graph_rebuild",
+                "repo_id": target.id,
+                "command": f"./scripts/repoctl graph build --repo-id {target.id} --rebuild --json",
+            }
         elif str(freshness.get("status") or "") == "stale":
-            recovery_actions.append(
-                {
-                    "kind": "graph_refresh",
-                    "repo_id": target.id,
-                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
-                }
-            )
+            graph_recovery = {
+                "kind": "graph_refresh",
+                "repo_id": target.id,
+                "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+            }
         if _has_errors(metadata_problems):
             metadata_codes = {problem.code for problem in metadata_problems}
             recovery_actions.append(
@@ -5824,6 +6453,36 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                     ),
                 }
             )
+        if completion_history_problems:
+            recovery_actions.append(
+                {
+                    "kind": "history_rebuild",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl history rebuild --repo-id {target.id} --json",
+                }
+            )
+            if graph_recovery is None:
+                graph_recovery = {
+                    "kind": "graph_refresh",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                }
+        if _has_errors(projection_problems):
+            recovery_actions.append(
+                {
+                    "kind": "knowledge_rebuild",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl knowledge rebuild --repo-id {target.id} --json",
+                }
+            )
+            if graph_recovery is None:
+                graph_recovery = {
+                    "kind": "graph_refresh",
+                    "repo_id": target.id,
+                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                }
+        if graph_recovery is not None:
+            recovery_actions.append(graph_recovery)
         for problem in [*record_problems, *candidate_problems]:
             action = _knowledge_artifact_postflight_action(repo_id=target.id, problem=problem)
             if action is not None:
@@ -5845,6 +6504,11 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                     "record_count": int(record_data.get("record_count") or 0),
                     "event_count": int(record_data.get("event_count") or 0),
                     "problem_codes": _problem_code_counts(record_problems),
+                    "projection_status": "ready" if not _has_errors(projection_problems) else "rebuild_required",
+                    "projection_problem_codes": _problem_code_counts(projection_problems),
+                },
+                "completion_history": {
+                    **completion_history_summary,
                 },
                 "knowledge_candidates": {
                     "total_count": int(candidate_data.get("candidate_total_count") or 0),
@@ -5871,6 +6535,8 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             deduped_recovery.append(action)
     recovery_priority = {
         "metadata_repair": 0,
+        "history_rebuild": 1,
+        "knowledge_rebuild": 1,
         "knowledge_candidate_refresh": 1,
         "knowledge_candidate_manual_review": 1,
         "knowledge_record_manual_review": 1,
@@ -5900,6 +6566,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             "unbound_repo_ids": sorted(str(item.get("repo_id") or "") for item in unbound_namespaces),
             "historical_unbound_repo_ids": sorted(str(item.get("repo_id") or "") for item in historical_unbound_namespaces),
         },
+        "completion_history": completion_history,
         "repositories": repositories,
         "recovery_actions": deduped_recovery,
     }, problems
@@ -6067,6 +6734,7 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check")
     check.add_argument("--fix-board", action="store_true")
     check.add_argument("--include-archived-warnings", action="store_true")
+    check.add_argument("--audit-history", action="store_true", help="validate every cold completion receipt and task artifact (O(total history bytes))")
     check.add_argument("--full", action="store_true", help="include detailed release field-gate commands")
     check.add_argument("--json", action="store_true")
     check.set_defaults(func=cmd_check)
@@ -6162,6 +6830,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add.add_argument("task_id")
     task_discovery_add.add_argument("--query", help="candidate search/query command or phrase")
     task_discovery_add.add_argument("--reviewed", action="append", default=[], help="repos/path inspected during discovery; repeat for multiple files")
+    task_discovery_add.add_argument("--excluded", action="append", default=[], help="reviewed repos/path explicitly rejected for this Discovery episode; repeat for multiple files")
     task_discovery_add.add_argument("--chosen", action="append", default=[], help="repos/path selected for task scope; repeat for multiple files")
     task_discovery_add.add_argument("--replace-chosen", action="append", default=[], help="replace the active chosen-file set; repeat for multiple files")
     task_discovery_add.add_argument("--reason", help="required rationale when replacing the active chosen-file set")
@@ -6177,6 +6846,16 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add.add_argument("--full", action="store_true", help="include the full cumulative Discovery state")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)
+    task_verification = task_sub.add_parser("verification")
+    task_verification_sub = task_verification.add_subparsers(dest="task_verification_command", required=True, parser_class=RepoctlArgumentParser)
+    task_verification_add = task_verification_sub.add_parser("add")
+    task_verification_add.add_argument("task_id")
+    task_verification_add.add_argument("--status", choices=["passed", "failed", "mixed", "blocked"], required=True)
+    task_verification_add.add_argument("--evidence-ref", required=True, help="existing evidence file or sha256 digest")
+    task_verification_add.add_argument("--subject", action="append", default=[], help="Discovery subject ID, key, or path covered by this check")
+    task_verification_add.add_argument("--claim-id", action="append", default=[], help="sha256 claim ID covered by this check")
+    task_verification_add.add_argument("--json", action="store_true")
+    task_verification_add.set_defaults(func=cmd_task_verification_add)
     task_baseline = task_sub.add_parser("baseline")
     task_baseline_sub = task_baseline.add_subparsers(dest="task_baseline_command", required=True, parser_class=RepoctlArgumentParser)
     task_baseline_resolve = task_baseline_sub.add_parser("resolve")
@@ -6343,6 +7022,15 @@ def build_parser() -> argparse.ArgumentParser:
     graph_query.add_argument("--json", action="store_true")
     graph_query.set_defaults(func=cmd_graph_query)
 
+    history = sub.add_parser("history")
+    history_sub = history.add_subparsers(dest="history_command", required=True, parser_class=RepoctlArgumentParser)
+    history_rebuild = history_sub.add_parser("rebuild")
+    history_rebuild_target = history_rebuild.add_mutually_exclusive_group()
+    history_rebuild_target.add_argument("--repo-id")
+    history_rebuild_target.add_argument("--workspace", action="store_true")
+    history_rebuild.add_argument("--json", action="store_true")
+    history_rebuild.set_defaults(func=cmd_history_rebuild)
+
     context = sub.add_parser("context")
     context_sub = context.add_subparsers(dest="context_command", required=True, parser_class=RepoctlArgumentParser)
     context_query = context_sub.add_parser("query")
@@ -6485,6 +7173,10 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_refresh.add_argument("--repo-id", required=True)
     knowledge_candidate_refresh.add_argument("--json", action="store_true")
     knowledge_candidate_refresh.set_defaults(func=cmd_knowledge_candidate_refresh)
+    knowledge_rebuild = knowledge_sub.add_parser("rebuild")
+    knowledge_rebuild.add_argument("--repo-id", required=True)
+    knowledge_rebuild.add_argument("--json", action="store_true")
+    knowledge_rebuild.set_defaults(func=cmd_knowledge_rebuild)
     knowledge_status_parser = knowledge_sub.add_parser("status")
     knowledge_status_parser.add_argument("--repo-id", required=True)
     knowledge_status_parser.add_argument("--json", action="store_true")

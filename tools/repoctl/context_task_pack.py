@@ -26,13 +26,24 @@ from .graph import project_context_neighborhood
 from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import graph_materialization_freshness, graph_stale_paths, load_materialized_graph
 from .git import normalize_repo_path, repo_change_fingerprint_records, repo_changed_entries, repo_git_head
-from .io import RepoctlError
+from .io import RepoctlError, atomic_write
 from .language_profiles import collect_verification_hints
-from .markdown import find_section
+from .markdown import find_section, parse_frontmatter
 from .path_roles import PathRole, classify_path_role
 from .repositories import RepoTarget
 from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, parse_result_request
-from .tasks import Problem, Task, normalize_task_id, repo_changes_since_task_start, resolve_task, task_discovery_result_selections, task_discovery_values
+from .tasks import (
+    Problem,
+    Task,
+    archive_locator_path,
+    archive_locator_text,
+    normalize_task_id,
+    repo_changes_since_task_start,
+    resolve_task,
+    task_discovery_result_selections,
+    task_discovery_values,
+    validate_workspace_write_path,
+)
 
 
 TASK_CONTEXT_PACK_SCHEMA_VERSION = 4
@@ -184,6 +195,8 @@ def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, 
     unchanged: list[str] = []
     overwritten: list[str] = []
     conflicts: list[str] = []
+    pending_writes: list[tuple[Path, str, str]] = []
+    restore_on_failure: dict[Path, str | None] = {}
     for entry in task_entries:
         if not isinstance(entry, dict):
             problems.append(Problem("error", "context_pack_benchmark_task_invalid", "context pack benchmark task entry must be an object", tasks_path.as_posix()))
@@ -199,6 +212,39 @@ def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, 
         except ValueError:
             problems.append(Problem("error", "context_pack_benchmark_task_outside_workspace", "context pack benchmark task path must stay inside workspace", rel_path))
             continue
+        try:
+            frontmatter, _body = parse_frontmatter(content)
+        except RepoctlError:
+            problems.append(Problem("error", "context_pack_benchmark_task_invalid", "context pack benchmark task content is invalid", rel_path))
+            continue
+        task_id = str(frontmatter.get("id") or "")
+        if (
+            not re.fullmatch(r"T-[0-9]{14}Z", task_id)
+            or not Path(rel_path).name.startswith(f"{task_id}--")
+            or frontmatter.get("status") not in {"done", "canceled"}
+        ):
+            problems.append(Problem("error", "context_pack_benchmark_task_invalid", "context pack benchmark task identity or status is invalid", rel_path))
+            continue
+        locator = archive_locator_path(root, task_id)
+        locator_rel = locator.relative_to(root).as_posix()
+        try:
+            validate_workspace_write_path(root, target, boundary=root / "docs/archive/tasks")
+            validate_workspace_write_path(root, locator, boundary=root / "docs/tasks/.repoctl-state/archive")
+        except RepoctlError:
+            problems.append(Problem("error", "context_pack_benchmark_task_outside_workspace", "context pack benchmark task state path must stay inside its canonical workspace directory", rel_path))
+            continue
+        locator_text = archive_locator_text(task_id, rel_path)
+        if locator.exists() or locator.is_symlink():
+            try:
+                locator_current = locator.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                locator_current = ""
+            if locator.is_symlink() or locator_current != locator_text:
+                conflicts.append(locator_rel)
+                continue
+        else:
+            pending_writes.append((locator, locator_text, locator_rel))
+            restore_on_failure[locator] = None
         if target.exists():
             current = target.read_text(encoding="utf-8")
             if current == content:
@@ -210,11 +256,41 @@ def materialize_task_context_pack_benchmark_tasks(root: Path, *, fixture: Path, 
             overwritten.append(rel_path)
         else:
             created.append(rel_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        restore_on_failure[target] = current if target.exists() else None
+        pending_writes.append((target, content, rel_path))
 
     if conflicts:
         problems.append(Problem("error", "context_pack_benchmark_task_conflict", "context pack benchmark task already exists with different content; rerun with --force to overwrite", conflicts[0]))
+    if not problems:
+        written: list[Path] = []
+        try:
+            for path, text, rel_path in pending_writes:
+                atomic_write(path, text)
+                written.append(path)
+                if rel_path.startswith("docs/tasks/.repoctl-state/archive/"):
+                    created.append(rel_path)
+        except (OSError, RepoctlError, UnicodeError) as write_error:
+            rollback_failures: list[Path] = []
+            for path in reversed(written):
+                try:
+                    previous = restore_on_failure[path]
+                    if previous is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        atomic_write(path, previous)
+                except (OSError, RepoctlError, UnicodeError):
+                    rollback_failures.append(path)
+            if rollback_failures:
+                failed_path = rollback_failures[0].relative_to(root).as_posix()
+                raise RepoctlError(
+                    "context pack benchmark task rollback failed; workspace state may be partial",
+                    code="context_pack_benchmark_rollback_failed",
+                    path=failed_path,
+                ) from write_error
+            raise
+    else:
+        created.clear()
+        overwritten.clear()
     data = {
         "schema": "repoctl.context.task_pack.benchmark.materialize",
         "schema_version": 1,

@@ -4,11 +4,20 @@ from tests.repoctl.graph.test_graph_build import _sha256_text, _snapshot
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.repoctl.cli import main
+from tools.repoctl.completion_catalogue import (
+    CompletionCatalogueUnavailable,
+    CompletionCatalogueUnavailableReason,
+    rebuild_completion_catalogue,
+)
 from tools.repoctl.graph import project_context_neighborhood
 from tools.repoctl.graph_model import GraphContextAnchor, GraphContextAnchorKind, file_id
 from tools.repoctl.graph_store import graph_materialization_freshness, materialize_graph
 from tools.repoctl.repositories import require_repo_target
+from tests.repoctl.io_audit import reject_directory_enumeration
+from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source, _setup_knowledge_workspace
 from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import commit_all, init_repo, write_settings
@@ -41,6 +50,119 @@ def _receipt(task_id: str, *, repo_id: str, task_path: str, content_sha256: str,
             "truncated": False,
         },
     }
+
+
+def _rebuild_completion_history(root: Path, *, repo_id: str = "main") -> None:
+    """Explicitly migrate legacy/raw receipt fixtures into catalogue state."""
+
+    rebuild_completion_catalogue(root, repo_id)
+
+
+def test_graph_exact_selectors_project_evicted_cold_task_without_mutating_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("VALUE = True\n", encoding="utf-8")
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True)
+    cold_task_id = "T-20260609184046Z"
+    cold_artifact_rel = f"docs/archive/tasks/{cold_task_id}--cold-task.md"
+    cold_artifact_text = "# cold task\n"
+    (tmp_path / "docs/archive/tasks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / cold_artifact_rel).write_text(cold_artifact_text, encoding="utf-8")
+    cold_receipt = _receipt(
+        cold_task_id,
+        repo_id="main",
+        task_path=cold_artifact_rel,
+        content_sha256=_sha256_text(cold_artifact_text),
+        changed_entries=[{"change": "modified", "path": "app.py"}],
+    )
+    (receipt_dir / f"{cold_task_id}.json").write_text(
+        json.dumps(cold_receipt) + "\n",
+        encoding="utf-8",
+    )
+    for index in range(32):
+        task_id = f"T-2026070118{index:02d}46Z"
+        artifact_rel = f"docs/archive/tasks/{task_id}--newer.md"
+        artifact_text = "# newer\n"
+        (tmp_path / artifact_rel).write_text(artifact_text, encoding="utf-8")
+        receipt = _receipt(
+            task_id,
+            repo_id="main",
+            task_path=artifact_rel,
+            content_sha256=_sha256_text(artifact_text),
+            changed_entries=[{"change": "modified", "path": "app.py"}],
+        )
+        (receipt_dir / f"{task_id}.json").write_text(
+            json.dumps(receipt) + "\n",
+            encoding="utf-8",
+        )
+    _rebuild_completion_history(tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+    _, problems, _meta = materialize_graph(tmp_path, target=target)
+    assert not [problem for problem in problems if problem.severity == "error"]
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--task", cold_task_id, "--json"]) == 0
+    task_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert task_result["matches"][0]["task_id"] == cold_task_id
+    assert any(path["edge"] == "TASK_CHANGED_FILE" for path in task_result["paths"])
+
+    assert main(["graph", "query", "--artifact", cold_artifact_rel, "--json"]) == 0
+    artifact_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert artifact_result["matches"][0]["path"] == cold_artifact_rel
+
+
+def test_graph_exact_task_selector_revalidates_hot_authority(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("VALUE = True\n", encoding="utf-8")
+    task_id = "T-20260609184046Z"
+    artifact_rel = f"docs/archive/tasks/{task_id}--hot-task.md"
+    artifact_text = "# hot task\n"
+    (tmp_path / "docs/archive/tasks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / artifact_rel).write_text(artifact_text, encoding="utf-8")
+    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
+    receipt_dir.mkdir(parents=True)
+    receipt = _receipt(
+        task_id,
+        repo_id="main",
+        task_path=artifact_rel,
+        content_sha256=_sha256_text(artifact_text),
+        changed_entries=[{"change": "modified", "path": "app.py"}],
+    )
+    (receipt_dir / f"{task_id}.json").write_text(
+        json.dumps(receipt) + "\n",
+        encoding="utf-8",
+    )
+    _rebuild_completion_history(tmp_path)
+    snapshot, problems, _meta = materialize_graph(
+        tmp_path,
+        target=require_repo_target(tmp_path, repo_id="main"),
+    )
+    assert snapshot is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+    assert any(node.id == f"task:{task_id}" for node in snapshot.nodes)
+    (tmp_path / artifact_rel).write_text("# tampered hot task\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--task", task_id, "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["result"] is None
+    assert payload["problems"][0]["code"] == (
+        CompletionCatalogueUnavailableReason.SOURCE_AUDIT_FAILED.value
+    )
 
 
 def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -116,15 +238,12 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
 
     artifact = tmp_path / task_path
     artifact.write_text(artifact.read_text(encoding="utf-8") + "\npost-build change\n", encoding="utf-8")
-    assert main(["graph", "query", "--task", task_id, "--json"]) == 0
-    compact_stale = json.loads(capsys.readouterr().out)["data"]["result"]
-    artifact_path = next(path for path in compact_stale["paths"] if path["edge"] == "TASK_VERIFIED_BY")
-    assert artifact_path["evidence"]["freshness"] == "stale"
-    assert main(["graph", "query", "--task", task_id, "--full", "--json"]) == 0
-    stale = json.loads(capsys.readouterr().out)
-    assert stale["data"]["freshness"]["status"] == "stale"
-    assert stale["data"]["freshness"]["changed_root_paths"] == sorted(
-        [finish_payload["data"]["completion_receipt"], task_path]
+    assert main(["graph", "query", "--task", task_id, "--json"]) == 1
+    invalid = json.loads(capsys.readouterr().out)
+    assert invalid["data"]["result"] is None
+    assert invalid["data"]["freshness"]["status"] == "current"
+    assert invalid["problems"][0]["code"] == (
+        CompletionCatalogueUnavailableReason.SOURCE_AUDIT_FAILED.value
     )
 
 
@@ -162,6 +281,7 @@ def test_range_observed_receipt_does_not_claim_task_changed_files(tmp_path: Path
         json.dumps(receipt) + "\n",
         encoding="utf-8",
     )
+    _rebuild_completion_history(tmp_path)
 
     snapshot, problems, _meta = materialize_graph(
         tmp_path,
@@ -225,15 +345,15 @@ def test_graph_legacy_receipt_preserves_paths_and_rejects_null_ownership(tmp_pat
         ],
     )
     (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _rebuild_completion_history(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["graph", "build", "--full", "--json"]) == 0
 
     snapshot = _snapshot(json.loads(capsys.readouterr().out))
-    assert any(node["id"] == file_id("main", "deleted.py") and node["facts"]["receipt"]["present_in_current_inventory"] is False for node in snapshot["nodes"])
-    assert any(node["id"] == file_id("main", "old.py") and node["facts"]["receipt"]["present_in_current_inventory"] is False for node in snapshot["nodes"])
-    assert any(edge["kind"] == "CHANGE_AFFECTED_FILE" and edge["to"] == file_id("main", "deleted.py") and edge["facts"]["role"] == "path" for edge in snapshot["edges"])
-    assert any(edge["kind"] == "CHANGE_AFFECTED_FILE" and edge["to"] == file_id("main", "old.py") and edge["facts"]["role"] == "old_path" for edge in snapshot["edges"])
+    assert not any(node["id"] == file_id("main", "deleted.py") for node in snapshot["nodes"])
+    assert not any(node["id"] == file_id("main", "old.py") for node in snapshot["nodes"])
+    assert not any(edge["to"] in {file_id("main", "deleted.py"), file_id("main", "old.py")} for edge in snapshot["edges"])
     task_node = next(node for node in snapshot["nodes"] if node["id"] == "task:T-20260609184046Z")
     assert task_node["facts"]["receipt"]["task_path_at_completion"] == "docs/tasks/T-20260609184046Z--alpha.md"
     assert any(
@@ -242,8 +362,20 @@ def test_graph_legacy_receipt_preserves_paths_and_rejects_null_ownership(tmp_pat
         for node in snapshot["nodes"]
     )
 
-    assert main(["graph", "query", "--task", "T-20260609184046Z", "--json"]) == 0
+    assert main(["graph", "query", "--file", "deleted.py", "--json"]) == 0
+    deleted_file_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert deleted_file_result["query_status"] == "not_found"
+    assert deleted_file_result["matches"] == []
+    assert deleted_file_result["candidates"] == []
+    assert deleted_file_result["continuations"] == []
+
+    assert main(["graph", "query", "--task", "T-20260609184046Z", "--full", "--json"]) == 0
     task_result = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert any(
+        path["edge"] == "CHANGE_AFFECTED_FILE"
+        and path["to"].get("path") == "deleted.py"
+        for path in task_result["paths"]
+    )
     assert any(
         item["selector"] == {"kind": "document", "value": "docs/archive/tasks/T-20260609184046Z--alpha.md"}
         for item in task_result["continuations"]
@@ -255,22 +387,26 @@ def test_graph_legacy_receipt_preserves_paths_and_rejects_null_ownership(tmp_pat
             "query",
             "--artifact",
             "docs/archive/tasks/T-20260609184046Z--alpha.md",
+            "--full",
             "--json",
         ]
     ) == 0
     artifact_result = json.loads(capsys.readouterr().out)["data"]["result"]
     assert artifact_result["query_status"] == "found"
+    assert any(
+        path["edge"] == "CHANGE_AFFECTED_FILE"
+        and path["to"].get("path") == "deleted.py"
+        for path in artifact_result["paths"]
+    )
 
     receipt["repo_evidence"]["ownership"] = None
     (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    assert main(["graph", "build", "--full", "--json"]) == 0
-    invalid = json.loads(capsys.readouterr().out)
-    assert invalid["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
-    assert not any(node["id"] == "task:T-20260609184046Z" for node in invalid["data"]["snapshot"]["nodes"])
-    assert any(warning["code"] == "invalid_completion_receipt" for warning in invalid["warnings"])
+    with pytest.raises(CompletionCatalogueUnavailable) as caught:
+        _rebuild_completion_history(tmp_path)
+    assert caught.value.reason == CompletionCatalogueUnavailableReason.SOURCE_AUDIT_FAILED
 
 
-def test_graph_localizes_invalid_receipt_to_selected_repo_task_history(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_explicit_catalogue_rebuild_localizes_invalid_receipt_to_selected_repo(tmp_path: Path) -> None:
     write_workspace(tmp_path)
     web = tmp_path / "repos/web"
     api = tmp_path / "repos/api"
@@ -295,148 +431,74 @@ def test_graph_localizes_invalid_receipt_to_selected_repo_task_history(tmp_path:
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["graph", "build", "--repo-id", "web", "--full", "--json"]) == 0
-    first = json.loads(capsys.readouterr().out)
-    assert first["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "complete"
+    first = rebuild_completion_catalogue(tmp_path, "web")
+    assert first.last_sequence == 0
 
     (receipt_dir / "T-20260609184047Z.json").write_text(
         json.dumps({"schema": "repoctl.task.completion", "schema_version": 1, "repo_id": "web", "task_id": "BAD", "status": "banana"}) + "\n",
         encoding="utf-8",
     )
-    assert main(["graph", "build", "--repo-id", "web", "--full", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
-    assert any(warning["code"] == "invalid_completion_receipt" for warning in payload["warnings"])
-
-    assert main(["graph", "query", "--repo-id", "web", "--file", "app.py", "--json"]) == 0
-    query = json.loads(capsys.readouterr().out)
-    assert query["data"]["query_status"] == "found"
-    assert query["data"]["completeness"] == {"status": "partial"}
-    assert any(warning["code"] == "graph_task_history_partial" for warning in query["warnings"])
+    with pytest.raises(CompletionCatalogueUnavailable) as caught:
+        rebuild_completion_catalogue(tmp_path, "web")
+    assert caught.value.reason == CompletionCatalogueUnavailableReason.SOURCE_AUDIT_FAILED
 
 
-def test_graph_reports_unknown_scope_invalid_receipt_without_losing_current_inventory(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize(
+    "invalid_source",
+    ["malformed", "receipt_symlink", "directory_symlink", "not_directory", "hash_mismatch"],
+)
+def test_explicit_catalogue_rebuild_rejects_untrusted_receipt_sources(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    invalid_source: str,
+) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
     (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
-    receipt_dir.mkdir(parents=True)
-    receipt_path = receipt_dir / "T-20260609184046Z.json"
-    receipt_path.write_text(json.dumps({"broken": True}) + "\n", encoding="utf-8")
-    snapshot, problems, _meta = materialize_graph(tmp_path, target=require_repo_target(tmp_path, repo_id="main"))
-    assert snapshot is not None
-    assert not [problem for problem in problems if problem.severity == "error"]
+    if invalid_source == "malformed":
+        receipt_dir.mkdir(parents=True)
+        (receipt_dir / "T-20260609184046Z.json").write_text(
+            json.dumps({"broken": True}) + "\n",
+            encoding="utf-8",
+        )
+    elif invalid_source == "receipt_symlink":
+        receipt_dir.mkdir(parents=True)
+        outside_receipt = tmp_path.parent / f"{tmp_path.name}-outside-receipt.json"
+        outside_receipt.write_text("{}\n", encoding="utf-8")
+        (receipt_dir / "T-20260609184046Z.json").symlink_to(outside_receipt)
+    elif invalid_source == "directory_symlink":
+        outside_receipts = tmp_path.parent / f"{tmp_path.name}-outside-completions"
+        outside_receipts.mkdir()
+        receipt_dir.parent.mkdir(parents=True)
+        receipt_dir.symlink_to(outside_receipts, target_is_directory=True)
+    elif invalid_source == "not_directory":
+        receipt_dir.parent.mkdir(parents=True)
+        receipt_dir.write_text("not a receipt directory\n", encoding="utf-8")
+    else:
+        archive_path = tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md"
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_text(task_text("T-20260609184046Z", status="done"), encoding="utf-8")
+        receipt_dir.mkdir(parents=True)
+        receipt = _receipt(
+            "T-20260609184046Z",
+            repo_id="main",
+            task_path="docs/archive/tasks/T-20260609184046Z--alpha.md",
+            content_sha256="sha256:" + "a" * 64,
+            changed_entries=[{"change": "modified", "path": "app.py"}],
+        )
+        (receipt_dir / "T-20260609184046Z.json").write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["graph", "query", "--repo-id", "main", "--file", "app.py", "--json"]) == 0
-
+    assert main(["history", "rebuild", "--repo-id", "main", "--json"]) != 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["query_status"] == "found"
-    assert payload["data"]["completeness"] == {"status": "partial"}
-    assert any(warning["code"] == "graph_task_history_partial" for warning in payload["warnings"])
-    assert "warnings" not in payload["data"]["result"]
-    assert all(warning["code"] != "graph_provider_failure" for warning in payload["warnings"])
-    assert all(warning["code"] != "invalid_completion_receipt" for warning in payload["warnings"])
-
-
-def test_graph_rejects_completion_receipt_symlink_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    init_repo(repo)
-    write_repometa(repo)
-    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
-    receipt_dir.mkdir(parents=True)
-    outside_receipt = tmp_path.parent / f"{tmp_path.name}-outside-receipt.json"
-    outside_receipt.write_text("{}\n", encoding="utf-8")
-    (receipt_dir / "T-20260609184046Z.json").symlink_to(outside_receipt)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    receipt_warning = next(warning for warning in payload["warnings"] if warning["code"] == "invalid_completion_receipt")
-    assert "escapes workspace" in receipt_warning["message"]
-    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
-
-
-def test_graph_rejects_completion_receipt_directory_symlink_outside_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    init_repo(repo)
-    write_repometa(repo)
-    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    outside_receipts = tmp_path.parent / f"{tmp_path.name}-outside-completions"
-    outside_receipts.mkdir()
-    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
-    receipt_dir.parent.mkdir(parents=True)
-    receipt_dir.symlink_to(outside_receipts, target_is_directory=True)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    receipt_warning = next(warning for warning in payload["warnings"] if warning["code"] == "invalid_completion_receipt")
-    assert receipt_warning["path"] == "docs/tasks/.repoctl-state/completions"
-    assert "escapes workspace" in receipt_warning["message"]
-    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
-    assert payload["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
-
-
-def test_graph_rejects_completion_receipt_directory_replaced_by_file(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    init_repo(repo)
-    write_repometa(repo)
-    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
-    receipt_dir.parent.mkdir(parents=True)
-    receipt_dir.write_text("not a receipt directory\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["graph", "build", "--repo-id", "main", "--full", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    receipt_warning = next(warning for warning in payload["warnings"] if warning["code"] == "invalid_completion_receipt")
-    assert receipt_warning["path"] == "docs/tasks/.repoctl-state/completions"
-    assert "not a directory" in receipt_warning["message"]
-    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
-    assert payload["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
-
-
-def test_graph_excludes_receipt_with_fake_hash_without_losing_current_inventory(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    init_repo(repo)
-    write_repometa(repo)
-    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    archive_path = tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_path.write_text(task_text("T-20260609184046Z", status="done"), encoding="utf-8")
-    receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
-    receipt_dir.mkdir(parents=True)
-    receipt = _receipt(
-        "T-20260609184046Z",
-        repo_id="main",
-        task_path="docs/archive/tasks/T-20260609184046Z--alpha.md",
-        content_sha256="sha256:" + "a" * 64,
-        changed_entries=[{"change": "modified", "path": "app.py"}],
-    )
-    (receipt_dir / "T-20260609184046Z.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["graph", "build", "--full", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["snapshot"]["completeness"]["receipt_set_complete"] is False
-    assert payload["data"]["snapshot"]["completeness"]["invalid_completion_receipts"] == 1
-    assert payload["data"]["snapshot"]["completeness"]["capabilities"]["task_history"] == "partial"
-    assert any(warning["code"] == "invalid_completion_receipt" for warning in payload["warnings"])
-    assert any(node["id"] == file_id("main", "app.py") for node in payload["data"]["snapshot"]["nodes"])
+    assert payload["problems"][0]["code"] == CompletionCatalogueUnavailableReason.SOURCE_AUDIT_FAILED.value
 
 
 def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -485,6 +547,7 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
         json.dumps(newer_receipt) + "\n",
         encoding="utf-8",
     )
+    _rebuild_completion_history(tmp_path)
     snapshot, problems, _meta = materialize_graph(tmp_path, target=require_repo_target(tmp_path, repo_id="main"))
     assert snapshot is not None
     assert not [problem for problem in problems if problem.severity == "error"]
@@ -519,7 +582,7 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
     )
 
 
-def test_graph_rebuilds_when_receipt_artifact_identity_becomes_ambiguous(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_explicit_history_rejects_ambiguous_receipt_artifact_authority(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -544,6 +607,7 @@ def test_graph_rebuilds_when_receipt_artifact_identity_becomes_ambiguous(tmp_pat
         changed_entries=[{"change": "modified", "path": "app.py"}],
     )
     (receipt_dir / f"{task_id}.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _rebuild_completion_history(tmp_path)
     target = require_repo_target(tmp_path, repo_id="main")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -552,41 +616,77 @@ def test_graph_rebuilds_when_receipt_artifact_identity_becomes_ambiguous(tmp_pat
     assert not [problem for problem in first_problems if problem.severity == "error"]
     assert first_meta["materialization"]["status"] == "rebuilt"
     assert any(node.id == f"task:{task_id}" for node in first.nodes)
-    assert main(["context", "query", history_token, "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(
+        [
+            "context",
+            "query",
+            history_token,
+            "--mode",
+            "past-decision",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
     initial_context = json.loads(capsys.readouterr().out)["data"]["bundle"]
     assert any(item["source_ref"]["path"] == archive_rel for item in initial_context["groups"]["related_history"])
 
     live_path = tmp_path / live_rel
     live_path.write_bytes(archive_path.read_bytes())
-    stale, stale_problems = graph_materialization_freshness(tmp_path, target=target)
-    assert not [problem for problem in stale_problems if problem.severity == "error"]
-    assert stale["status"] == "stale"
-    assert stale["root_evidence_changed"] is True
-    assert stale["completion_receipt_input_changed"] is True
-    assert live_rel in stale["changed_root_paths"]
-    assert archive_rel in stale["changed_root_paths"]
-    assert main(["context", "query", history_token, "--repo-id", "main", "--full", "--json"]) == 0
-    stale_context = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    assert all(item["source_ref"]["path"] != archive_rel for item in stale_context["groups"]["related_history"])
+    ordinary, ordinary_problems = graph_materialization_freshness(tmp_path, target=target)
+    assert ordinary_problems == []
+    assert ordinary["status"] == "current"
+    assert ordinary["root_evidence_changed"] is False
 
-    ambiguous, ambiguous_problems, ambiguous_meta = materialize_graph(tmp_path, target=target)
-    assert ambiguous is not None
-    assert ambiguous_meta["materialization"]["status"] == "updated"
-    assert ambiguous.completeness["capabilities"]["task_history"] == "partial"
-    assert ambiguous.completeness["receipt_set_complete"] is False
-    assert not any(node.id == f"task:{task_id}" for node in ambiguous.nodes)
-    assert any(problem.code == "invalid_completion_receipt" for problem in ambiguous_problems)
-    current_ambiguous, current_ambiguous_problems = graph_materialization_freshness(tmp_path, target=target)
-    assert current_ambiguous_problems == []
-    assert current_ambiguous["status"] == "current"
+    assert main(["graph", "query", "--task", task_id, "--json"]) == 1
+    invalid = json.loads(capsys.readouterr().out)
+    assert invalid["data"]["result"] is None
+    assert invalid["problems"][0]["code"] == (
+        CompletionCatalogueUnavailableReason.SOURCE_AUDIT_FAILED.value
+    )
 
-    live_path.unlink()
-    restored, restored_problems, restored_meta = materialize_graph(tmp_path, target=target)
-    assert restored is not None
-    assert not [problem for problem in restored_problems if problem.severity == "error"]
-    assert restored_meta["materialization"]["status"] == "updated"
-    assert restored.completeness["capabilities"]["task_history"] == "complete"
-    assert any(node.id == f"task:{task_id}" for node in restored.nodes)
-    current_restored, current_restored_problems = graph_materialization_freshness(tmp_path, target=target)
-    assert current_restored_problems == []
-    assert current_restored["status"] == "current"
+
+def test_graph_root_freshness_reads_only_current_knowledge_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    repo = _setup_knowledge_workspace(tmp_path, monkeypatch)
+    (repo / "app.py").write_text("VALUE = True\n", encoding="utf-8")
+    current = _approve_knowledge_source(capsys)["data"]["record"]
+    cold = _approve_knowledge_source(
+        capsys,
+        claim="Deprecated Graph guidance must stay outside current root evidence.",
+    )["data"]["record"]
+    reason = tmp_path / "deprecate.md"
+    reason.write_text("No longer applies.\n", encoding="utf-8")
+    assert main(
+        ["knowledge", "deprecate", cold["id"], "--repo-id", "main", "--reason-file", str(reason), "--json"]
+    ) == 0
+    capsys.readouterr()
+
+    current_path = (tmp_path / f"docs/knowledge/records/{current['id']}.json").resolve()
+    cold_path = tmp_path / f"docs/knowledge/records/{cold['id']}.json"
+    cold_text = cold_path.read_text(encoding="utf-8")
+    target = require_repo_target(tmp_path, repo_id="main")
+    with reject_directory_enumeration(
+        monkeypatch,
+        tmp_path / "docs/knowledge/records",
+        tmp_path / "docs/knowledge/events",
+        allow_reads=lambda _path: True,
+    ) as reads:
+        snapshot, problems, _meta = materialize_graph(tmp_path, target=target)
+        assert snapshot is not None
+        assert not [problem for problem in problems if problem.severity == "error"]
+        freshness, freshness_problems = graph_materialization_freshness(tmp_path, target=target)
+    assert current_path in reads
+    assert cold_path.resolve() not in reads
+    assert freshness_problems == []
+    assert freshness["status"] == "current"
+
+    cold_path.write_text(cold_text + "\n", encoding="utf-8")
+    freshness, freshness_problems = graph_materialization_freshness(tmp_path, target=target)
+    assert freshness_problems == []
+    assert freshness["status"] == "current"
+    assert freshness["root_evidence_changed"] is False

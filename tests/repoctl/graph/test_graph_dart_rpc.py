@@ -672,6 +672,7 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
             "kind": "file",
             "retrieval_lane": "product_source",
             "lexical_rank": 1,
+            "component_ids": ["component:pubspec.yaml:.:rpc_fixture"],
         }
     ]
     context_candidate = next(

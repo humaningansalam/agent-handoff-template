@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .code_index import CodeIndexEntry
-from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_markdown_text, chunk_text_source, sha256_text
+from .context_chunks import DocumentChunk, chunk_markdown_file, chunk_text_source, sha256_text
 from .context_model import CONTEXT_SOURCE_KIND_VALUES, LEXICAL_CONTEXT_SOURCE_KIND_VALUES, ContextSectionKind, ContextSourceKind, ContextSourceRef
 from .context_retrieval import (
     AUTO_RETRIEVAL_LANE_LIMITS,
@@ -29,12 +29,12 @@ from .document_roles import (
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints
 from .repositories import RepoTarget
-from .tasks import CompletionReceiptCollection, Problem
+from .tasks import Problem
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
-EVIDENCE_INDEX_SCHEMA_VERSION = 7
-STATIC_KINDS = {"document", "product_manifest", "verification_hint", "completion_receipt", "task_artifact"}
+EVIDENCE_INDEX_SCHEMA_VERSION = 8
+STATIC_KINDS = {"document", "product_manifest", "verification_hint"}
 
 
 class EvidenceRetrievalChannel(StrEnum):
@@ -225,7 +225,6 @@ def _static_chunks(
     root: Path,
     *,
     target: RepoTarget,
-    receipt_collection: CompletionReceiptCollection,
 ) -> tuple[list[DocumentChunk], set[str], list[Problem]]:
     chunks: list[DocumentChunk] = []
     static_paths: set[str] = set()
@@ -267,30 +266,6 @@ def _static_chunks(
                 kind="verification_hint",
                 section=f"verification: {hint.command}",
                 section_kind=ContextSectionKind.VERIFICATION,
-            )
-        )
-    receipt_artifacts = receipt_collection.artifacts
-    receipt_problems = receipt_collection.problems
-    problems.extend(Problem("warning", problem.code, problem.message, problem.path) for problem in receipt_problems)
-    for receipt_artifact in receipt_artifacts:
-        receipt = receipt_artifact.receipt
-        task_id = str(receipt.get("task_id") or "")
-        chunks.append(
-            chunk_text_source(
-                root,
-                receipt_artifact.receipt_path,
-                receipt_artifact.receipt_text,
-                kind="completion_receipt",
-                section=task_id or "completion receipt",
-                section_kind=ContextSectionKind.TASK,
-            )
-        )
-        chunks.extend(
-            chunk_markdown_text(
-                root,
-                receipt_artifact.resolved_path,
-                receipt_artifact.artifact_text,
-                kind="task_artifact",
             )
         )
     return chunks, static_paths, problems
@@ -515,7 +490,6 @@ def materialize_evidence_index(
     file_fingerprints: dict[str, str],
     changed_paths: set[str],
     graph_input_digest: str,
-    receipt_collection: CompletionReceiptCollection,
     rebuild: bool = False,
     allow_reset: bool = False,
     database_path: Path | None = None,
@@ -555,7 +529,6 @@ def materialize_evidence_index(
             static_chunks, static_paths, static_problems = _static_chunks(
                 root,
                 target=target,
-                receipt_collection=receipt_collection,
             )
             problems.extend(static_problems)
             placeholders = ",".join("?" for _ in STATIC_KINDS)
@@ -598,7 +571,6 @@ def materialize_evidence_index(
                 "chunk_counts": counts,
                 "source_path_counts": source_path_counts,
                 "document_manifest_digest": _source_manifest(connection, {"document", "product_manifest", "verification_hint"}),
-                "receipt_manifest_digest": _source_manifest(connection, {"completion_receipt", "task_artifact"}),
                 "current_source_manifest_digest": _source_manifest(connection, CONTEXT_SOURCE_KIND_VALUES),
                 "problems": [
                     problem.to_dict()
@@ -714,7 +686,6 @@ def _retrieval_filter(
     target: RepoTarget,
     *,
     channel: EvidenceRetrievalChannel,
-    include_history: bool,
 ) -> tuple[str, list[Any]]:
     prefix = f"{target.display_path.rstrip('/')}/%"
     source_kinds = (
@@ -726,10 +697,7 @@ def _retrieval_filter(
         allowed_kinds = (*sorted(source_kinds), "product_manifest", "verification_hint")
         placeholders = ",".join("?" for _ in allowed_kinds)
         return f"c.path LIKE ? AND c.kind IN ({placeholders})", [prefix, *allowed_kinds]
-    if include_history and mode in {"auto", "past_decision", "failure_mode"}:
-        base_sql, base_params = "1 = 1", []
-    else:
-        base_sql, base_params = "c.kind NOT IN ('completion_receipt', 'task_artifact')", []
+    base_sql, base_params = "1 = 1", []
     if channel is EvidenceRetrievalChannel.EXACT_IDENTITY:
         return base_sql, base_params
     exact_only_kinds = sorted(CONTEXT_SOURCE_KIND_VALUES - LEXICAL_CONTEXT_SOURCE_KIND_VALUES)
@@ -749,7 +717,6 @@ def query_evidence_index(
     database_path: Path | None = None,
     overlay_chunks: list[DocumentChunk] | None = None,
     replaced_paths: set[str] | None = None,
-    include_history: bool = True,
 ) -> tuple[list[DocumentChunk], dict[str, Any], list[Problem]]:
     metadata, problems = load_evidence_index_metadata(root, target=target, database_path=database_path)
     if problems:
@@ -795,13 +762,11 @@ def query_evidence_index(
             mode,
             target,
             channel=EvidenceRetrievalChannel.FTS,
-            include_history=include_history,
         )
         exact_filter_sql, exact_filter_params = _retrieval_filter(
             mode,
             target,
             channel=EvidenceRetrievalChannel.EXACT_IDENTITY,
-            include_history=include_history,
         )
         fts_rows = _path_diverse_fts_rows(
             query_connection,

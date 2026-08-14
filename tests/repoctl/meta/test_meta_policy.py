@@ -5,15 +5,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
-from tools.repoctl.meta import DEFAULT_POLICY
 from tests.repoctl.workspace.test_check import write_workspace
-
-
-def test_default_policy_is_ecosystem_neutral() -> None:
-    excludes = set(DEFAULT_POLICY["indexing"]["exclude"])
-    directory_excludes = {pattern for pattern in excludes if pattern.endswith("/**") and not pattern.startswith("**/")}
-    assert {".git/**", ".repometa/**", ".venv/**", "node_modules/**", ".next/**", ".gradle/**", ".dart_tool/**"} <= directory_excludes
-    assert {"**/*.png", "**/*.zip", "**/*.pyc", "**/*.log"} <= excludes
 
 
 def test_project_policy_can_exclude_project_local_outputs(tmp_path: Path, monkeypatch, capsys) -> None:

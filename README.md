@@ -41,6 +41,8 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 3. Open the selected live task and `docs/BOARD.md` when inspection is needed
 4. Continue only from a non-null `executable_handoff`; otherwise inspect the typed selection or drift before acting
 
+`resume_guidance.status` answers whether the bound Handoff is current. `resume_guidance.health` separately reports whether repository lifecycle evidence is healthy; a current Handoff can coexist with unhealthy lifecycle state.
+
 ## Minimal structure
 
 ```text
@@ -67,6 +69,8 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - **JSON output contract**: `docs/contracts/repoctl-json-contract.md`
 - **repoctl module boundaries**: `docs/contracts/repoctl-module-boundaries.md`
 - **Context query contract**: `docs/contracts/repoctl-context-contract.md`
+- **Discovery outcome contract**: `docs/contracts/repoctl-discovery-outcome-contract.md`
+- **Graph snapshot and traversal contract**: `docs/contracts/repoctl-graph-contract.md`
 - **Repo metadata rules**: `docs/workflows/repo-metadata.md`
 - **Root template PRD / adopter workspace context**: `docs/PRD.md`
 - **Optional repo map**: `docs/REPOS.md`
@@ -80,7 +84,8 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - Backlog items are raw planning blocks; agents read them and pass explicit task fields rather than relying on repoctl to parse intent.
 - `.repometa` provides file-level discovery and changed-file metadata gates; `repoctl index code` extracts read-only technical facts, and neither is a generated graph.
 - `repoctl graph build` materializes a deterministic snapshot plus a persistent source/symbol/document evidence index; later builds reuse unchanged Code Index and provider results and update only changed semantic units.
-- `repoctl graph query` reads that snapshot without rebuilding, reports exact freshness, and supports file/topic/import/symbol/call/impact traversal plus task and completion-artifact traversal.
-- `repoctl context query` is the integrated discovery view for ambiguous repository work. It uses the persistent index, overlays only changed paths, resolves a bounded owner/test hypothesis set into typed Graph evidence, and groups source documents, task receipts, and reviewed knowledge into a compact working set with repeatable typed follow-up actions. Narrow `rg`, explicit Graph queries, and direct reads remain available for known identities. Its `project_knowledge` summary reports documents, task history, and reviewed reusable records as separate lanes; zero reviewed records never means the document knowledge base is empty.
+- `repoctl graph query` reads that snapshot without rebuilding, reports exact freshness, and supports file/topic/import/symbol/call/impact traversal. Explicit task and completion-artifact selectors validate one cold catalogue record and build a query-local projection. Query-visible files and confirmed relations carry set-aware component membership and crossings only when registered manifest providers find valid project declarations.
+- `repoctl context query` is the integrated discovery view for ambiguous repository work. It returns a bounded evidence hypothesis with typed follow-up actions; narrow `rg`, explicit Graph queries, and direct reads remain available for known identities. Its `project_knowledge` summary reports documents, task history, and reviewed reusable records as separate lanes; zero reviewed records never means the document knowledge base is empty. Explicit `past_decision` and `failure_mode` modes isolate bounded cold-history matches in `related_history`; those matches cannot affect the already determined current working set or Graph seeds.
+- Discovery records explicit Reviewed, Excluded, Chosen, result-member, and structured verification evidence; task finish freezes it into the completion receipt and publishes bounded catalogue ingress. Ordinary Context joins independently retrieved current candidates to that freshness-checked hot frontier, while ordinary Graph build and freshness checks use the catalogue head/checkpoint and committed hot projection instead of scanning the completion archive or retained event sidecars. Cold history never defines current candidates, ranking, Graph seeds, relations, component membership, or task scope.
 - Generated llmwiki pages are non-authoritative views; records/events and original source refs remain the authority.
 - MCP, if ever added, should be transport over repoctl contracts, not a second mutation path.

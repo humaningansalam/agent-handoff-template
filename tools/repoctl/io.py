@@ -122,6 +122,7 @@ def _recover_dead_lock(lock_dir: Path) -> None:
 
 def atomic_write(path: Path, text: str) -> None:
     path = Path(path)
+    _reject_symlinked_parent_chain(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = write_temporary_text(path, text)
     try:
@@ -130,6 +131,20 @@ def atomic_write(path: Path, text: str) -> None:
         if tmp.exists() and not tmp.is_symlink():
             tmp.unlink()
         raise
+
+
+def _reject_symlinked_parent_chain(path: Path) -> None:
+    """Never let a state write cross an existing symlinked path component."""
+
+    current = path.parent
+    while current != current.parent:
+        if current.is_symlink():
+            raise RepoctlError(
+                "write path crosses a symlinked parent",
+                code="unsafe_write_path",
+                path=path.as_posix(),
+            )
+        current = current.parent
 
 
 def write_temporary_text(path: Path, text: str, *, suffix: str = ".tmp") -> Path:

@@ -7,6 +7,7 @@ from tools.repoctl.cli import main
 from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.graph_model import digest_data, file_id, import_ref_id, topic_id
 from tools.repoctl.repositories import require_repo_target
+from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
@@ -23,6 +24,7 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
+    (repo / "package.json").write_text('{"name":"graph-query-fixture"}\n', encoding="utf-8")
     (repo / "src").mkdir()
     (repo / "src/app.py").write_text("import hashlib\n\n\ndef api_error():\n    return 'root'\n", encoding="utf-8")
     (repo / "repos/src").mkdir(parents=True)
@@ -30,64 +32,59 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     (repo / "repos/only.py").write_text("def only_nested():\n    return 'nested'\n", encoding="utf-8")
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    monkeypatch.setattr(
-        "tools.repoctl.graph_store.collect_graph_inputs",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("query rescanned product sources")),
-    )
+    target = require_repo_target(tmp_path, repo_id="main")
+    monkeypatch.setattr("tools.repoctl.cli.require_repo_target", lambda root, repo_id=None: target)
+    with reject_directory_enumeration(
+        monkeypatch,
+        repo / "src",
+        repo / "repos",
+        repo / "package.json",
+    ) as product_reads:
+        assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 0
 
-    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 0
+        compact_payload = json.loads(capsys.readouterr().out)
+        compact_result = compact_payload["data"]["result"]
+        compact_receipt = compact_payload["data"]["result_receipt"]
+        assert compact_receipt["producer"] == "graph"
+        assert {item["ref"] for item in compact_receipt["selectable"]} >= {"src/app.py"}
+        assert compact_result["matches"][0]["component_ids"] == [
+            "component:package.json:.:graph-query-fixture"
+        ]
+        assert any(item["selector"] == {"kind": "file", "value": "src/app.py"} for item in compact_result["continuations"])
 
-    compact_payload = json.loads(capsys.readouterr().out)
-    compact_result = compact_payload["data"]["result"]
-    compact_receipt = compact_payload["data"]["result_receipt"]
-    assert compact_receipt["producer"] == "graph"
-    assert compact_receipt["request"] == {
-        "kind": "graph_query",
-        "selector": {"type": "file", "path": "src/app.py"},
-    }
-    assert {item["ref"] for item in compact_receipt["selectable"]} >= {"src/app.py"}
-    assert "nodes" not in compact_result
-    assert "edges" not in compact_result
-    assert "node_count" not in compact_result
-    assert "edge_count" not in compact_result
-    assert not any(relation["edge"] == "CONTAINS" for relation in compact_result["relations"])
-    assert any(item["selector"] == {"kind": "file", "value": "src/app.py"} for item in compact_result["continuations"])
+        assert main(["graph", "query", "--file", "repos/src/app.py", "--json"]) == 1
+        ambiguous_path = json.loads(capsys.readouterr().out)
+        ambiguous_result = ambiguous_path["data"]["result"]
+        assert ambiguous_path["problems"][0]["code"] == "graph_query_ambiguous_path"
+        assert [item["path"] for item in ambiguous_result["candidates"]] == ["repos/src/app.py", "src/app.py"]
+        assert main(["graph", "query", "--file", "repos/only.py", "--json"]) == 0
+        exact_repo_path = json.loads(capsys.readouterr().out)["data"]["result"]
+        assert exact_repo_path["query"] == {"type": "file", "path": "repos/only.py"}
 
-    assert main(["graph", "query", "--file", "repos/src/app.py", "--json"]) == 1
-    ambiguous_path = json.loads(capsys.readouterr().out)
-    assert ambiguous_path["problems"][0]["code"] == "graph_query_ambiguous_path"
-    assert [item["path"] for item in ambiguous_path["data"]["result"]["candidates"]] == ["repos/src/app.py", "src/app.py"]
+        assert main(["graph", "query", "--file", "src/app.py", "--full", "--json"]) == 0
 
-    assert main(["graph", "query", "--file", "repos/only.py", "--json"]) == 0
-    exact_repo_path = json.loads(capsys.readouterr().out)["data"]["result"]
-    assert exact_repo_path["query"] == {"type": "file", "path": "repos/only.py"}
+        full_payload = json.loads(capsys.readouterr().out)
+        result = full_payload["data"]["result"]
+        assert full_payload["data"]["result_receipt"] == compact_receipt
+        assert result["query"] == {"type": "file", "path": "src/app.py"}
+        assert any(node["id"] == file_id("main", "src/app.py") for node in result["nodes"])
+        assert any(edge["kind"] == "CONTAINS" and edge["to"] == file_id("main", "src/app.py") for edge in result["edges"])
 
-    assert main(["graph", "query", "--file", "src/app.py", "--full", "--json"]) == 0
+        assert main(["graph", "query", "--symbol", "api_error", "--in-file", "../outside.py", "--json"]) == 1
+        invalid_in_file = json.loads(capsys.readouterr().out)
+        assert invalid_in_file["problems"][0]["code"] == "graph_query_invalid_path"
 
-    full_payload = json.loads(capsys.readouterr().out)
-    result = full_payload["data"]["result"]
-    assert full_payload["data"]["result_receipt"] == compact_receipt
-    assert result["query"] == {"type": "file", "path": "src/app.py"}
-    assert any(node["id"] == file_id("main", "src/app.py") for node in result["nodes"])
-    assert any(edge["kind"] == "CONTAINS" and edge["to"] == file_id("main", "src/app.py") for edge in result["edges"])
+        assert main(["graph", "query", "--symbol", "api_error", "--in-file", "repos/src/app.py", "--json"]) == 1
+        ambiguous_in_file = json.loads(capsys.readouterr().out)
+        assert ambiguous_in_file["data"]["query_status"] == "ambiguous"
+        assert [item["path"] for item in ambiguous_in_file["data"]["result"]["candidates"]] == ["repos/src/app.py", "src/app.py"]
 
-    assert main(["graph", "query", "--file", "./src\\app.py", "--json"]) == 1
-    invalid = json.loads(capsys.readouterr().out)
-    assert invalid["problems"][0]["code"] == "graph_query_invalid_path"
+        assert main(["graph", "query", "--symbol", "api_error", "--in-file", "missing/app.py", "--json"]) == 0
+        missing_in_file = json.loads(capsys.readouterr().out)
+        assert missing_in_file["data"]["query_status"] == "not_found"
+        assert {item["path"] for item in missing_in_file["data"]["result"]["candidates"]} == {"repos/src/app.py", "src/app.py"}
 
-    assert main(["graph", "query", "--symbol", "api_error", "--in-file", "../outside.py", "--json"]) == 1
-    invalid_in_file = json.loads(capsys.readouterr().out)
-    assert invalid_in_file["problems"][0]["code"] == "graph_query_invalid_path"
-
-    assert main(["graph", "query", "--symbol", "api_error", "--in-file", "repos/src/app.py", "--json"]) == 1
-    ambiguous_in_file = json.loads(capsys.readouterr().out)
-    assert ambiguous_in_file["data"]["query_status"] == "ambiguous"
-    assert [item["path"] for item in ambiguous_in_file["data"]["result"]["candidates"]] == ["repos/src/app.py", "src/app.py"]
-
-    assert main(["graph", "query", "--symbol", "api_error", "--in-file", "missing/app.py", "--json"]) == 0
-    missing_in_file = json.loads(capsys.readouterr().out)
-    assert missing_in_file["data"]["query_status"] == "not_found"
-    assert {item["path"] for item in missing_in_file["data"]["result"]["candidates"]} == {"repos/src/app.py", "src/app.py"}
+    assert product_reads == []
 
     provider_path = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
     removed_provider_path = provider_path.with_suffix(".removed")

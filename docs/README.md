@@ -27,6 +27,8 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Bind a reviewed pause/transfer Handoff: `./scripts/repoctl task handoff bind T-... --json`
 - Bind an optional reviewed Context Pack with it: `./scripts/repoctl task handoff bind T-... --context-pack .repoctl-state/context-pack/T-....md --json`
 - Append log: `./scripts/repoctl task log append T-... "message" --json`
+- Record an explicitly rejected Discovery file: `./scripts/repoctl task discovery add T-... --reviewed repos/decoy --excluded repos/decoy --json`
+- Bind a structured check outcome to a recorded subject: `./scripts/repoctl task verification add T-... --status passed --evidence-ref verification.txt --subject repos/path --json`
 - Finish task from completed `## Verification`: `./scripts/repoctl task finish T-... --json`
 - Finish with an external verification artifact: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
 - Finish and create a reusable Knowledge review candidate atomically: `./scripts/repoctl task finish T-... --knowledge-kind invariant --knowledge-claim "<reusable invariant>" --knowledge-applies-to src/owner.py --json`
@@ -34,6 +36,8 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Create follow-up work: `./scripts/repoctl task create --follow-up-of T-old --slug follow-up "Follow-up title" --json`
 - Show version: `./scripts/repoctl --version` or `./scripts/repoctl version --json`
 - Check workspace: `./scripts/repoctl check --json`
+- Audit every completion receipt, task artifact, and derived catalogue: `./scripts/repoctl check --audit-history --json`
+- Rebuild workspace-scoped completion history: `./scripts/repoctl history rebuild --workspace --json`
 - Check metadata: `./scripts/repoctl meta check --json`
 - Build/update Graph: `./scripts/repoctl graph build --repo-id main --json`
 - Query materialized Graph: `./scripts/repoctl graph query --repo-id main --file path --json`

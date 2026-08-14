@@ -11,6 +11,7 @@ from tools.repoctl.markdown import find_section, replace_frontmatter_line, repla
 from tools.repoctl.repositories import require_repo_target
 from tools.repoctl.result_receipts import ContextResultRequest, GraphResultRequest, ResultAuthority, ResultProducer, ResultSelection, write_result_receipt
 from tools.repoctl.tasks import DiscoveryResultSelection, resolve_task, task_discovery_result_selections
+from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
     init_committed_product_repo,
@@ -115,6 +116,55 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     assert ambiguous["data"]["resume_guidance"] is None
     assert [candidate["id"] for candidate in ambiguous["data"]["candidates"]] == [first, second]
     assert ambiguous["problems"][0]["code"] == "task_resume_ambiguous"
+
+
+def test_task_list_does_not_enumerate_archive(tmp_path: Path, monkeypatch) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="doing"))
+    archived = tmp_path / "docs/archive/tasks"
+    (archived / "T-20260609184045Z--cold.md").write_text("not a task\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    with monkeypatch.context() as audit_patch:
+        with reject_directory_enumeration(audit_patch, archived) as cold_reads:
+            assert main(["task", "list", "--json"]) == 0
+
+    assert cold_reads == []
+
+
+def test_archived_task_locator_rejects_symlinked_archive_parent(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184045Z"
+    archive = tmp_path / "docs/archive/tasks"
+    archive.rmdir()
+    outside = tmp_path / "outside-archive"
+    outside.mkdir()
+    archived = outside / f"{task_id}--escaped.md"
+    archived.write_text(task_text(task_id, status="done"), encoding="utf-8")
+    archive.symlink_to(outside, target_is_directory=True)
+    locator = tmp_path / f"docs/tasks/.repoctl-state/archive/{task_id}.json"
+    locator.parent.mkdir(parents=True)
+    locator.write_text(
+        json.dumps(
+            {
+                "schema": "repoctl.task.archive",
+                "schema_version": 1,
+                "task_id": task_id,
+                "task_path": f"docs/archive/tasks/{archived.name}",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "show", task_id, "--summary", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "task_not_found"
 
 
 def test_task_show_accepts_canonical_id_filename_and_path_with_section_projection(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -400,6 +450,48 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
     assert main(["check", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
     assert not any(warning["code"] == "missing_discovery_evidence" for warning in check_payload["warnings"])
+
+
+def test_task_discovery_markdown_and_outcome_state_commit_atomically(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
+    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    task_path = tmp_path / "docs/tasks/T-20260609184046Z--alpha.md"
+    original_task = task_path.read_bytes()
+    outcome_path = tmp_path / "docs/tasks/.repoctl-state/discovery-outcomes/T-20260609184046Z.json"
+    real_atomic_write = __import__("tools.repoctl.cli", fromlist=["atomic_write"]).atomic_write
+
+    def fail_task_write(path: Path, value: str) -> None:
+        if path == task_path:
+            raise OSError("simulated task Markdown write failure")
+        real_atomic_write(path, value)
+
+    monkeypatch.setattr("tools.repoctl.cli.atomic_write", fail_task_write)
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            "T-20260609184046Z",
+            "--query",
+            "checkout retry behavior",
+            "--reviewed",
+            "repos/src/checkout.py",
+            "--chosen",
+            "repos/src/checkout.py",
+            "--json",
+        ]
+    ) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "io_error"
+    assert task_path.read_bytes() == original_task
+    assert not outcome_path.exists()
 
 
 def test_task_discovery_starts_a_new_episode_and_replaces_active_chosen_with_reason(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -963,9 +1055,10 @@ def test_task_state_schema_version_requires_an_exact_json_integer(tmp_path: Path
     state["schema_version"] = 4.0
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["task", "show", "T-20260609184046Z", "--json"]) == 2
+    assert main(["task", "show", "T-20260609184046Z", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "task_state_schema_unsupported"
+    assert payload["data"]["health"]["codes"] == ["task_state_schema_unsupported"]
 
 
 def test_task_start_force_dirty_records_dirty_files(tmp_path: Path, monkeypatch) -> None:
@@ -1189,6 +1282,46 @@ def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, 
     assert "task_contract" in guidance["changed_inputs"]
 
 
+def test_parent_handoff_binding_tracks_direct_child_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    parent_path = tmp_path / f"docs/tasks/{parent_id}--parent.md"
+    child_path = tmp_path / f"docs/tasks/{child_id}--child.md"
+    parent_path.write_text(task_text(parent_id, status="doing"), encoding="utf-8")
+    child_path.write_text(task_text(child_id, status="todo", parent=parent_id), encoding="utf-8")
+    (tmp_path / "docs/BOARD.md").write_text(
+        "# BOARD\n\n## Board\n\n"
+        f"- docs/tasks/{parent_path.name}\n"
+        f"- docs/tasks/{child_path.name}\n\n"
+        "## Backlog\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    def bind_parent() -> dict:
+        assert main(["task", "handoff", "bind", parent_id, "--json"]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    def show_parent() -> dict:
+        assert main(["task", "show", parent_id, "--summary", "--json"]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    bind_parent()
+
+    child_path.write_text(
+        replace_frontmatter_line(child_path.read_text(encoding="utf-8"), "status", "blocked"),
+        encoding="utf-8",
+    )
+    guidance = show_parent()["data"]["resume_guidance"]
+    assert guidance["status"] == "stale"
+    assert guidance["changed_inputs"] == ["direct_children"]
+
+
 def test_task_handoff_repository_digest_detects_same_head_content_drift_but_not_touch(
     tmp_path: Path,
     monkeypatch,
@@ -1209,6 +1342,43 @@ def test_task_handoff_repository_digest_detects_same_head_content_drift_but_not_
     _bind_handoff(capsys)
     app.touch()
     assert _show_resume_guidance(capsys)["status"] == "current"
+
+
+def test_current_handoff_executability_is_independent_from_repository_lineage_health(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _task_path, repo, _receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    _bind_handoff(capsys)
+    binding_path = tmp_path / "docs/tasks/.repoctl-state/resume/T-20260609184046Z.json"
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+
+    tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    rewritten = subprocess.check_output(
+        ["git", "commit-tree", tree, "-m", "unrelated root"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    subprocess.run(["git", "reset", "--hard", rewritten], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    # Keep only Handoff freshness current to prove it is independent of lifecycle health.
+    current_task = resolve_task(tmp_path, "T-20260609184046Z")
+    from tools.repoctl.tasks import task_resume_input_digests
+
+    binding["input_digests"] = task_resume_input_digests(tmp_path, current_task)
+    binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert main(["task", "resume", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    guidance = payload["data"]["resume_guidance"]
+    assert guidance["status"] == "current"
+    assert guidance["handoff"]["active"] is True
+    assert guidance["health"]["status"] == "unhealthy"
+    assert guidance["health"]["codes"]
+    assert "Next exact step" in guidance["executable_handoff"]
+
+    assert binding_path.read_bytes() == (json.dumps(binding, indent=2, sort_keys=True) + "\n").encode()
 
 
 def test_task_handoff_invalid_receipt_fails_closed_and_archived_handoff_is_historical(
@@ -1235,6 +1405,22 @@ def test_task_handoff_invalid_receipt_fails_closed_and_archived_handoff_is_histo
     _bind_handoff(capsys)
     archived = tmp_path / "docs/archive/tasks" / task_path.name
     archived.write_text(replace_frontmatter_line(task_path.read_text(encoding="utf-8"), "status", "done"), encoding="utf-8")
+    locator = tmp_path / "docs/tasks/.repoctl-state/archive/T-20260609184046Z.json"
+    locator.parent.mkdir(parents=True, exist_ok=True)
+    locator.write_text(
+        json.dumps(
+            {
+                "schema": "repoctl.task.archive",
+                "schema_version": 1,
+                "task_id": "T-20260609184046Z",
+                "task_path": archived.relative_to(tmp_path).as_posix(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     task_path.unlink()
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
 

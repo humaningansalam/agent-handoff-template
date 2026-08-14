@@ -11,10 +11,24 @@ from pathlib import Path
 from typing import Any
 
 from .io import RepoctlError, atomic_write, repoctl_lock
+from .markdown import parse_frontmatter
+from .tasks import (
+    ID_RE,
+    TASK_RE,
+    LIVE,
+    NON_LIVE,
+    archive_locator_path,
+    archive_locator_text,
+    completion_receipt_artifact_for_task,
+    parse_archive_locator,
+)
 
 MANIFEST_REL = Path("repoctl-upgrade-manifest.json")
 UPGRADE_STATE_REL = Path("docs/tasks/.repoctl-state/upgrades")
 UPGRADE_POSTFLIGHT_COMMAND = ["./scripts/repoctl", "upgrade", "postflight", "--json"]
+ARCHIVE_LOCATOR_MIGRATION = "archive_locator_backfill"
+ARCHIVE_LOCATOR_MIGRATION_VERSION = 1
+UPGRADE_PLAN_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -196,10 +210,11 @@ def _plan_payload(
     manifest: dict[str, Any],
     operations: list[UpgradeOperation],
     conflicts: list[dict[str, str]],
+    migrations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     source_paths = [*manifest["replace_paths"], *manifest["create_paths"], *_preserve_seed_paths(source_root, manifest)]
     data = {
-        "schema_version": 1,
+        "schema_version": UPGRADE_PLAN_SCHEMA_VERSION,
         "package": manifest.get("package", "agent-workspace-control-plane"),
         "source_version": str(manifest.get("version", "")),
         "source_root": source_root.as_posix(),
@@ -212,6 +227,7 @@ def _plan_payload(
         "preserve_paths": manifest["preserve_paths"],
         "postflight_command": manifest["postflight_command"],
         "operations": [operation.to_dict() for operation in operations],
+        "migrations": migrations,
         "conflicts": conflicts,
     }
     encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -307,7 +323,8 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
                 size=len(source_bytes),
             )
         )
-    return _plan_payload(root, source_root, manifest, operations, conflicts)
+    migrations, migration_conflicts = _plan_archive_locator_migration(root)
+    return _plan_payload(root, source_root, manifest, operations, [*conflicts, *migration_conflicts], migrations)
 
 
 def write_plan(path: Path, payload: dict[str, Any]) -> None:
@@ -328,6 +345,188 @@ def _atomic_copy_file(source: Path, target: Path) -> None:
         if tmp.exists() and not tmp.is_symlink():
             tmp.unlink()
         raise
+
+
+def _migration_conflict(code: str, message: str, path: str) -> dict[str, str]:
+    return {"code": code, "message": message, "path": path}
+
+
+def _read_exact_regular_file(root: Path, rel: str, *, code: str) -> tuple[Path, bytes]:
+    path = _assert_contained_path(root, rel, code=code, require_file=True)
+    if path.is_symlink():
+        raise RepoctlError(f"migration authority must not be a symlink: {rel}", code=code, path=rel)
+    try:
+        return path, path.read_bytes()
+    except OSError as exc:
+        raise RepoctlError(f"migration authority is unreadable: {rel}", code=code, path=rel) from exc
+
+
+def _valid_live_follow_up(path: Path, root: Path) -> tuple[str, str]:
+    rel = path.relative_to(root).as_posix()
+    _path, raw = _read_exact_regular_file(root, rel, code="archive_locator_migration_conflict")
+    try:
+        frontmatter, _body = parse_frontmatter(raw.decode("utf-8"))
+    except (UnicodeDecodeError, RepoctlError) as exc:
+        raise RepoctlError("live follow-up task is invalid", code="archive_locator_migration_conflict", path=rel) from exc
+    filename = TASK_RE.fullmatch(path.name)
+    task_id = str(frontmatter.get("id") or "")
+    follow_up_of = str(frontmatter.get("follow_up_of") or "")
+    if frontmatter.get("status") not in LIVE or not follow_up_of:
+        return "", _sha256(_hash_bytes(raw))
+    if filename is None or filename.group(1) != task_id:
+        raise RepoctlError("live follow-up task identity or status is invalid", code="archive_locator_migration_conflict", path=rel)
+    if ID_RE.fullmatch(follow_up_of) is None:
+        raise RepoctlError("live follow-up task has an invalid predecessor identity", code="archive_locator_migration_conflict", path=rel)
+    return follow_up_of, _sha256(_hash_bytes(raw))
+
+
+def _valid_archive_authority(path: Path, root: Path, task_id: str) -> tuple[str, str]:
+    rel = path.relative_to(root).as_posix()
+    _path, raw = _read_exact_regular_file(root, rel, code="archive_locator_migration_conflict")
+    try:
+        frontmatter, _body = parse_frontmatter(raw.decode("utf-8"))
+    except (UnicodeDecodeError, RepoctlError) as exc:
+        raise RepoctlError("archived task is invalid", code="archive_locator_migration_conflict", path=rel) from exc
+    filename = TASK_RE.fullmatch(path.name)
+    if (
+        filename is None
+        or filename.group(1) != task_id
+        or frontmatter.get("id") != task_id
+        or frontmatter.get("status") not in NON_LIVE
+    ):
+        raise RepoctlError("archived task identity or status is invalid", code="archive_locator_migration_conflict", path=rel)
+    return rel, _sha256(_hash_bytes(raw))
+
+
+def _existing_locator_binding(root: Path, task_id: str) -> tuple[str, str, str, str]:
+    """Return the validated existing locator and its archived authority."""
+
+    rel = archive_locator_path(root, task_id).relative_to(root).as_posix()
+    path = _assert_contained_path(root, rel, code="archive_locator_migration_conflict")
+    if not path.exists() and not path.is_symlink():
+        return "missing", "", "", ""
+    if path.is_symlink() or not path.is_file():
+        raise RepoctlError("archive locator is not a regular file", code="archive_locator_migration_conflict", path=rel)
+    try:
+        text = path.read_text(encoding="utf-8")
+        archive_rel = parse_archive_locator(text, task_id=task_id)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepoctlError("archive locator is unreadable", code="archive_locator_migration_conflict", path=rel) from exc
+    except ValueError as exc:
+        raise RepoctlError("archive locator conflicts with archived task authority", code="archive_locator_migration_conflict", path=rel) from exc
+    archive_path = _assert_contained_path(root, archive_rel, code="archive_locator_migration_conflict", require_file=True)
+    validated_rel, archive_digest = _valid_archive_authority(archive_path, root, task_id)
+    return "current", validated_rel, archive_digest, _sha256(_hash_bytes(text.encode("utf-8")))
+
+
+def _plan_archive_locator_migration(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Plan the bounded legacy migration from exact live follow-up identities."""
+
+    task_directory = root / "docs/tasks"
+    archive_directory = root / "docs/archive/tasks"
+    if not task_directory.is_dir() or not archive_directory.is_dir():
+        return [], []
+    conflicts: list[dict[str, str]] = []
+    references: dict[str, list[dict[str, str]]] = {}
+    for task_path in sorted(task_directory.glob("T-*.md")):
+        try:
+            follow_up_of, task_digest = _valid_live_follow_up(task_path, root)
+        except RepoctlError as exc:
+            conflicts.append(_migration_conflict(exc.code, str(exc), exc.path or task_path.relative_to(root).as_posix()))
+            continue
+        if follow_up_of:
+            references.setdefault(follow_up_of, []).append(
+                {"path": task_path.relative_to(root).as_posix(), "content_sha256": task_digest}
+            )
+    migrations: list[dict[str, Any]] = []
+    for task_id, live_sources in sorted(references.items()):
+        locator_rel = archive_locator_path(root, task_id).relative_to(root).as_posix()
+        try:
+            locator_state, bound_archive_rel, bound_archive_digest, locator_digest = _existing_locator_binding(root, task_id)
+        except RepoctlError as exc:
+            conflicts.append(_migration_conflict(exc.code, str(exc), exc.path or task_id))
+            continue
+        if locator_state == "current":
+            locator_text = archive_locator_text(task_id, bound_archive_rel)
+            migrations.append(
+                {
+                    "name": ARCHIVE_LOCATOR_MIGRATION,
+                    "version": ARCHIVE_LOCATOR_MIGRATION_VERSION,
+                    "task_id": task_id,
+                    "live_follow_ups": live_sources,
+                    "archive_path": bound_archive_rel,
+                    "archive_content_sha256": bound_archive_digest,
+                    "locator_path": locator_rel,
+                    "locator_state": locator_state,
+                    "locator_content_sha256": _sha256(_hash_bytes(locator_text.encode("utf-8"))),
+                    "observed_locator_sha256": locator_digest,
+                }
+            )
+            continue
+        receipt, receipt_problems = completion_receipt_artifact_for_task(root, task_id=task_id)
+        if receipt is not None and not receipt_problems:
+            continue
+        matches = sorted(archive_directory.glob(f"{task_id}--*.md"))
+        if len(matches) != 1:
+            conflicts.append(
+                _migration_conflict(
+                    "archive_locator_migration_unresolved",
+                    f"live follow-up predecessor must resolve to exactly one archived task, found {len(matches)}",
+                    f"docs/archive/tasks/{task_id}--*.md",
+                )
+            )
+            continue
+        try:
+            archive_rel, archive_digest = _valid_archive_authority(matches[0], root, task_id)
+            locator_text = archive_locator_text(task_id, archive_rel)
+        except RepoctlError as exc:
+            conflicts.append(_migration_conflict(exc.code, str(exc), exc.path or matches[0].relative_to(root).as_posix()))
+            continue
+        migrations.append(
+            {
+                "name": ARCHIVE_LOCATOR_MIGRATION,
+                "version": ARCHIVE_LOCATOR_MIGRATION_VERSION,
+                "task_id": task_id,
+                "live_follow_ups": live_sources,
+                "archive_path": archive_rel,
+                "archive_content_sha256": archive_digest,
+                "locator_path": locator_rel,
+                "locator_state": "missing",
+                "locator_content_sha256": _sha256(_hash_bytes(locator_text.encode("utf-8"))),
+                "observed_locator_sha256": "",
+            }
+        )
+    return migrations, conflicts
+
+
+def _archive_locator_migration_writes(root: Path, planned: Any) -> list[tuple[Path, str, dict[str, Any]]]:
+    if not isinstance(planned, list):
+        raise RepoctlError("upgrade plan migrations must be a list", code="invalid_upgrade_plan")
+    writes: list[tuple[Path, str, dict[str, Any]]] = []
+    for migration in planned:
+        if (
+            not isinstance(migration, dict)
+            or migration.get("name") != ARCHIVE_LOCATOR_MIGRATION
+            or migration.get("version") != ARCHIVE_LOCATOR_MIGRATION_VERSION
+        ):
+            raise RepoctlError("upgrade plan contains an unsupported migration", code="invalid_upgrade_plan")
+        if migration.get("locator_state") == "missing":
+            task_id = str(migration.get("task_id") or "")
+            archive_rel = str(migration.get("archive_path") or "")
+            locator_rel = str(migration.get("locator_path") or "")
+            if ID_RE.fullmatch(task_id) is None:
+                raise RepoctlError("upgrade plan archive locator target is invalid", code="invalid_upgrade_plan", path=locator_rel)
+            expected_rel = archive_locator_path(root, task_id).relative_to(root).as_posix()
+            if locator_rel != expected_rel:
+                raise RepoctlError("upgrade plan archive locator target is invalid", code="invalid_upgrade_plan", path=locator_rel)
+            try:
+                locator_text = archive_locator_text(task_id, archive_rel)
+            except ValueError as exc:
+                raise RepoctlError("upgrade plan archive locator identity is invalid", code="invalid_upgrade_plan", path=locator_rel) from exc
+            if _sha256(_hash_bytes(locator_text.encode("utf-8"))) != migration.get("locator_content_sha256"):
+                raise RepoctlError("upgrade plan archive locator digest is invalid", code="invalid_upgrade_plan", path=locator_rel)
+            writes.append((_assert_contained_path(root, locator_rel, code="invalid_upgrade_target"), locator_text, migration))
+    return writes
 
 
 def _prune_empty_parents(root: Path, start: Path) -> None:
@@ -377,7 +576,9 @@ def _load_plan(path: Path) -> dict[str, Any]:
         raise RepoctlError(f"invalid upgrade plan JSON: {error}", code="invalid_upgrade_plan", path=str(path)) from error
     if (
         not isinstance(payload, dict)
+        or payload.get("schema_version") != UPGRADE_PLAN_SCHEMA_VERSION
         or not isinstance(payload.get("operations"), list)
+        or not isinstance(payload.get("migrations"), list)
     ):
         raise RepoctlError("invalid upgrade plan shape", code="invalid_upgrade_plan", path=str(path))
     expected_digest = _canonical_plan_hash(payload)
@@ -401,7 +602,7 @@ def _operation_dicts(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(result, key=lambda item: (item["path"], item["action"], item["source_hash"], item["target_hash"], item["size"]))
 
 
-def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, Any]) -> None:
+def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, Any]) -> list[dict[str, Any]]:
     manifest = _load_manifest(source_root)
     if str(plan.get("package") or "") != str(manifest.get("package") or "agent-workspace-control-plane"):
         raise RepoctlError("upgrade plan package does not match source manifest", code="invalid_upgrade_plan")
@@ -412,6 +613,8 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
             raise RepoctlError(f"upgrade plan {key} does not match source manifest", code="invalid_upgrade_plan")
     if list(plan.get("postflight_command") or []) != manifest["postflight_command"]:
         raise RepoctlError("upgrade plan postflight_command does not match source manifest", code="invalid_upgrade_plan")
+    if not isinstance(plan.get("migrations"), list):
+        raise RepoctlError("upgrade plan migrations must be a list", code="invalid_upgrade_plan")
     managed = set(manifest["replace_paths"]) | set(manifest["create_paths"]) | set(manifest["remove_paths"])
     preserve_seeds = set(_preserve_seed_paths(source_root, manifest))
     preserved = manifest["preserve_paths"]
@@ -430,8 +633,11 @@ def _verify_plan_bound_to_source(root: Path, source_root: Path, plan: dict[str, 
         raise RepoctlError("upgrade source has conflicts; recreate the plan", code="upgrade_plan_stale")
     if _operation_dicts(plan) != _operation_dicts(expected):
         raise RepoctlError("upgrade plan operations do not match current source manifest and workspace state", code="upgrade_plan_stale")
+    if plan["migrations"] != expected["migrations"]:
+        raise RepoctlError("archive locator migration inputs changed after plan", code="upgrade_plan_stale")
     if str(plan.get("source_content_digest") or "") != str(expected.get("source_content_digest") or ""):
         raise RepoctlError("upgrade plan source digest does not match current source", code="upgrade_plan_stale")
+    return expected["migrations"]
 
 
 def _verify_plan_fresh(root: Path, plan: dict[str, Any]) -> None:
@@ -458,6 +664,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
     applied: list[dict[str, str]] = []
     backups: list[dict[str, Any]] = []
     backup_root = root / UPGRADE_STATE_REL / run_id / "backup"
+    applied_migrations: list[dict[str, Any]] = []
 
     def backup_target(rel: str, target_path: Path) -> None:
         if not target_path.is_file():
@@ -476,7 +683,8 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
 
     with repoctl_lock(root):
         _verify_plan_fresh(root, plan)
-        _verify_plan_bound_to_source(root, source_root, plan)
+        current_migrations = _verify_plan_bound_to_source(root, source_root, plan)
+        migration_writes = _archive_locator_migration_writes(root, current_migrations)
         try:
             for operation in plan["operations"]:
                 rel = _safe_rel(str(operation["path"]))
@@ -498,6 +706,19 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                         raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
                     _atomic_copy_file(source_path, target_path)
                 applied.append({"path": rel, "action": action})
+            for locator_path, locator_text, migration in migration_writes:
+                atomic_write(locator_path, locator_text)
+                locator_rel = locator_path.relative_to(root).as_posix()
+                applied.append({"path": locator_rel, "action": "migration_create"})
+                applied_migrations.append(
+                    {
+                        "name": migration["name"],
+                        "version": migration["version"],
+                        "task_id": migration["task_id"],
+                        "path": locator_rel,
+                        "action": "create",
+                    }
+                )
         except Exception as error:
             rolled_back = _rollback_applied(root, applied, backups)
             rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
@@ -526,22 +747,48 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
             "recorded_digest": _canonical_tree_digest(backup_root) if backups else "",
             "retention_status_at_creation": "manual_retention" if backups else "not_required",
         }
-        receipt = {
-            "run_id": run_id,
-            "plan_file": plan_path.as_posix(),
-            "plan_sha256": plan.get("plan_sha256", ""),
-            "source_content_digest": str(plan.get("source_content_digest") or ""),
-            "applied": applied,
-            "backups": backups,
-            "backup": backup,
-        }
-        receipt_path = root / UPGRADE_STATE_REL / run_id / "receipt.json"
-        atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        try:
+            receipt = {
+                "run_id": run_id,
+                "plan_file": plan_path.as_posix(),
+                "plan_sha256": plan.get("plan_sha256", ""),
+                "source_content_digest": str(plan.get("source_content_digest") or ""),
+                "applied": applied,
+                "backups": backups,
+                "backup": backup,
+                "migrations": plan.get("migrations", []),
+                "applied_migrations": applied_migrations,
+            }
+            receipt_path = root / UPGRADE_STATE_REL / run_id / "receipt.json"
+            atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        except Exception as error:
+            rolled_back = _rollback_applied(root, applied, backups)
+            rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
+            atomic_write(
+                rollback_path,
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "plan_file": plan_path.as_posix(),
+                        "plan_sha256": plan.get("plan_sha256", ""),
+                        "applied": applied,
+                        "backups": backups,
+                        "rolled_back": rolled_back,
+                        "error": str(error),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+            )
+            raise
     return {
         "run_id": run_id,
         "applied": applied,
         "backups": backups,
         "backup": backup,
+        "migrations": plan.get("migrations", []),
+        "applied_migrations": applied_migrations,
         "receipt_path": (UPGRADE_STATE_REL / run_id / "receipt.json").as_posix(),
         "postflight_command": list(plan.get("postflight_command") or []),
         "verification_commands": [

@@ -287,3 +287,36 @@ def test_task_finish_blocks_when_repo_registry_target_drifted(tmp_path: Path, mo
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repo_target_changed_since_start"
+
+
+def test_repo_task_survives_whole_workspace_relocation_without_rewriting_state(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    original = tmp_path / "original"
+    relocated = tmp_path / "relocated"
+    write_workspace(original)
+    repo = original / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("print('base')\n", encoding="utf-8")
+    commit_all(repo)
+    current_root = original
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: current_root)
+
+    assert main(["task", "create", "--area", "repo", "--start", "--slug", "relocate", "Relocate", "--json"]) == 0
+    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
+    original.rename(relocated)
+    current_root = relocated
+    assert main(["task", "show", task_id, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"] == []
+    assert payload["data"]["repo_changes"]["observed_committed"] == 0
+    verification = relocated / "verification.md"
+    verification.write_text("- Relocated repository continuity observed\n- Result: pass\n", encoding="utf-8")
+
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out)["data"]["task_id"] == task_id

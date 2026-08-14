@@ -761,7 +761,7 @@ class TestMaintenanceScopeGuardContract:
             {
                 "schema_version": 1,
                 "workflow_id": "mw-retry-plan-fail",
-                "phase": "plan_reviewed",
+                "phase": "skeptic_reviewed",
                 "retry": {"target": "retry-plan", "blockers": ["plan review scope fit missing"]},
                 "pass_eligibility": {"calculated": {"eligible": False}},
             },

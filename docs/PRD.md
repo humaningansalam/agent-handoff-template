@@ -13,8 +13,8 @@ Coding agents can edit code, but they do not reliably preserve project state acr
 - useful decisions and failure modes are rediscovered instead of reused
 - generated summaries can be mistaken for source authority
 - a new agent repeatedly scans a large repository to rediscover product authority, implementation owners, direct tests, and prior decisions that the workspace already contains
-- semantically different documents compete as generic evidence, allowing indexes, templates, or broad references to displace the applicable authority or procedure and cause avoidable exploration and rework
-- structured reports, exports, and fixtures are mistaken for configuration merely because they share a JSON/YAML/TOML extension, allowing their repeated vocabulary to displace executable owners and tests
+- an initial Context result may be wrong or incomplete, so later work needs an explicit, freshness-checked outcome loop instead of treating the first ranking as truth
+- large repositories need query-visible component membership and crossings without turning directory names into ownership or a second graph
 
 This template solves workspace coordination and repository-understanding startup around agents. For ambiguous work, Context is the natural integrated discovery surface: it provides a compact, source-linked working set over current code, typed relationships, project authority, procedures, task history, and explicitly reviewed reusable knowledge. It narrows where to read and change before the agent spends tokens rescanning a large repository. Exact search, free iterative Graph traversal, and direct source inspection remain available for confirmation and deeper exploration.
 
@@ -36,9 +36,15 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - follow typed continuations toward likely owner, change, dependency, and verification surfaces without repeatedly rescanning the repository
 - keep exploring caller, callee, import, test, task, document, and Knowledge relationships through typed Graph continuations without a mandatory Context -> Graph -> `rg` sequence
 - use narrow exact search and direct reads to confirm a known identity instead of repeating broad discovery that the working set already answered
-- improve later related discovery from validated task outcomes and explicitly Reviewed Knowledge without turning an unfamiliar first query into a false claim of certainty
 - promote only explicitly reviewed, source-linked knowledge into durable records
 - render llmwiki pages as disposable views, not authority
+
+### Repository-Understanding Loop
+
+- Bind a discovery query, its citable evidence, explicit review decisions, and verification into one completion-bound outcome.
+- Join only independently retrieved, current subjects to fresh applicable outcomes while keeping the first result a hypothesis, not authority or edit scope.
+- Project declared component membership and crossings onto existing typed subjects and relations so an agent can traverse between relevant areas without a second graph.
+- Keep the loop bounded as it is reused: hot state, ordinary query work, incremental refresh work, and agent-facing payload must converge instead of growing with task history.
 
 ## Success Criteria
 
@@ -46,21 +52,13 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - A live Handoff is active only after an explicit review binding to the exact structured Task and observed repository state; later input drift is visible as typed inactive resume guidance instead of silently blessing old prose.
 - Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
 - Task finish leaves auditable verification evidence and stable completion receipts.
-- Graph and Context answers preserve source refs, repo IDs, digests, freshness, typed continuations, and completeness warnings.
-- Every successful Context or Graph query content-binds its exact typed request and compact selectable surface to the producer, repository identity, and result digest; Discovery rejects invented or cross-repository result references at the mutation boundary.
+- Graph and Context answers preserve repository identity, source refs, digests, freshness, typed continuations, and completeness warnings.
 - Compatible but unresolved relationships remain agent-visible as explicitly non-authoritative candidates without being promoted to Graph edges.
-- A task may retain only the Context or Graph result references that actually informed Reviewed or Chosen files, without mandatory feature-use logging.
-- For an ambiguous repository question or task startup, compact Context surfaces the applicable authority or procedure and the likely source, relation, and test surfaces ahead of generic indexes and templates.
-- Context selects distinct likely owner source, direct tests, and at least one immediate typed impact path into a bounded working set when the budget and available relations permit, while keeping unrelated same-word files out of agent-visible slots when typed Graph evidence resolves the area.
-- Generic natural-language words do not become exact symbol identities; explicit paths, quoted/code-shaped identities, and provider-confirmed symbols retain exact behavior and ambiguity fails closed.
-- Compact Context exposes whether each Graph seed came from exact identity, provider symbol, Reviewed Knowledge, or a ranked lexical hypothesis so path resolution is never mistaken for proven semantic ownership.
-- Every fresh resolved Graph seed keeps one bounded source-digest identity and typed continuation outside compact item budgets, and Task Pack carries that same identity without promoting it to edit scope or authority.
-- Repository-understanding quality is evaluated by owner/test/impact hit rate, first-correct rank, irrelevant visible slots, repeated broad-discovery behavior, and serialized output/token cost rather than Graph invocation count or `rg` prohibition.
-- A first query over unfamiliar work remains an explicit ranked hypothesis. Fresh current code and Graph evidence, validated completion history, and explicitly Reviewed Knowledge may improve a later related working set, but no query result or past guess is automatically promoted to source truth, Graph fact, authority, or edit scope.
-- Document meaning remains consistent across materialized-index and live-fallback retrieval, compact grouping, and Task Pack projection; split `docs/prd/**` documents retain product-authority semantics.
-- Source-role classification remains consistent across the materialized index and live fallback: registered current product source, including text-only source, and declared configuration may form lexical working-set hypotheses, while ordinary structured data enters that working set only through exact identity, explicit reviewed applicability, or a typed Graph relation.
-- Current project documents, task history, and explicitly reviewed reusable records are reported as distinct project-knowledge lanes; zero Reviewed Knowledge records never means that project knowledge is empty.
+- For ambiguous work, compact Context improves owner/test/impact hit rate and first-correct rank while reducing irrelevant visible slots, broad rediscovery, serialized bytes, and token cost.
+- Current project documents, task history, and explicitly reviewed reusable records remain distinct evidence lanes; generated views never become source authority.
 - Reviewed Knowledge records require an explicit approval action and remain separate from generated llmwiki output; the actor may be a human or an authorized agent.
+- The outcome loop admits only explicit, source-bound task outcomes as feedback and never turns them into ownership, authority, edit scope, or a hard filter.
+- Repeating equivalent verified work does not increase hot rows, ordinary query reads, unchanged-delta refresh work, or later payload; cold audit growth stays off the ordinary retrieval path.
 
 ## Core Requirements
 
@@ -92,15 +90,15 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays scored in the same retrieval corpus as materialized evidence and typed continuations for iterative exploration.
 - Let an optional Task Pack participate in resume guidance only when the user or agent explicitly binds that exact current artifact. JSON and Markdown artifacts must share one canonical input projection, reject missing/tampered/wrong-task/legacy artifacts, and become inactive when their producer-owned source identities, structured Task inputs, Graph snapshot, or repository observation changes.
 - Resolve bounded lexical file hypotheses into the existing typed Graph projection so ambiguous natural-language work can include owners, direct tests, callers, callees, imports, and structured dependencies without a hidden rebuild or a second traversal engine.
-- Preserve exact-identity fail-closed behavior. Classify product files once as registered current product source, including text-only source, declared configuration, or ordinary structured data instead of treating a serialization extension as configuration authority. Keep every current source/test/declared-config lexical hypothesis eligible, preserve canonical path/section/body query evidence, and allocate the bounded working set by saturating lexical breadth plus source/test/config lane, evidence-role, and repository-component coverage so vocabulary-heavy consumers cannot crowd out distinct owners. Keep ordinary structured data searchable by exact identity and available through explicit reviewed applicability or typed Graph relations, but do not let body vocabulary alone make it a lexical Graph seed or likely code owner. Select non-test owner hypotheses before the bounded verification slot; prefer a provider-confirmed test relation to the first owner and otherwise use shared canonical query evidence only as lexical test corroboration, never as a fabricated Graph edge. Keep weak provider identities exact while requiring strong identity evidence or fresh candidate-to-candidate Graph coherence before they reserve owner capacity. A file-level relation cannot corroborate an unrelated weak provider symbol: only that symbol's exact node appearing as an endpoint of a fresh resolved `CALLS` relation is symbol-specific Graph corroboration. Let a typed relation corroborate a lexical section only when it is attributable to that provider symbol or analyzer source fact, or when the active query explicitly uses file-level impact semantics; keep other file-wide relations available as separate navigation evidence. Use fresh typed relations among the current query candidates as later coherence corroboration, keep raw Graph degree later still, and use shared directory scope only as a final tie-break. When the whole cohort contains only weak single-term matches, select one top fallback while still reporting every omitted candidate; in a mixed cohort, a weak isolated singleton may remain diagnostic without consuming a slot unless it adds meaningful lane, role, or component evidence. Continue with fresh resolved anchors when another hypothesis is stale or absent, report anchor omissions independently from typed anchor resolution, and report final compact working-set omissions independently from anchor coverage.
-- Publish one coherent final working-set projection after compact source/test selection. Preserve actual Graph-seed membership and the precedence of exact, explicit, strong, and Reviewed-Knowledge-derived current-source anchors; reorder only remaining weak seeds toward the retained sources they can actually navigate. In `auto`, show a compact relation only when its resolved `from_path` or `to_path` touches a retained source. Compact output, completeness, seed refs, human views, and Task Pack must consume that same final resolution.
-- Preserve source refs, digests, repo namespaces, and completeness diagnostics.
-- Treat each distinct Discovery query as a new active episode: retain current Chosen scope, reset earlier Reviewed/result/note evidence, and build Task Pack only from the active episode. A Context receipt owns the canonical query; Graph selectors accumulate as typed follow-up provenance without forcing a new episode. Existing recorded result evidence keeps its validated request identity if the regenerable producer receipt is later removed.
+- Preserve exact typed identities, source refs, digests, repository namespaces, field-level evidence, and typed continuations. Lexical relevance may propose a working-set member but never prove semantic ownership.
+- Publish one coherent bounded projection for compact output, completeness, citations, seed refs, human views, and Task Pack; renderer differences must not change evidence identity.
 - Keep confirmed relations and compatible unresolved relationship candidates as separate typed lanes; candidates must preserve their structured resolution reason and never imply task scope.
 - Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.
 - Keep active authority and procedures eligible for ordinary retrieval, keep templates from consuming ordinary recall unless explicitly addressed, and never ingest generated views as source evidence.
 - Treat current project documents, task history, and Reviewed Knowledge as separate complementary evidence lanes rather than one interchangeable corpus.
 - Do not turn Context output into task scope, source authority, or reviewed knowledge automatically.
+
+The completion-bound outcome and bounded-retention semantics are owned by `docs/contracts/repoctl-discovery-outcome-contract.md`. The additive component-crossing projection is owned by `docs/contracts/repoctl-graph-contract.md`.
 
 ### Reviewed Knowledge And llmwiki
 
@@ -119,6 +117,18 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Context is the default integrated discovery surface for ambiguous work, not a ban on exact search, typed Graph traversal, or direct source inspection.
 - Repository Understanding does not require moving the established documentation tree, mandatory per-document frontmatter, embeddings, or a second content-management system.
 - Repository Understanding is not online self-training: query output and task prose do not auto-approve Knowledge, rewrite Graph facts, or become future authority.
+
+## Acceptance And Rejection
+
+Accept the repository-understanding loop only when repeated field scenarios demonstrate all of the following:
+
+- later related work improves owner/test/impact hit rate and reduces broad rediscovery, serialized bytes, tokens, and elapsed exploration time
+- the combined capture, storage, indexing, query, and reading cost across a related task pair is lower than the no-reuse baseline
+- exact provenance survives while outcomes remain non-authoritative and current source, direct reads, exact search, and typed traversal stay independently available
+- a typed continuation can cross a derived component boundary without a manually maintained second graph
+- equivalent repetition leaves hot state, ordinary query work, incremental refresh work, and agent-facing payload stable rather than proportional to completed-task count
+
+Reject or revisit the model when those field outcomes do not improve. Investigate retrieval, tokenization, and continuation presentation before adding more schema or fixture-specific ranking rules.
 
 ## Adoption Rule
 

@@ -10,8 +10,18 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .completion_catalogue import prepare_completion_sidecar_writes
+from .discovery_outcomes import (
+    add_verification_record as add_discovery_verification_record,
+    completion_outcome_projection,
+    load_outcome_state,
+    outcome_state_path,
+    serialize_outcome_state,
+    update_outcome_state,
+    validate_completion_outcome,
+)
 from .io import LOCK_REL, RepoctlError, atomic_write, decode_schema_version
-from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states
+from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states
 from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoSelectorStatus, RepoTarget, RepositoryIdentitySource, default_repo_target, repo_layout, resolve_repo_selector_path
@@ -31,9 +41,12 @@ SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
 TASK_STATE_SCHEMA_VERSION = 4
 LEGACY_TASK_STATE_SCHEMA_VERSION = 3
-COMPLETION_RECEIPT_SCHEMA_VERSION = 3
+COMPLETION_RECEIPT_SCHEMA_VERSION = 4
+TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION = 2
-RESUME_BINDING_SCHEMA_VERSION = 1
+RESUME_BINDING_SCHEMA_VERSION = 2
+LEGACY_RESUME_BINDING_SCHEMA_VERSION = 1
+ARCHIVE_LOCATOR_SCHEMA_VERSION = 1
 
 
 class TaskHandoffStatus(StrEnum):
@@ -59,6 +72,15 @@ class _CompletionEvidenceMode(StrEnum):
 class BaselineOwnership(StrEnum):
     TASK = "task"
     PREEXISTING = "preexisting"
+
+
+class RepositoryLineageStatus(StrEnum):
+    BASELINE_MISSING = "baseline_missing"
+    IDENTITY_MISMATCH = "identity_mismatch"
+    UNAVAILABLE = "unavailable"
+    SAME_HEAD = "same_head"
+    DESCENDANT = "descendant"
+    REWRITTEN = "rewritten"
 
 
 @dataclass(frozen=True)
@@ -446,6 +468,48 @@ class Problem:
 
 
 @dataclass(frozen=True)
+class RepositoryTransitionObservation:
+    """One read-only Git transition observation with non-owning change segments."""
+
+    repo_id: str
+    repo_path: str
+    historical_git_toplevel: str
+    start_head: str
+    current_head: str
+    lineage: RepositoryLineageStatus
+    committed_changes: tuple[ChangedEntry, ...]
+    worktree_changes: tuple[ChangedEntry, ...]
+    repo_git: RepoGitState
+    problems: tuple[Problem, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "logical_identity": {
+                "repo_id": self.repo_id,
+                "repo_path": self.repo_path,
+            },
+            "historical_locator": {
+                "git_toplevel": self.historical_git_toplevel,
+            },
+            "heads": {
+                "start": self.start_head,
+                "current": self.current_head,
+            },
+            "lineage": self.lineage.value,
+            "segments": {
+                "committed": [_entry_to_dict(entry) for entry in self.committed_changes],
+                "worktree": [_entry_to_dict(entry) for entry in self.worktree_changes],
+            },
+            "git": {
+                "available": self.repo_git.available,
+                "reason": self.repo_git.reason,
+                "problem_code": self.repo_git.problem_code,
+            },
+            "problems": [problem.to_dict() for problem in self.problems],
+        }
+
+
+@dataclass(frozen=True)
 class _DescendantPathClaim:
     task_id: str
     receipt_path: str
@@ -537,14 +601,27 @@ def load_task(path: Path, root: Path, *, archived: bool = False) -> Task:
     return Task(path=path, rel_path=_rel(root, path), frontmatter=frontmatter, body=body, archived=archived)
 
 
-def load_tasks(root: Path) -> list[Task]:
+def load_tasks(root: Path, *, include_archived: bool = False) -> list[Task]:
     tasks: list[Task] = []
     for path in sorted((root / "docs/tasks").glob("T-*.md")):
         tasks.append(load_task(path, root, archived=False))
     archive_dir = root / "docs/archive/tasks"
-    if archive_dir.exists():
+    if include_archived and archive_dir.exists():
         for path in sorted(archive_dir.glob("T-*.md")):
             tasks.append(load_task(path, root, archived=True))
+    elif archive_dir.exists():
+        # A live follow-up may point at one immutable archived task. Resolve
+        # only those explicit identities so ordinary checks stay independent
+        # of total archive size while validation still sees the authority.
+        archived_ids = {
+            str(task.frontmatter.get("follow_up_of") or "")
+            for task in tasks
+            if ID_RE.fullmatch(str(task.frontmatter.get("follow_up_of") or ""))
+        }
+        for task_id in sorted(archived_ids - {task.id for task in tasks}):
+            path = _task_archive_locator(root, task_id)
+            if path is not None:
+                tasks.append(load_task(path, root, archived=True))
     return tasks
 
 
@@ -577,12 +654,15 @@ def resolve_live_task(root: Path, task_id: str) -> Task:
 
 def resolve_task(root: Path, task_id: str) -> Task:
     task_id = normalize_task_id(task_id)
-    matches = sorted((root / "docs/tasks").glob(f"{task_id}--*.md")) + sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md"))
-    if not matches:
-        raise RepoctlError(f"task not found: {task_id}", code="task_not_found")
+    matches = sorted((root / "docs/tasks").glob(f"{task_id}--*.md"))
     if len(matches) > 1:
         raise RepoctlError(f"ambiguous task id: {task_id}")
-    return load_task(matches[0], root)
+    if matches:
+        return load_task(matches[0], root)
+    archived = _task_archive_locator(root, task_id)
+    if archived is None:
+        raise RepoctlError(f"task not found: {task_id}", code="task_not_found")
+    return load_task(archived, root, archived=True)
 
 
 def append_task_log(root: Path, task_id: str, message: str) -> dict[str, Any]:
@@ -667,6 +747,7 @@ def update_task_discovery(
     *,
     query: str = "",
     reviewed: list[str] | None = None,
+    excluded: list[str] | None = None,
     chosen: list[str] | None = None,
     replace_chosen: list[str] | None = None,
     reason: str = "",
@@ -680,6 +761,7 @@ def update_task_discovery(
     if task.status not in LIVE:
         raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
     reviewed = reviewed or []
+    excluded = excluded or []
     chosen = chosen or []
     replace_chosen = replace_chosen or []
     result_refs = result_refs or []
@@ -694,7 +776,7 @@ def update_task_discovery(
             code="incomplete_discovery_result_evidence",
             path=task.rel_path,
         )
-    if not any([query.strip(), reviewed, chosen, replace_chosen, note.strip(), result_refs]):
+    if not any([query.strip(), reviewed, excluded, chosen, replace_chosen, note.strip(), result_refs]):
         raise RepoctlError("task discovery add requires scope evidence, a note, or selected result evidence", code="missing_discovery_input", path=task.rel_path)
 
     fields = task_discovery_values(task)
@@ -832,7 +914,7 @@ def update_task_discovery(
         ]
     else:
         episode_result_selections = previous_result_selections
-    reviewed_values = _dedupe_preserve([*episode_reviewed, *reviewed])
+    reviewed_values = _dedupe_preserve([*episode_reviewed, *reviewed, *excluded])
     chosen_values = _dedupe_preserve(replace_chosen) if replace_chosen else _dedupe_preserve([*previous_chosen, *chosen])
     note_values = _dedupe_preserve([*episode_notes, *([note] if note.strip() else [])])
     result_selection_by_text = {
@@ -841,7 +923,7 @@ def update_task_discovery(
     }
     result_selections = [result_selection_by_text[key] for key in sorted(result_selection_by_text)]
     if target is not None:
-        for label, values in (("reviewed", reviewed_values), ("chosen", chosen_values)):
+        for label, values in (("reviewed", reviewed_values), ("excluded", excluded), ("chosen", chosen_values)):
             normalized_paths = [_normalize_discovery_path(value) for value in values]
             invalid_paths = [value for value, normalized in zip(values, normalized_paths, strict=True) if not normalized]
             if invalid_paths:
@@ -901,6 +983,19 @@ def update_task_discovery(
             "Execution Log",
             f"- {utc_stamp()}: scope changed: removed {', '.join(removed) or 'none'}; added {', '.join(added) or 'none'}; reason={reason.strip()}",
         )
+    outcome_state = update_outcome_state(
+        root,
+        task_id=task.id,
+        target=target,
+        query=query_values[-1] if query_values else "",
+        episode_id=incoming_episode_id or active_episode_id,
+        starts_new_episode=starts_new_episode,
+        reviewed_paths=reviewed_values,
+        excluded_paths=excluded,
+        chosen_paths=chosen_values,
+        result_receipt=receipt if result_refs else None,
+        result_selections=requested_selections,
+    )
     return {
         "task": task,
         "text": text,
@@ -909,6 +1004,10 @@ def update_task_discovery(
             "candidate_query_history": query_values,
             "candidate_files_reviewed": reviewed_values,
             "chosen_files": chosen_values,
+            "excluded_files": [
+                str(item.get("identity", {}).get("path") or "")
+                for item in (outcome_state.get("active_episode") or {}).get("excluded", [])
+            ],
             "notes": note_values,
             "selected_result_evidence": [selection.to_dict() for selection in result_selections],
         },
@@ -956,13 +1055,51 @@ def update_task_discovery(
             "candidate_query_count": len(query_values),
             "reviewed_file_count": len(reviewed_values),
             "chosen_file_count": len(chosen_values),
+            "excluded_file_count": len((outcome_state.get("active_episode") or {}).get("excluded", [])),
             "note_count": len(note_values),
             "selected_result_evidence_count": len(result_selections),
         },
+        "state_writes": [
+            (outcome_state_path(root, task.id), serialize_outcome_state(outcome_state)),
+        ],
     }
 
 
-def discovery_scope_delta(task: Task, target: RepoTarget, changes: list[ChangedEntry]) -> dict[str, list[str]]:
+def record_task_verification_outcome(
+    root: Path,
+    task_id: str,
+    *,
+    status: str,
+    evidence_ref: str,
+    subject_refs: list[str],
+    claim_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    task = resolve_live_task(root, task_id)
+    if task.status not in LIVE:
+        raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
+    state = add_discovery_verification_record(
+        root,
+        task_id=task.id,
+        target=_target_for_task(root, task),
+        status=status,
+        evidence_ref=evidence_ref,
+        subject_refs=subject_refs,
+        claim_ids=claim_ids or [],
+    )
+    return {
+        "task": task,
+        "state": state,
+        "state_writes": [(outcome_state_path(root, task.id), serialize_outcome_state(state))],
+    }
+
+
+def discovery_scope_delta(
+    task: Task,
+    target: RepoTarget,
+    changes: list[ChangedEntry],
+    *,
+    observed_committed_changes: list[ChangedEntry] | None = None,
+) -> dict[str, list[str]]:
     values = task_discovery_values(task).get("Chosen files", [])
     prefix = f"{target.display_path.rstrip('/')}/"
     chosen: set[str] = set()
@@ -973,11 +1110,13 @@ def discovery_scope_delta(task: Task, target: RepoTarget, changes: list[ChangedE
         if normalized:
             chosen.add(normalized)
     actual = set(_entry_mutation_paths(changes))
+    observed_committed = set(_entry_mutation_paths(observed_committed_changes or []))
     return {
         "actual_paths": sorted(actual),
+        "observed_committed_paths": sorted(observed_committed),
         "chosen_paths": sorted(chosen),
         "unchosen_actual_paths": sorted(actual - chosen),
-        "unused_chosen_paths": sorted(chosen - actual),
+        "unused_chosen_paths": sorted(chosen - actual - observed_committed),
     }
 
 
@@ -1006,6 +1145,197 @@ def _baseline_path(root: Path, task_id: str) -> Path:
 
 def _completion_receipt_path(root: Path, task_id: str) -> Path:
     return _state_dir(root) / "completions" / f"{task_id}.json"
+
+
+def archive_locator_path(root: Path, task_id: str) -> Path:
+    if not isinstance(task_id, str) or ID_RE.fullmatch(task_id) is None:
+        raise ValueError("invalid archive locator identity")
+    return _state_dir(root) / "archive" / f"{task_id}.json"
+
+
+def archive_locator_text(task_id: str, task_path: str) -> str:
+    if (
+        not isinstance(task_id, str)
+        or not isinstance(task_path, str)
+        or ID_RE.fullmatch(task_id) is None
+        or not task_path.startswith("docs/archive/tasks/")
+        or not _valid_receipt_task_path(task_path, task_id=task_id)
+    ):
+        raise ValueError("invalid archive locator identity")
+    return json.dumps(
+        {
+            "schema": "repoctl.task.archive",
+            "schema_version": ARCHIVE_LOCATOR_SCHEMA_VERSION,
+            "task_id": task_id,
+            "task_path": task_path,
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+
+
+def parse_archive_locator(text: str, *, task_id: str) -> str:
+    locator = json.loads(text)
+    task_path = str(locator.get("task_path") or "") if isinstance(locator, dict) else ""
+    if (
+        not isinstance(locator, dict)
+        or set(locator) != {"schema", "schema_version", "task_id", "task_path"}
+        or locator.get("schema") != "repoctl.task.archive"
+        or type(locator.get("schema_version")) is not int
+        or locator["schema_version"] != ARCHIVE_LOCATOR_SCHEMA_VERSION
+        or locator.get("task_id") != task_id
+        or not task_path.startswith("docs/archive/tasks/")
+        or not _valid_receipt_task_path(task_path, task_id=task_id)
+    ):
+        raise ValueError("invalid archive locator identity")
+    return task_path
+
+
+def _contained_regular_file(root: Path, path: Path, directory: Path) -> bool:
+    """Accept a file only when every workspace-local component is non-symlinked."""
+
+    try:
+        relative = path.relative_to(root)
+        current = root
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                return False
+        root_resolved = root.resolve(strict=True)
+        directory_resolved = directory.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+        resolved.relative_to(directory_resolved)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return path.is_file()
+
+
+def validate_workspace_write_path(root: Path, path: Path, *, boundary: Path) -> None:
+    """Reject writes whose existing parent chain escapes or traverses a symlink."""
+
+    try:
+        relative = path.relative_to(root)
+        boundary.relative_to(root)
+        path.relative_to(boundary)
+        if path.is_symlink():
+            raise ValueError
+        root_resolved = root.resolve(strict=True)
+        boundary_resolved = boundary.resolve(strict=False)
+        boundary_resolved.relative_to(root_resolved)
+        current = root
+        for part in relative.parts[:-1]:
+            current /= part
+            if current.is_symlink():
+                raise ValueError
+            if current.exists():
+                current.resolve(strict=True).relative_to(root_resolved)
+        parent_resolved = path.parent.resolve(strict=False)
+        parent_resolved.relative_to(root_resolved)
+        parent_resolved.relative_to(boundary_resolved)
+    except (OSError, ValueError, RuntimeError) as exc:
+        rel = path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
+        raise RepoctlError(
+            "workspace state write path escapes its canonical directory or crosses a symlink",
+            code="unsafe_workspace_write_path",
+            path=rel,
+        ) from exc
+
+
+def _task_archive_locator(root: Path, task_id: str) -> Path | None:
+    """Resolve one archived task through fixed per-task machine state."""
+
+    if ID_RE.fullmatch(task_id) is None:
+        return None
+    task_path = ""
+    locator_path = archive_locator_path(root, task_id)
+    if locator_path.exists() or locator_path.is_symlink():
+        if not _contained_regular_file(root, locator_path, _state_dir(root) / "archive"):
+            return None
+        try:
+            task_path = parse_archive_locator(locator_path.read_text(encoding="utf-8"), task_id=task_id)
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+    else:
+        receipt_path = _completion_receipt_path(root, task_id)
+        if not _contained_regular_file(root, receipt_path, _state_dir(root) / "completions"):
+            return None
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(receipt, dict) or receipt.get("task_id") != task_id:
+            return None
+        try:
+            _completion_receipt_repo_id(receipt_path, root, receipt)
+            if (
+                receipt.get("status") != "done"
+                or not isinstance(receipt.get("content_sha256"), str)
+                or not _valid_sha256(str(receipt.get("content_sha256") or ""))
+                or not isinstance(receipt.get("changed_entries"), list)
+                or not isinstance(receipt.get("repo_evidence"), dict)
+                or not isinstance(receipt.get("verification"), dict)
+            ):
+                return None
+        except RepoctlError:
+            return None
+        task_path = completion_receipt_task_path(receipt)
+    if not _valid_receipt_task_path(task_path, task_id=task_id) or not task_path.startswith("docs/archive/tasks/"):
+        return None
+    path = root / task_path
+    if not _contained_regular_file(root, path, root / "docs/archive/tasks"):
+        return None
+    try:
+        task = load_task(path, root, archived=True)
+    except (OSError, UnicodeError, RepoctlError):
+        return None
+    if task.id != task_id or task.status not in NON_LIVE:
+        return None
+    return path
+
+
+def archive_locator_writes(root: Path, moves: list[tuple[Path, Path]], tasks: list[Task]) -> list[tuple[Path, str]]:
+    """Bind each archive move to one immutable, fixed-path lookup record."""
+
+    tasks_by_path = {task.path: task for task in tasks}
+    writes: list[tuple[Path, str]] = []
+    for source, target in moves:
+        validate_workspace_write_path(root, target, boundary=root / "docs/archive/tasks")
+        if target.exists() or target.is_symlink():
+            raise RepoctlError(
+                "archive task target already exists and will not be overwritten",
+                code="archive_task_conflict",
+                path=target.relative_to(root).as_posix(),
+            )
+        task = tasks_by_path.get(source)
+        if task is None:
+            raise RepoctlError(
+                "archive move has no source task identity",
+                code="archive_locator_source_missing",
+                path=source.relative_to(root).as_posix(),
+            )
+        task_path = target.relative_to(root).as_posix()
+        locator_path = archive_locator_path(root, task.id)
+        validate_workspace_write_path(root, locator_path, boundary=_state_dir(root) / "archive")
+        locator_text = archive_locator_text(task.id, task_path)
+        if locator_path.exists() or locator_path.is_symlink():
+            try:
+                existing = locator_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise RepoctlError(
+                    "archive locator is unreadable",
+                    code="archive_locator_conflict",
+                    path=locator_path.relative_to(root).as_posix(),
+                ) from exc
+            if locator_path.is_symlink() or existing != locator_text:
+                raise RepoctlError(
+                    "archive locator conflicts with the requested archive move",
+                    code="archive_locator_conflict",
+                    path=locator_path.relative_to(root).as_posix(),
+                )
+        writes.append((locator_path, locator_text))
+    return writes
 
 
 def _completion_receipt_path_problem(root: Path, path: Path) -> Problem | None:
@@ -1156,6 +1486,10 @@ def _repository_resume_projection(root: Path, task: Task) -> dict[str, Any]:
             "head_state": _repo_state_projection(head_state),
             "baseline_available": bool(delta.get("baseline_available")),
             "change_records": records,
+            "observed_committed_changes": [
+                _entry_to_dict(entry)
+                for entry in delta.get("observed_committed_changes", [])
+            ],
             "baseline_conflicts": sorted(str(value) for value in delta.get("baseline_conflicts", []) if str(value)),
             "child_attributed_changes": sorted(
                 child_changes,
@@ -1187,9 +1521,88 @@ def _repository_resume_projection(root: Path, task: Task) -> dict[str, Any]:
     return {"scope": "workspace_repositories", "repositories": repositories}
 
 
+def _child_completion_receipt_projection(root: Path, child: Task) -> dict[str, Any]:
+    path = _completion_receipt_path(root, child.id)
+    rel = path.relative_to(root).as_posix()
+    present = path.exists() or path.is_symlink()
+    if not present:
+        return {
+            "path": rel,
+            "present": False,
+            "content_sha256": "",
+            "resolution": {"status": "missing_receipt"},
+        }
+    if path_problem := _completion_receipt_path_problem(root, path):
+        return {
+            "path": rel,
+            "present": True,
+            "content_sha256": "",
+            "resolution": {
+                "status": "invalid_receipt_path",
+                "code": path_problem.code,
+            },
+        }
+    try:
+        receipt_bytes = path.read_bytes()
+    except OSError:
+        return {
+            "path": rel,
+            "present": True,
+            "content_sha256": "",
+            "resolution": {"status": "unreadable_receipt"},
+        }
+    receipt_sha256 = _sha256_bytes(receipt_bytes)
+    try:
+        data = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {
+            "path": rel,
+            "present": True,
+            "content_sha256": receipt_sha256,
+            "resolution": {"status": "unreadable_receipt"},
+        }
+    declared_path = str(data.get("task_path_at_completion") or "") if isinstance(data, dict) else ""
+    resolution = _resolve_receipt_artifact(
+        root,
+        child.id,
+        declared_path,
+        receipt_path=rel,
+        receipt_sha256=receipt_sha256,
+    )
+    return {
+        "path": rel,
+        "present": True,
+        "content_sha256": receipt_sha256,
+        "resolution": resolution.input_identity(),
+    }
+
+
+def _direct_child_lifecycle_projection(root: Path, task: Task) -> list[dict[str, Any]]:
+    children = [
+        candidate
+        for candidate in load_tasks(root, include_archived=False)
+        if candidate.parent == task.id
+    ]
+    return [
+        {
+            "id": child.id,
+            "status": child.status,
+            "path": child.rel_path,
+            "completion_receipt": _child_completion_receipt_projection(root, child),
+        }
+        for child in sorted(children, key=lambda candidate: (candidate.id, candidate.rel_path))
+    ]
+
+
 def task_resume_input_digests(root: Path, task: Task) -> dict[str, str]:
+    outcome_state = load_outcome_state(root, task.id)
     section_digests = {
-        "discovery": digest_data({"section": _normalized_task_section_body(task, "Discovery")}),
+        "discovery": digest_data(
+            {
+                "section": _normalized_task_section_body(task, "Discovery"),
+                "outcome_state_digest": str((outcome_state or {}).get("state_digest") or ""),
+            }
+        ),
         "execution_log": digest_data({"section": _normalized_task_section_body(task, "Execution Log")}),
         "verification": digest_data({"section": _normalized_task_section_body(task, "Verification")}),
     }
@@ -1197,6 +1610,7 @@ def task_resume_input_digests(root: Path, task: Task) -> dict[str, str]:
         "task_contract": _task_contract_digest(task),
         **section_digests,
         "repository": digest_data(_repository_resume_projection(root, task)),
+        "direct_children": digest_data(_direct_child_lifecycle_projection(root, task)),
     }
 
 
@@ -1212,10 +1626,11 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
     }
     if set(data) != expected_keys:
         raise RepoctlError("task resume binding has invalid fields", code="task_resume_binding_invalid", path=rel)
+    schema_version = data.get("schema_version")
     if (
         data.get("schema") != "repoctl.task.resume_binding"
-        or type(data.get("schema_version")) is not int
-        or data.get("schema_version") != RESUME_BINDING_SCHEMA_VERSION
+        or type(schema_version) is not int
+        or schema_version not in {LEGACY_RESUME_BINDING_SCHEMA_VERSION, RESUME_BINDING_SCHEMA_VERSION}
     ):
         raise RepoctlError("task resume binding has invalid schema", code="task_resume_binding_invalid", path=rel)
     if str(data.get("task_id") or "") != task_id:
@@ -1224,6 +1639,8 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
         raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
     input_digests = data.get("input_digests")
     expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository"}
+    if schema_version == RESUME_BINDING_SCHEMA_VERSION:
+        expected_input_keys.add("direct_children")
     if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
         raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)
     if any(not _valid_sha256(str(value or "")) for value in input_digests.values()):
@@ -1371,7 +1788,7 @@ def task_handoff_observation(
         }
     changed_inputs = [
         key
-        for key in ("task_contract", "discovery", "execution_log", "verification", "repository")
+        for key in ("task_contract", "discovery", "execution_log", "verification", "repository", "direct_children")
         if str(bound_digests.get(key) or "") != str(current_digests.get(key) or "")
     ]
     reason_codes = [f"{key}_changed" for key in changed_inputs]
@@ -1413,21 +1830,22 @@ def completion_receipt_task_path(receipt: dict[str, Any]) -> str:
     return value if ID_RE.match(task_id) and _valid_receipt_task_path(value, task_id=task_id) else ""
 
 
-def _completion_receipt_artifact_candidates(root: Path, task_id: str, task_path: str) -> list[Path]:
+def _completion_receipt_artifact_candidates(
+    root: Path,
+    task_id: str,
+    task_path: str,
+    *,
+    audit_history: bool = False,
+) -> list[Path]:
     if not ID_RE.match(task_id) or not _valid_receipt_task_path(task_path, task_id=task_id):
         return []
-    candidates = [
-        root / task_path,
-        *sorted((root / "docs/tasks").glob(f"{task_id}--*.md")),
-        *sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")),
-    ]
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate not in seen:
-            seen.add(candidate)
-            unique.append(candidate)
-    return unique
+    declared = root / task_path
+    archived = _task_archive_locator(root, task_id)
+    candidates = [declared, *([archived] if archived is not None and archived != declared else [])]
+    if audit_history:
+        candidates.extend(sorted((root / "docs/tasks").glob(f"{task_id}--*.md")))
+        candidates.extend(sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")))
+    return list(dict.fromkeys(candidates))
 
 
 def _resolve_receipt_artifact(
@@ -1437,8 +1855,14 @@ def _resolve_receipt_artifact(
     *,
     receipt_path: str = "",
     receipt_sha256: str = "",
+    audit_history: bool = False,
 ) -> CompletionReceiptArtifactResolution:
-    candidates = _completion_receipt_artifact_candidates(root, task_id, value)
+    candidates = _completion_receipt_artifact_candidates(
+        root,
+        task_id,
+        value,
+        audit_history=audit_history,
+    )
     candidate_paths = tuple(candidate.relative_to(root).as_posix() for candidate in candidates)
     if not candidates:
         return CompletionReceiptArtifactResolution(
@@ -1543,6 +1967,7 @@ def _completion_receipt_schema_version(data: dict[str, Any], *, rel: str) -> int
             data.get("schema_version"),
             supported=(
                 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION,
+                TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
                 COMPLETION_RECEIPT_SCHEMA_VERSION,
             ),
         )
@@ -1775,7 +2200,7 @@ def _validate_completion_receipt(
     completed_at = data.get("completed_at")
     if not isinstance(task_id, str):
         raise RepoctlError(f"task completion receipt has invalid identity: {rel}", code="invalid_completion_receipt", path=rel)
-    if schema_version == COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
         valid_completion_stamp = isinstance(completed_at, str) and _valid_utc_stamp(completed_at)
     else:
         valid_completion_stamp = "completed_at" not in data or (
@@ -1827,7 +2252,7 @@ def _validate_completion_receipt(
     if len(set(entries)) != len(entries):
         raise RepoctlError(f"task completion receipt has duplicate changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
     _validate_receipt_fingerprint_manifest(rel=rel, data=data, repo_evidence=repo_evidence, entries=entries)
-    if schema_version == COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
         started_at = data.get("started_at")
         completed_event_at = data.get("completed_event_at")
         if not isinstance(started_at, str) or not _valid_event_stamp(started_at):
@@ -1841,6 +2266,22 @@ def _validate_completion_receipt(
             repo_evidence=repo_evidence,
             entries=entries,
             ownership=ownership,
+        )
+    outcome = data.get("discovery_outcome")
+    if schema_version == COMPLETION_RECEIPT_SCHEMA_VERSION:
+        try:
+            validate_completion_outcome(outcome)
+        except ValueError as exc:
+            raise RepoctlError(
+                f"task completion receipt has invalid Discovery outcome: {rel}",
+                code="invalid_completion_receipt",
+                path=rel,
+            ) from exc
+    elif outcome is not None:
+        raise RepoctlError(
+            f"legacy task completion receipt must not invent Discovery outcome facts: {rel}",
+            code="invalid_completion_receipt",
+            path=rel,
         )
     return CompletionReceiptArtifact(
         receipt=data,
@@ -1911,6 +2352,7 @@ def collect_completion_receipt_collection(
             task_path,
             receipt_path=rel,
             receipt_sha256=_sha256_bytes(receipt_bytes),
+            audit_history=True,
         )
         resolutions.append(resolution)
         try:
@@ -1986,13 +2428,28 @@ def completion_receipt_artifact_for_task(
     *,
     task_id: str,
     repo_id: str | None = None,
+    audit_history: bool = False,
 ) -> tuple[CompletionReceiptArtifact | None, list[Problem]]:
     """Return one validated receipt with its unique current task artifact identity."""
     path, receipt, receipt_text, problems = _completion_receipt_data_for_task(root, task_id=task_id, repo_id=repo_id)
     if path is None or receipt is None or problems:
         return None, problems
     try:
-        return _validate_completion_receipt(path, root, receipt, receipt_text=receipt_text), []
+        resolution = _resolve_receipt_artifact(
+            root,
+            str(receipt.get("task_id") or ""),
+            str(receipt.get("task_path_at_completion") or ""),
+            receipt_path=path.relative_to(root).as_posix(),
+            receipt_sha256=_sha256_text(receipt_text),
+            audit_history=audit_history,
+        )
+        return _validate_completion_receipt(
+            path,
+            root,
+            receipt,
+            receipt_text=receipt_text,
+            artifact_resolution=resolution,
+        ), []
     except RepoctlError as exc:
         rel = path.relative_to(root).as_posix()
         return None, [Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel)]
@@ -2367,7 +2824,7 @@ def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
             _decode_repo_baseline_record(root, path, item, state_version=state_version)
             for item in raw_repositories
         ]
-        identities = [(record["repo_id"], record["repo_path"], record["git_toplevel"]) for record in repositories]
+        identities = [(record["repo_id"], record["repo_path"]) for record in repositories]
         if len(set(identities)) != len(identities):
             raise _invalid_task_baseline(root, path)
         ownership = _decode_task_baseline_ownership(
@@ -2779,7 +3236,7 @@ def _done_descendant_completion_receipts(
 ) -> tuple[list[tuple[Task, dict[str, Any]]], list[Problem]]:
     if _repo_scoped_task(task):
         return [], []
-    children = children_by_parent(load_tasks(root))
+    children = children_by_parent(load_tasks(root, include_archived=False))
     stack = list(children.get(task.id, []))
     seen = {task.id}
     done: list[tuple[Task, dict[str, Any]]] = []
@@ -2814,14 +3271,9 @@ def _done_descendant_completion_receipts(
             )
             continue
         if not receipt_path.is_file():
-            problems.append(
-                Problem(
-                    "error",
-                    "child_completion_receipt_missing",
-                    "done child task is missing its completion receipt",
-                    child.rel_path,
-                )
-            )
+            # Legacy/manual done children can remain under docs/tasks without a
+            # machine receipt. They contribute no repository ownership evidence;
+            # parent completion validates only receipts that actually exist.
             continue
         try:
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -3123,7 +3575,8 @@ def _descendant_claims_by_path(
         entries = [_receipt_changed_entry(item, rel=receipt_path) for item in receipt.get("changed_entries", [])]
         mutation_paths = set(_entry_mutation_paths(entries))
         evidence_paths.update(mutation_paths)
-        if receipt.get("schema_version") != COMPLETION_RECEIPT_SCHEMA_VERSION:
+        schema_version = receipt.get("schema_version")
+        if schema_version == LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION:
             legacy_claims, legacy_problems, legacy_paths = _legacy_descendant_path_claims(
                 root,
                 child=child,
@@ -3169,24 +3622,171 @@ def _repository_target_identity_problem(
 ) -> Problem | None:
     expected_repo_path = str(baseline.get("repo_path") or "")
     expected_repo_id = str(baseline.get("repo_id") or "")
-    expected_toplevel = str(baseline.get("git_toplevel") or "")
-    try:
-        current_toplevel = target.root_path.resolve().as_posix()
-    except OSError:
-        current_toplevel = target.root_path.as_posix()
     if (
         expected_repo_path != target.display_path
         or (expected_repo_id and expected_repo_id != target.id)
-        or not expected_toplevel
-        or expected_toplevel != current_toplevel
     ):
         return Problem(
             "error",
             "repo_target_changed_since_start",
-            "task baseline and current repository target do not match",
+            "task baseline and current logical repository identity do not match",
             target.display_path,
         )
     return None
+
+
+def _repository_transition_observation(
+    root: Path,
+    *,
+    target: RepoTarget,
+    baseline: dict[str, Any] | None,
+    worktree_changes: list[ChangedEntry],
+    repo_git: RepoGitState | None = None,
+) -> RepositoryTransitionObservation:
+    expected_repo_id = str((baseline or {}).get("repo_id") or target.id)
+    expected_repo_path = str((baseline or {}).get("repo_path") or target.display_path)
+    historical_git_toplevel = str((baseline or {}).get("git_toplevel") or "")
+    start_head = str((baseline or {}).get("head") or (baseline or {}).get("start_head") or "")
+    current_head = ""
+    committed_changes: tuple[ChangedEntry, ...] = ()
+    problems: list[Problem] = []
+    state = repo_git or repo_git_state(root, target)
+
+    if baseline is None:
+        if state.available:
+            current_head, state = repo_git_head(root, target)
+        return RepositoryTransitionObservation(
+            repo_id=expected_repo_id,
+            repo_path=expected_repo_path,
+            historical_git_toplevel=historical_git_toplevel,
+            start_head="",
+            current_head=current_head,
+            lineage=RepositoryLineageStatus.BASELINE_MISSING,
+            committed_changes=(),
+            worktree_changes=tuple(sorted(set(worktree_changes))),
+            repo_git=state,
+        )
+
+    if identity_problem := _repository_target_identity_problem(target=target, baseline=baseline):
+        problems.append(identity_problem)
+        return RepositoryTransitionObservation(
+            repo_id=expected_repo_id,
+            repo_path=expected_repo_path,
+            historical_git_toplevel=historical_git_toplevel,
+            start_head=start_head,
+            current_head="",
+            lineage=RepositoryLineageStatus.IDENTITY_MISMATCH,
+            committed_changes=(),
+            worktree_changes=tuple(sorted(set(worktree_changes))),
+            repo_git=state,
+            problems=tuple(problems),
+        )
+
+    if not state.available:
+        problems.append(
+            Problem(
+                "error",
+                state.problem_code or "repo_git_unavailable",
+                f"cannot observe repository transition: {state.reason}",
+                state.repo_path or target.display_path,
+            )
+        )
+        return RepositoryTransitionObservation(
+            repo_id=expected_repo_id,
+            repo_path=expected_repo_path,
+            historical_git_toplevel=historical_git_toplevel,
+            start_head=start_head,
+            current_head="",
+            lineage=RepositoryLineageStatus.UNAVAILABLE,
+            committed_changes=(),
+            worktree_changes=tuple(sorted(set(worktree_changes))),
+            repo_git=state,
+            problems=tuple(problems),
+        )
+
+    current_head, head_state = repo_git_head(root, target)
+    state = head_state
+    if not head_state.available:
+        problems.append(
+            Problem(
+                "error",
+                head_state.problem_code or "repo_commit_range_unavailable",
+                f"cannot observe current repository HEAD: {head_state.reason}",
+                head_state.repo_path or target.display_path,
+            )
+        )
+        lineage = RepositoryLineageStatus.UNAVAILABLE
+    elif not start_head:
+        problems.append(
+            Problem(
+                "error",
+                "repo_commit_range_unavailable",
+                "task baseline has no recorded repository start HEAD",
+                target.display_path,
+            )
+        )
+        lineage = RepositoryLineageStatus.UNAVAILABLE
+    elif current_head == start_head:
+        lineage = RepositoryLineageStatus.SAME_HEAD
+    else:
+        is_ancestor, ancestry_state = repo_is_ancestor(
+            root,
+            ancestor=start_head,
+            descendant=current_head,
+            target=target,
+        )
+        if not ancestry_state.available:
+            problems.append(
+                Problem(
+                    "error",
+                    ancestry_state.problem_code or "repo_commit_range_unavailable",
+                    f"cannot compare repository transition history: {ancestry_state.reason}",
+                    ancestry_state.repo_path or target.display_path,
+                )
+            )
+            lineage = RepositoryLineageStatus.UNAVAILABLE
+        elif not is_ancestor:
+            problems.append(
+                Problem(
+                    "error",
+                    "repo_history_rewritten",
+                    "current repository history is not descended from the task start HEAD",
+                    target.display_path,
+                )
+            )
+            lineage = RepositoryLineageStatus.REWRITTEN
+        else:
+            lineage = RepositoryLineageStatus.DESCENDANT
+            committed, range_state = repo_commit_range_entries(
+                root,
+                base=start_head,
+                head=current_head,
+                target=target,
+            )
+            if not range_state.available:
+                problems.append(
+                    Problem(
+                        "error",
+                        range_state.problem_code or "repo_commit_range_unavailable",
+                        f"cannot observe committed repository transition: {range_state.reason}",
+                        range_state.repo_path or target.display_path,
+                    )
+                )
+            else:
+                committed_changes = tuple(sorted(set(committed)))
+
+    return RepositoryTransitionObservation(
+        repo_id=expected_repo_id,
+        repo_path=expected_repo_path,
+        historical_git_toplevel=historical_git_toplevel,
+        start_head=start_head,
+        current_head=current_head,
+        lineage=lineage,
+        committed_changes=committed_changes,
+        worktree_changes=tuple(sorted(set(worktree_changes))),
+        repo_git=state,
+        problems=tuple(problems),
+    )
 
 
 def _repository_baseline_problem(
@@ -3195,35 +3795,13 @@ def _repository_baseline_problem(
     target: RepoTarget,
     baseline: dict[str, Any],
 ) -> Problem | None:
-    if identity_problem := _repository_target_identity_problem(target=target, baseline=baseline):
-        return identity_problem
-    start_head = str(baseline.get("head") or baseline.get("start_head") or "")
-    current_head, head_state = repo_git_head(root, target)
-    if not start_head or not head_state.available:
-        return Problem(
-            "error",
-            "root_evidence_incomplete",
-            "parent repository history cannot be observed",
-            target.display_path,
-        )
-    if start_head == "<unborn>":
-        return None
-    if current_head == "<unborn>":
-        return Problem(
-            "error",
-            "repository_history_diverged",
-            "current repository no longer contains the parent start history",
-            target.display_path,
-        )
-    is_ancestor, ancestry_state = repo_is_ancestor(root, ancestor=start_head, descendant=current_head, target=target)
-    if not ancestry_state.available or not is_ancestor:
-        return Problem(
-            "error",
-            "repository_history_diverged",
-            "current repository history is not descended from the parent start state",
-            target.display_path,
-        )
-    return None
+    observation = _repository_transition_observation(
+        root,
+        target=target,
+        baseline=baseline,
+        worktree_changes=[],
+    )
+    return observation.problems[0] if observation.problems else None
 
 
 def _parent_path_states(
@@ -3553,50 +4131,14 @@ def repo_changes_since_task_start(
                         )
                     continue
                 matched_current_paths.add(matched.display_path)
-                start_head = str(record.get("start_head") or "")
-                current_head, head_state = repo_git_head(root, matched)
-                if not head_state.available:
-                    integrity_problems.append(
-                        Problem(
-                            "error",
-                            head_state.problem_code or "repo_git_unavailable",
-                            f"cannot observe parent repository HEAD: {head_state.reason}",
-                            head_state.repo_path or matched.display_path,
-                        )
-                    )
-                elif current_head != start_head:
-                    committed, range_state = repo_commit_range_entries(
-                        root,
-                        base=start_head,
-                        head=current_head,
-                        target=matched,
-                    )
-                    if not range_state.available:
-                        integrity_problems.append(
-                            Problem(
-                                "error",
-                                range_state.problem_code or "repo_commit_range_unavailable",
-                                f"cannot observe committed repository changes: {range_state.reason}",
-                                range_state.repo_path or matched.display_path,
-                            )
-                        )
-                    else:
-                        observed_committed_changes.extend(
-                            (
-                                entry[0],
-                                f"{repo_path}/{entry[1]}",
-                                f"{repo_path}/{entry[2]}" if entry[2] else "",
-                            )
-                            for entry in committed
-                        )
                 current, current_state = repo_changed_entries(root, matched)
                 if not current_state.available:
                     integrity_problems.append(
                         Problem(
                             "error",
-                            "repository_history_diverged",
-                            f"cannot observe parent repository history: {current_state.reason}",
-                            matched.display_path,
+                            current_state.problem_code or "repo_git_unavailable",
+                            f"cannot observe current repository changes: {current_state.reason}",
+                            current_state.repo_path or matched.display_path,
                         )
                     )
                     current = []
@@ -3610,8 +4152,22 @@ def repo_changes_since_task_start(
                     **record,
                     "state_version": baseline.get("state_version"),
                 }
-                if history_problem := _repository_baseline_problem(root, target=matched, baseline=selected_baseline):
-                    integrity_problems.append(history_problem)
+                observation = _repository_transition_observation(
+                    root,
+                    target=matched,
+                    baseline=selected_baseline,
+                    worktree_changes=current,
+                    repo_git=current_state,
+                )
+                integrity_problems.extend(observation.problems)
+                observed_committed_changes.extend(
+                    (
+                        entry[0],
+                        f"{repo_path}/{entry[1]}",
+                        f"{repo_path}/{entry[2]}" if entry[2] else "",
+                    )
+                    for entry in observation.committed_changes
+                )
                 current_fingerprints, _fingerprint_state = _current_baseline_fingerprints(
                     root,
                     baseline=selected_baseline,
@@ -3753,11 +4309,21 @@ def repo_changes_since_task_start(
                 git_state.repo_path or target.display_path,
             )
         )
-    baseline = _read_repo_baseline(root, task_id) if git_state.available else None
+    baseline = _read_repo_baseline(root, task_id)
     if baseline is None:
         changes, attributed_changes = attribute(target, current, None)
+        observation = _repository_transition_observation(
+            root,
+            target=target,
+            baseline=None,
+            worktree_changes=changes,
+            repo_git=git_state,
+        )
+        integrity_problems.extend(observation.problems)
         return complete({
             "changes": changes,
+            "observed_committed_changes": list(observation.committed_changes),
+            "repository_observation": observation.to_dict(),
             "baseline_available": False,
             "baseline_count": 0,
             "current_count": len(current),
@@ -3767,11 +4333,9 @@ def repo_changes_since_task_start(
             "ownership": {},
             "child_attributed_changes": attributed_changes,
             "child_attributed_count": len(attributed_changes),
-            "repo_git": git_state,
+            "repo_git": observation.repo_git,
         })
     baseline_entries = baseline["entries"]
-    if history_problem := _repository_baseline_problem(root, target=target, baseline=baseline):
-        integrity_problems.append(history_problem)
     baseline_fingerprints = baseline["path_fingerprints"]
     baseline_paths = set(_entry_mutation_paths(baseline_entries))
     current_paths = set(_entry_mutation_paths(current))
@@ -3813,11 +4377,21 @@ def repo_changes_since_task_start(
     )
     raw_changes = list(changes)
     changes, attributed_changes = attribute(target, raw_changes, baseline)
+    observation = _repository_transition_observation(
+        root,
+        target=target,
+        baseline=baseline,
+        worktree_changes=changes,
+        repo_git=git_state,
+    )
+    integrity_problems.extend(observation.problems)
     remaining_paths = set(_entry_mutation_paths(changes))
     baseline_only_conflicts = baseline_conflicts - current_paths
     entry_conflicts = baseline_conflicts & current_paths & remaining_paths
     return complete({
         "changes": changes,
+        "observed_committed_changes": list(observation.committed_changes),
+        "repository_observation": observation.to_dict(),
         "baseline_available": True,
         "baseline_count": len(baseline_entries),
         "current_count": len(current),
@@ -3829,7 +4403,7 @@ def repo_changes_since_task_start(
         "current_path_fingerprints": current_fingerprints,
         "child_attributed_changes": attributed_changes,
         "child_attributed_count": len(attributed_changes),
-        "repo_git": git_state,
+        "repo_git": observation.repo_git,
     })
 
 
@@ -4042,7 +4616,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         raise RepoctlError(f"task finish would create non-monotonic Execution Log timestamps; {timestamp_problem}", code="execution_log_timestamp_order", path=task.rel_path)
     if not verification.text.strip():
         raise RepoctlError("verification evidence must contain the commands run and their results", code="empty_verification_file", path=verification.source_path or task.rel_path)
-    all_tasks = load_tasks(root)
+    all_tasks = load_tasks(root, include_archived=False)
     children = children_by_parent(all_tasks)
     live_children = [child for child in children.get(task.id, []) if child.status in LIVE]
     if live_children:
@@ -4099,8 +4673,11 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
                 code="transition_evidence_incomplete",
                 path=task.rel_path,
             )
+    discovery_outcome = completion_outcome_projection(root, task.id)
     receipt_schema_version = (
         COMPLETION_RECEIPT_SCHEMA_VERSION
+        if discovery_outcome is not None and path_transitions is not None and _valid_event_stamp(started_at)
+        else TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION
         if path_transitions is not None and _valid_event_stamp(started_at)
         else LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION
     )
@@ -4108,6 +4685,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     text = _finalize_handoff(text, status="done", new_path=new_path, receipt_path=receipt_rel, evidence_mode=evidence_mode.value, copy=copy)
     if moves:
         archive_texts[root / new_path] = text
+    archive_writes = archive_locator_writes(root, moves, all_tasks)
     changed_entries = [_entry_to_dict(entry) for entry in (repo_delta or {}).get("changes", [])]
     repo_evidence = {
         "mode": evidence_mode.value,
@@ -4129,7 +4707,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
             "scope": (repo_delta or {}).get("scope") or {},
         },
     }
-    if receipt_schema_version == COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if receipt_schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
         repo_evidence["path_transitions"] = path_transitions
     receipt = {
         "schema": "repoctl.task.completion",
@@ -4144,10 +4722,22 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         "repo_evidence": repo_evidence,
         "verification": verification_metadata,
     }
-    if receipt_schema_version == COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if receipt_schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
         receipt["started_at"] = started_at
         receipt["completed_event_at"] = finish_event_timestamp
-    receipt_writes.append((receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"))
+    if discovery_outcome is not None:
+        receipt["discovery_outcome"] = discovery_outcome
+    receipt_text = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    receipt_writes.append((receipt_path, receipt_text))
+    catalogue_writes = prepare_completion_sidecar_writes(
+        root,
+        receipt=receipt,
+        receipt_path=receipt_rel,
+        receipt_text=receipt_text,
+        artifact_path=new_path,
+        artifact_text=text,
+    )
+    receipt_writes.extend(catalogue_writes.writes)
     return {
         "task": task,
         "text": text,
@@ -4158,8 +4748,9 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         "archive_texts": archive_texts,
         "truncated": bool(verification_metadata["truncated"]),
         "receipt_path": receipt_path,
-        "receipt_text": json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        "receipt_text": receipt_text,
         "receipt_writes": receipt_writes,
+        "archive_writes": archive_writes,
         "receipt": receipt,
     }
 
@@ -4175,7 +4766,7 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) ->
         raise RepoctlError(f"task cancel would create non-monotonic Execution Log timestamps; {timestamp_problem}")
     if not verification.text.strip():
         raise RepoctlError("verification file must contain the cancellation reason and any verification evidence")
-    all_tasks = load_tasks(root)
+    all_tasks = load_tasks(root, include_archived=False)
     children = children_by_parent(all_tasks)
     live_children = [child for child in children.get(task.id, []) if child.status in LIVE]
     if live_children:
@@ -4210,6 +4801,7 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) ->
     text = _finalize_handoff(text, status="canceled", new_path=new_path, receipt_path="", evidence_mode="none", copy=copy)
     if moves:
         archive_texts[root / new_path] = text
+    archive_writes = archive_locator_writes(root, moves, all_tasks)
     return {
         "task": task,
         "text": text,
@@ -4220,6 +4812,7 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) ->
         "archive_texts": archive_texts,
         "truncated": bool(verification_metadata["truncated"]),
         "receipt_writes": receipt_writes,
+        "archive_writes": archive_writes,
     }
 
 
@@ -4619,15 +5212,16 @@ def create_task_file(
     _validate_parent_id(parent)
     _validate_parent_id(follow_up_of)
     if parent:
-        parent_matches = [task for task in load_tasks(root) if not task.archived and task.id == parent]
-        if not parent_matches:
+        try:
+            parent_task = resolve_live_task(root, parent)
+        except RepoctlError as exc:
+            if exc.code != "task_not_found":
+                raise
             raise RepoctlError(f"parent task not found: {parent}", code="parent_task_not_found")
-        if parent_matches[0].status not in LIVE or not is_parent_task(parent_matches[0]):
+        if parent_task.status not in LIVE or not is_parent_task(parent_task):
             raise RepoctlError(f"parent task is not a live coordinating parent: {parent}", code="parent_target_not_coordinator")
     if follow_up_of:
-        previous = next((task for task in load_tasks(root) if task.id == follow_up_of), None)
-        if previous is None:
-            raise RepoctlError(f"follow-up task not found: {follow_up_of}", code="task_not_found")
+        previous = resolve_task(root, follow_up_of)
         if previous.status not in NON_LIVE:
             raise RepoctlError("--follow-up-of requires a done or canceled task", code="follow_up_task_still_live", path=previous.rel_path)
     slug = slug or _slug_from_title(title)
@@ -4644,7 +5238,7 @@ def create_task_file(
         task_id = f"T-{ts_file}"
         rel_path = Path("docs/tasks") / f"{task_id}--{slug}.md"
         path = root / rel_path
-        if list((root / "docs/tasks").glob(f"{task_id}--*.md")) or list((root / "docs/archive/tasks").glob(f"{task_id}--*.md")):
+        if list((root / "docs/tasks").glob(f"{task_id}--*.md")) or archive_locator_path(root, task_id).exists():
             time.sleep(1)
             continue
         if path.exists():

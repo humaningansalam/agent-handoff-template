@@ -171,6 +171,7 @@ class ContextGraphAnchorCandidate:
     score_breakdown: dict[str, float] = field(default_factory=dict)
     query_term_matches: dict[str, tuple[str, ...]] = field(default_factory=dict)
     graph_support: dict[str, Any] = field(default_factory=dict)
+    component_ids: tuple[str, ...] = ()
     related_record_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -200,6 +201,8 @@ class ContextGraphAnchorCandidate:
             }
         if self.graph_support:
             data["graph_support"] = self.graph_support
+        if self.component_ids:
+            data["component_ids"] = list(self.component_ids)
         return data
 
 
@@ -224,29 +227,22 @@ class ContextAnchorResolution:
 
 
 @dataclass(frozen=True)
-class ContextOwnerProjection:
-    """One producer-owned ordering for actionable Context paths."""
+class ContextEvidenceProjection:
+    """Evidence ranking plus bounded compact visibility, never edit authority."""
 
-    anchor_resolution: ContextAnchorResolution | None = None
-    source_order: tuple[str, ...] = ()
-    selected_source_paths: tuple[str, ...] = ()
-    test_order: tuple[str, ...] = ()
-    selected_test_paths: tuple[str, ...] = ()
+    ranked_source_paths: tuple[str, ...] = ()
+    visible_source_paths: tuple[str, ...] = ()
+    ranked_test_paths: tuple[str, ...] = ()
+    visible_test_paths: tuple[str, ...] = ()
+    prior_outcome_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "anchor_paths": [
-                candidate.anchor.path
-                for candidate in (
-                    self.anchor_resolution.anchors
-                    if self.anchor_resolution is not None
-                    else ()
-                )
-            ],
-            "source_order": list(self.source_order),
-            "selected_source_paths": list(self.selected_source_paths),
-            "test_order": list(self.test_order),
-            "selected_test_paths": list(self.selected_test_paths),
+            "ranked_source_paths": list(self.ranked_source_paths),
+            "visible_source_paths": list(self.visible_source_paths),
+            "ranked_test_paths": list(self.ranked_test_paths),
+            "visible_test_paths": list(self.visible_test_paths),
+            "prior_outcome_paths": list(self.prior_outcome_paths),
         }
 
 
@@ -326,12 +322,13 @@ class ContextBundle:
     knowledge_results: list[dict[str, Any]] = field(default_factory=list)
     groups: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     relationship_candidates: list[dict[str, Any]] = field(default_factory=list)
+    component_crossings: list[dict[str, Any]] = field(default_factory=list)
     graph_seed_refs: list[ContextGraphSeedRef] = field(default_factory=list)
     preselection_graph_support_by_path: dict[str, dict[str, Any]] = field(
         default_factory=dict,
         repr=False,
     )
-    owner_projection: ContextOwnerProjection | None = field(
+    evidence_projection: ContextEvidenceProjection | None = field(
         default=None,
         repr=False,
     )
@@ -355,6 +352,9 @@ class ContextBundle:
             "relationship_candidates": self.relationship_candidates,
             "relationship_candidate_count": len(self.relationship_candidates),
             "relationship_candidates_truncated": False,
+            "component_crossings": self.component_crossings,
+            "component_crossing_count": len(self.component_crossings),
+            "component_crossings_truncated": False,
             "graph_seed_refs": [seed.to_dict() for seed in self.graph_seed_refs],
             "selection": self.selection,
         }
@@ -373,9 +373,10 @@ class ContextBundle:
             knowledge_results=self.knowledge_results,
             groups=self.groups,
             relationship_candidates=self.relationship_candidates,
+            component_crossings=self.component_crossings,
             graph_seed_refs=self.graph_seed_refs,
             preselection_graph_support_by_path=self.preselection_graph_support_by_path,
-            owner_projection=self.owner_projection,
+            evidence_projection=self.evidence_projection,
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,

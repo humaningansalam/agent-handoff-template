@@ -576,11 +576,38 @@ def test_task_finish_rolls_back_archive_when_board_write_fails(tmp_path: Path, m
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
     assert "docs/tasks/T-20260609184046Z--alpha.md" in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     assert not (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").exists()
+    assert not (tmp_path / "docs/tasks/.repoctl-state/archive/T-20260609184046Z.json").exists()
 
 
+def test_task_finish_rejects_conflicting_archive_locator(tmp_path: Path, monkeypatch, capsys) -> None:
+    task_id = "T-20260609184046Z"
+    task_path = f"docs/tasks/{task_id}--alpha.md"
+    write_workspace(tmp_path)
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="doing"))
+    verification = tmp_path / "verification.md"
+    verification.write_text("ok\n", encoding="utf-8")
+    locator_path = tmp_path / f"docs/tasks/.repoctl-state/archive/{task_id}.json"
+    locator_path.parent.mkdir(parents=True, exist_ok=True)
+    conflicting_locator = {
+        "schema": "repoctl.task.archive",
+        "schema_version": 1,
+        "task_id": task_id,
+        "task_path": f"docs/archive/tasks/{task_id}--different.md",
+    }
+    locator_path.write_text(
+        json.dumps(conflicting_locator, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
 
-
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "archive_locator_conflict"
+    assert (tmp_path / task_path).exists()
+    assert task_path in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
+    assert not (tmp_path / f"docs/archive/tasks/{task_id}--alpha.md").exists()
+    assert json.loads(locator_path.read_text(encoding="utf-8")) == conflicting_locator
 
 def test_task_finish_ignores_unrelated_full_repo_metadata_errors(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
