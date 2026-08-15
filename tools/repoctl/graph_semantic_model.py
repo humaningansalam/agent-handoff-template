@@ -180,10 +180,13 @@ def parse_provider_semantics(
         caller = str(raw.get("caller_provider_symbol_id") or "")
         callee = str(raw.get("callee_provider_symbol_id") or "")
         language = fixed_language or str(raw.get("language") or "")
+        scope = raw.get("scope")
         if anchor is None:
             raise ProviderOutputError("call anchor is outside the eligible analysis set")
         if caller not in symbol_ids or callee not in symbol_ids or language not in allowed_languages:
             raise ProviderOutputError("call identity is unbound or uses an unsupported language")
+        if scope not in {"same_file", "cross_file_import"}:
+            raise ProviderOutputError("call scope is missing or unsupported")
         key = (caller, callee, anchor.start_line, anchor.start_col)
         if key in seen:
             raise ProviderOutputError("provider output contains duplicate calls")
@@ -195,7 +198,7 @@ def parse_provider_semantics(
                 caller_provider_symbol_id=caller,
                 callee_provider_symbol_id=callee,
                 language=language,
-                scope=str(raw.get("scope") or "same_file"),
+                scope=scope,
                 anchor=anchor,
             )
         )

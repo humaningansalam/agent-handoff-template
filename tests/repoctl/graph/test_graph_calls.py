@@ -44,7 +44,7 @@ def test_typescript_provider_rejects_malformed_success_payload(
         observed_effects=[],
     )
     compiler = tmp_path / "typescript.js"
-    duplicate_symbol = {
+    symbol = {
         "provider_symbol_id": "src/app.ts:value",
         "language": "typescript",
         "kind": "variable",
@@ -76,8 +76,16 @@ def test_typescript_provider_rejects_malformed_success_payload(
                     "provider": "typescript_compiler",
                     "analyzed_paths": ["src/app.ts"],
                     "failed_paths": [],
-                    "symbols": [duplicate_symbol, duplicate_symbol],
-                    "calls": [],
+                    "symbols": [symbol],
+                    "calls": [
+                        {
+                            "caller_provider_symbol_id": "src/app.ts:value",
+                            "callee_provider_symbol_id": "src/app.ts:value",
+                            "language": "typescript",
+                            "scope": "network_magic",
+                            "anchor": symbol["anchor"],
+                        }
+                    ],
                 }
             ),
             stderr="",
