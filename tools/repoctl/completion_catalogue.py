@@ -436,7 +436,11 @@ def prepare_completion_sidecar_writes(
     paths = completion_catalogue_paths(root, repo_id)
     head = _load_head(paths, repo_id=repo_id, policy=policy, required=False)
     if head is None:
-        _require_no_orphaned_materialization(paths)
+        _require_no_or_empty_materialization(
+            paths,
+            repo_id=repo_id,
+            policy=policy,
+        )
         sequence = 1
         previous_event_id = ""
         previous_prefix_digest = EMPTY_PREFIX_DIGEST
@@ -1578,16 +1582,48 @@ def _validate_head_sidecar(paths: CompletionCataloguePaths, head: Mapping[str, A
         _unavailable(CompletionCatalogueUnavailableReason.PREFIX_MISMATCH, "completion catalogue head prefix does not match its event", root=root, path=paths.head)
 
 
-def _require_no_orphaned_materialization(paths: CompletionCataloguePaths) -> None:
+def _require_no_or_empty_materialization(
+    paths: CompletionCataloguePaths,
+    *,
+    repo_id: str,
+    policy: CompletionCataloguePolicy,
+) -> None:
     root = paths.directory.parents[3]
     materialized = [paths.catalogue, paths.checkpoint, *paths.projection_slots]
-    if any(path.exists() or path.is_symlink() for path in materialized):
-        _unavailable(
-            CompletionCatalogueUnavailableReason.GAP,
-            "completion catalogue materialization exists without an ingress head; run explicit rebuild",
-            root=root,
-            path=paths.directory,
-        )
+    if not any(path.exists() or path.is_symlink() for path in materialized):
+        return
+    checkpoint, projection = _load_committed_projection(
+        paths,
+        repo_id=repo_id,
+        policy=policy,
+        allow_empty=False,
+    )
+    expected_projection = _empty_projection(repo_id, policy)
+    expected_checkpoint = _checkpoint_data(
+        repo_id,
+        policy,
+        sequence=0,
+        event_id="",
+        prefix_digest=EMPTY_PREFIX_DIGEST,
+        catalogue_size=0,
+        prefix_window_digest=_digest_bytes(b""),
+        projection_slot=0,
+        projection_digest=_digest_data(expected_projection),
+    )
+    if (
+        checkpoint == expected_checkpoint
+        and projection == expected_projection
+        and paths.catalogue.is_file()
+        and not paths.catalogue.is_symlink()
+        and paths.catalogue.stat().st_size == 0
+    ):
+        return
+    _unavailable(
+        CompletionCatalogueUnavailableReason.GAP,
+        "completion catalogue materialization exists without an ingress head; run explicit rebuild",
+        root=root,
+        path=paths.directory,
+    )
 
 
 def _validate_event(

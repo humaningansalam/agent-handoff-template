@@ -6,10 +6,15 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
 
 from .code_index import CodeIndexEntry
-from .graph_semantic_model import PreciseCall, PreciseSymbol, ProviderFailure, SemanticProviderResult, SourceAnchor
+from .graph_semantic_model import (
+    ProviderFailure,
+    ProviderOutputError,
+    SemanticProviderResult,
+    parse_provider_coverage,
+    parse_provider_semantics,
+)
 from .repositories import RepoTarget
 
 
@@ -133,81 +138,6 @@ def csharp_analysis_units(repo: Path, paths: set[str]) -> dict[str, str]:
     return units
 
 
-def _anchor(data: Any, *, eligible_paths: set[str]) -> SourceAnchor | None:
-    if not isinstance(data, dict):
-        return None
-    path = str(data.get("path") or "")
-    if path not in eligible_paths:
-        return None
-    try:
-        values = [int(data[key]) for key in ("start_line", "start_col", "end_line", "end_col")]
-    except (KeyError, TypeError, ValueError):
-        return None
-    if values[0] < 1 or values[1] < 0 or values[2] < values[0] or values[3] < 0:
-        return None
-    return SourceAnchor(path, *values)
-
-
-def _symbols(data: Any, *, eligible_paths: set[str]) -> tuple[list[PreciseSymbol], set[str]]:
-    symbols: list[PreciseSymbol] = []
-    symbol_ids: set[str] = set()
-    if not isinstance(data, list):
-        return symbols, symbol_ids
-    for raw in data:
-        if not isinstance(raw, dict):
-            continue
-        anchor = _anchor(raw.get("anchor"), eligible_paths=eligible_paths)
-        provider_symbol_id = str(raw.get("provider_symbol_id") or "")
-        name = str(raw.get("name") or "")
-        if anchor is None or not provider_symbol_id or not name or provider_symbol_id in symbol_ids:
-            continue
-        symbols.append(
-            PreciseSymbol(
-                path=anchor.path,
-                provider=PROVIDER,
-                provider_symbol_id=provider_symbol_id,
-                language="csharp",
-                kind=str(raw.get("kind") or "symbol"),
-                name=name,
-                qualified_name=str(raw.get("qualified_name") or name),
-                anchor=anchor,
-            )
-        )
-        symbol_ids.add(provider_symbol_id)
-    return sorted(symbols, key=lambda item: item.provider_symbol_id), symbol_ids
-
-
-def _calls(data: Any, *, eligible_paths: set[str], symbol_ids: set[str]) -> list[PreciseCall]:
-    calls: list[PreciseCall] = []
-    seen: set[tuple[str, str, int, int]] = set()
-    if not isinstance(data, list):
-        return calls
-    for raw in data:
-        if not isinstance(raw, dict):
-            continue
-        anchor = _anchor(raw.get("anchor"), eligible_paths=eligible_paths)
-        caller = str(raw.get("caller_provider_symbol_id") or "")
-        callee = str(raw.get("callee_provider_symbol_id") or "")
-        if anchor is None or caller not in symbol_ids or callee not in symbol_ids:
-            continue
-        key = (caller, callee, anchor.start_line, anchor.start_col)
-        if key in seen:
-            continue
-        seen.add(key)
-        calls.append(
-            PreciseCall(
-                path=anchor.path,
-                provider=PROVIDER,
-                caller_provider_symbol_id=caller,
-                callee_provider_symbol_id=callee,
-                language="csharp",
-                scope=str(raw.get("scope") or "same_file"),
-                anchor=anchor,
-            )
-        )
-    return sorted(calls, key=lambda item: (item.caller_provider_symbol_id, item.callee_provider_symbol_id, item.anchor.start_line, item.anchor.start_col))
-
-
 def _unavailable(paths: tuple[str, ...], *, code: str, message: str) -> SemanticProviderResult:
     failures: tuple[ProviderFailure, ...] = ()
     if paths:
@@ -272,10 +202,20 @@ def build_csharp_semantics(
         return _unavailable(selected, code="csharp_provider_failed", message=f"Roslyn provider failed: {message}")
 
     eligible_paths = set(selected)
-    analyzed = tuple(sorted({str(path) for path in data.get("analyzed_paths", []) if str(path) in eligible_paths}))
-    failed = tuple(sorted(eligible_paths - set(analyzed)))
-    symbols, symbol_ids = _symbols(data.get("symbols"), eligible_paths=eligible_paths)
-    calls = _calls(data.get("calls"), eligible_paths=eligible_paths, symbol_ids=symbol_ids)
+    try:
+        analyzed, failed = parse_provider_coverage(data, eligible_paths=eligible_paths)
+        symbols, calls = parse_provider_semantics(
+            data,
+            provider=PROVIDER,
+            languages=("csharp",),
+            eligible_paths=eligible_paths,
+        )
+    except ProviderOutputError as exc:
+        return _unavailable(
+            selected,
+            code="csharp_provider_invalid_output",
+            message=f"Roslyn provider output is invalid: {exc}",
+        )
     failures: tuple[ProviderFailure, ...] = ()
     if failed:
         failures = (ProviderFailure(PROVIDER, "symbols,calls", "csharp_analysis_failed", "Roslyn analysis failed for one or more source files", failed),)

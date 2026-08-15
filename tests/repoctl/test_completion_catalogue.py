@@ -125,6 +125,72 @@ def _current_file_completion_key(root: Path, path: str) -> str:
     return versioned_completion_subject_key(subject["key"], subject["version_digest"])
 
 
+def _tamper_empty_checkpoint(root: Path, repo_id: str) -> tuple[Path, str]:
+    checkpoint_path = completion_catalogue_paths(root, repo_id).checkpoint
+    original = checkpoint_path.read_text(encoding="utf-8")
+    checkpoint = json.loads(original)
+    checkpoint["prefix_window_digest"] = "sha256:" + ("0" * 64)
+    checkpoint_path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return checkpoint_path, original
+
+
+def test_first_public_finish_can_follow_an_empty_history_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    task_id, _task_path, verification = _public_finish_fixture(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        slug="first-after-empty-rebuild",
+    )
+    assert main(["history", "rebuild", "--repo-id", "main", "--json"]) == 0
+    rebuilt = json.loads(capsys.readouterr().out)
+    assert rebuilt["data"]["last_sequence"] == 0
+
+    checkpoint_path, checkpoint_text = _tamper_empty_checkpoint(tmp_path, "main")
+
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["problems"][0]["code"] == "completion_catalogue_gap"
+    assert any(
+        action.get("command") == "./scripts/repoctl history rebuild --repo-id main --json"
+        for action in rejected["next_actions"]
+    )
+
+    checkpoint_path.write_text(checkpoint_text, encoding="utf-8")
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    finished = json.loads(capsys.readouterr().out)
+    assert (tmp_path / finished["data"]["new_path"]).is_file()
+    assert (tmp_path / finished["data"]["completion_receipt"]).is_file()
+    assert completion_catalogue_status(tmp_path, "main").status == "tail_pending"
+
+
+def test_workspace_finish_recovery_uses_the_workspace_history_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_workspace(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "create", "--area", "docs", "--start", "--slug", "workspace-docs", "Workspace docs", "--json"]) == 0
+    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
+    rebuild_completion_catalogue(tmp_path, "", receipt_artifacts=[])
+    _tamper_empty_checkpoint(tmp_path, "")
+    verification = tmp_path / "workspace-verification.md"
+    verification.write_text("- Checked workspace docs\n- Result: pass\n", encoding="utf-8")
+
+    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["data"]["repo_id"] == ""
+    assert any(
+        action.get("command") == "./scripts/repoctl history rebuild --workspace --json"
+        for action in rejected["next_actions"]
+    )
+
+
 def _receipt_file_completion_key(receipt: dict[str, object], path: str) -> str:
     outcome = receipt["discovery_outcome"]
     assert isinstance(outcome, dict)

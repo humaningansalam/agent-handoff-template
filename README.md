@@ -34,7 +34,50 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - multiple agent tools may operate in the same workspace
 - you want Graph, Context / Task Pack, Reviewed Knowledge, or llmwiki capabilities on a stable workspace contract
 
-## 60-second start
+## Prerequisites
+
+- Bash
+- Git
+- Python 3.11 or newer
+
+## Fresh adoption
+
+Run these commands from the workspace root. For one product repository, clone it directly into `repos/`; `repos/` itself is the product Git root and receives the reserved repo ID `main`.
+
+1. Clone the product repository and confirm its identity:
+   ```bash
+   git clone <product-repo-url> repos
+   ./scripts/repoctl repo list --json
+   ```
+2. Initialize the repo-local metadata store:
+   ```bash
+   ./scripts/repoctl meta init --repo-id main --json
+   ```
+3. Review `repos/.repometa/policy.json` and the generated shards. Apply deliberate project-specific policy changes as described in the metadata workflow, use `repoctl meta` for annotations and exclusions, then validate and commit the store in the product repository:
+   ```bash
+   ./scripts/repoctl meta check --repo-id main --json
+   cd repos
+   git add .repometa
+   git diff --cached -- .repometa
+   git commit -m "Initialize repoctl metadata"
+   cd ..
+   ```
+4. Initialize the empty Reviewed Knowledge projection:
+   ```bash
+   ./scripts/repoctl knowledge rebuild --repo-id main --json
+   ```
+5. Materialize the initial Graph:
+   ```bash
+   ./scripts/repoctl graph build --repo-id main --json
+   ```
+6. Create and start the first product task. A single configured repository is selected automatically:
+   ```bash
+   ./scripts/repoctl task create --start --json "First product change"
+   ```
+
+For a collection layout, place each product Git root at `repos/<name>/`, run `./scripts/repoctl repo adopt --all --json`, and replace `main` with the pinned repo ID in later commands.
+
+## Resume an existing workspace
 
 1. Read `AGENTS.md`
 2. Run `./scripts/repoctl task resume --json`

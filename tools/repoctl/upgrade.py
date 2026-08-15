@@ -65,6 +65,15 @@ def _sha256(value: str) -> str:
     return f"sha256:{value}"
 
 
+def _is_sha256_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
 def _canonical_entry_records(path: Path, *, relative_to: Path) -> list[dict[str, Any]]:
     paths = [path]
     if path.is_dir() and not path.is_symlink():
@@ -98,11 +107,16 @@ def _canonical_paths_digest(root: Path, paths: list[str]) -> str:
 
 
 def _canonical_tree_digest(path: Path) -> str:
+    digest, _records = _canonical_tree_snapshot(path)
+    return digest
+
+
+def _canonical_tree_snapshot(path: Path) -> tuple[str, list[dict[str, Any]]]:
     if not path.exists() and not path.is_symlink():
-        return ""
+        return "", []
     records = _canonical_entry_records(path, relative_to=path.parent)
     encoded = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return _sha256(_hash_bytes(encoded))
+    return _sha256(_hash_bytes(encoded)), records
 
 
 def _safe_rel(value: str) -> str:
@@ -677,7 +691,6 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
             {
                 "path": rel,
                 "backup_path": backup_path.relative_to(root).as_posix(),
-                "backup_digest": _sha256(_hash_file(backup_path)),
             }
         )
 
@@ -742,9 +755,19 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
             if isinstance(error, RepoctlError):
                 raise
             raise
+        backup_digest = ""
+        if backups:
+            backup_digest, backup_records = _canonical_tree_snapshot(backup_root)
+            content_digests = {
+                (backup_root.parent / str(record["path"])).relative_to(root).as_posix(): str(record["content_sha256"])
+                for record in backup_records
+                if record.get("kind") == "file"
+            }
+            for item in backups:
+                item["backup_digest"] = content_digests[str(item["backup_path"])]
         backup = {
             "path": backup_root.relative_to(root).as_posix(),
-            "recorded_digest": _canonical_tree_digest(backup_root) if backups else "",
+            "recorded_digest": backup_digest,
             "retention_status_at_creation": "manual_retention" if backups else "not_required",
         }
         try:
@@ -799,62 +822,252 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
     }
 
 
-def upgrade_status(root: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def _upgrade_backup_status(
+    root: Path,
+    *,
+    run_id: str,
+    backup: dict[str, Any] | None,
+    backups: list[Any],
+    check_contents: bool,
+) -> dict[str, str]:
+    expected_root_rel = (UPGRADE_STATE_REL / run_id / "backup").as_posix()
+    if not backups:
+        if backup is None:
+            return {
+                "path": "",
+                "recorded_digest": "",
+                "current_digest": "",
+                "retention_status_at_creation": "",
+                "availability": "not_required",
+            }
+        if (
+            backup.get("path") != expected_root_rel
+            or backup.get("recorded_digest") != ""
+            or backup.get("retention_status_at_creation") != "not_required"
+        ):
+            raise RepoctlError(
+                "upgrade receipt empty-backup metadata is invalid",
+                code="upgrade_receipt_invalid",
+                path=expected_root_rel,
+            )
+        return {
+            "path": expected_root_rel,
+            "recorded_digest": "",
+            "current_digest": "",
+            "retention_status_at_creation": "not_required",
+            "availability": "not_required",
+        }
+
+    modern = backup is not None
+    recorded_digest = backup.get("recorded_digest") if modern else ""
+    if modern and (
+        backup.get("path") != expected_root_rel
+        or not _is_sha256_digest(recorded_digest)
+        or backup.get("retention_status_at_creation") != "manual_retention"
+    ):
+        raise RepoctlError(
+            "upgrade receipt backup metadata is incomplete",
+            code="upgrade_receipt_invalid",
+            path=expected_root_rel,
+        )
+
+    individual_paths: list[Path] = []
+    expected_digests: dict[str, str] = {}
+    targets: set[str] = set()
+    for item in backups:
+        if not isinstance(item, dict):
+            raise RepoctlError(
+                "upgrade backup entry is not an object",
+                code="upgrade_receipt_invalid",
+                path=expected_root_rel,
+            )
+        target_value = item.get("path")
+        backup_path_value = item.get("backup_path")
+        if not isinstance(target_value, str) or not isinstance(backup_path_value, str):
+            raise RepoctlError(
+                "upgrade backup entry path is invalid",
+                code="upgrade_receipt_invalid",
+                path=expected_root_rel,
+            )
+        target_rel = _safe_rel(target_value)
+        if target_rel in targets:
+            raise RepoctlError(
+                "upgrade receipt contains duplicate backup targets",
+                code="upgrade_receipt_invalid",
+                path=target_rel,
+            )
+        targets.add(target_rel)
+        expected_item_rel = (UPGRADE_STATE_REL / run_id / "backup" / target_rel).as_posix()
+        if backup_path_value != expected_item_rel:
+            raise RepoctlError(
+                "upgrade backup path does not match its run and target",
+                code="upgrade_receipt_invalid",
+                path=backup_path_value or expected_root_rel,
+            )
+        backup_path = _assert_contained_path(
+            root,
+            backup_path_value,
+            code="upgrade_receipt_invalid",
+        )
+        if backup_path.exists() and not backup_path.is_file():
+            raise RepoctlError(
+                "upgrade backup is not a regular file",
+                code="upgrade_receipt_invalid",
+                path=backup_path_value,
+            )
+        if modern:
+            item_digest = item.get("backup_digest")
+            if not _is_sha256_digest(item_digest):
+                raise RepoctlError(
+                    "upgrade backup entry digest is invalid",
+                    code="upgrade_receipt_invalid",
+                    path=backup_path_value,
+                )
+            expected_digests[backup_path_value] = str(item_digest)
+        individual_paths.append(backup_path)
+
+    missing = any(not path.exists() for path in individual_paths)
+    if not modern:
+        return {
+            "path": "",
+            "recorded_digest": "",
+            "current_digest": "",
+            "retention_status_at_creation": "",
+            "availability": "missing" if missing else "digest_unavailable",
+        }
+
+    if not check_contents:
+        return {
+            "path": expected_root_rel,
+            "recorded_digest": str(recorded_digest),
+            "current_digest": "",
+            "retention_status_at_creation": "manual_retention",
+            "availability": "missing" if missing else "not_checked",
+        }
+
+    backup_root = _assert_contained_path(root, expected_root_rel, code="upgrade_receipt_invalid")
+    if not backup_root.exists():
+        availability = "missing"
+        current_digest = ""
+    elif not backup_root.is_dir():
+        raise RepoctlError(
+            "upgrade backup tree is not a directory",
+            code="upgrade_receipt_invalid",
+            path=expected_root_rel,
+        )
+    else:
+        current_digest, records = _canonical_tree_snapshot(backup_root)
+        actual_files = {
+            (backup_root.parent / str(record["path"])).relative_to(root).as_posix()
+            for record in records
+            if record.get("kind") == "file"
+        }
+        current_digests = {
+            (backup_root.parent / str(record["path"])).relative_to(root).as_posix(): str(record["content_sha256"])
+            for record in records
+            if record.get("kind") == "file"
+        }
+        expected_files = {item.relative_to(root).as_posix() for item in individual_paths}
+        entry_digests_match = all(
+            current_digests.get(path) == digest
+            for path, digest in expected_digests.items()
+        )
+        if missing:
+            availability = "missing"
+        elif entry_digests_match and actual_files == expected_files and current_digest == recorded_digest:
+            availability = "available"
+        else:
+            availability = "digest_mismatch"
+    return {
+        "path": expected_root_rel,
+        "recorded_digest": str(recorded_digest),
+        "current_digest": current_digest,
+        "retention_status_at_creation": "manual_retention",
+        "availability": availability,
+    }
+
+
+def upgrade_status(
+    root: Path,
+    *,
+    _check_backup_contents: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
     receipts: list[dict[str, Any]] = []
     problems: list[dict[str, str]] = []
     state_root = root / UPGRADE_STATE_REL
     if state_root.is_dir():
         for path in sorted(state_root.glob("*/receipt.json")):
             rel = path.relative_to(root).as_posix()
+
+            def add_invalid(message: str, problem_path: str = rel) -> None:
+                problems.append(
+                    {
+                        "severity": "error",
+                        "code": "upgrade_receipt_invalid",
+                        "message": message,
+                        "path": problem_path,
+                    }
+                )
+
             try:
-                receipt = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                problems.append({"severity": "error", "code": "upgrade_receipt_invalid", "message": str(exc), "path": rel})
+                receipt_path = _assert_contained_path(
+                    root,
+                    rel,
+                    code="upgrade_receipt_invalid",
+                    require_file=True,
+                )
+            except RepoctlError as exc:
+                add_invalid(str(exc), exc.path or rel)
+                continue
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                add_invalid(str(exc))
                 continue
             if not isinstance(receipt, dict):
-                problems.append({"severity": "error", "code": "upgrade_receipt_invalid", "message": "upgrade receipt is not an object", "path": rel})
+                add_invalid("upgrade receipt is not an object")
                 continue
-            backup = receipt.get("backup") if isinstance(receipt.get("backup"), dict) else {}
-            backups = receipt.get("backups") if isinstance(receipt.get("backups"), list) else []
-            backup_rel = str(backup.get("path") or "")
-            recorded_digest = str(backup.get("recorded_digest") or "")
-            retention_status = str(backup.get("retention_status_at_creation") or "")
-            availability = "not_required"
-            current_digest = ""
-            if backups:
-                if not backup_rel or not recorded_digest:
-                    problems.append(
-                        {
-                            "severity": "error",
-                            "code": "upgrade_receipt_invalid",
-                            "message": "upgrade receipt backup metadata is incomplete",
-                            "path": rel,
-                        }
-                    )
-                    availability = "invalid"
-                else:
-                    try:
-                        backup_path = _assert_contained_path(root, backup_rel, code="upgrade_receipt_invalid")
-                        if not backup_path.exists():
-                            availability = "missing"
-                        else:
-                            current_digest = _canonical_tree_digest(backup_path)
-                            availability = "available" if current_digest == recorded_digest else "digest_mismatch"
-                    except RepoctlError as exc:
-                        problems.append({"severity": "error", "code": exc.code, "message": str(exc), "path": exc.path or rel})
-                        availability = "invalid"
+            declared_run_id = receipt.get("run_id")
+            raw_backup = receipt.get("backup")
+            raw_backups = receipt.get("backups")
+            try:
+                parsed_run_id = datetime.strptime(declared_run_id, "%Y%m%d%H%M%SZ") if isinstance(declared_run_id, str) else None
+            except ValueError:
+                parsed_run_id = None
+            if (
+                parsed_run_id is None
+                or parsed_run_id.strftime("%Y%m%d%H%M%SZ") != declared_run_id
+                or declared_run_id != path.parent.name
+                or (raw_backup is not None and not isinstance(raw_backup, dict))
+                or not isinstance(raw_backups, list)
+            ):
+                add_invalid("upgrade receipt identity or backup shape is invalid")
+                continue
+            backup = raw_backup if isinstance(raw_backup, dict) else {}
+            backups = raw_backups
+            try:
+                backup_status = _upgrade_backup_status(
+                    root,
+                    run_id=declared_run_id,
+                    backup=raw_backup,
+                    backups=backups,
+                    check_contents=_check_backup_contents,
+                )
+            except RepoctlError as exc:
+                add_invalid(str(exc), exc.path or rel)
+                backup_status = {
+                    "path": str(backup.get("path") or ""),
+                    "recorded_digest": str(backup.get("recorded_digest") or ""),
+                    "current_digest": "",
+                    "retention_status_at_creation": str(backup.get("retention_status_at_creation") or ""),
+                    "availability": "invalid",
+                }
             receipts.append(
                 {
-                    "run_id": str(receipt.get("run_id") or path.parent.name),
+                    "run_id": declared_run_id,
                     "receipt_path": rel,
                     "source_content_digest": str(receipt.get("source_content_digest") or ""),
-                    "backup": {
-                        "path": backup_rel,
-                        "recorded_digest": recorded_digest,
-                        "current_digest": current_digest,
-                        "retention_status_at_creation": retention_status,
-                        "availability": availability,
-                    },
+                    "backup": backup_status,
                 }
             )
     latest = receipts[-1] if receipts else None

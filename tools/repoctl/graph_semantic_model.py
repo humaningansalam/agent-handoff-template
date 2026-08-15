@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -66,6 +67,150 @@ class PreciseCall:
             "scope": self.scope,
             "anchor": self.anchor.to_dict(),
         }
+
+
+class ProviderOutputError(ValueError):
+    pass
+
+
+def parse_provider_coverage(
+    data: object,
+    *,
+    eligible_paths: set[str],
+    analyzed_field: str = "analyzed_paths",
+    failed_field: str = "failed_paths",
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(data, dict):
+        raise ProviderOutputError("provider output must be an object")
+
+    parsed: list[tuple[str, ...]] = []
+    for field_name in (analyzed_field, failed_field):
+        raw_paths = data.get(field_name)
+        if not isinstance(raw_paths, list) or any(not isinstance(path, str) for path in raw_paths):
+            raise ProviderOutputError(f"{field_name} must be an array of paths")
+        paths = tuple(sorted(raw_paths))
+        if len(paths) != len(set(paths)) or not set(paths).issubset(eligible_paths):
+            raise ProviderOutputError(f"{field_name} contains duplicate or ineligible paths")
+        parsed.append(paths)
+
+    analyzed, failed = parsed
+    if set(analyzed) & set(failed) or set(analyzed) | set(failed) != eligible_paths:
+        raise ProviderOutputError("provider coverage must classify every eligible path exactly once")
+    return analyzed, failed
+
+
+def parse_provider_anchor(
+    data: object,
+    *,
+    eligible_paths: set[str],
+) -> SourceAnchor | None:
+    if not isinstance(data, dict):
+        return None
+    path = str(data.get("path") or "")
+    if path not in eligible_paths:
+        return None
+    try:
+        values = [
+            int(data[key])
+            for key in ("start_line", "start_col", "end_line", "end_col")
+        ]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if values[0] < 1 or values[1] < 0 or values[2] < values[0] or values[3] < 0:
+        return None
+    return SourceAnchor(path, *values)
+
+
+def parse_provider_semantics(
+    data: object,
+    *,
+    provider: str,
+    languages: Collection[str],
+    eligible_paths: set[str],
+) -> tuple[list[PreciseSymbol], list[PreciseCall]]:
+    symbols: list[PreciseSymbol] = []
+    calls: list[PreciseCall] = []
+    if not isinstance(data, dict):
+        raise ProviderOutputError("provider output must be an object")
+    symbol_ids: set[str] = set()
+    allowed_languages = frozenset(languages)
+    fixed_language = next(iter(allowed_languages)) if len(allowed_languages) == 1 else ""
+    raw_symbols = data.get("symbols")
+    raw_calls = data.get("calls")
+    if not isinstance(raw_symbols, list) or not isinstance(raw_calls, list):
+        raise ProviderOutputError("symbols and calls must be arrays")
+    for raw in raw_symbols:
+        if not isinstance(raw, dict):
+            raise ProviderOutputError("every symbol must be an object")
+        anchor = parse_provider_anchor(
+            raw.get("anchor"),
+            eligible_paths=eligible_paths,
+        )
+        provider_symbol_id = str(raw.get("provider_symbol_id") or "")
+        language = fixed_language or str(raw.get("language") or "")
+        name = str(raw.get("name") or "")
+        if anchor is None:
+            raise ProviderOutputError("symbol anchor is outside the eligible analysis set")
+        if not provider_symbol_id or language not in allowed_languages or not name:
+            raise ProviderOutputError("symbol identity is incomplete or uses an unsupported language")
+        if provider_symbol_id in symbol_ids:
+            raise ProviderOutputError("provider output contains duplicate symbol identities")
+        symbols.append(
+            PreciseSymbol(
+                path=anchor.path,
+                provider=provider,
+                provider_symbol_id=provider_symbol_id,
+                language=language,
+                kind=str(raw.get("kind") or "symbol"),
+                name=name,
+                qualified_name=str(raw.get("qualified_name") or name),
+                anchor=anchor,
+            )
+        )
+        symbol_ids.add(provider_symbol_id)
+
+    seen: set[tuple[str, str, int, int]] = set()
+    for raw in raw_calls:
+        if not isinstance(raw, dict):
+            raise ProviderOutputError("every call must be an object")
+        anchor = parse_provider_anchor(
+            raw.get("anchor"),
+            eligible_paths=eligible_paths,
+        )
+        caller = str(raw.get("caller_provider_symbol_id") or "")
+        callee = str(raw.get("callee_provider_symbol_id") or "")
+        language = fixed_language or str(raw.get("language") or "")
+        if anchor is None:
+            raise ProviderOutputError("call anchor is outside the eligible analysis set")
+        if caller not in symbol_ids or callee not in symbol_ids or language not in allowed_languages:
+            raise ProviderOutputError("call identity is unbound or uses an unsupported language")
+        key = (caller, callee, anchor.start_line, anchor.start_col)
+        if key in seen:
+            raise ProviderOutputError("provider output contains duplicate calls")
+        seen.add(key)
+        calls.append(
+            PreciseCall(
+                path=anchor.path,
+                provider=provider,
+                caller_provider_symbol_id=caller,
+                callee_provider_symbol_id=callee,
+                language=language,
+                scope=str(raw.get("scope") or "same_file"),
+                anchor=anchor,
+            )
+        )
+    return (
+        sorted(symbols, key=lambda item: item.provider_symbol_id),
+        sorted(
+            calls,
+            key=lambda item: (
+                item.caller_provider_symbol_id,
+                item.callee_provider_symbol_id,
+                item.anchor.start_line,
+                item.anchor.start_col,
+            ),
+        ),
+    )
 
 
 class RpcRoutineStatus(StrEnum):

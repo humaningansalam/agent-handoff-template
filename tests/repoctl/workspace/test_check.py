@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -163,7 +164,18 @@ def test_render_board_replaces_only_board_section() -> None:
     assert "## Backlog\n\n- keep" in rendered
 
 def test_repoctl_script_uses_system_python_without_workspace_residue(tmp_path: Path) -> None:
-    root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+    source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+    root = tmp_path / "workspace"
+    write_workspace(root)
+    (root / "scripts").mkdir()
+    shutil.copy2(source_root / "scripts/repoctl", root / "scripts/repoctl")
+    (root / "tools").mkdir()
+    shutil.copy2(source_root / "tools/__init__.py", root / "tools/__init__.py")
+    shutil.copytree(
+        source_root / "tools/repoctl",
+        root / "tools/repoctl",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
 
     def tree_snapshot() -> list[tuple[str, str, int, str]]:
         entries: list[tuple[str, str, int, str]] = []

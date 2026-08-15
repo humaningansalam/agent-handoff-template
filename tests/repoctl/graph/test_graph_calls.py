@@ -3,11 +3,14 @@ from tests.repoctl.graph.test_graph_build import _snapshot
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from tools.repoctl.cli import main
+from tools.repoctl.code_index import CodeIndexEntry
 from tools.repoctl.graph_model import file_id, symbol_id
 from tools.repoctl.graph_store import materialize_graph
-from tools.repoctl.repositories import require_repo_target
+from tools.repoctl.graph_typescript_provider import build_typescript_semantics
+from tools.repoctl.repositories import RepoTarget, require_repo_target
 from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
@@ -17,6 +20,86 @@ def _materialize(root: Path) -> None:
     snapshot, problems, _meta = materialize_graph(root, target=require_repo_target(root, repo_id="main"))
     assert snapshot is not None
     assert not [problem for problem in problems if problem.severity == "error"]
+
+
+def test_typescript_provider_rejects_malformed_success_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    source = repo / "src/app.ts"
+    source.parent.mkdir()
+    source.write_text("export const value = 1;\n", encoding="utf-8")
+    entry = CodeIndexEntry(
+        path="src/app.ts",
+        workspace_path="repos/src/app.ts",
+        language="typescript",
+        classification="source",
+        symbols=[],
+        imports=[],
+        calls=[],
+        deps=[],
+        observed_effects=[],
+    )
+    compiler = tmp_path / "typescript.js"
+    duplicate_symbol = {
+        "provider_symbol_id": "src/app.ts:value",
+        "language": "typescript",
+        "kind": "variable",
+        "name": "value",
+        "qualified_name": "value",
+        "anchor": {
+            "path": "src/app.ts",
+            "start_line": 1,
+            "start_col": 13,
+            "end_line": 1,
+            "end_col": 18,
+        },
+    }
+    monkeypatch.setattr(
+        "tools.repoctl.graph_typescript_provider._find_compiler",
+        lambda _repo, _entries: (compiler, "test"),
+    )
+    monkeypatch.setattr(
+        "tools.repoctl.graph_typescript_provider.shutil.which",
+        lambda command: "/usr/bin/node" if command == "node" else None,
+    )
+    monkeypatch.setattr(
+        "tools.repoctl.graph_typescript_provider.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "provider": "typescript_compiler",
+                    "analyzed_paths": ["src/app.ts"],
+                    "failed_paths": [],
+                    "symbols": [duplicate_symbol, duplicate_symbol],
+                    "calls": [],
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    result = build_typescript_semantics(
+        root=tmp_path,
+        target=RepoTarget(
+            id="main",
+            root_path=repo,
+            display_path="repos",
+            identity_source="reserved",
+        ),
+        entries=[entry],
+    )
+
+    assert result.symbol_analyzed_paths == ()
+    assert result.symbol_failed_paths == ("src/app.ts",)
+    assert [failure.code for failure in result.failures] == [
+        "typescript_provider_invalid_output"
+    ]
 
 
 def test_graph_resolves_same_file_python_calls(tmp_path: Path, monkeypatch, capsys) -> None:

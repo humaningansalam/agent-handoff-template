@@ -16,6 +16,7 @@ from .io import RepoctlError, atomic_write
 from .knowledge_projection import (
     apply_knowledge_projection_tail,
     empty_knowledge_projection,
+    knowledge_lifecycle_ambiguity_problems,
     knowledge_projection_path,
     load_knowledge_projection,
     verify_current_knowledge_projection,
@@ -3269,6 +3270,12 @@ def event_integrity_problems(
             problems.append(Problem("error", "knowledge_event_type_unknown", "knowledge event type is unknown", event_id))
     if not event_digests_valid:
         return problems
+    problems.extend(
+        knowledge_lifecycle_ambiguity_problems(
+            records=records,
+            events=inspected_events,
+        )
+    )
     for record in records:
         binding = _knowledge_approval_binding(
             record,

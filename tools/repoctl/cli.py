@@ -440,14 +440,21 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 add_completion_catalogue_recovery(
                     source="problems_or_warnings[].code" if code == catalogue_reason else "problems_or_warnings[].cause_code"
                 )
-        if code in {
+        knowledge_projection_problem_codes = {
             "knowledge_projection_unavailable",
             "knowledge_projection_schema_mismatch",
             "knowledge_projection_digest_mismatch",
             "knowledge_projection_tail_gap",
             "knowledge_projection_tail_digest_mismatch",
-        }:
-            add_knowledge_projection_recovery(source="problems_or_warnings[].code")
+        }
+        if code in knowledge_projection_problem_codes or cause_code in knowledge_projection_problem_codes:
+            add_knowledge_projection_recovery(
+                source=(
+                    "problems_or_warnings[].code"
+                    if code in knowledge_projection_problem_codes
+                    else "problems_or_warnings[].cause_code"
+                )
+            )
         if code == "missing_verification_file":
             add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
             add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --json")
@@ -576,6 +583,13 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "repo_ref_non_repo_area":
             add("Use a repo-scoped area and stable repo_id for repos/ work", command="./scripts/repoctl task create --area repo --repo-id <id> --slug <slug> \"<title>\" --json")
             add("Omit --repo-ref when no product repo is selected", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
+        elif code == "missing_repometa_policy":
+            repo_id = selected_repo_id()
+            add(
+                "Initialize repository metadata",
+                command=f"./scripts/repoctl meta init --repo-id {repo_id} --json",
+            )
+            add("Review repository metadata setup", path="docs/workflows/repo-metadata.md")
         elif code == "metadata_coverage_empty":
             add("Configure sparse metadata coverage", command="./scripts/repoctl meta set <path> --role <role> --purpose <purpose> --topic <topic> --json")
         elif code == "board_missing_live_task":
@@ -1647,6 +1661,13 @@ def _error_data(args: argparse.Namespace) -> dict[str, Any]:
     repo_id = str(getattr(args, "repo_id", "") or "")
     if task_id:
         data["task_id"] = task_id
+        if not repo_id:
+            try:
+                task = resolve_task(_workspace_root_or_cwd(), task_id)
+            except (OSError, RepoctlError):
+                pass
+            else:
+                data["repo_id"] = str(task.frontmatter.get("repo_id") or "")
     if repo_id:
         data["repo_id"] = repo_id
     return data
@@ -2972,6 +2993,10 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             repo_id = args.repo_id or ""
             if not title:
                 raise RepoctlError("task title is required")
+            if args.start and args.type == "task" and not area and not repo_id:
+                default_target = default_repo_target(root)
+                if default_target is not None:
+                    repo_id = default_target.id
             if args.backlog_id:
                 resolve_backlog_item(board_text, args.backlog_id)
                 if not args.slug:
@@ -6322,6 +6347,10 @@ def _upgrade_completion_history_status(
 def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
     layout = repo_layout(root)
     namespaces, namespace_problem_dicts = repository_state_namespaces(root)
+    _upgrade_receipts, upgrade_receipt_problem_dicts = upgrade_status(
+        root,
+        _check_backup_contents=False,
+    )
     layout_problem_dicts = repo_check_problems(layout)
     repository_runtime_uninitialized = (
         not layout.targets
@@ -6331,6 +6360,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
     )
     problems = [] if repository_runtime_uninitialized else _problems_from_dicts(layout_problem_dicts)
     problems.extend(_problems_from_dicts(namespace_problem_dicts))
+    problems.extend(_problems_from_dicts(upgrade_receipt_problem_dicts))
     configured_ids = {target.id for target in layout.targets}
     unbound_namespaces = unbound_repository_state_namespaces(namespaces, repo_ids=configured_ids)
     historical_unbound_namespaces = [
@@ -6377,20 +6407,42 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
         projection: dict[str, Any] = {}
         projection_problems: list[Problem] = []
         durable_record_count = int(record_data.get("record_count") or 0)
-        if durable_record_count and not _has_errors(record_problems):
+        projection_path = knowledge_projection_path(root, repo_id=target.id)
+        knowledge_store_initialized = (
+            (root / "docs/knowledge/records").exists()
+            or projection_path.exists()
+        )
+        if knowledge_store_initialized and not _has_errors(record_problems):
             projection, projection_problems = load_knowledge_projection(root, repo_id=target.id)
             checkpoint = projection.get("checkpoint") if isinstance(projection.get("checkpoint"), dict) else {}
+            durable_lifecycle_counts = {"current": 0, "deprecated": 0, "superseded": 0}
+            for record in record_data.get("records", []):
+                status = str(record.get("status") or "")
+                lifecycle = "current" if status in {"reviewed", "stale"} else status
+                if lifecycle in durable_lifecycle_counts:
+                    durable_lifecycle_counts[lifecycle] += 1
+            projection_lifecycle_counts = (
+                projection.get("lifecycle_counts")
+                if isinstance(projection.get("lifecycle_counts"), dict)
+                else {}
+            )
             if (
                 not projection_problems
-                and checkpoint.get("record_count") != durable_record_count
+                and (
+                    checkpoint.get("record_count") != durable_record_count
+                    or any(
+                        projection_lifecycle_counts.get(status) != count
+                        for status, count in durable_lifecycle_counts.items()
+                    )
+                )
             ):
                 projection_problems = [
                     Problem(
                         "error",
                         "knowledge_projection_unavailable",
-                        "knowledge projection record count does not match durable reviewed records; rebuild it explicitly",
-                        knowledge_projection_path(root, repo_id=target.id).relative_to(root).as_posix(),
-                        cause_code="cold_record_count_mismatch",
+                        "knowledge projection does not match durable reviewed Knowledge lifecycle; rebuild it explicitly",
+                        projection_path.relative_to(root).as_posix(),
+                        cause_code="cold_lifecycle_mismatch",
                     )
                 ]
         candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=target.id, pending_only=True)
@@ -6784,7 +6836,11 @@ def build_parser() -> argparse.ArgumentParser:
     task_create.add_argument("--owner", default="unassigned")
     task_create.add_argument("--parent", default="")
     task_create.add_argument("--repo-ref", default="", help="advisory repos/ branch or worktree hint; never selects a repository")
-    task_create.add_argument("--repo-id", default="", help="stable product repository id for repo-scoped work; defaults to main in single-repo workspaces")
+    task_create.add_argument(
+        "--repo-id",
+        default="",
+        help="stable product repository id for repo-scoped work; an unscoped --start task defaults to the only configured repository",
+    )
     task_create.add_argument("--backlog-id")
     task_create.add_argument("--follow-up-of", default="", help="create a new task linked to a completed task; completed tasks are immutable")
     task_create.add_argument("--start", action="store_true")

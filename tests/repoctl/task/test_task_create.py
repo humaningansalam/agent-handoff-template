@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.repoctl.task_lifecycle_helpers import init_committed_product_repo
 from tools.repoctl.cli import main
 
 
@@ -33,6 +34,23 @@ def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypa
     assert "Repository: `main`" in text
     assert "Repo ref hint: `repos`" in text
     assert 'document_language: "en"' in text
+
+
+def test_started_task_defaults_to_the_only_configured_repository(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_committed_product_repo(tmp_path / "repos", {"app.py": "value = 1\n"})
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--start", "--slug", "change-app", "Change app", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    task = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
+    state = json.loads(
+        (tmp_path / "docs/tasks/.repoctl-state" / f"{payload['data']['task_id']}.json").read_text(encoding="utf-8")
+    )
+    assert 'repo_id: "main"' in task
+    assert state["initial"]["repo_id"] == "main"
+    assert state["initial"]["repo_path"] == "repos"
 
 
 def test_task_create_uses_configured_korean_document_language(tmp_path: Path, monkeypatch, capsys) -> None:

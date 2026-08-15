@@ -10,9 +10,8 @@ from typing import Any
 
 from .code_index import CodeIndexEntry
 from .graph_semantic_model import (
-    PreciseCall,
-    PreciseSymbol,
     ProviderFailure,
+    ProviderOutputError,
     RpcInvocationContract,
     RpcInvocationFact,
     RpcParamsReasonCode,
@@ -21,7 +20,9 @@ from .graph_semantic_model import (
     RpcRoutineStatus,
     RpcSchemaSelection,
     SemanticProviderResult,
-    SourceAnchor,
+    parse_provider_anchor,
+    parse_provider_coverage,
+    parse_provider_semantics,
 )
 from .io import atomic_write
 from .repositories import RepoTarget
@@ -124,81 +125,6 @@ def _helper_executable(root: Path, dart: str) -> tuple[Path | None, str]:
     return executable, ""
 
 
-def _anchor(data: Any, *, eligible_paths: set[str]) -> SourceAnchor | None:
-    if not isinstance(data, dict):
-        return None
-    path = str(data.get("path") or "")
-    if path not in eligible_paths:
-        return None
-    try:
-        values = [int(data[key]) for key in ("start_line", "start_col", "end_line", "end_col")]
-    except (KeyError, TypeError, ValueError):
-        return None
-    if values[0] < 1 or values[1] < 0 or values[2] < values[0] or values[3] < 0:
-        return None
-    return SourceAnchor(path, *values)
-
-
-def _symbols(data: Any, *, eligible_paths: set[str]) -> tuple[list[PreciseSymbol], set[str]]:
-    symbols: list[PreciseSymbol] = []
-    symbol_ids: set[str] = set()
-    if not isinstance(data, list):
-        return symbols, symbol_ids
-    for raw in data:
-        if not isinstance(raw, dict):
-            continue
-        anchor = _anchor(raw.get("anchor"), eligible_paths=eligible_paths)
-        provider_symbol_id = str(raw.get("provider_symbol_id") or "")
-        name = str(raw.get("name") or "")
-        if anchor is None or not provider_symbol_id or not name or provider_symbol_id in symbol_ids:
-            continue
-        symbols.append(
-            PreciseSymbol(
-                path=anchor.path,
-                provider=PROVIDER,
-                provider_symbol_id=provider_symbol_id,
-                language="dart",
-                kind=str(raw.get("kind") or "symbol"),
-                name=name,
-                qualified_name=str(raw.get("qualified_name") or name),
-                anchor=anchor,
-            )
-        )
-        symbol_ids.add(provider_symbol_id)
-    return sorted(symbols, key=lambda item: item.provider_symbol_id), symbol_ids
-
-
-def _calls(data: Any, *, eligible_paths: set[str], symbol_ids: set[str]) -> list[PreciseCall]:
-    calls: list[PreciseCall] = []
-    seen: set[tuple[str, str, int, int]] = set()
-    if not isinstance(data, list):
-        return calls
-    for raw in data:
-        if not isinstance(raw, dict):
-            continue
-        anchor = _anchor(raw.get("anchor"), eligible_paths=eligible_paths)
-        caller = str(raw.get("caller_provider_symbol_id") or "")
-        callee = str(raw.get("callee_provider_symbol_id") or "")
-        if anchor is None or caller not in symbol_ids or callee not in symbol_ids:
-            continue
-        key = (caller, callee, anchor.start_line, anchor.start_col)
-        if key in seen:
-            continue
-        seen.add(key)
-        calls.append(
-            PreciseCall(
-                path=anchor.path,
-                provider=PROVIDER,
-                caller_provider_symbol_id=caller,
-                callee_provider_symbol_id=callee,
-                language="dart",
-                scope=str(raw.get("scope") or "same_file"),
-                anchor=anchor,
-            )
-        )
-    return sorted(calls, key=lambda item: (item.caller_provider_symbol_id, item.callee_provider_symbol_id, item.anchor.start_line, item.anchor.start_col))
-
-
 def _rpc_invocations(
     data: Any,
     *,
@@ -214,7 +140,10 @@ def _rpc_invocations(
     for raw in data:
         if not isinstance(raw, dict):
             return None, "rpc invocation must be an object"
-        anchor = _anchor(raw.get("anchor"), eligible_paths=selected_paths)
+        anchor = parse_provider_anchor(
+            raw.get("anchor"),
+            eligible_paths=selected_paths,
+        )
         path = str(raw.get("path") or "")
         if anchor is None or path != anchor.path or path not in selected_paths:
             return None, "rpc invocation path or anchor is outside the selected analysis set"
@@ -389,14 +318,26 @@ def build_dart_semantics(
 
     eligible_paths = set(paths)
     selected_paths = set(selected)
-    analyzed = tuple(sorted({str(path) for path in data.get("analyzed_paths", []) if str(path) in selected_paths}))
-    failed = tuple(sorted(selected_paths - set(analyzed)))
-    rpc_analyzed = tuple(sorted({str(path) for path in data.get("rpc_analyzed_paths", []) if str(path) in selected_paths}))
-    rpc_failed = tuple(sorted({str(path) for path in data.get("rpc_failed_paths", []) if str(path) in selected_paths}))
-    if set(rpc_analyzed) & set(rpc_failed) or set(rpc_analyzed) | set(rpc_failed) != selected_paths:
-        return _unavailable(selected, code="dart_provider_invalid_output", message="Dart analyzer RPC coverage did not account for every selected path")
-    symbols, symbol_ids = _symbols(data.get("symbols"), eligible_paths=eligible_paths)
-    calls = _calls(data.get("calls"), eligible_paths=eligible_paths, symbol_ids=symbol_ids)
+    try:
+        analyzed, failed = parse_provider_coverage(data, eligible_paths=selected_paths)
+        rpc_analyzed, rpc_failed = parse_provider_coverage(
+            data,
+            eligible_paths=selected_paths,
+            analyzed_field="rpc_analyzed_paths",
+            failed_field="rpc_failed_paths",
+        )
+        symbols, calls = parse_provider_semantics(
+            data,
+            provider=PROVIDER,
+            languages=("dart",),
+            eligible_paths=eligible_paths,
+        )
+    except ProviderOutputError as exc:
+        return _unavailable(
+            selected,
+            code="dart_provider_invalid_output",
+            message=f"Dart analyzer provider output is invalid: {exc}",
+        )
     rpc_invocations, rpc_error = _rpc_invocations(
         data.get("rpc_invocations"),
         repo_id=target.id,

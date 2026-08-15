@@ -103,37 +103,49 @@ def rebuild_knowledge_projection(
         for record in records
         for record_id in _record_supersedes(record)
     }
-    deprecated_ids = {
-        str(event.get("record_id") or "")
-        for event in events
-        if event.get("type") == "deprecated" and str(event.get("record_id") or "")
-    }
+    deprecated_ids: set[str] = set()
+    supersession_bindings: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "deprecated":
+            if record_id := str(event.get("record_id") or ""):
+                deprecated_ids.add(record_id)
+            continue
+        if event_type != "superseded":
+            continue
+        key = (
+            str(event.get("superseded_by") or ""),
+            str(event.get("approved_event_id") or ""),
+        )
+        supersession_bindings.setdefault(key, []).append(event)
+    inactive_ids = superseded_ids | deprecated_ids
     heads = []
     for record in records:
         record_id = str(record.get("id") or "")
-        if record_id in superseded_ids | deprecated_ids:
+        if record_id in inactive_ids:
             continue
         approval = approval_by_record[record_id]
-        binding_events = [approval]
-        binding_events.extend(
-            event
-            for event in events
-            if event.get("type") == "superseded"
-            and str(event.get("superseded_by") or "") == record_id
-            and str(event.get("approved_event_id") or "") == str(approval.get("id") or "")
-        )
+        binding_events = [
+            approval,
+            *supersession_bindings.get(
+                (record_id, str(approval.get("id") or "")),
+                (),
+            ),
+        ]
         heads.append(_head_entry(record, approval, binding_events=binding_events))
+    record_identities = [_record_identity(item) for item in records]
+    event_identities = [_event_identity(item) for item in events]
     checkpoint = {
         "kind": "full_rebuild",
         "record_count": len(records),
         "event_count": len(events),
-        "record_set_digest": digest_data([_record_identity(item) for item in records]),
-        "event_set_digest": digest_data([_event_identity(item) for item in events]),
+        "record_set_digest": digest_data(record_identities),
+        "event_set_digest": digest_data(event_identities),
         "tail_sequence": 0,
         "source_chain_digest": digest_data(
             {
-                "records": [_record_identity(item) for item in records],
-                "events": [_event_identity(item) for item in events],
+                "records": record_identities,
+                "events": event_identities,
             }
         ),
     }
@@ -443,6 +455,46 @@ def load_knowledge_projection(
                 cause_code="member_count_mismatch",
             )
         ]
+    lifecycle_counts = data["lifecycle_counts"]
+    expected_lifecycle_keys = {"current", "deprecated", "superseded"}
+    if set(lifecycle_counts) != expected_lifecycle_keys or any(
+        type(value) is not int or value < 0
+        for value in lifecycle_counts.values()
+    ):
+        return {}, [
+            _unavailable(
+                "knowledge_projection_schema_mismatch",
+                "knowledge current-head projection lifecycle counts are invalid",
+                path,
+                root,
+                cause_code="lifecycle_counts_invalid",
+            )
+        ]
+    if lifecycle_counts["current"] != len(data["heads"]):
+        return {}, [
+            _unavailable(
+                "knowledge_projection_schema_mismatch",
+                "knowledge current-head projection current count does not match its heads",
+                path,
+                root,
+                cause_code="lifecycle_current_count_mismatch",
+            )
+        ]
+    checkpoint_record_count = data["checkpoint"].get("record_count")
+    if (
+        type(checkpoint_record_count) is not int
+        or checkpoint_record_count < 0
+        or sum(lifecycle_counts.values()) != checkpoint_record_count
+    ):
+        return {}, [
+            _unavailable(
+                "knowledge_projection_schema_mismatch",
+                "knowledge current-head projection lifecycle does not match its checkpoint",
+                path,
+                root,
+                cause_code="lifecycle_record_count_mismatch",
+            )
+        ]
     if (
         len(data["heads"]) > MAX_KNOWLEDGE_HOT_HEADS
         or len(_json_text(data).encode("utf-8")) > MAX_KNOWLEDGE_HOT_BYTES
@@ -733,6 +785,34 @@ def _load_all_events(root: Path, *, repo_id: str) -> tuple[list[dict[str, Any]],
     return sorted(events, key=lambda item: str(item.get("id") or "")), problems
 
 
+def knowledge_lifecycle_ambiguity_problems(
+    *,
+    records: Iterable[dict[str, Any]],
+    events: Iterable[dict[str, Any]],
+) -> list[Problem]:
+    """Reject cold histories that assign more than one terminal lifecycle state."""
+
+    deprecation_counts: dict[str, int] = {}
+    for event in events:
+        if event.get("type") != "deprecated":
+            continue
+        record_id = str(event.get("record_id") or "")
+        deprecation_counts[record_id] = deprecation_counts.get(record_id, 0) + 1
+
+    superseded_ids = {
+        old_id
+        for record in records
+        for old_id in _record_supersedes(record)
+    }
+    problems: list[Problem] = []
+    for record_id, count in sorted(deprecation_counts.items()):
+        if count > 1:
+            problems.append(Problem("error", "knowledge_deprecated_event_duplicate", "knowledge deprecation has duplicate lifecycle events", record_id))
+        if record_id in superseded_ids:
+            problems.append(Problem("error", "knowledge_lifecycle_status_conflict", "knowledge record cannot be both superseded and deprecated", record_id))
+    return problems
+
+
 def _validate_lifecycle(
     *,
     repo_id: str,
@@ -756,6 +836,10 @@ def _validate_lifecycle(
                 problems.append(Problem("error", "knowledge_event_record_missing", "knowledge deprecation references a missing record", record_id))
             elif str(event.get("record_digest") or "") != str(record.get("record_digest") or ""):
                 problems.append(Problem("error", "knowledge_event_record_digest_mismatch", "knowledge deprecation digest does not match its record", record_id))
+
+    problems.extend(
+        knowledge_lifecycle_ambiguity_problems(records=records, events=events)
+    )
 
     approval_by_record: dict[str, dict[str, Any]] = {}
     for record_id, record in records_by_id.items():

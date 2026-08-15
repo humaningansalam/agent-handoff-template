@@ -61,6 +61,12 @@ def test_task_start_blocks_when_registry_becomes_unready(tmp_path: Path, monkeyp
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
+    assert main(["task", "create", "--start", "--slug", "unbound-start", "Unbound start", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repository_identity_unbound"
+    assert not list((tmp_path / "docs/tasks").glob("T-*--unbound-start.md"))
+
 
 def test_task_finish_uses_configured_repo_id_in_multi_repo(tmp_path: Path, monkeypatch, capsys) -> None:
     web, _ = _setup_configured_multi_repo(tmp_path, monkeypatch)
@@ -111,6 +117,12 @@ def test_task_create_repo_scoped_requires_repo_id_in_multi_repo(tmp_path: Path, 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_selector_required"
+
+    assert main(["task", "create", "--start", "--slug", "ambiguous-start", "Ambiguous start", "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repository_selector_required"
+    assert not list((tmp_path / "docs/tasks").glob("T-*--ambiguous-start.md"))
 
 
 

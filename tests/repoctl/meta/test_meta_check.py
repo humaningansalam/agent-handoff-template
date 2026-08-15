@@ -79,6 +79,10 @@ def test_meta_check_requires_json_policy(tmp_path: Path, monkeypatch, capsys) ->
 
     payload = json.loads(capsys.readouterr().out)
     assert any(problem["code"] == "missing_repometa_policy" for problem in payload["problems"])
+    assert any(
+        action.get("command") == "./scripts/repoctl meta init --repo-id main --json"
+        for action in payload["next_actions"]
+    )
 
 def test_meta_check_changed_reports_repo_git_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

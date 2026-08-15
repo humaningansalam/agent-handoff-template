@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import tools.repoctl.knowledge_candidates as knowledge_candidates
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
@@ -208,6 +210,91 @@ def test_knowledge_rebuild_recovers_missing_projection_before_new_approval(
     assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
     approved = json.loads(capsys.readouterr().out)
     assert approved["data"]["record"]["id"] != first_record["id"]
+
+
+@pytest.mark.parametrize(
+    ("history_case", "expected_code"),
+    [
+        ("duplicate_deprecation", "knowledge_deprecated_event_duplicate"),
+        ("superseded_and_deprecated", "knowledge_lifecycle_status_conflict"),
+    ],
+)
+def test_knowledge_rebuild_rejects_ambiguous_cold_lifecycle_before_projection_write(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    history_case: str,
+    expected_code: str,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    record = _approve_knowledge_source(capsys)["data"]["record"]
+
+    if history_case == "duplicate_deprecation":
+        reason = tmp_path / "deprecated-reason.md"
+        reason.write_text("Decision is no longer active.\n", encoding="utf-8")
+        assert main(
+            [
+                "knowledge",
+                "deprecate",
+                record["id"],
+                "--repo-id",
+                "main",
+                "--reason-file",
+                reason.as_posix(),
+                "--json",
+            ]
+        ) == 0
+        event = json.loads(capsys.readouterr().out)["data"]["event"]
+        event["id"] = f"{event['id']}-2"
+    else:
+        _approve_knowledge_source(
+            capsys,
+            claim="Replacement reviewed routing decision.",
+            approve_args=["--supersedes", record["id"]],
+        )
+        event = {
+            "schema": "repoctl.knowledge.event",
+            "schema_version": 1,
+            "id": "E-20260815000000Z--deprecated-superseded-record",
+            "type": "deprecated",
+            "repo_id": "main",
+            "record_id": record["id"],
+            "record_digest": record["record_digest"],
+            "reason": "Conflicting cold-history lifecycle state.",
+        }
+    event["event_digest"] = digest_data(
+        {key: value for key, value in event.items() if key != "event_digest"}
+    )
+    _write_event(tmp_path, event)
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 1
+    check_payload = json.loads(capsys.readouterr().out)
+    assert expected_code in {
+        problem["code"] for problem in check_payload["problems"]
+    }
+
+    assert main(
+        [
+            "upgrade",
+            "postflight",
+            "--workspace-root",
+            tmp_path.as_posix(),
+            "--json",
+        ]
+    ) == 1
+    postflight_payload = json.loads(capsys.readouterr().out)
+    assert expected_code in {
+        problem["code"] for problem in postflight_payload["problems"]
+    }
+
+    projection_path = knowledge_projection_path(tmp_path, repo_id="main")
+    projection_before = projection_path.read_bytes()
+
+    assert main(["knowledge", "rebuild", "--repo-id", "main", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert [problem["code"] for problem in payload["problems"]] == [expected_code]
+    assert projection_path.read_bytes() == projection_before
 
 
 def test_knowledge_check_reports_event_digest_mismatch(tmp_path: Path, monkeypatch, capsys) -> None:

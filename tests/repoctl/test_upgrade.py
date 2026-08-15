@@ -9,8 +9,14 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
+from tools.repoctl.graph_model import digest_data
 from tools.repoctl.io import RepoctlError
-from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, write_plan
+from tools.repoctl.knowledge_projection import knowledge_projection_path
+from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
+from tests.repoctl.knowledge_test_helpers import (
+    _approve_knowledge_source,
+    _setup_knowledge_workspace,
+)
 from tests.repoctl.meta.test_meta_check import write_repometa
 
 
@@ -153,6 +159,126 @@ def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, mon
     assert main(["upgrade", "status", "--json"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["data"]["latest"]["backup"]["availability"] == "available"
+
+    receipt_path = workspace / payload["data"]["receipt_path"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    invalid_receipts = []
+    for invalid_path in ("", "README.md"):
+        damaged = json.loads(json.dumps(receipt))
+        damaged["backup"]["path"] = invalid_path
+        invalid_receipts.append(damaged)
+    damaged = json.loads(json.dumps(receipt))
+    damaged["backups"][0]["backup_path"] = "README.md"
+    invalid_receipts.append(damaged)
+    damaged = json.loads(json.dumps(receipt))
+    damaged["backups"] = []
+    invalid_receipts.append(damaged)
+
+    for damaged in invalid_receipts:
+        receipt_path.write_text(json.dumps(damaged) + "\n", encoding="utf-8")
+        assert main(["upgrade", "status", "--json"]) == 1
+        invalid_status = json.loads(capsys.readouterr().out)
+        assert [problem["code"] for problem in invalid_status["problems"]] == [
+            "upgrade_receipt_invalid"
+        ]
+
+    damaged = json.loads(json.dumps(receipt))
+    damaged["backups"][0]["backup_digest"] = "sha256:" + "0" * 64
+    receipt_path.write_text(json.dumps(damaged) + "\n", encoding="utf-8")
+    assert main(["upgrade", "status", "--json"]) == 0
+    damaged_status = json.loads(capsys.readouterr().out)
+    assert damaged_status["data"]["latest"]["backup"]["availability"] == "digest_mismatch"
+
+
+def test_upgrade_status_reads_legacy_individual_backups_without_claiming_digest_verification(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace)
+    run_id = "20260618025741Z"
+    backup_rel = f"docs/tasks/.repoctl-state/upgrades/{run_id}/backup/tools/repoctl/tasks.py"
+    backup_path = workspace / backup_rel
+    backup_path.parent.mkdir(parents=True)
+    backup_path.write_text("old tasks module\n", encoding="utf-8")
+    receipt_path = workspace / f"docs/tasks/.repoctl-state/upgrades/{run_id}/receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "backups": [
+                    {
+                        "path": "tools/repoctl/tasks.py",
+                        "backup_path": backup_rel,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    status, problems = upgrade_status(workspace)
+
+    assert problems == []
+    assert status["latest"]["backup"]["availability"] == "digest_unavailable"
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["backups"][0]["backup_path"] = "README.md"
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    status, problems = upgrade_status(workspace)
+
+    assert [problem["code"] for problem in problems] == ["upgrade_receipt_invalid"]
+    assert status["latest"]["backup"]["availability"] == "invalid"
+
+    receipt["backups"][0]["backup_path"] = backup_rel
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+    outside_run_id = "20260618025742Z"
+    outside_run = tmp_path / "outside-upgrade-run"
+    outside_run.mkdir()
+    (outside_run / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": outside_run_id,
+                "backups": [],
+                "backup": {
+                    "path": f"docs/tasks/.repoctl-state/upgrades/{outside_run_id}/backup",
+                    "recorded_digest": "",
+                    "retention_status_at_creation": "not_required",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    linked_run = workspace / f"docs/tasks/.repoctl-state/upgrades/{outside_run_id}"
+    linked_run.symlink_to(outside_run, target_is_directory=True)
+
+    status, problems = upgrade_status(workspace)
+
+    assert [problem["code"] for problem in problems] == ["upgrade_receipt_invalid"]
+    assert status["receipt_count"] == 1
+
+    assert main(
+        [
+            "upgrade",
+            "postflight",
+            "--workspace-root",
+            workspace.as_posix(),
+            "--json",
+        ]
+    ) == 1
+    postflight = json.loads(capsys.readouterr().out)
+    assert any(
+        problem["code"] == "upgrade_receipt_invalid"
+        for problem in postflight["problems"]
+    )
+
+    linked_run.unlink()
+    receipt_path.write_bytes(b"\xff")
+    _status, problems = upgrade_status(workspace)
+    assert [problem["code"] for problem in problems] == ["upgrade_receipt_invalid"]
 
 
 def test_upgrade_apply_rejects_forged_preserved_path_operation(tmp_path: Path) -> None:
@@ -697,3 +823,116 @@ Promote a context pack into reviewed knowledge after upgrade.
     assert render_payload["data"]["rendered"]
     render_check_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main", "--check"])
     assert render_check_payload["data"]["check"]["current"] is True
+
+
+def test_initialized_empty_knowledge_store_exposes_projection_recovery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace)
+    subprocess.run(["git", "init"], cwd=workspace / "repos", stdout=subprocess.DEVNULL, check=True)
+    write_repometa(workspace / "repos")
+    records = workspace / "docs/knowledge/records"
+    records.mkdir(parents=True)
+    (records / ".gitkeep").write_text("", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(workspace), "--json"]) == 1
+    postflight = json.loads(capsys.readouterr().out)
+    reviewed = postflight["data"]["repositories"][0]["reviewed_knowledge"]
+    assert reviewed["record_count"] == 0
+    assert reviewed["projection_status"] == "rebuild_required"
+    assert any(problem["code"] == "knowledge_projection_unavailable" for problem in postflight["problems"])
+    assert any(
+        action.get("command") == "./scripts/repoctl knowledge rebuild --repo-id main --json"
+        for action in postflight["data"]["recovery_actions"]
+    )
+
+    assert main(["context", "query", "product", "--repo-id", "main", "--json"]) == 0
+    context = json.loads(capsys.readouterr().out)
+    warning = next(problem for problem in context["problems"] if problem["code"] == "context_linked_knowledge_unavailable")
+    assert warning["cause_code"] == "knowledge_projection_unavailable"
+    assert any(action.get("kind") == "knowledge_rebuild" for action in context["next_actions"])
+    assert any(action.get("kind") == "context_resume" for action in context["next_actions"])
+
+
+def test_postflight_rejects_projection_that_misses_durable_deprecation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    record = _approve_knowledge_source(capsys)["data"]["record"]
+    projection_path = knowledge_projection_path(tmp_path, repo_id="main")
+    projection_before_deprecation = projection_path.read_bytes()
+    reason = tmp_path / "deprecation-reason.md"
+    reason.write_text("The reviewed decision no longer applies.\n", encoding="utf-8")
+    assert main(
+        [
+            "knowledge",
+            "deprecate",
+            record["id"],
+            "--repo-id",
+            "main",
+            "--reason-file",
+            reason.as_posix(),
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    projection_path.write_bytes(projection_before_deprecation)
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 1
+    postflight = json.loads(capsys.readouterr().out)
+    reviewed = postflight["data"]["repositories"][0]["reviewed_knowledge"]
+    assert reviewed["projection_status"] == "rebuild_required"
+    assert any(
+        problem["code"] == "knowledge_projection_unavailable"
+        and problem["cause_code"] == "cold_lifecycle_mismatch"
+        for problem in postflight["problems"]
+    )
+
+
+def test_postflight_reports_invalid_projection_lifecycle_without_crashing(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace)
+    subprocess.run(["git", "init"], cwd=workspace / "repos", stdout=subprocess.DEVNULL, check=True)
+    write_repometa(workspace / "repos")
+    records = workspace / "docs/knowledge/records"
+    records.mkdir(parents=True)
+    projection_path = knowledge_projection_path(workspace, repo_id="main")
+    projection_path.parent.mkdir(parents=True)
+    projection = {
+        "schema": "repoctl.knowledge.current-head",
+        "schema_version": 1,
+        "repo_id": "main",
+        "generation": 1,
+        "checkpoint": {"record_count": 0},
+        "head_count": 0,
+        "heads": [],
+    }
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    for lifecycle_counts, cause_code in (
+        ({"current": "0", "deprecated": 0, "superseded": 0}, "lifecycle_counts_invalid"),
+        ({"current": 0, "deprecated": 1, "superseded": 0}, "lifecycle_record_count_mismatch"),
+    ):
+        invalid_projection = {**projection, "lifecycle_counts": lifecycle_counts}
+        invalid_projection["projection_digest"] = digest_data(invalid_projection)
+        projection_path.write_text(json.dumps(invalid_projection), encoding="utf-8")
+
+        assert main(["upgrade", "postflight", "--workspace-root", str(workspace), "--json"]) == 1
+        postflight = json.loads(capsys.readouterr().out)
+        reviewed = postflight["data"]["repositories"][0]["reviewed_knowledge"]
+        assert reviewed["projection_status"] == "rebuild_required"
+        assert any(
+            problem["code"] == "knowledge_projection_schema_mismatch"
+            and problem["cause_code"] == cause_code
+            for problem in postflight["problems"]
+        )

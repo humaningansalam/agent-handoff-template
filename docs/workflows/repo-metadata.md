@@ -226,6 +226,15 @@ Discovery commands are read-only helpers for task planning:
 
 Use `repoctl meta init` to create the default `.repometa` policy and shard skeleton for a selected product repo. It does not overwrite an existing policy or shard.
 
+After initialization, review the generated policy and shards. Apply any project-specific policy changes described above, use `repoctl meta` for annotations and exclusions, and run `repoctl meta check --repo-id <id> --json`. The store is durable product-repo state, so commit it in that product repository before starting product changes. For the direct `main` layout:
+
+```bash
+cd repos
+git add .repometa
+git diff --cached -- .repometa
+git commit -m "Initialize repoctl metadata"
+```
+
 Mutation commands update `.repometa` through repoctl:
 
 ```bash

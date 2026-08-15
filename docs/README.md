@@ -20,7 +20,7 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 
 ## Common Commands
 
-- Create task: `./scripts/repoctl task create "Task title"`
+- Create and start a product task in a single-repo workspace: `./scripts/repoctl task create --start --json "Task title"`
 - Create parent task: `./scripts/repoctl task create --type parent "Parent title"`
 - List tasks: `./scripts/repoctl task list --json`
 - Show task: `./scripts/repoctl task show T-... --json`
