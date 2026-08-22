@@ -22,6 +22,8 @@ from .repositories import RepoTarget
 
 RESULT_RECEIPT_SCHEMA = "repoctl.repository-understanding.result-receipt"
 RESULT_RECEIPT_SCHEMA_VERSION = 2
+RESULT_RECEIPT_PROJECTION_SCHEMA = "repoctl.repository-understanding.result-receipt-projection"
+RESULT_RECEIPT_PROJECTION_SCHEMA_VERSION = 1
 RESULT_RECEIPT_ROOT = Path(".repoctl-state/result-receipts")
 RESULT_CACHE_INDEX = RESULT_RECEIPT_ROOT / "index.json"
 RESULT_CACHE_INDEX_SCHEMA = "repoctl.repository-understanding.result-receipt-cache-index"
@@ -663,6 +665,104 @@ def context_result_citations(bundle: dict[str, Any]) -> list[ResultSelection]:
         if selector_ref:
             selections.add(ResultSelection(ResultAuthority.GRAPH, selector_ref))
     return sorted(selections)
+
+
+def context_result_receipt_projection(
+    receipt: dict[str, Any],
+    *,
+    compact_bundle: dict[str, Any],
+    full: bool = False,
+) -> dict[str, Any]:
+    """Project one immutable Context receipt without redefining its manifest."""
+
+    manifest = [
+        ResultSelection(ResultAuthority(item["authority"]), item["ref"])
+        for item in receipt.get("selectable", [])
+        if isinstance(item, dict)
+    ]
+    manifest_members = set(manifest)
+    representative: list[dict[str, Any]] = []
+    visible_members: set[ResultSelection] = set()
+    visible_item_count = 0
+    groups = (
+        compact_bundle.get("groups")
+        if isinstance(compact_bundle.get("groups"), dict)
+        else {}
+    )
+    for group, raw_items in groups.items():
+        if group == "warnings_and_completeness" or not isinstance(raw_items, list):
+            continue
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            visible_item_count += 1
+            authority, ref = _context_item_selection(str(group), item)
+            if authority is None or not ref:
+                continue
+            selection = ResultSelection(authority, ref)
+            if selection not in manifest_members:
+                raise RepoctlError(
+                    "compact Context citation is not a member of the immutable result manifest",
+                    code="result_receipt_projection_invalid",
+                    path=selection.ref,
+                )
+            entry: dict[str, Any] = {
+                "group": str(group),
+                "primary_citation": selection.to_dict(),
+            }
+            reason = str(item.get("selection_reason") or "").strip()
+            if reason:
+                entry["selection_reason"] = reason
+            representative.append(entry)
+            visible_members.add(selection)
+
+    manifest_counts = _selection_counts_by_authority(manifest_members)
+    visible_counts = _selection_counts_by_authority(visible_members)
+    omitted_by_authority = {
+        authority.value: max(
+            0,
+            manifest_counts.get(authority.value, 0)
+            - visible_counts.get(authority.value, 0),
+        )
+        for authority in ResultAuthority
+        if manifest_counts.get(authority.value, 0)
+        - visible_counts.get(authority.value, 0)
+        > 0
+    }
+    manifest_projection: dict[str, Any] = {
+        "selectable_count": len(manifest_members),
+        "omitted_count": max(0, len(manifest_members) - len(visible_members)),
+        "omitted_by_authority": omitted_by_authority,
+        "full_available": True,
+    }
+    if full:
+        manifest_projection["items"] = [selection.to_dict() for selection in manifest]
+    return {
+        "schema": RESULT_RECEIPT_PROJECTION_SCHEMA,
+        "schema_version": RESULT_RECEIPT_PROJECTION_SCHEMA_VERSION,
+        "view": "full" if full else "compact",
+        "producer": receipt["producer"],
+        "result_id": receipt["result_id"],
+        "receipt_digest": receipt["receipt_digest"],
+        "request": receipt["request"],
+        "compact": {
+            "representative_citations": representative,
+            "visible_item_count": visible_item_count,
+            "cited_item_count": len(representative),
+            "manifest_member_count": len(visible_members),
+        },
+        "manifest": manifest_projection,
+    }
+
+
+def _selection_counts_by_authority(
+    selections: Iterable[ResultSelection],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for selection in selections:
+        key = selection.authority.value
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _context_continuations(

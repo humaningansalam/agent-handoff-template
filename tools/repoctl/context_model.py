@@ -55,6 +55,8 @@ class ContextEvidenceKind(StrEnum):
     EXACT_TASK = "exact_task"
     NAMED_FILE_IDENTITY = "named_file_identity"
     NAMED_SYMBOL_IDENTITY = "named_symbol_identity"
+    EXPLICIT_NAMED_FILE_IDENTITY = "explicit_named_file_identity"
+    EXPLICIT_NAMED_SYMBOL_IDENTITY = "explicit_named_symbol_identity"
     PATH_TERMS = "path_terms"
     SECTION_TERMS = "section_terms"
     BODY_TERMS = "body_terms"

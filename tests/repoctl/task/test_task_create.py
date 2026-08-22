@@ -51,6 +51,42 @@ def test_started_task_defaults_to_the_only_configured_repository(tmp_path: Path,
     assert 'repo_id: "main"' in task
     assert state["initial"]["repo_id"] == "main"
     assert state["initial"]["repo_path"] == "repos"
+    assert any(warning["code"] == "task_handoff_generated_template" for warning in payload["warnings"])
+    assert payload["next_actions"][0] == {
+        "label": "Replace the generated Handoff with task-specific restart instructions",
+        "path": payload["data"]["path"],
+        "source": "data.generated_handoff",
+    }
+    assert payload["next_actions"][1]["label"] == "Record the candidate query"
+
+
+def test_started_root_task_text_output_reports_the_generated_handoff_action(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--area", "docs", "--start", "--slug", "root-docs", "Root docs"]) == 0
+    output = capsys.readouterr().out
+    assert "Started:" in output
+    assert "Next: Replace the generated Handoff with task-specific restart instructions" in output
+
+
+def test_started_repo_task_text_prioritizes_generated_handoff_before_discovery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    init_committed_product_repo(tmp_path / "repos", {"app.py": "value = 1\n"})
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "create", "--start", "--slug", "repo-text", "Repo text"]) == 0
+    output = capsys.readouterr().out
+    assert "Next: Replace the generated Handoff with task-specific restart instructions" in output
+    assert "Next: ./scripts/repoctl task discovery add" not in output
 
 
 def test_task_create_uses_configured_korean_document_language(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -286,6 +322,57 @@ def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, mo
     assert f'follow_up_of: "{previous_id}"' in created
     assert f"- Follow-up of: `{previous_id}`" in created
     assert previous_path.read_text(encoding="utf-8") == previous_text
+
+
+def test_check_loads_only_the_transitive_archived_follow_up_chain(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    ancestor_id = "T-20260609184044Z"
+    previous_id = "T-20260609184045Z"
+    current_id = "T-20260609184046Z"
+
+    def archive(task_id: str, text: str, slug: str) -> None:
+        task_path = tmp_path / f"docs/archive/tasks/{task_id}--{slug}.md"
+        task_path.write_text(text, encoding="utf-8")
+        locator = tmp_path / f"docs/tasks/.repoctl-state/archive/{task_id}.json"
+        locator.parent.mkdir(parents=True, exist_ok=True)
+        locator.write_text(
+            json.dumps(
+                {
+                    "schema": "repoctl.task.archive",
+                    "schema_version": 1,
+                    "task_id": task_id,
+                    "task_path": task_path.relative_to(tmp_path).as_posix(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    archive(ancestor_id, task_text(ancestor_id, status="done"), "ancestor")
+    archive(
+        previous_id,
+        task_text(previous_id, status="done").replace(
+            "depends_on: []",
+            f'follow_up_of: "{ancestor_id}"\ndepends_on: []',
+        ),
+        "previous",
+    )
+    current = task_text(current_id).replace(
+        "depends_on: []",
+        f'follow_up_of: "{previous_id}"\ndepends_on: []',
+    )
+    add_task(tmp_path, f"{current_id}--current.md", current)
+    (tmp_path / "docs/BOARD.md").write_text(
+        f"# BOARD\n\n## Board\n\n- docs/tasks/{current_id}--current.md\n\n## Backlog\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["check", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert not any(problem["code"] == "missing_follow_up_task" for problem in payload["problems"])
 
 
 def test_task_create_rejects_non_ascii_title_without_slug(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -418,8 +418,8 @@ def repo_layout(root: Path) -> RepoLayout:
     return _layout_from_settings(root, load_repoctl_settings(root))
 
 
-def default_repo_target(root: Path) -> RepoTarget | None:
-    layout = repo_layout(root)
+def default_repo_target(root: Path, *, layout: RepoLayout | None = None) -> RepoTarget | None:
+    layout = layout or repo_layout(root)
     if not layout.registry_ready:
         raise RepoctlError("repository identities are unbound; run repoctl repo adopt before mutating product repositories", code="repository_identity_unbound")
     if not layout.targets:
@@ -429,8 +429,8 @@ def default_repo_target(root: Path) -> RepoTarget | None:
     return layout.targets[0]
 
 
-def require_repo_target(root: Path, repo_id: str | None = None) -> RepoTarget:
-    layout = repo_layout(root)
+def require_repo_target(root: Path, repo_id: str | None = None, *, layout: RepoLayout | None = None) -> RepoTarget:
+    layout = layout or repo_layout(root)
     if not layout.registry_ready:
         raise RepoctlError("repository identities are unbound; run repoctl repo adopt before mutating product repositories", code="repository_identity_unbound")
     if not layout.targets:
@@ -445,6 +445,33 @@ def require_repo_target(root: Path, repo_id: str | None = None) -> RepoTarget:
     if len(layout.targets) > 1:
         raise RepoctlError("multiple product repositories configured; pass --repo-id", code="repository_selector_required")
     return layout.targets[0]
+
+
+def resolve_task_repo_target(
+    root: Path,
+    *,
+    repo_id: str = "",
+    repo_scoped: bool,
+    layout: RepoLayout | None = None,
+    task_path: str = "",
+) -> RepoTarget | None:
+    """Apply one repository-selection policy for every task command."""
+
+    try:
+        if repo_id:
+            return require_repo_target(root, repo_id=repo_id, layout=layout)
+        if repo_scoped:
+            return default_repo_target(root, layout=layout)
+        return None
+    except RepoctlError as exc:
+        if not task_path or exc.path:
+            raise
+        raise RepoctlError(
+            str(exc),
+            code=exc.code,
+            path=task_path,
+            cause_code=exc.cause_code,
+        ) from exc
 
 
 def repository_for_workspace_path(root: Path, path: Path) -> RepoTarget | None:

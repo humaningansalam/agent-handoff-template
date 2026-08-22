@@ -151,13 +151,21 @@ def test_context_pack_uses_only_current_discovery_episode_and_does_not_revalidat
         title="Use the current discovery episode",
         query="old_owner",
         goal="Keep only current discovery evidence in the Task Pack.",
+        status="todo",
         reviewed="repos/old.py",
         chosen="repos/stable.py",
     )
+    assert main(["task", "start", task_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
 
     assert main(["context", "query", "old_owner", "--repo-id", "main", "--json"]) == 0
     old_receipt = json.loads(capsys.readouterr().out)["data"]["result_receipt"]
-    old_selection = next(item for item in old_receipt["selectable"] if item == {"authority": "source", "ref": "repos/old.py"})
+    old_selection = next(
+        item["primary_citation"]
+        for item in old_receipt["compact"]["representative_citations"]
+        if item["primary_citation"]
+        == {"authority": "source", "ref": "repos/old.py"}
+    )
     assert main(
         [
             "task", "discovery", "add", task_id,
@@ -173,7 +181,12 @@ def test_context_pack_uses_only_current_discovery_episode_and_does_not_revalidat
 
     assert main(["context", "query", "new_owner", "--repo-id", "main", "--json"]) == 0
     new_receipt = json.loads(capsys.readouterr().out)["data"]["result_receipt"]
-    new_selection = next(item for item in new_receipt["selectable"] if item == {"authority": "source", "ref": "repos/new.py"})
+    new_selection = next(
+        item["primary_citation"]
+        for item in new_receipt["compact"]["representative_citations"]
+        if item["primary_citation"]
+        == {"authority": "source", "ref": "repos/new.py"}
+    )
     assert main(
         [
             "task", "discovery", "add", task_id,

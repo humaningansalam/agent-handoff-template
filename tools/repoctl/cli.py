@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +21,7 @@ from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCata
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .discovery_outcomes import structured_verification_coverage
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
 from .graph_model import digest_data
@@ -36,9 +38,9 @@ from .knowledge_projection import (
 from .knowledge_render import render_knowledge
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
-from .repositories import RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, unbound_repository_state_namespaces
-from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, graph_result_selections, write_result_receipt
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
+from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
+from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, context_result_receipt_projection, graph_result_selections, write_result_receipt
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskHandoffProvenance, TaskResumeSelectionStatus, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_handoff_origin_path, task_handoff_provenance, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -81,6 +83,7 @@ class NextActionKind(StrEnum):
     KNOWLEDGE_REBUILD = "knowledge_rebuild"
     CONTEXT_RESUME = "context_resume"
     TASK_HANDOFF_BIND = "task_handoff_bind"
+    TASK_VERIFICATION_ADD = "task_verification_add"
     CONTEXT_PACK_REFRESH = "context_pack_refresh"
 
 
@@ -96,6 +99,7 @@ class TaskScopeResolution(StrEnum):
 
 
 COMPACT_PATH_LIMIT = 20
+RESUME_PROBLEM_SAMPLE_LIMIT = 3
 COMPLETION_CATALOGUE_UNAVAILABLE_CODES = frozenset(
     reason.value for reason in CompletionCatalogueUnavailableReason
 )
@@ -118,6 +122,49 @@ class TaskHealth:
             "executable": self.executable,
             "codes": sorted({problem.code for problem in self.problems}),
         }
+
+
+def _task_health_problem_summary(problems: tuple[Problem, ...]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Problem]] = {}
+    for problem in problems:
+        grouped.setdefault(problem.code, []).append(problem)
+    summary: list[dict[str, Any]] = []
+    for code in sorted(grouped):
+        items = grouped[code]
+        paths = sorted({problem.path for problem in items if problem.path})
+        summary.append(
+            {
+                "code": code,
+                "count": len(items),
+                "sample_paths": paths[:RESUME_PROBLEM_SAMPLE_LIMIT],
+                "paths_truncated": len(paths) > RESUME_PROBLEM_SAMPLE_LIMIT,
+            }
+        )
+    return summary
+
+
+def _compact_task_health_problems(problems: tuple[Problem, ...]) -> list[Problem]:
+    first_by_code: dict[str, Problem] = {}
+    for problem in problems:
+        first_by_code.setdefault(problem.code, problem)
+    compact: list[Problem] = []
+    for item in _task_health_problem_summary(problems):
+        first = first_by_code[item["code"]]
+        count = int(item["count"])
+        compact.append(
+            Problem(
+                first.severity,
+                first.code,
+                (
+                    first.message
+                    if count == 1
+                    else f"{count} repository lifecycle problems have code {first.code}; inspect task doctor or task resume --full for complete paths"
+                ),
+                (item["sample_paths"] or [first.path])[0],
+                first.cause_code,
+            )
+        )
+    return compact
 
 
 class RepoctlArgumentParser(argparse.ArgumentParser):
@@ -299,6 +346,12 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
     actions: list[dict[str, Any]] = []
     seen: set[str] = set()
     task_id = str((data or {}).get("task_id") or "T-...")
+    resume_handoff = _mapping_at(data, "resume_guidance", "handoff")
+    generated_resume_handoff = resume_handoff.get("generated_template") is True
+    origin_unknown_resume_handoff = (
+        "task_handoff_origin_unknown" in _string_list(resume_handoff.get("reason_codes"))
+    )
+    task_path = str(_mapping_at(data, "task").get("path") or f"docs/tasks/{task_id}.md")
 
     def add(
         label: str,
@@ -412,6 +465,17 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             source="data.bundle.query",
         )
 
+    if generated_resume_handoff:
+        add(
+            "Replace the generated Handoff with task-specific restart instructions",
+            path=task_path,
+        )
+    elif origin_unknown_resume_handoff:
+        add(
+            "Regenerate or replace the origin-unknown Handoff with task-specific restart instructions",
+            path=task_path,
+        )
+
     for problem in problems:
         code = _problem_code(problem)
         path = _problem_path(problem)
@@ -464,6 +528,52 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
             add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
+        elif code == "task_structured_verification_missing":
+            action_inputs = _mapping_at(data, "action_inputs")
+            subjects = _string_list(action_inputs.get("missing_structured_verification_subjects"))
+            if subjects:
+                add(
+                    "Record passed structured verification for each missing current changed Chosen subject",
+                    command=f"./scripts/repoctl task verification add {task_id} --status passed --evidence-ref <evidence-ref> --subject <verified-subject> --json",
+                    kind=NextActionKind.TASK_VERIFICATION_ADD,
+                    source="data.action_inputs.missing_structured_verification_subjects",
+                    target_ref="data.action_inputs.missing_structured_verification_subjects",
+                )
+        elif code == "task_structured_verification_nonpassing":
+            action_inputs = _mapping_at(data, "action_inputs")
+            subjects = _string_list(action_inputs.get("nonpassing_structured_verification_subjects"))
+            if subjects:
+                add(
+                    "Review nonpassing structured evidence; another passed record does not erase prior current-version outcomes",
+                    path=path or f"docs/tasks/{task_id}.md",
+                    source="data.action_inputs.nonpassing_structured_verification_subjects",
+                    target_ref="data.action_inputs.nonpassing_structured_verification_subjects",
+                )
+        elif code == "task_handoff_generated_template":
+            add(
+                "Replace the generated Handoff with task-specific restart instructions",
+                path=path or f"docs/tasks/{task_id}.md",
+            )
+        elif code == "task_decomposition_recommended":
+            add(
+                "Review whether the next independently verifiable milestone belongs in a new task",
+                path=path or f"docs/tasks/{task_id}.md",
+            )
+        elif code in {
+            "discovery_task_chosen_invalid",
+            "discovery_outcome_chosen_mismatch",
+            "discovery_outcome_chosen_invalid",
+        }:
+            add(
+                "Reconcile the approved Chosen scope through the repoctl Discovery boundary",
+                command=f"./scripts/repoctl task discovery add {task_id} --replace-chosen repos/<approved-path> --reason '<scope reconciliation reason>' --json",
+            )
+            add("Open the Task Discovery section", path=path or f"docs/tasks/{task_id}.md")
+        elif code == "discovery_outcome_repository_mismatch":
+            add(
+                "Inspect the Task repository identity and immutable Discovery outcome before continuing",
+                path=path or f"docs/tasks/{task_id}.md",
+            )
         elif code in {"actual_changes_outside_chosen", "task_chosen_scope_drift"}:
             action_inputs = _mapping_at(data, "action_inputs")
             unchosen = _string_list(action_inputs.get("unchosen_actual_paths"))
@@ -536,13 +646,18 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "task_not_found":
             add("List live tasks", command="./scripts/repoctl task list --json")
             add("Open Board task registry", path="docs/BOARD.md")
-        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_resume_binding_invalid"}:
-            add(
-                "Bind the reviewed Handoff to the current task and repository inputs",
-                command=f"./scripts/repoctl task handoff bind {task_id} --json",
-                kind=NextActionKind.TASK_HANDOFF_BIND,
-                source="data.resume_guidance.handoff.status",
-            )
+        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_handoff_origin_unknown", "task_resume_binding_invalid"}:
+            if not generated_resume_handoff:
+                add(
+                    (
+                        "Bind the regenerated or reviewed Handoff under the current provenance contract"
+                        if origin_unknown_resume_handoff
+                        else "Bind the reviewed Handoff to the current task and repository inputs"
+                    ),
+                    command=f"./scripts/repoctl task handoff bind {task_id} --json",
+                    kind=NextActionKind.TASK_HANDOFF_BIND,
+                    source="data.resume_guidance.handoff.status",
+                )
         elif code == "task_resume_observation_unavailable":
             add("Inspect current task and repository state", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"context_pack_stale", "context_pack_missing", "context_pack_invalid", "context_pack_unknown"}:
@@ -561,12 +676,13 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 kind=NextActionKind.CONTEXT_PACK_REFRESH,
                 source="data.resume_guidance.context_pack.status",
             )
-            add(
-                "Bind the reviewed Handoff and regenerated Context Pack",
-                command=f"./scripts/repoctl task handoff bind {task_id} --context-pack {shlex.quote(pack_path)} --json",
-                kind=NextActionKind.TASK_HANDOFF_BIND,
-                source="data.resume_guidance.context_pack.path",
-            )
+            if not generated_resume_handoff:
+                add(
+                    "Bind the reviewed Handoff and regenerated Context Pack",
+                    command=f"./scripts/repoctl task handoff bind {task_id} --context-pack {shlex.quote(pack_path)} --json",
+                    kind=NextActionKind.TASK_HANDOFF_BIND,
+                    source="data.resume_guidance.context_pack.path",
+                )
         elif code == "repository_not_found":
             add("Inspect configured repositories", command="./scripts/repoctl repo list --json")
             add("Adopt detected product repositories", command="./scripts/repoctl repo adopt --all --json")
@@ -1588,6 +1704,15 @@ def _discovery_guidance_actions(task_id: str, *, repo_id: str = "main", repo_pat
     ]
 
 
+def _with_task_safety_prerequisite(
+    actions: list[dict[str, str]],
+    prerequisite: dict[str, str],
+) -> list[dict[str, str]]:
+    """Keep the safety prerequisite first for both JSON and compact text."""
+
+    return [prerequisite, *actions]
+
+
 def _has_errors(problems: list[Problem]) -> bool:
     return any(problem.severity == "error" for problem in problems)
 
@@ -2154,7 +2279,7 @@ def cmd_task_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_task_resume_projection(root: Path) -> dict[str, Any]:
+def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str, Any]:
     tasks = load_tasks(root, include_archived=False)
     selection = select_task_for_resume(tasks)
     selection_data = {
@@ -2194,35 +2319,67 @@ def build_task_resume_projection(root: Path) -> dict[str, Any]:
     task = selection.task
     if task is None:  # pragma: no cover - closed by TaskResumeSelectionStatus
         raise RepoctlError("single-live resume selection is missing its task", code="task_resume_selection_invalid")
-    target, _delta, health = _task_lifecycle_observation(root, task)
-    guidance, warnings, problems = _task_resume_guidance(root, task, target=target)
-    problems = _dedupe_problems([*problems, *health.problems])
+    repository_observation_available = True
+    try:
+        layout = repo_layout(root)
+    except RepoctlError as exc:
+        layout = None
+        target = None
+        health = _task_health(root, task, observation_error=exc)
+        repository_observation_available = False
+    else:
+        target, _delta, health = _task_lifecycle_observation(root, task, layout=layout)
+    guidance, warnings, guidance_problems = _task_resume_guidance(
+        root,
+        task,
+        target=target,
+        layout=layout,
+        repository_observation_available=repository_observation_available,
+    )
+    projected_health_problems = list(health.problems) if full else _compact_task_health_problems(health.problems)
+    problems = _dedupe_problems([*guidance_problems, *projected_health_problems])
     handoff = dict(guidance.get("handoff") or {})
     handoff_body = handoff.pop("body", "")
-    executable_handoff = (
+    readable_handoff = (
         handoff_body
         if guidance.get("status") == "current" and handoff.get("active") is True
         else None
     )
+    blocked_by_health = not health.executable
+    executable_handoff = readable_handoff if not blocked_by_health else None
+    health_data = {
+        **health.to_dict(),
+        "problem_count": len(health.problems),
+        "problem_summary": _task_health_problem_summary(health.problems),
+        "details_included": full,
+        "details_command": f"./scripts/repoctl task doctor {task.id} --json",
+        "full_command": "./scripts/repoctl task resume --full --json",
+    }
     guidance = {
         **guidance,
-        "health": health.to_dict(),
+        "health": health_data,
         "handoff": handoff,
+        "readable_handoff": readable_handoff,
+        "blocked_by_health": blocked_by_health,
         "executable_handoff": executable_handoff,
     }
     data.update({"task": task.to_list_dict(), "resume_guidance": guidance})
-    return {
+    payload = {
         "ok": not _has_errors(problems),
         "command": "task.resume",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
-        "next_actions": [],
     }
+    payload["next_actions"] = _next_actions_for_problems(
+        [*payload["problems"], *payload["warnings"]],
+        data={**data, "task_id": task.id},
+    )
+    return payload
 
 
 def cmd_task_resume(args: argparse.Namespace) -> int:
-    payload = build_task_resume_projection(find_workspace_root())
+    payload = build_task_resume_projection(find_workspace_root(), full=bool(args.full))
     if args.json:
         _json(payload)
     else:
@@ -2265,20 +2422,26 @@ def _task_scope_drift_warning(root: Path, task: Any, delta: dict[str, Any]) -> d
 def _task_lifecycle_observation(
     root: Path,
     task: Any,
+    *,
+    layout: RepoLayout | None = None,
 ) -> tuple[RepoTarget | None, dict[str, Any] | None, TaskHealth]:
     """Resolve one task target and one repository observation for all consumers."""
     if task.archived or task.status not in {"todo", "doing", "blocked"}:
         try:
-            target = _repo_target_for_task_command(root, task)
+            target = _repo_target_for_task_command(root, task, layout=layout)
         except RepoctlError:
             target = None
         return target, None, TaskHealth("historical", ())
     try:
-        target = _repo_target_for_task_command(root, task)
-        delta = repo_changes_since_task_start(root, task.id)
+        target = _repo_target_for_task_command(root, task, layout=layout)
+        delta = repo_changes_since_task_start(root, task.id, layout=layout)
+        alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
     except RepoctlError as exc:
         return None, None, _task_health(root, task, observation_error=exc)
-    return target, delta, _task_health(root, task, delta=delta)
+    health = _task_health(root, task, delta=delta)
+    if alignment_problem is not None:
+        health = TaskHealth("unhealthy", tuple([*health.problems, alignment_problem]))
+    return target, delta, health
 
 
 def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[str, Any] | None:
@@ -2303,6 +2466,8 @@ def _task_resume_guidance(
     task: Any,
     *,
     target: RepoTarget | None,
+    layout: RepoLayout | None = None,
+    repository_observation_available: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[Problem]]:
     warnings: list[dict[str, Any]] = []
     problems: list[Problem] = []
@@ -2320,7 +2485,51 @@ def _task_resume_guidance(
                     exc.path or task.rel_path,
                 )
             )
-    handoff = task_handoff_observation(root, task, binding=binding)
+    handoff = task_handoff_observation(
+        root,
+        task,
+        binding=binding,
+        layout=layout,
+        repository_observation_available=repository_observation_available,
+    )
+    provenance = TaskHandoffProvenance.AUTHORED_OR_REVIEWED
+    if not historical:
+        try:
+            provenance = task_handoff_provenance(root, task)
+        except RepoctlError as exc:
+            problems.append(
+                Problem(
+                    "error",
+                    exc.code or "task_handoff_origin_invalid",
+                    str(exc),
+                    exc.path or task.rel_path,
+                )
+            )
+    generated_template = provenance is TaskHandoffProvenance.GENERATED
+    origin_unknown = bool(not historical and provenance is TaskHandoffProvenance.UNKNOWN_LEGACY)
+    handoff["generated_template"] = generated_template
+    if generated_template and handoff["status"] == "current":
+        # A receipt created by an older repoctl must not activate unchanged
+        # placeholder prose under the stronger current contract.
+        handoff.update(
+            {
+                "status": "unbound",
+                "active": False,
+                "reason_codes": ["task_handoff_generated_template"],
+                "changed_inputs": [],
+            }
+        )
+    if origin_unknown and handoff["status"] in {"current", "unbound", "stale"}:
+        # Origin-less prose is never classified from its wording. A fresh bind
+        # is the only explicit review boundary.
+        handoff.update(
+            {
+                "status": "unbound",
+                "active": False,
+                "reason_codes": ["task_handoff_origin_unknown"],
+                "changed_inputs": [],
+            }
+        )
     if problems and handoff["status"] != "historical":
         handoff.update(
             {
@@ -2400,6 +2609,24 @@ def _task_resume_guidance(
                 "path": task.rel_path,
             }
         )
+    if generated_template:
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_handoff_generated_template",
+                "message": "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
+                "path": task.rel_path,
+            }
+        )
+    elif origin_unknown:
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_handoff_origin_unknown",
+                "message": "regenerate or replace this origin-unknown Handoff with task-specific instructions, then bind it under the current provenance contract",
+                "path": task.rel_path,
+            }
+        )
     pack_status = str(context_pack.get("status") or "not_bound")
     if pack_status in {"stale", "missing", "invalid", "unknown"}:
         warnings.append(
@@ -2459,6 +2686,17 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         "health": health.to_dict(),
         "resume_guidance": resume_guidance,
     }
+    decomposition = _task_decomposition_advisory(root, task)
+    if decomposition is not None:
+        summary["decomposition_advisory"] = decomposition
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_decomposition_recommended",
+                "message": "the active task has repeated Discovery and verification cycles across a Chosen scope larger than the compact path window; consider moving the next independently verifiable milestone to a new task",
+                "path": task.rel_path,
+            }
+        )
     if delta:
         action_inputs = _task_action_inputs(delta)
         if action_inputs:
@@ -2665,6 +2903,7 @@ def cmd_task_verification_add(args: argparse.Namespace) -> int:
             evidence_ref=args.evidence_ref,
             subject_refs=args.subject or [],
             claim_ids=args.claim_id or [],
+            artifact_refs=args.artifact or [],
         )
         for state_path, state_text in result["state_writes"]:
             atomic_write(state_path, state_text)
@@ -2685,6 +2924,140 @@ def cmd_task_verification_add(args: argparse.Namespace) -> int:
     else:
         print(f"Recorded verification outcome: {result['task'].id}")
     return 0
+
+
+def _changed_chosen_structured_verification(
+    root: Path,
+    task: Any,
+    *,
+    target: RepoTarget | None,
+    delta: Mapping[str, Any],
+) -> dict[str, Any]:
+    coverage: dict[str, Any] = {
+        "status": "not_applicable",
+        "required_subjects": [],
+        "passed_subjects": [],
+        "missing_subjects": [],
+        "nonpassing_subjects": [],
+    }
+    alignment = task_discovery_outcome_alignment(root, task, target=target)
+    if target is None:
+        if alignment["status"] != "mismatch":
+            return coverage
+        return {
+            "status": "scope_mismatch",
+            "required_subjects": [],
+            "passed_subjects": [],
+            "missing_subjects": [],
+            "nonpassing_subjects": [],
+        }
+    scope = delta.get("scope") if isinstance(delta.get("scope"), dict) else {}
+    if not scope:
+        if alignment["status"] != "mismatch":
+            return coverage
+        return {
+            "status": "scope_mismatch",
+            "required_subjects": [],
+            "passed_subjects": [],
+            "missing_subjects": [],
+            "nonpassing_subjects": [],
+        }
+    changed_chosen = sorted(
+        (set(_string_list(scope.get("actual_paths"))) | set(_string_list(scope.get("observed_committed_paths"))))
+        & set(_string_list(scope.get("chosen_paths")))
+    )
+    if alignment["status"] == "mismatch":
+        return {
+            "status": "scope_mismatch",
+            "required_subjects": changed_chosen,
+            "passed_subjects": [],
+            "missing_subjects": [],
+            "nonpassing_subjects": [],
+        }
+    return structured_verification_coverage(
+        root,
+        task_id=task.id,
+        target=target,
+        subject_refs=changed_chosen,
+    )
+
+
+def _task_decomposition_advisory(root: Path, task: Any) -> dict[str, Any] | None:
+    if task.archived or task.status not in {"todo", "doing", "blocked"}:
+        return None
+    evidence = task_decomposition_evidence(root, task.id)
+    if (
+        evidence["chosen_subject_count"] <= COMPACT_PATH_LIMIT
+        or evidence["prior_discovery_episode_count"] < 2
+        or evidence["structured_verification_record_count"] < 2
+    ):
+        return None
+    return {
+        "status": "recommended",
+        "reason_codes": [
+            "chosen_scope_exceeds_compact_window",
+            "repeated_discovery_episodes",
+            "multiple_structured_verification_records",
+        ],
+        **evidence,
+        "compact_path_limit": COMPACT_PATH_LIMIT,
+    }
+
+
+def _structured_verification_warnings(
+    coverage: Mapping[str, Any],
+    *,
+    path: str,
+) -> list[Problem]:
+    warnings: list[Problem] = []
+    missing_subjects = _string_list(coverage.get("missing_subjects"))
+    nonpassing_subjects = _string_list(coverage.get("nonpassing_subjects"))
+    if missing_subjects:
+        warnings.append(
+            Problem(
+                "warning",
+                "task_structured_verification_missing",
+                f"{len(missing_subjects)} current changed Chosen subject(s) have no structured verification record",
+                path,
+            )
+        )
+    if nonpassing_subjects:
+        warnings.append(
+            Problem(
+                "warning",
+                "task_structured_verification_nonpassing",
+                f"{len(nonpassing_subjects)} current changed Chosen subject(s) do not have exactly passed structured verification",
+                path,
+            )
+        )
+    return warnings
+
+
+def _structured_verification_summary(
+    coverage: Mapping[str, Any],
+    *,
+    include_unverified_subjects: bool = False,
+) -> dict[str, Any]:
+    missing_subjects = _string_list(coverage.get("missing_subjects"))
+    nonpassing_subjects = _string_list(coverage.get("nonpassing_subjects"))
+    summary = {
+        "status": str(coverage["status"]),
+        "required_subject_count": len(_string_list(coverage.get("required_subjects"))),
+        "passed_subject_count": len(_string_list(coverage.get("passed_subjects"))),
+        "missing_subject_count": len(missing_subjects),
+        "nonpassing_subject_count": len(nonpassing_subjects),
+    }
+    if include_unverified_subjects:
+        unverified = sorted({*missing_subjects, *nonpassing_subjects})
+        visible, count, truncated = _project_string_collection(unverified, compact=True)
+        summary.update(
+            {
+                "unverified_subjects": visible,
+                "unverified_subject_count": count,
+                "unverified_subjects_truncated": truncated,
+            }
+        )
+    return summary
 
 
 def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
@@ -2749,11 +3122,26 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         doctor_problems.append(Problem("warning", exc.code or "missing_verification_file", str(exc), exc.path or task.rel_path))
     target: RepoTarget | None = None
     repository: dict[str, Any] = {}
+    alignment_problem: Problem | None = None
+    discovery_outcome_alignment: dict[str, Any] = {
+        "status": "observation_unavailable",
+        "reason_codes": [],
+        "task_chosen_paths": [],
+        "outcome_chosen_paths": [],
+        "task_only_paths": [],
+        "outcome_only_paths": [],
+        "invalid_task_chosen_values": [],
+        "invalid_outcome_subject_ids": [],
+    }
     delta_preparation_failed = False
     delta_observation_error: RepoctlError | None = None
     try:
         target = _repo_target_for_task_command(root, task)
         repository = target.to_dict() if target is not None else {}
+        discovery_outcome_alignment = task_discovery_outcome_alignment(root, task, target=target)
+        alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
+        if alignment_problem is not None:
+            doctor_problems.append(alignment_problem)
         delta = (
             _task_finish_repo_delta(root, task, target, use_committed_diff=use_committed_diff)
             if target is not None
@@ -2799,12 +3187,36 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
             if not discovery_is_already_advisory and not scope_is_already_advisory:
                 doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
+    structured_coverage = _changed_chosen_structured_verification(
+        root,
+        task,
+        target=target,
+        delta=delta,
+    )
+    doctor_problems.extend(
+        _structured_verification_warnings(
+            structured_coverage,
+            path=task.rel_path,
+        )
+    )
+    decomposition = _task_decomposition_advisory(root, task)
+    if decomposition is not None:
+        doctor_problems.append(
+            Problem(
+                "warning",
+                "task_decomposition_recommended",
+                "the active task has repeated Discovery and verification cycles across a Chosen scope larger than the compact path window; consider moving the next independently verifiable milestone to a new task",
+                task.rel_path,
+            )
+        )
     health = _task_health(
         root,
         task,
         delta=None if delta_preparation_failed else delta,
         observation_error=delta_observation_error,
     )
+    if alignment_problem is not None:
+        health = TaskHealth("unhealthy", tuple([*health.problems, alignment_problem]))
     combined = _dedupe_problems([*task_problems, *doctor_problems, *health.problems])
     blockers = [problem.code for problem in combined if problem.severity == "error"]
     advisory = [
@@ -2830,8 +3242,24 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             "default_source": "task_section",
             "task_section_complete": verification_ready,
         },
+        "structured_verification": _structured_verification_summary(structured_coverage),
+        "discovery_outcome_alignment": discovery_outcome_alignment,
     }
+    if decomposition is not None:
+        data["decomposition_advisory"] = decomposition
     action_inputs = _task_action_inputs(delta)
+    unverified_subjects = sorted({
+        *_string_list(structured_coverage.get("missing_subjects")),
+        *_string_list(structured_coverage.get("nonpassing_subjects")),
+    })
+    if unverified_subjects:
+        action_inputs["unverified_chosen_subjects"] = unverified_subjects
+    missing_subjects = _string_list(structured_coverage.get("missing_subjects"))
+    if missing_subjects:
+        action_inputs["missing_structured_verification_subjects"] = missing_subjects
+    nonpassing_subjects = _string_list(structured_coverage.get("nonpassing_subjects"))
+    if nonpassing_subjects:
+        action_inputs["nonpassing_structured_verification_subjects"] = nonpassing_subjects
     if action_inputs:
         data["action_inputs"] = action_inputs
     payload = {
@@ -2840,8 +3268,8 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "data": data,
         "problems": [problem.to_dict() for problem in combined if problem.severity == "error"],
         "warnings": [
-            *[problem.to_dict() for problem in combined if problem.severity == "warning"],
             *([scope_warning] if scope_warning is not None else []),
+            *[problem.to_dict() for problem in combined if problem.severity == "warning"],
         ],
     }
     payload["next_actions"] = _next_actions_for_problems(
@@ -3026,10 +3454,17 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             start_result = None
             if args.start:
                 start_result = start_task(root, task.id, force_dirty=args.force_dirty)
+                origin_write = start_result.get("handoff_origin_write")
+                if origin_write is not None:
+                    atomic_write(*origin_write)
                 atomic_write(start_result["task"].path, start_result["text"])
         except Exception:
             if task is not None and task.path.exists() and task.path.is_file():
                 task.path.unlink()
+            if task is not None:
+                origin_path = task_handoff_origin_path(root, task.id)
+                if origin_path.is_file():
+                    origin_path.unlink()
             if original_board_text:
                 atomic_write(board_path, original_board_text)
             raise
@@ -3047,7 +3482,28 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         except RepoctlError:
             pass
         next_actions = _discovery_guidance_actions(task.id, repo_id=repo_id, repo_path=repo_path)
+    started_task = resolve_task(root, task.id) if start_result else task
+    generated_handoff = task_handoff_is_generated_template(root, started_task)
+    if start_result and generated_handoff:
+        next_actions = _with_task_safety_prerequisite(
+            next_actions,
+            {
+                "label": "Replace the generated Handoff with task-specific restart instructions",
+                "path": started_task.rel_path,
+                "source": "data.generated_handoff",
+            },
+        )
     start_delta = repo_changes_since_task_start(root, task.id) if start_result else None
+    warnings = [problem.to_dict() for problem in (start_result or {}).get("warnings", [])]
+    if start_result and generated_handoff:
+        warnings.append(
+            {
+                "severity": "warning",
+                "code": "task_handoff_generated_template",
+                "message": "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
+                "path": started_task.rel_path,
+            }
+        )
     payload = {
         "ok": True,
         "command": "task.create",
@@ -3058,6 +3514,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             "backlog_id": args.backlog_id or "",
             "backlog_removed": bool(args.backlog_id),
             "started": bool(start_result),
+            "generated_handoff": generated_handoff,
             "repo_changes": (
                 _repo_change_summary(
                     start_delta,
@@ -3068,7 +3525,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             ),
         },
         "problems": [],
-        "warnings": [problem.to_dict() for problem in (start_result or {}).get("warnings", [])],
+        "warnings": warnings,
         "next_actions": next_actions,
     }
     if args.json:
@@ -3081,7 +3538,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
         if start_result:
             print(f"Started: {task.id}")
         if next_actions:
-            print(f"Next: {next_actions[0]['command']}")
+            print(f"Next: {next_actions[0].get('command') or next_actions[0]['label']}")
     return 0
 
 
@@ -3164,6 +3621,9 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     with repoctl_lock(root):
         load_task_resume_binding(root, task_id)
         result = start_task(root, task_id, force_dirty=args.force_dirty)
+        origin_write = result.get("handoff_origin_write")
+        if origin_write is not None:
+            atomic_write(*origin_write)
         atomic_write(result["task"].path, result["text"])
     started_task = resolve_task(root, task_id)
     delta = repo_changes_since_task_start(root, task_id)
@@ -3197,14 +3657,43 @@ def cmd_task_start(args: argparse.Namespace) -> int:
         next_actions = _discovery_guidance_actions(task_id, repo_id=repo_id, repo_path=repo_path)
     resume_guidance, resume_warnings, resume_problems = _task_resume_guidance(root, started_task, target=target)
     data["resume_guidance"] = resume_guidance
-    next_actions.append(
-        {
-            "label": "Bind the reviewed Handoff before pausing or transferring the task",
-            "command": f"./scripts/repoctl task handoff bind {task_id} --json",
-            "kind": NextActionKind.TASK_HANDOFF_BIND.value,
-            "source": "data.resume_guidance.handoff.status",
-        }
-    )
+    if resume_guidance["handoff"].get("generated_template") is True:
+        next_actions = _with_task_safety_prerequisite(
+            next_actions,
+            {
+                "label": "Replace the generated Handoff with task-specific restart instructions",
+                "path": started_task.rel_path,
+                "source": "data.resume_guidance.handoff.generated_template",
+            },
+        )
+    elif "task_handoff_origin_unknown" in resume_guidance["handoff"].get("reason_codes", []):
+        next_actions = _with_task_safety_prerequisite(
+            next_actions,
+            {
+                "label": "Bind the regenerated or reviewed Handoff under the current provenance contract",
+                "command": f"./scripts/repoctl task handoff bind {task_id} --json",
+                "kind": NextActionKind.TASK_HANDOFF_BIND.value,
+                "source": "data.resume_guidance.handoff.status",
+            },
+        )
+        next_actions = _with_task_safety_prerequisite(
+            next_actions,
+            {
+                "label": "Regenerate or replace the origin-unknown Handoff with task-specific restart instructions",
+                "path": started_task.rel_path,
+                "source": "data.resume_guidance.handoff.status",
+            },
+        )
+    else:
+        next_actions = _with_task_safety_prerequisite(
+            next_actions,
+            {
+                "label": "Bind the reviewed Handoff before pausing or transferring the task",
+                "command": f"./scripts/repoctl task handoff bind {task_id} --json",
+                "kind": NextActionKind.TASK_HANDOFF_BIND.value,
+                "source": "data.resume_guidance.handoff.status",
+            },
+        )
     payload = {
         "ok": not _has_errors(resume_problems),
         "command": "task.start",
@@ -3218,7 +3707,7 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     else:
         print(f"Started: {task_id}")
         if next_actions:
-            print(f"Next: {next_actions[0]['command']}")
+            print(f"Next: {next_actions[0].get('command') or next_actions[0]['label']}")
     return 1 if _has_errors(resume_problems) else 0
 
 
@@ -3265,14 +3754,21 @@ def _verification_input_arg(root: Path, task_id: str, *, verification_file: str 
         )
 
 
-def _repo_target_for_task_command(root: Path, task: Any) -> RepoTarget | None:
+def _repo_target_for_task_command(
+    root: Path,
+    task: Any,
+    *,
+    layout: RepoLayout | None = None,
+) -> RepoTarget | None:
     repo_id = str(task.frontmatter.get("repo_id") or "").strip()
     area = str(task.frontmatter.get("area") or "")
-    if repo_id:
-        return require_repo_target(root, repo_id=repo_id)
-    if area in REPO_REQUIRED_AREAS:
-        return default_repo_target(root)
-    return None
+    return resolve_task_repo_target(
+        root,
+        repo_id=repo_id,
+        repo_scoped=bool(repo_id or area in REPO_REQUIRED_AREAS),
+        layout=layout,
+        task_path=task.rel_path,
+    )
 
 
 def _task_finish_repo_delta(
@@ -3756,6 +4252,8 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="finish")
     knowledge_request = _task_finish_knowledge_request(root, args)
     prepared_candidate = None
+    finish_structured_coverage: dict[str, Any]
+    finish_structured_warnings: list[Problem]
     with repoctl_lock(root):
         meta_gate, delta, result = _prepare_task_finish(
             root,
@@ -3788,6 +4286,17 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
                 problem = candidate_problems[0] if candidate_problems else Problem("error", "knowledge_closeout_failed", "knowledge closeout candidate could not be prepared")
                 raise RepoctlError(problem.message, code=problem.code, path=problem.path)
             result["additional_state_writes"] = [(prepared_candidate.path, prepared_candidate.text)]
+        finish_target = _repo_target_for_task_command(root, result["task"])
+        finish_structured_coverage = _changed_chosen_structured_verification(
+            root,
+            result["task"],
+            target=finish_target,
+            delta=delta,
+        )
+        finish_structured_warnings = _structured_verification_warnings(
+            finish_structured_coverage,
+            path=str(result["new_path"]),
+        )
         _write_task_result(root, result)
     finish_summary = _finish_summary(meta_gate, delta)
     data = {
@@ -3801,6 +4310,10 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "truncated": result["truncated"],
         "meta_gate": meta_gate,
         "finish_summary": finish_summary,
+        "structured_verification": _structured_verification_summary(
+            finish_structured_coverage,
+            include_unverified_subjects=True,
+        ),
         "completion_receipt": result["receipt_path"].relative_to(root).as_posix(),
     }
     receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
@@ -3833,7 +4346,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "command": "task.finish",
         "data": data,
         "problems": [],
-        "warnings": [],
+        "warnings": [problem.to_dict() for problem in finish_structured_warnings],
         "next_actions": next_actions,
     }
     if args.json:
@@ -5002,7 +5515,15 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     data = {
         "bundle": bundle_data,
         "repository": target.to_dict(),
-        "result_receipt": _public_result_receipt(result_receipt),
+        "result_receipt": (
+            context_result_receipt_projection(
+                result_receipt,
+                compact_bundle=compact_bundle_data,
+                full=bool(args.full),
+            )
+            if result_receipt is not None and bundle is not None
+            else None
+        ),
     }
     if args.full or args.explain:
         data.update(meta)
@@ -6853,6 +7374,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.add_argument("--json", action="store_true")
     task_list.set_defaults(func=cmd_task_list)
     task_resume = task_sub.add_parser("resume")
+    task_resume.add_argument("--full", action="store_true", help="include every repository lifecycle problem instead of the bounded code summary")
     task_resume.add_argument("--json", action="store_true")
     task_resume.set_defaults(func=cmd_task_resume)
     task_show = task_sub.add_parser("show")
@@ -6909,6 +7431,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_verification_add.add_argument("--status", choices=["passed", "failed", "mixed", "blocked"], required=True)
     task_verification_add.add_argument("--evidence-ref", required=True, help="existing evidence file or sha256 digest")
     task_verification_add.add_argument("--subject", action="append", default=[], help="Discovery subject ID, key, or path covered by this check")
+    task_verification_add.add_argument("--artifact", action="append", default=[], help="existing non-product workspace artifact covered by this root-task check")
     task_verification_add.add_argument("--claim-id", action="append", default=[], help="sha256 claim ID covered by this check")
     task_verification_add.add_argument("--json", action="store_true")
     task_verification_add.set_defaults(func=cmd_task_verification_add)

@@ -27,9 +27,10 @@ from .path_roles import is_test_path
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]+|[가-힣]+")
-QUOTED_IDENTITY_RE = re.compile(r"`([^`]+)`|'([^']+)'|\"([^\"]+)\"")
 IDENTIFIER_PART_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|[0-9]+")
 IDENTIFIER_SEGMENT_RE = re.compile(r"[A-Za-z0-9]+|[가-힣]+")
+UNQUOTED_PROVIDER_IDENTITY_DELIMITERS = frozenset("()[]{},;")
+PROVIDER_IDENTITY_QUOTES = frozenset(("'", '"', "`"))
 FTS_FIELD_WEIGHTS = (4.0, 3.0, 1.0)
 STOPWORDS = {
     "a",
@@ -92,7 +93,15 @@ class ContextIdentityQuery:
     """Analyzer-owned query identities; this is not a prose classifier."""
 
     explicit_selectors: tuple[tuple[str, ...], ...]
+    exact_symbol_surfaces: tuple[str, ...]
     ordered_natural_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _QuotedIdentitySpan:
+    start: int
+    end: int
+    value: str
 
 
 def retrieve_context(
@@ -250,8 +259,10 @@ def rank_context_chunks(
         for chunk in chunks
         if chunk.corpus_fts_score is not None
     }
-    fts_scores = corpus_fts_scores or _fts_scores(query, chunks)
+    fts_scores = corpus_fts_scores or _fts_scores(terms, chunks)
     candidates: list[ContextCandidate] = []
+    normalized_repository_path = repository_path.replace("\\", "/").strip("/")
+    repository_prefix = f"{normalized_repository_path}/" if normalized_repository_path else ""
 
     for chunk in chunks:
         document_role = source_document_role(
@@ -260,8 +271,24 @@ def rank_context_chunks(
             repository_path=repository_path,
             assigned=chunk.document_role,
         )
-        normalized_repository_path = repository_path.replace("\\", "/").strip("/")
-        repository_prefix = f"{normalized_repository_path}/" if normalized_repository_path else ""
+        identity_kinds = context_identity_evidence(
+            identity_query,
+            path=chunk.source_ref.path,
+            section=chunk.source_ref.section,
+            section_kind=chunk.source_ref.section_kind,
+        )
+        if (
+            chunk.source_ref.kind == ContextSourceKind.STRUCTURED_DATA.value
+            and not identity_kinds
+        ):
+            continue
+        if document_role in SOURCE_EXCLUDED_DOCUMENT_ROLES:
+            continue
+        if (
+            document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES
+            and not identity_kinds
+        ):
+            continue
         repository_relative_path = chunk.source_ref.path.replace("\\", "/")
         if repository_prefix and repository_relative_path.startswith(repository_prefix):
             repository_relative_path = repository_relative_path.removeprefix(repository_prefix)
@@ -285,24 +312,6 @@ def rank_context_chunks(
             "section": _matched_query_terms(ordered_terms, section_terms),
             "body": _matched_query_terms(ordered_terms, body_terms),
         }
-        identity_kinds = context_identity_evidence(
-            identity_query,
-            path=chunk.source_ref.path,
-            section=chunk.source_ref.section,
-            section_kind=chunk.source_ref.section_kind,
-        )
-        if (
-            chunk.source_ref.kind == ContextSourceKind.STRUCTURED_DATA.value
-            and not identity_kinds
-        ):
-            continue
-        if document_role in SOURCE_EXCLUDED_DOCUMENT_ROLES:
-            continue
-        if (
-            document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES
-            and not identity_kinds
-        ):
-            continue
         identity_score, _ = _identity_score_from_kinds(identity_kinds)
         fts_score = fts_scores.get(chunk.source_ref.key(), 0.0)
         authority_score = _authority_score(chunk, document_role=document_role)
@@ -394,23 +403,151 @@ def canonical_identifier_sequence(value: str) -> tuple[str, ...]:
     return tuple(part for part in parts if part)
 
 
+def _provider_identity_surface(value: str) -> str:
+    return value.casefold()
+
+
+def _unquoted_provider_identity_surfaces(
+    query: str,
+    *,
+    quoted_spans: tuple[_QuotedIdentitySpan, ...],
+) -> tuple[str, ...]:
+    quote_ends_by_start = {span.start: span.end for span in quoted_spans}
+    surfaces: list[str] = []
+    surface_start: int | None = None
+    index = 0
+    while index < len(query):
+        quote_end = quote_ends_by_start.get(index)
+        if quote_end is not None:
+            if surface_start is not None:
+                surfaces.append(query[surface_start:index])
+                surface_start = None
+            index = quote_end
+            continue
+        if _is_unquoted_provider_identity_delimiter(query[index]):
+            if surface_start is not None:
+                surfaces.append(query[surface_start:index])
+                surface_start = None
+        elif surface_start is None:
+            surface_start = index
+        index += 1
+    if surface_start is not None:
+        surfaces.append(query[surface_start:])
+    return tuple(surface for surface in surfaces if surface)
+
+
+def _is_unquoted_provider_identity_delimiter(character: str) -> bool:
+    return character.isspace() or character in UNQUOTED_PROVIDER_IDENTITY_DELIMITERS
+
+
+def _bounded_quoted_identity_spans(query: str) -> tuple[_QuotedIdentitySpan, ...]:
+    """Return non-overlapping, delimiter-bounded quote spans in linear time."""
+
+    next_same_quote = [-1] * len(query)
+    next_quote_positions = {quote: -1 for quote in PROVIDER_IDENTITY_QUOTES}
+    for index in range(len(query) - 1, -1, -1):
+        quote = query[index]
+        if quote not in PROVIDER_IDENTITY_QUOTES:
+            continue
+        next_same_quote[index] = next_quote_positions[quote]
+        next_quote_positions[quote] = index
+
+    spans: list[_QuotedIdentitySpan] = []
+    index = 0
+    while index < len(query):
+        quote = query[index]
+        if quote not in PROVIDER_IDENTITY_QUOTES or (
+            index > 0
+            and not _is_unquoted_provider_identity_delimiter(query[index - 1])
+        ):
+            index += 1
+            continue
+
+        closing_index = next_same_quote[index]
+        end = closing_index + 1
+        if (
+            closing_index <= index + 1
+            or (
+                end < len(query)
+                and not _is_unquoted_provider_identity_delimiter(query[end])
+            )
+        ):
+            # This quote does not own any later candidate. Advancing one
+            # character leaves a subsequent bounded opening visible.
+            index += 1
+            continue
+
+        spans.append(
+            _QuotedIdentitySpan(
+                start=index,
+                end=end,
+                value=query[index + 1:closing_index],
+            )
+        )
+        # A valid outer span owns its contents; inner quote characters cannot
+        # independently establish another exact provider surface.
+        index = end
+    return tuple(spans)
+
+
+def _is_explicit_provider_identity_surface(surface: str) -> bool:
+    return bool(
+        surface
+        and any(character.isalnum() or character == "_" for character in surface)
+        and (
+            _is_explicit_identity_token(surface)
+            or not surface.isidentifier()
+        )
+    )
+
+
 def context_identity_selectors(query: str) -> ContextIdentityQuery:
     selectors: list[tuple[str, ...]] = []
-    stripped = query.strip().strip("`'\"")
+    exact_symbol_surfaces: list[str] = []
+    quoted_spans = _bounded_quoted_identity_spans(query)
+    content_start = 0
+    while content_start < len(query) and query[content_start].isspace():
+        content_start += 1
+    content_end = len(query)
+    while content_end > content_start and query[content_end - 1].isspace():
+        content_end -= 1
+
+    stripped = query[content_start:content_end]
+    whole_quoted_span = (
+        quoted_spans[0]
+        if len(quoted_spans) == 1
+        and quoted_spans[0].start == content_start
+        and quoted_spans[0].end == content_end
+        else None
+    )
+    if whole_quoted_span is not None:
+        stripped = whole_quoted_span.value
+    if stripped:
+        exact_symbol_surfaces.append(_provider_identity_surface(stripped))
     whole = tuple(part for part in canonical_identifier_sequence(stripped) if part not in STOPWORDS)
     if whole:
         selectors.append(whole)
-    for match in QUOTED_IDENTITY_RE.finditer(query):
-        quoted = next((value for value in match.groups() if value is not None), "")
+    for span in quoted_spans:
+        quoted = span.value
+        if quoted:
+            exact_symbol_surfaces.append(_provider_identity_surface(quoted))
         selector = canonical_identifier_sequence(quoted)
         if selector:
             selectors.append(selector)
-    for raw_token in TOKEN_RE.findall(query):
+    for provider_surface in _unquoted_provider_identity_surfaces(
+        query,
+        quoted_spans=quoted_spans,
+    ):
+        if _is_explicit_provider_identity_surface(provider_surface):
+            exact_symbol_surfaces.append(
+                _provider_identity_surface(provider_surface)
+            )
+    for token_match in TOKEN_RE.finditer(query):
+        raw_token = token_match.group(0)
         token = raw_token.rstrip(".:")
-        if not _is_explicit_identity_token(token):
-            continue
-        selector = canonical_identifier_sequence(token)
-        if selector:
+        if _is_explicit_identity_token(token) and (
+            selector := canonical_identifier_sequence(token)
+        ):
             selectors.append(selector)
     ordered_natural_terms = tuple(
         part
@@ -421,6 +558,14 @@ def context_identity_selectors(query: str) -> ContextIdentityQuery:
     return ContextIdentityQuery(
         explicit_selectors=tuple(
             dict.fromkeys(sorted(selectors, key=lambda value: (-len(value), value)))
+        ),
+        exact_symbol_surfaces=tuple(
+            dict.fromkeys(
+                sorted(
+                    (value for value in exact_symbol_surfaces if value),
+                    key=lambda value: (-len(value), value),
+                )
+            )
         ),
         ordered_natural_terms=ordered_natural_terms,
     )
@@ -444,6 +589,7 @@ def context_identity_evidence(
     path_identity = canonical_identifier_sequence(path.removeprefix("./"))
     filename_identity = canonical_identifier_sequence(path.replace("\\", "/").rsplit("/", 1)[-1])
     section_identity = canonical_identifier_sequence(section.strip())
+    section_surface = _provider_identity_surface(section)
     kinds: set[ContextEvidenceKind] = set()
     for selector in identity_query.explicit_selectors:
         if selector == filename_identity:
@@ -453,21 +599,22 @@ def context_identity_evidence(
         elif selector == path_identity:
             kinds.add(ContextEvidenceKind.EXACT_PATH)
         if (
-            section_kind in {ContextSectionKind.PROVIDER_SYMBOL, ContextSectionKind.PROVIDER_RELATIONSHIP}
-            and section_identity
-            and selector == section_identity
-        ):
-            kinds.add(
-                ContextEvidenceKind.EXACT_SYMBOL
-                if section_kind == ContextSectionKind.PROVIDER_SYMBOL
-                else ContextEvidenceKind.EXACT_RELATIONSHIP
-            )
-        if (
             section_kind == ContextSectionKind.TASK
             and section_identity
             and selector == section_identity
         ):
             kinds.add(ContextEvidenceKind.EXACT_TASK)
+    if (
+        section_kind
+        in {ContextSectionKind.PROVIDER_SYMBOL, ContextSectionKind.PROVIDER_RELATIONSHIP}
+        and section_surface
+        and section_surface in identity_query.exact_symbol_surfaces
+    ):
+        kinds.add(
+            ContextEvidenceKind.EXACT_SYMBOL
+            if section_kind == ContextSectionKind.PROVIDER_SYMBOL
+            else ContextEvidenceKind.EXACT_RELATIONSHIP
+        )
 
     filename = path.replace("\\", "/").rsplit("/", 1)[-1]
     filename_stem = filename.rsplit(".", 1)[0] if "." in filename else filename
@@ -487,6 +634,8 @@ def context_identity_evidence(
         )
     ):
         kinds.add(ContextEvidenceKind.NAMED_FILE_IDENTITY)
+        if named_file_identity in identity_query.explicit_selectors:
+            kinds.add(ContextEvidenceKind.EXPLICIT_NAMED_FILE_IDENTITY)
 
     if section_kind in {
         ContextSectionKind.PROVIDER_SYMBOL,
@@ -502,6 +651,8 @@ def context_identity_evidence(
                 )
             ):
                 kinds.add(ContextEvidenceKind.NAMED_SYMBOL_IDENTITY)
+                if named_symbol_identity in identity_query.explicit_selectors:
+                    kinds.add(ContextEvidenceKind.EXPLICIT_NAMED_SYMBOL_IDENTITY)
                 break
     return tuple(sorted(kinds, key=lambda kind: kind.value))
 
@@ -600,6 +751,8 @@ def _anchor_strength(
     if set(identity_kinds) & {
         ContextEvidenceKind.NAMED_FILE_IDENTITY,
         ContextEvidenceKind.NAMED_SYMBOL_IDENTITY,
+        ContextEvidenceKind.EXPLICIT_NAMED_FILE_IDENTITY,
+        ContextEvidenceKind.EXPLICIT_NAMED_SYMBOL_IDENTITY,
     }:
         return ContextAnchorStrength.STRONG
     if section_kind in {ContextSectionKind.PROVIDER_SYMBOL, ContextSectionKind.PROVIDER_RELATIONSHIP} and section_coverage == 1.0:
@@ -751,8 +904,8 @@ def _authority_score(
     return 0.1
 
 
-def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str, str, str, int, int, str, str, str], float]:
-    if not query.strip() or not chunks:
+def _fts_scores(terms: set[str], chunks: list[DocumentChunk]) -> dict[tuple[str, str, str, str, int, int, str, str, str], float]:
+    if not terms or not chunks:
         return {}
     connection = sqlite3.connect(":memory:")
     try:
@@ -761,9 +914,7 @@ def _fts_scores(query: str, chunks: list[DocumentChunk]) -> dict[tuple[str, str,
             "INSERT INTO chunks(path, section, body) VALUES (?, ?, ?)",
             [(chunk.source_ref.path, chunk.source_ref.section, chunk.text) for chunk in chunks],
         )
-        phrase = " OR ".join(_escape_fts(token) for token in sorted(context_query_terms(query)))
-        if not phrase:
-            return {}
+        phrase = " OR ".join(_escape_fts(token) for token in sorted(terms))
         result: dict[tuple[str, str, str, str, int, int, str, str, str], float] = {}
         cursor = connection.execute(
             "SELECT rowid, bm25(chunks, ?, ?, ?) AS rank FROM chunks WHERE chunks MATCH ? ORDER BY rank, rowid",

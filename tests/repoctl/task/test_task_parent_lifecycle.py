@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import tools.repoctl.tasks as task_module
 from tools.repoctl.cli import main
 from tools.repoctl.tasks import repo_changes_since_task_start
 from tests.repoctl.task_lifecycle_helpers import (
@@ -181,6 +182,41 @@ def test_task_finish_parent_archives_non_live_child_byte_identically(tmp_path: P
     assert child_archive.exists()
     assert not (tmp_path / "docs/tasks/T-20260609184047Z--child.md").exists()
     assert child_archive.read_bytes() == original_child
+
+
+def test_parent_repository_observation_materializes_layout_once_for_done_descendants(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    repo, verification = _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, child_id, query="update app", reviewed="repos/app.py", chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    assert main(["task", "finish", child_id, "--verification-file", str(verification), "--json"]) == 0
+    capsys.readouterr()
+
+    real_repo_layout = task_module.repo_layout
+    calls = 0
+
+    def counted_repo_layout(root: Path):
+        nonlocal calls
+        calls += 1
+        return real_repo_layout(root)
+
+    monkeypatch.setattr(task_module, "repo_layout", counted_repo_layout)
+
+    delta = repo_changes_since_task_start(tmp_path, parent_id)
+
+    assert delta["child_attributed_count"] == 1
+    assert calls == 1
 
 
 def test_root_parent_requires_root_evidence_for_repository_adopted_after_its_baseline(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -25,7 +25,7 @@ At session start or after compaction, run `./scripts/repoctl task resume --json`
 
 For repo-scoped implementation tasks, use this order before editing product files:
 
-1. Explore without changing product source or task scope using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query` as the integrated discovery view; known file -> Graph or direct read; known exact string or symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
+1. Explore without changing product source or task scope using the entry point that matches the known evidence: ambiguous intent -> compact `repoctl context query` as the integrated discovery view; an explicit current-diff/review request -> Git status/diff as the changed-set authority, followed by Graph or direct reads for relationships and meaning; known file -> Graph or direct read; known exact string or symbol -> `rg`; past decision or failure mode -> task history or Knowledge.
 2. Use top-level `graph_seed_refs` as ranked, source-bound Graph continuation inputs. Read `completeness.graph_anchor.seed_anchors` only to interpret coverage and provenance: `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are explicit anchors, while `lexical_file` is a ranked hypothesis. Treat a coherent returned source/test/relation set as the initial working set after inspecting the source; `resolved` means the typed path exists in Graph, not that semantic ownership is proven. Follow typed Graph continuations repeatedly when imports, callers, callees, direct tests, related tasks/documents, or impact paths are useful. Context and Graph are independent entry points; neither is a mandatory precursor to the other.
 3. Do not restart the same broad repository discovery with `rg` after Context already returned a coherent working set. Narrow `rg` checks and direct reads remain appropriate for confirmation; refine the query or refresh Graph when Context reports ambiguity, missing coverage, or stale evidence.
 4. Create or resume the task and start it before the first product mutation. Exploration is not gated on task creation or task start.
@@ -39,17 +39,20 @@ The completion-bound outcome contract is specified in `docs/contracts/repoctl-di
 ```bash
 ./scripts/repoctl task discovery add T-... --query "<query>" --json
 ./scripts/repoctl context query "<query>" --repo-id main --json
-# Current result format: when a returned result informed scope, copy its producer/result_id and one exact selectable authority/ref tuple:
+# Context: copy producer/result_id plus one exact `compact.representative_citations[*].primary_citation`; rerun with `--full` and use `manifest.items` only when selecting an omitted member. Graph receipts expose `selectable` directly:
 ./scripts/repoctl task discovery add T-... --result-producer context --result-id "sha256:..." --result-authority source --result-ref repos/path --json
 ./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl task discovery add T-... --reviewed repos/path --chosen repos/path --json
 ./scripts/repoctl task discovery add T-... --reviewed repos/decoy --excluded repos/decoy --json
 ./scripts/repoctl task verification add T-... --status passed --evidence-ref verification.txt --subject repos/path --json
+./scripts/repoctl task verification add T-... --status passed --evidence-ref verification.txt --artifact docs/reviews/review.md --json
 ./scripts/repoctl context pack --task T-... --repo-id main --format markdown --output .repoctl-state/context-pack/T-....md
 ./scripts/repoctl task handoff bind T-... --context-pack .repoctl-state/context-pack/T-....md --json
 ```
 
 Context Pack is optional read-only evidence and never defines task scope. If generated before Chosen files exist, refresh it after Discovery before relying on its scoped view. Before pausing or transferring a live task, review the four Handoff fields and explicitly run `task handoff bind`; add `--context-pack` only when that exact Pack should be active resume evidence. `task start` and `task show` never bind automatically. Only `current` resume guidance is active; `unbound`, `stale`, `unknown`, and `historical` Handoffs remain readable but must not be treated as current instructions.
+
+`task verification add --artifact` is only for a root-only workspace task with current root-only task-start evidence. It accepts an existing canonical workspace-relative regular file outside `repos/**`, records it as Reviewed evidence without adding Chosen scope, and never promotes it into the ordinary product outcome frontier. A todo task, a legacy live task without the current start-state schema, malformed state, or a product-start task later reclassified by frontmatter is rejected before outcome state is written. Once a start baseline exists, product Discovery and verification mutations likewise require the current selected repository to match that immutable start scope. Product-repository checks use `--subject`; absolute paths, traversal, missing files, product paths, and symlink escapes are rejected.
 
 `graph query` reads the last materialized snapshot and never rebuilds automatically. Its default response reports bounded freshness state only; use `--full` for freshness counts, exact stale paths, or raw relations. Run `graph build` explicitly when no snapshot exists or after changes that must be reflected in Graph traversal. With a snapshot, `context query` uses the persistent evidence index and reads only stale path overlays. Without a snapshot, it still returns lexical source/document/task/Knowledge evidence and marks Graph relations unavailable.
 
@@ -92,9 +95,13 @@ Scope matrix:
 - Task frontmatter is authoritative. Board rows are a live registry only; do not update Board rows for owner/status changes.
 - Parent-child authority: child `parent` frontmatter is source of truth; parent child lists are convenience summaries.
 - `owner` and `depends_on` are informational metadata, not locks/enforcement.
-- Worker agents must not set lifecycle-managed fields such as `status: done`; use `repoctl task finish`.
-- Humans and agents write task meaning: Goal, Discovery, Execution Log, Verification, and Handoff. Do not hand-edit `.repoctl-state` baselines, fingerprints, ownership decisions, completion receipts, regenerable query-result receipts, or archive metadata; repoctl owns those machine records.
+- Worker agents must not set lifecycle-managed fields such as `status: done` or `handoff_origin_commitment`; use the corresponding repoctl lifecycle command.
+- Humans and agents write task meaning: Goal, Discovery, Execution Log, Verification, and Handoff. Do not hand-edit `.repoctl-state` baselines, fingerprints, Handoff-origin records, ownership decisions, completion receipts, regenerable query-result receipts, or archive metadata; repoctl owns those machine records.
 - A Handoff binding records that the exact four-field Handoff, structured task inputs, and observed repository state were reviewed together. It does not certify the semantic correctness of the prose. Any later Handoff, task contract, Discovery, Execution Log, Verification, or observed repository-content change makes it stale until explicitly reviewed and rebound.
+- Repoctl-generated creation/start Handoff text is a placeholder, not reviewed task meaning. Repoctl carries its exact generated-body commitment in lifecycle-managed task frontmatter and records its body digest plus template version in machine-owned origin state. Origin state is published before the generated task body, and the task-carried commitment keeps unchanged placeholder text classified as generated if that sidecar is later missing; a non-regular, symlinked, unreadable, or inconsistent origin remains a typed error. Later copy, language, title, path, or repository-hint changes therefore cannot make the placeholder executable. Replace it with task-specific restart instructions before binding; repoctl warns and rejects an unchanged generated Handoff without attempting semantic prose analysis. `task start` replaces only a machine-proven exact generated placeholder and preserves a structurally valid authored Handoff. A Handoff with neither origin state nor a task-carried commitment is never classified by matching its prose to current or historical templates; it remains inactive until an agent regenerates, replaces, or explicitly reviews it and records one fresh provenance-aware `task handoff bind`.
+- A `todo` task may record Discovery before start. Once a task is `doing` or `blocked`, every Discovery outcome mutation requires a current task-start baseline with the same immutable repository scope; every structured verification mutation requires that evidence in every status. A legacy live task without it must use a fresh follow-up rather than creating machine state that cannot be completed.
+- When machine-owned Discovery outcome state exists, its `active_chosen` identities and the Task's complete structured `Chosen files` projection must agree. Explicit Chosen values that are not canonical workspace-relative paths are typed lifecycle errors rather than silently discarded data. Direct prose edits that make either form diverge leave lifecycle health unhealthy and block finish; reconcile the approved set through `task discovery add --replace-chosen ... --reason ...` rather than editing machine state.
+- `task show` and `task doctor` may recommend decomposition when a live task combines a Chosen set beyond the existing compact path window, repeated closed Discovery episodes, and multiple structured verification records. This is an advisory to move the next independently verifiable milestone into a new task; it does not prove semantic independence, split automatically, or rewrite current scope.
 
 ## repoctl Boundary
 
@@ -127,6 +134,7 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - Handoff fields: **Next exact step**, **First file to open**, **First command to run**, **Done when**.
 - For a live task, **First file to open** must resolve to an existing file inside the workspace. Historical `## Last Active Handoff` entries are not revalidated after completion. **First command to run** is stored as text and must not be parsed, classified, or executed by repoctl.
 - `## Execution Log` is append-only, short, and uses real UTC timestamps. Prefer `repoctl task log append` over hand-written timestamps.
+- Dirty path details live in the machine-owned task-start baseline. The human Execution Log records only their count and baseline reference rather than duplicating path lists.
 - `## Verification` records commands, evidence, and results. Worker inability to run a gate is evidence, not final verification; final gates are the manager/Codex responsibility.
 - Keep `## Handoff` aligned with the latest meaningful execution log before stopping.
 
@@ -137,6 +145,7 @@ Root-level automation under `scripts/` must resolve the workspace root from the 
 - Parent tasks archive only after live children are done, canceled, or re-parented.
 - Done/canceled tasks and their completion receipts are immutable.
 - Additional work uses a new task: `./scripts/repoctl task create --follow-up-of T-old --slug ... "Follow-up title" --json`. The new task gets a new baseline; the old task is not moved or rewritten.
+- Ordinary validation resolves the bounded transitive chain of immutable `follow_up_of` ancestors reachable from current tasks; it does not enumerate unrelated archive history.
 - Create a Knowledge candidate only when the task established a reusable cross-task decision, invariant, or failure mode. Every candidate requires an explicit `--claim` or `--claim-file`; source documents and completion receipts provide provenance, never the reusable claim. Prefer the integrated `task finish --knowledge-kind ... --knowledge-claim ...` closeout. `knowledge candidate suggest --from-task ... --dry-run` remains a preview path for an already-finished task, not the normal closeout. Use candidate show/check before explicit approval, and never hand-edit candidate JSON. Approval materializes the reviewed record and synchronizes Graph in the same command; if Graph synchronization fails, keep the durable record and follow the returned typed rebuild action. Routine implementation details should remain in task history rather than durable Knowledge.
 
 ## Documentation Language

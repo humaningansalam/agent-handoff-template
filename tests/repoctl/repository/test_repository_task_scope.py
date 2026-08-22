@@ -102,7 +102,11 @@ def test_task_doctor_uses_task_repo_id_in_configured_multi_repo(tmp_path: Path, 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["repository"] == {"id": "web", "path": "repos/web", "identity_source": "pinned"}
-    assert {warning["code"] for warning in payload["warnings"]} == {"missing_discovery_evidence", "missing_verification_file"}
+    assert {warning["code"] for warning in payload["warnings"]} == {
+        "missing_discovery_evidence",
+        "missing_verification_file",
+        "task_handoff_generated_template",
+    }
     assert payload["problems"] == []
 
 

@@ -16,7 +16,17 @@ from tools.repoctl.completion_catalogue import (
 )
 from tools.repoctl.cli import main
 from tools.repoctl.context import compact_context_bundle
-from tools.repoctl.context_model import ContextBundle, ContextCandidate, ContextSourceRef
+from tools.repoctl.context_model import (
+    ContextBundle,
+    ContextCandidate,
+    ContextEvidenceKind,
+    ContextSectionKind,
+    ContextSourceRef,
+)
+from tools.repoctl.context_retrieval import (
+    context_identity_evidence,
+    context_identity_selectors,
+)
 from tools.repoctl.discovery_outcomes import (
     add_verification_record,
     completion_outcome_projection,
@@ -28,7 +38,15 @@ from tools.repoctl.graph_store import load_materialized_graph, materialize_graph
 from tools.repoctl.knowledge_projection import rebuild_knowledge_projection
 from tools.repoctl.path_roles import PathRole, classify_path_role
 from tools.repoctl.repositories import require_repo_target
-from tools.repoctl.result_receipts import ResultProducer, context_result_citations, result_receipt_path
+from tools.repoctl.result_receipts import (
+    ResultAuthority,
+    ResultProducer,
+    ResultSelection,
+    context_result_citations,
+    read_result_receipt,
+    result_receipt_path,
+    verify_result_selections,
+)
 from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
 from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.test_completion_catalogue import _public_finish_fixture
@@ -158,15 +176,30 @@ def test_context_query_exposes_one_compact_result_receipt_for_default_and_full_v
     (repo / "owner.py").write_text("def resolve_invoice_owner():\n    return 'billing'\n", encoding="utf-8")
 
     assert main(["context", "query", "resolve_invoice_owner", "--repo-id", "main", "--json"]) == 0
-    compact_payload = json.loads(capsys.readouterr().out)
+    compact_output = capsys.readouterr().out
+    compact_payload = json.loads(compact_output)
     compact_receipt = compact_payload["data"]["result_receipt"]
+    assert compact_receipt["schema"] == (
+        "repoctl.repository-understanding.result-receipt-projection"
+    )
+    assert compact_receipt["schema_version"] == 1
+    assert compact_receipt["view"] == "compact"
     assert compact_receipt["producer"] == "context"
     assert compact_receipt["request"] == {
         "kind": "context_query",
         "query": "resolve_invoice_owner",
         "mode": "auto",
     }
-    assert {item["ref"] for item in compact_receipt["selectable"]} >= {"repos/owner.py"}
+    assert "selectable" not in compact_receipt
+    assert "items" not in compact_receipt["manifest"]
+    visible_citations = {
+        (
+            item["primary_citation"]["authority"],
+            item["primary_citation"]["ref"],
+        )
+        for item in compact_receipt["compact"]["representative_citations"]
+    }
+    assert ("source", "repos/owner.py") in visible_citations
     target = require_repo_target(tmp_path, repo_id="main")
     path = result_receipt_path(
         tmp_path,
@@ -175,11 +208,39 @@ def test_context_query_exposes_one_compact_result_receipt_for_default_and_full_v
         result_id=compact_receipt["result_id"],
     )
     receipt_bytes = path.read_bytes()
+    stored_receipt = read_result_receipt(tmp_path, path)
+    assert compact_receipt["manifest"]["selectable_count"] == len(
+        stored_receipt["selectable"]
+    )
+    hidden = next(
+        item
+        for item in stored_receipt["selectable"]
+        if (item["authority"], item["ref"]) not in visible_citations
+    )
+    assert verify_result_selections(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=compact_receipt["result_id"],
+        selections=[
+            ResultSelection(ResultAuthority(hidden["authority"]), hidden["ref"])
+        ],
+    ) == stored_receipt
 
     assert main(["context", "query", "resolve_invoice_owner", "--repo-id", "main", "--full", "--json"]) == 0
-    full_receipt = json.loads(capsys.readouterr().out)["data"]["result_receipt"]
+    full_output = capsys.readouterr().out
+    full_receipt = json.loads(full_output)["data"]["result_receipt"]
 
-    assert full_receipt == compact_receipt
+    assert full_receipt["view"] == "full"
+    assert full_receipt["compact"] == compact_receipt["compact"]
+    assert full_receipt["manifest"]["items"] == stored_receipt["selectable"]
+    assert {
+        key: value
+        for key, value in full_receipt["manifest"].items()
+        if key != "items"
+    } == compact_receipt["manifest"]
+    assert full_receipt["receipt_digest"] == compact_receipt["receipt_digest"]
+    assert len(compact_output.encode("utf-8")) < len(full_output.encode("utf-8"))
     assert path.read_bytes() == receipt_bytes
 
 
@@ -526,11 +587,13 @@ def test_context_query_ranks_provider_section_owner_over_repeated_body_noise(tmp
     noise = next(item for item in bundle["evidence"] if item["source_ref"]["path"] == "repos/noise.py")
     assert owner["score_breakdown"]["section"] == 1.0
     assert noise["score_breakdown"]["section"] == 0.0
-    assert owner["anchor_strength"] == "exact"
+    assert owner["anchor_strength"] == "strong"
+    assert "named_symbol_identity" in owner["evidence_kinds"]
+    assert "exact_symbol" not in owner["evidence_kinds"]
     assert noise["anchor_strength"] == "weak"
 
 
-def test_context_query_preserves_exact_owner_beyond_body_noise_cutoff(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_query_preserves_named_owner_beyond_body_noise_cutoff(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     noisy_functions = "\n\n".join(
         f"def noise_{index}():\n    return 'locate owner'"
@@ -632,6 +695,417 @@ def test_context_query_does_not_promote_generic_natural_language_token_to_exact_
             item["anchor_provenance"] != "exact_identity"
             for item in punctuated_resolution["anchors"]
         )
+
+
+@pytest.mark.parametrize(
+    ("query", "provider_symbol", "expected_exact"),
+    [
+        ("find sha256 owner", "sha256", True),
+        ("find SHA256 owner", "sha256", True),
+        ("find SHA-256 owner", "sha256", False),
+        ('find "sha256" owner', "sha256", True),
+        ('find "SHA-256" owner', "sha256", False),
+        ("find validate_token owner", "validate_token", True),
+        ("find validateToken owner", "validateToken", True),
+        ("find hashlib.sha256 owner", "hashlib.sha256", True),
+        ("find TLS1.3 owner", "tls13", False),
+        ("find foo-bar owner", "fooBar", False),
+        ("find foo-bar owner", "foo-bar", True),
+        ("find FooBar:: owner", "FooBar", False),
+        ("find FooBar:: owner", "FooBar::", True),
+        ("find FooBar. owner", "FooBar", False),
+        ('find " FooBar " owner', "FooBar", False),
+        ('find " FooBar " owner', " FooBar ", True),
+        ("find FooBar owner", " FooBar ", False),
+        ("find ClassName::method_name owner", "ClassName::method_name", True),
+        ("find (FooBar) owner", "FooBar", True),
+        ("find FooBar, owner", "FooBar", True),
+        ("find FooBar() owner", "FooBar", True),
+        ('find "FooBar," owner', "FooBar", False),
+        ('find "FooBar," owner', "FooBar,", True),
+        ("impact $fooBar", "fooBar", False),
+        ("impact $fooBar", "$fooBar", True),
+        ("impact $foo", "foo", False),
+        ("impact $foo", "$foo", True),
+        ("impact @fooBar", "fooBar", False),
+        ("impact @fooBar", "@fooBar", True),
+        ("impact #fooBar", "fooBar", False),
+        ("impact #fooBar", "#fooBar", True),
+        ("impact fooBar?", "fooBar", False),
+        ("impact fooBar?", "fooBar?", True),
+        ("impact fooBar+other", "fooBar", False),
+        ("impact fooBar+other", "fooBar+other", True),
+        ('impact "$fooBar"', "fooBar", False),
+        ('impact "$fooBar"', "$fooBar", True),
+        ("reconcile settlement", "reconcileSettlement", False),
+    ],
+)
+def test_context_exact_provider_symbol_identity_preserves_query_surface(
+    query: str,
+    provider_symbol: str,
+    expected_exact: bool,
+) -> None:
+    kinds = context_identity_evidence(
+        context_identity_selectors(query),
+        path="repos/owner.py",
+        section=provider_symbol,
+        section_kind=ContextSectionKind.PROVIDER_SYMBOL,
+    )
+    assert (ContextEvidenceKind.EXACT_SYMBOL in kinds) is expected_exact
+
+
+@pytest.mark.parametrize(
+    ("query", "provider_relationship", "expected_exact"),
+    [
+        ("alpha", "alpha", True),
+        ("ALPHA", "alpha", True),
+        ("alpha-beta", "alphaBeta", False),
+        ("alpha-beta", "alpha-beta", True),
+        ("find FooBar:: owner", "FooBar", False),
+        ("find FooBar:: owner", "FooBar::", True),
+        ("find FooBar. owner", "FooBar", False),
+        ('find " FooBar " owner', "FooBar", False),
+        ('find " FooBar " owner', " FooBar ", True),
+        ("find FooBar owner", " FooBar ", False),
+        ("find ClassName::method_name owner", "ClassName::method_name", True),
+        ("find (FooBar) owner", "FooBar", True),
+        ("find FooBar, owner", "FooBar", True),
+        ("find FooBar() owner", "FooBar", True),
+        ('find "FooBar," owner', "FooBar", False),
+        ('find "FooBar," owner', "FooBar,", True),
+        ("impact $fooBar", "fooBar", False),
+        ("impact $fooBar", "$fooBar", True),
+        ("impact $foo", "foo", False),
+        ("impact $foo", "$foo", True),
+        ("impact @fooBar", "fooBar", False),
+        ("impact @fooBar", "@fooBar", True),
+        ("impact #fooBar", "fooBar", False),
+        ("impact #fooBar", "#fooBar", True),
+        ("impact fooBar?", "fooBar", False),
+        ("impact fooBar?", "fooBar?", True),
+        ("impact fooBar+other", "fooBar", False),
+        ("impact fooBar+other", "fooBar+other", True),
+        ('impact "$fooBar"', "fooBar", False),
+        ('impact "$fooBar"', "$fooBar", True),
+    ],
+)
+def test_context_exact_provider_relationship_identity_preserves_query_surface(
+    query: str,
+    provider_relationship: str,
+    expected_exact: bool,
+) -> None:
+    kinds = context_identity_evidence(
+        context_identity_selectors(query),
+        path="repos/client.dart",
+        section=provider_relationship,
+        section_kind=ContextSectionKind.PROVIDER_RELATIONSHIP,
+    )
+    assert (ContextEvidenceKind.EXACT_RELATIONSHIP in kinds) is expected_exact
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+@pytest.mark.parametrize("position", ["prefix", "suffix"])
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_unmatched_quote_remains_in_provider_exact_surface(
+    quote: str,
+    position: str,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    query = f"{quote}FooBar" if position == "prefix" else f"FooBar{quote}"
+    identity_query = context_identity_selectors(query)
+
+    assert "foobar" not in identity_query.exact_symbol_surfaces
+    assert query.casefold() in identity_query.exact_symbol_surfaces
+    subset_kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section="FooBar",
+        section_kind=section_kind,
+    )
+    full_surface_kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section=query,
+        section_kind=section_kind,
+    )
+    assert exact_kind not in subset_kinds
+    assert exact_kind in full_surface_kinds
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        '""FooBar""',
+        "''FooBar''",
+        "``FooBar``",
+        'x"FooBar"',
+        '"FooBar"x',
+        "x'FooBar'",
+        "'FooBar'x",
+        '"FooBar""',
+    ],
+)
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_embedded_or_repeated_quotes_do_not_create_subset_exact_identity(
+    query: str,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    identity_query = context_identity_selectors(query)
+
+    assert "foobar" not in identity_query.exact_symbol_surfaces
+    assert query.casefold() in identity_query.exact_symbol_surfaces
+    subset_kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section="FooBar",
+        section_kind=section_kind,
+    )
+    full_surface_kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section=query,
+        section_kind=section_kind,
+    )
+    assert exact_kind not in subset_kinds
+    assert exact_kind in full_surface_kinds
+
+
+@pytest.mark.parametrize(
+    ("query", "provider_surface", "expected_exact"),
+    [
+        ("don't 'Δ'", "Δ", True),
+        ("don't 'fooBar'", "fooBar", True),
+        ("don't 'fooBar'", "'fooBar'", False),
+    ],
+)
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_apostrophe_does_not_consume_later_bounded_quote(
+    query: str,
+    provider_surface: str,
+    expected_exact: bool,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    kinds = context_identity_evidence(
+        context_identity_selectors(query),
+        path="repos/owner.py",
+        section=provider_surface,
+        section_kind=section_kind,
+    )
+
+    assert (exact_kind in kinds) is expected_exact
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_unbounded_quote_does_not_hide_later_bounded_quote(
+    quote: str,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    query = f"x{quote}noise {quote}Δ{quote}"
+    identity_query = context_identity_selectors(query)
+
+    assert "δ" in identity_query.exact_symbol_surfaces
+    kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section="Δ",
+        section_kind=section_kind,
+    )
+    assert exact_kind in kinds
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+def test_context_many_bounded_quotes_keep_query_slicing_linear(quote: str) -> None:
+    class SliceCountingQuery(str):
+        sliced_character_count: int
+
+        def __new__(cls, value: str) -> "SliceCountingQuery":
+            instance = super().__new__(cls, value)
+            instance.sliced_character_count = 0
+            return instance
+
+        def __getitem__(self, key: int | slice) -> str:
+            value = super().__getitem__(key)
+            if isinstance(key, slice):
+                start, stop, step = key.indices(len(self))
+                self.sliced_character_count += len(range(start, stop, step))
+            return value
+
+    query = SliceCountingQuery(
+        " ".join(f"{quote}a{quote}" for _ in range(2_048))
+    )
+
+    identity_query = context_identity_selectors(query)
+
+    assert "a" in identity_query.exact_symbol_surfaces
+    assert query.sliced_character_count <= 2 * len(query)
+
+
+@pytest.mark.parametrize(
+    ("query", "provider_surface"),
+    [
+        ('"Δ"', "Δ"),
+        ('find "Δ" owner', "Δ"),
+        ('("🔥")', "🔥"),
+        ("Δ", "Δ"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_raw_provider_exact_surface_does_not_require_lexical_alphabet_support(
+    query: str,
+    provider_surface: str,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    identity_query = context_identity_selectors(query)
+
+    assert provider_surface.casefold() in identity_query.exact_symbol_surfaces
+    kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section=provider_surface,
+        section_kind=section_kind,
+    )
+    assert exact_kind in kinds
+
+
+@pytest.mark.parametrize(
+    ("query", "provider_surface", "plain_surface"),
+    [
+        ("impact $Δ owner", "$Δ", "Δ"),
+        ("impact @東京 owner", "@東京", "東京"),
+        ("impact #Журнал owner", "#Журнал", "Журнал"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_sigiled_provider_surface_does_not_require_lexical_token_support(
+    query: str,
+    provider_surface: str,
+    plain_surface: str,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    identity_query = context_identity_selectors(query)
+
+    assert provider_surface.casefold() in identity_query.exact_symbol_surfaces
+    sigiled_kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section=provider_surface,
+        section_kind=section_kind,
+    )
+    plain_kinds = context_identity_evidence(
+        identity_query,
+        path="repos/owner.py",
+        section=plain_surface,
+        section_kind=section_kind,
+    )
+    assert exact_kind in sigiled_kinds
+    assert exact_kind not in plain_kinds
+
+
+@pytest.mark.parametrize(
+    "provider_surface",
+    ["Δ\u0301", "e\u0301", "東京\u0301", "Журнал\u0301"],
+)
+@pytest.mark.parametrize(
+    ("section_kind", "exact_kind"),
+    [
+        (ContextSectionKind.PROVIDER_SYMBOL, ContextEvidenceKind.EXACT_SYMBOL),
+        (
+            ContextSectionKind.PROVIDER_RELATIONSHIP,
+            ContextEvidenceKind.EXACT_RELATIONSHIP,
+        ),
+    ],
+)
+def test_context_combining_mark_identifier_requires_whole_quote_or_real_sigil_for_exact(
+    provider_surface: str,
+    section_kind: ContextSectionKind,
+    exact_kind: ContextEvidenceKind,
+) -> None:
+    prose_identity = context_identity_selectors(f"use {provider_surface} now")
+    quoted_identity = context_identity_selectors(f'use "{provider_surface}" now')
+    sigiled_identity = context_identity_selectors(f"use ${provider_surface} now")
+
+    prose_kinds = context_identity_evidence(
+        prose_identity,
+        path="repos/owner.py",
+        section=provider_surface,
+        section_kind=section_kind,
+    )
+    quoted_kinds = context_identity_evidence(
+        quoted_identity,
+        path="repos/owner.py",
+        section=provider_surface,
+        section_kind=section_kind,
+    )
+    sigiled_kinds = context_identity_evidence(
+        sigiled_identity,
+        path="repos/owner.py",
+        section=f"${provider_surface}",
+        section_kind=section_kind,
+    )
+    assert exact_kind not in prose_kinds
+    assert exact_kind in quoted_kinds
+    assert exact_kind in sigiled_kinds
 
 
 def test_context_query_preserves_cross_component_runtime_coverage_against_vocabulary_rich_consumers(
@@ -1337,6 +1811,157 @@ def test_context_query_prefers_connected_test_over_weak_lexical_test_candidate(
     assert "`repos/tests/test_contract.py`" in markdown
 
 
+def test_context_query_keeps_explicit_named_source_and_named_test_ahead_of_weak_graph_echoes(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "admin_helper.py").write_text(
+        "def admin_helper():\n    return True\n",
+        encoding="utf-8",
+    )
+    (repo / "admin_screen.py").write_text(
+        "from admin_helper import admin_helper\n\n"
+        "def render_admin_screen():\n"
+        "    marker = 'Redmi empty hierarchy'\n"
+        "    return admin_helper() and marker\n",
+        encoding="utf-8",
+    )
+    (repo / "router.py").write_text(
+        "def route():\n"
+        "    return 'Redmi admin screen widget test empty hierarchy'\n",
+        encoding="utf-8",
+    )
+    (repo / "webrtc_service.py").write_text(
+        "def connect():\n"
+        "    return 'Redmi admin screen widget test empty hierarchy'\n",
+        encoding="utf-8",
+    )
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "widget_test.py").write_text(
+        "def test_widget_layout():\n"
+        "    assert 'Redmi empty hierarchy'\n",
+        encoding="utf-8",
+    )
+    (tests / "router_auth_guard_test.py").write_text(
+        "from router import route\n\n"
+        "def test_router_auth_guard():\n"
+        "    assert route()\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    query = "Redmi admin_screen widget test empty hierarchy"
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+
+    fresh = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert fresh["completeness"]["graph_anchor"]["status"] == "resolved"
+    assert [item["path"] for item in fresh["graph_seed_refs"]] == [
+        "admin_screen.py"
+    ]
+    fresh_sources = {
+        item["source_ref"]["path"]
+        for item in fresh["groups"]["likely_change_surface"]
+    }
+    assert "repos/admin_screen.py" in fresh_sources
+    assert fresh_sources <= {
+        "repos/admin_screen.py",
+        "repos/admin_helper.py",
+    }
+    assert "repos/router.py" not in fresh_sources
+    assert "repos/webrtc_service.py" not in fresh_sources
+    assert fresh["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/widget_test.py"
+    )
+
+    monkeypatch.setattr(
+        context_module,
+        "graph_stale_paths",
+        lambda _freshness: {"admin_screen.py"},
+    )
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+
+    stale_full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = stale_full["selection"]["graph_anchor"]
+    assert resolution["status"] == "unresolved"
+    assert resolution["anchors"] == []
+    assert [item["anchor"]["path"] for item in resolution["candidates"]] == [
+        "admin_screen.py"
+    ]
+    assert stale_full["graph_seed_refs"] == []
+    assert not [
+        item
+        for item in stale_full["evidence"]
+        if item["source_ref"]["kind"] == "graph_relation"
+    ]
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    stale_sources = {
+        item["source_ref"]["path"]
+        for item in stale["groups"]["likely_change_surface"]
+    }
+    assert "repos/admin_screen.py" in stale_sources
+    assert "repos/router.py" not in stale_sources
+    assert "repos/webrtc_service.py" not in stale_sources
+    assert stale["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
+        "repos/tests/widget_test.py"
+    )
+
+
+def test_context_query_marks_duplicate_explicit_named_basename_ambiguous(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for package in ("alpha", "beta"):
+        directory = repo / package
+        directory.mkdir()
+        (directory / "dependency.py").write_text(
+            f"VALUE = {package!r}\n",
+            encoding="utf-8",
+        )
+        (directory / "admin_screen.py").write_text(
+            f"from {package}.dependency import VALUE\n\n"
+            "def render():\n"
+            "    marker = 'layout state'\n"
+            "    return VALUE\n",
+            encoding="utf-8",
+        )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "admin_screen layout state",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "ambiguous"
+    assert resolution["anchors"] == []
+    assert {item["anchor"]["path"] for item in resolution["candidates"]} == {
+        "alpha/admin_screen.py",
+        "beta/admin_screen.py",
+    }
+    assert not [
+        item
+        for item in bundle["evidence"]
+        if item["source_ref"]["kind"] == "graph_relation"
+    ]
+
+
 def test_context_query_preserves_ranked_graph_seed_order_in_full_and_compact_views(
     tmp_path: Path,
     monkeypatch,
@@ -1727,7 +2352,15 @@ def test_context_query_supports_legal_backtick_path_in_result_receipt(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert {"authority": "source", "ref": "repos/owner`file.py"} in payload["data"]["result_receipt"]["selectable"]
+    assert ("source", "repos/owner`file.py") in {
+        (
+            item["primary_citation"]["authority"],
+            item["primary_citation"]["ref"],
+        )
+        for item in payload["data"]["result_receipt"]["compact"][
+            "representative_citations"
+        ]
+    }
 
 
 def test_context_query_rejects_unknown_mode(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1926,6 +2559,158 @@ def test_context_query_preserves_document_meaning_across_index_and_live_fallback
     )
 
 
+def test_context_compact_suppresses_weak_root_operational_doc_but_keeps_product_doc_and_explicit_recovery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    token = "svcloader_zeroarg_contract_zz"
+    (repo / "owner.py").write_text(
+        f"def {token}():\n    return True\n",
+        encoding="utf-8",
+    )
+    (repo / "README.md").write_text(
+        f"# Product validation\n\nRun the product check for {token}.\n",
+        encoding="utf-8",
+    )
+    root_contract = tmp_path / "docs/contracts/service-loader-policy.md"
+    root_contract.write_text(
+        f"# Workspace policy\n\nThe control-plane procedure mentions {token}.\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        ["context", "query", token, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(
+        item["source_ref"]["path"] == "docs/contracts/service-loader-policy.md"
+        for item in full["groups"]["must_read"]
+    )
+    assert any(
+        item["source_ref"]["path"] == "repos/README.md"
+        for item in full["groups"]["supporting_evidence"]
+    )
+
+    assert main(["context", "query", token, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert not any(
+        item["source_ref"]["path"] == "docs/contracts/service-loader-policy.md"
+        for item in compact["groups"]["must_read"]
+    )
+    assert any(
+        item["source_ref"]["path"] == "repos/README.md"
+        for item in compact["groups"]["supporting_evidence"]
+    )
+
+    assert main(
+        [
+            "context",
+            "query",
+            "docs/contracts/service-loader-policy.md",
+            "--repo-id",
+            "main",
+            "--json",
+        ]
+    ) == 0
+    explicit = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(
+        item["source_ref"]["path"] == "docs/contracts/service-loader-policy.md"
+        for item in explicit["groups"]["must_read"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("generic_term", "document_name", "heading", "expected_evidence_kind"),
+    [
+        (
+            "recovery",
+            "recovery-procedure.md",
+            "Workspace procedure",
+            "path_terms",
+        ),
+        (
+            "rollback",
+            "loader-policy.md",
+            "Rollback procedure",
+            "section_terms",
+        ),
+    ],
+)
+def test_context_compact_does_not_treat_generic_root_path_or_section_terms_as_document_intent(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    generic_term: str,
+    document_name: str,
+    heading: str,
+    expected_evidence_kind: str,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    token = "svcloader_zeroarg_contract_zz"
+    (repo / "owner.py").write_text(
+        f"def {token}():\n    return {generic_term!r}\n",
+        encoding="utf-8",
+    )
+    root_procedure = tmp_path / "docs/workflows" / document_name
+    root_procedure.write_text(
+        f"# {heading}\n\nWorkspace-only operational instructions.\n",
+        encoding="utf-8",
+    )
+    product_procedure = repo / "docs/workflows/product-policy.md"
+    product_procedure.parent.mkdir(parents=True)
+    product_procedure.write_text(
+        f"# {generic_term.title()} product procedure\n\n"
+        f"The product procedure applies to {token}.\n",
+        encoding="utf-8",
+    )
+    root_only_procedure = tmp_path / "docs/workflows/workspace-only-policy.md"
+    root_only_procedure.write_text(
+        "# Workspace-only procedure\n\nThe orphanedzz condition is handled here.\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    query = f"{token} {generic_term}"
+
+    assert main(
+        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
+    ) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full_item = next(
+        item
+        for item in full["evidence"]
+        if item["source_ref"]["path"] == f"docs/workflows/{document_name}"
+    )
+    assert full_item["anchor_strength"] == "weak"
+    assert expected_evidence_kind in full_item["evidence_kinds"]
+
+    assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert not any(
+        item["source_ref"]["path"] == f"docs/workflows/{document_name}"
+        for item in compact["groups"]["must_read"]
+    )
+    assert any(
+        item["source_ref"]["path"] == "repos/owner.py"
+        for item in compact["groups"]["likely_change_surface"]
+    )
+    assert any(
+        item["source_ref"]["path"] == "repos/docs/workflows/product-policy.md"
+        for item in compact["groups"]["must_read"]
+    )
+
+    assert main(
+        ["context", "query", "orphanedzz", "--repo-id", "main", "--json"]
+    ) == 0
+    root_only = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(
+        item["source_ref"]["path"] == "docs/workflows/workspace-only-policy.md"
+        for item in root_only["groups"]["must_read"]
+    )
+
+
 def test_context_query_keeps_product_reference_documents_out_of_authority(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     token = "unique_product_reference_navigation_token"
@@ -2090,7 +2875,7 @@ def test_context_query_preserves_ambiguous_exact_symbols_without_graph_expansion
     )
     _materialize(tmp_path)
 
-    assert main(["context", "query", "reconcile settlement", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(["context", "query", "reconcile_settlement", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     resolution = bundle["selection"]["graph_anchor"]
@@ -2100,7 +2885,7 @@ def test_context_query_preserves_ambiguous_exact_symbols_without_graph_expansion
     assert [item["anchor"]["path"] for item in resolution["candidates"]] == ["alpha.py", "beta.py"]
     assert not any(item["source_ref"]["kind"] == "graph_relation" for item in bundle["evidence"])
 
-    assert main(["context", "query", "reconcile settlement", "--mode", "code-location", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "reconcile_settlement", "--mode", "code-location", "--repo-id", "main", "--json"]) == 0
     compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
     assert compact["completeness"]["graph_anchor"] == {
         "status": "ambiguous",
@@ -2763,6 +3548,251 @@ def test_context_graph_marks_conflicting_exact_file_and_symbol_paths_ambiguous(t
     assert not any(item["source_ref"]["kind"] == "graph_relation" for item in bundle["evidence"])
 
 
+@pytest.mark.parametrize("symbol_selector", ["sha256", "`SHA256`"])
+def test_context_graph_marks_conflicting_exact_symbol_and_explicit_named_file_paths_ambiguous(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    symbol_selector: str,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "artifact_integrity.py").write_text(
+        "def verify_artifact():\n"
+        "    return 'artifact accepted filename fail closed'\n",
+        encoding="utf-8",
+    )
+    (repo / "digest_tool.py").write_text(
+        "def sha256():\n"
+        "    return 'digest helper'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    query = (
+        "ArtifactIntegrity artifact accepted filename "
+        f"{symbol_selector} fail closed"
+    )
+
+    assert main(
+        [
+            "context",
+            "query",
+            query,
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    named_file = next(
+        item
+        for item in bundle["evidence"]
+        if item["source_ref"]["path"] == "repos/artifact_integrity.py"
+    )
+    assert "explicit_named_file_identity" in named_file["evidence_kinds"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "ambiguous"
+    assert {item["anchor"]["path"] for item in resolution["candidates"]} == {
+        "artifact_integrity.py",
+        "digest_tool.py",
+    }
+    assert not any(
+        item["source_ref"]["kind"] == "graph_relation"
+        for item in bundle["evidence"]
+    )
+    assert bundle["graph_seed_refs"] == []
+
+    monkeypatch.setattr(
+        context_module,
+        "graph_stale_paths",
+        lambda _freshness: {"artifact_integrity.py"},
+    )
+    assert main(
+        [
+            "context",
+            "query",
+            query,
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    stale_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert stale_bundle["selection"]["graph_anchor"]["status"] == "ambiguous"
+    assert stale_bundle["graph_seed_refs"] == []
+    assert not any(
+        item["source_ref"]["kind"] == "graph_relation"
+        for item in stale_bundle["evidence"]
+    )
+
+
+def test_context_graph_does_not_use_exact_symbol_to_hide_duplicate_explicit_named_basename(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    for package in ("alpha", "beta"):
+        directory = repo / package
+        directory.mkdir()
+        (directory / "artifact_integrity.py").write_text(
+            "def verify_artifact():\n"
+            f"    return 'artifact accepted filename fail closed {package}'\n",
+            encoding="utf-8",
+        )
+    (repo / "digest_tool.py").write_text(
+        "def sha256():\n"
+        "    return 'digest helper'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "ArtifactIntegrity artifact accepted filename sha256 fail closed",
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "ambiguous"
+    assert {item["anchor"]["path"] for item in resolution["candidates"]} == {
+        "alpha/artifact_integrity.py",
+        "beta/artifact_integrity.py",
+        "digest_tool.py",
+    }
+    assert bundle["graph_seed_refs"] == []
+    assert not any(
+        item["source_ref"]["kind"] == "graph_relation"
+        for item in bundle["evidence"]
+    )
+
+
+def test_context_graph_keeps_exact_symbol_when_explicit_named_file_is_compatible(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "artifact_integrity.py").write_text(
+        "def sha256():\n"
+        "    return 'artifact accepted filename fail closed'\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+
+    assert main(
+        [
+            "context",
+            "query",
+            "ArtifactIntegrity artifact accepted filename sha256 fail closed",
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    anchor = resolution["anchors"][0]["anchor"]
+    assert anchor["kind"] == "symbol"
+    assert anchor["path"] == "artifact_integrity.py"
+    assert anchor["symbol"] == "sha256"
+    assert anchor["provider"] == "python_ast"
+    assert anchor["provider_symbol_id"].startswith(
+        "python_ast:artifact_integrity.py:sha256:function:"
+    )
+
+
+@pytest.mark.parametrize("domain_selector", ["SHA-256", "`SHA-256`", "$sha256"])
+def test_context_graph_does_not_promote_changed_provider_surface_to_exact_symbol(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    domain_selector: str,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "artifact_integrity.py").write_text(
+        "def verify_artifact():\n"
+        "    return 'artifact accepted filename SHA-256 fail closed'\n",
+        encoding="utf-8",
+    )
+    (repo / "digest_tool.py").write_text(
+        "def sha256():\n"
+        "    return 'generic digest helper'\n",
+        encoding="utf-8",
+    )
+    (repo / "test_artifact_integrity.py").write_text(
+        "from artifact_integrity import verify_artifact\n\n"
+        "def test_verify_artifact():\n"
+        "    assert verify_artifact()\n",
+        encoding="utf-8",
+    )
+    _materialize(tmp_path)
+    query = (
+        "ArtifactIntegrity artifact accepted filename "
+        f"{domain_selector} fail closed"
+    )
+
+    assert main(
+        [
+            "context",
+            "query",
+            query,
+            "--mode",
+            "code-location",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    digest_symbol = next(
+        item
+        for item in bundle["evidence"]
+        if item["source_ref"]["path"] == "repos/digest_tool.py"
+        and item["source_ref"].get("section") == "sha256"
+    )
+    assert "exact_symbol" not in digest_symbol["evidence_kinds"]
+    resolution = bundle["selection"]["graph_anchor"]
+    assert resolution["status"] == "resolved"
+    assert {item["anchor"]["path"] for item in resolution["anchors"]} == {
+        "artifact_integrity.py"
+    }
+    assert bundle["graph_seed_refs"]
+    assert {
+        ref["path"]
+        for ref in bundle["graph_seed_refs"]
+    } == {"artifact_integrity.py"}
+    assert any(
+        relation.get("edge") == "TESTS_FILE"
+        and {relation.get("from_path"), relation.get("to_path")}
+        == {"artifact_integrity.py", "test_artifact_integrity.py"}
+        for item in bundle["evidence"]
+        for relation in item.get("graph_path", [])
+    )
+
+
 def test_context_graph_accounts_for_anchor_missing_from_snapshot(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "owner.py").write_text("def owner():\n    return 'owner'\n", encoding="utf-8")
@@ -2846,7 +3876,7 @@ def test_context_compact_preserves_direct_anchor_and_expands_one_weak_lexical_ow
     assert auth_anchor["seed_paths"] == ["auth_callback.py"]
     assert auth_anchor["candidate_paths"] == ["auth_callback.py"]
     assert auth_anchor["seed_anchors"][0]["path"] == "auth_callback.py"
-    assert auth_anchor["seed_anchors"][0]["provenance"] == "exact_identity"
+    assert auth_anchor["seed_anchors"][0]["provenance"] == "provider_symbol"
     assert not bundle["groups"]["callers_and_dependents"]
     assert any(
         continuation["selector"] == {"kind": "file", "value": "auth_callback.py"}

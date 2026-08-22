@@ -127,18 +127,26 @@ def _write_context_pack_task(
     title: str,
     query: str,
     goal: str,
+    status: str = "doing",
     context_doc: str = "docs/contracts/repoctl-context-contract.md",
     reviewed: str = "repos/app.py",
     chosen: str = "repos/app.py",
     first_command: str | None = None,
 ) -> None:
     first_command = first_command or f"./scripts/repoctl context pack --task {task_id} --repo-id main --json"
+    execution_log = ""
+    if status == "todo":
+        created_stamp = (
+            f"{task_id[2:6]}-{task_id[6:8]}-{task_id[8:10]}"
+            f"T{task_id[10:12]}:{task_id[12:14]}:{task_id[14:16]}Z"
+        )
+        execution_log = f"\n## Execution Log\n\n- {created_stamp}: Fixture task created.\n"
     task_path = root / "docs/tasks" / f"{task_id}--{slug}.md"
     task_path.write_text(
         f"""---
 id: {task_id}
 title: "{title}"
-status: doing
+status: {status}
 owner: "codex"
 repo_ref: ""
 repo_id: "main"
@@ -163,6 +171,7 @@ depends_on: []
 ## Goal
 
 {goal}
+{execution_log}
 
 ## Handoff
 

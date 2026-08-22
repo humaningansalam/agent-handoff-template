@@ -49,9 +49,12 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 ## Success Criteria
 
 - A new agent can resume a live task from `AGENTS.md`, `docs/BOARD.md`, the task file, and Handoff without guessing.
+- Long-running tasks surface structural scope-growth evidence before repeated episodes and verification milestones make the current Goal expensive to recover; repoctl recommends review but never invents a split.
 - A live Handoff is active only after an explicit review binding to the exact structured Task and observed repository state; later input drift is visible as typed inactive resume guidance instead of silently blessing old prose.
 - Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
 - Task finish leaves auditable verification evidence and stable completion receipts.
+- A completion receipt cannot contain one Chosen scope in its Task projection and a different `active_chosen` scope in its structured outcome.
+- An explicit non-canonical Chosen value cannot disappear during alignment, and a live task cannot add structured outcome or verification facts after start without current immutable start-scope evidence.
 - Graph and Context answers preserve repository identity, source refs, digests, freshness, typed continuations, and completeness warnings.
 - Compatible but unresolved relationships remain agent-visible as explicitly non-authoritative candidates without being promoted to Graph edges.
 - For ambiguous work, compact Context improves owner/test/impact hit rate and first-correct rank while reducing irrelevant visible slots, broad rediscovery, serialized bytes, and token cost.
@@ -68,7 +71,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Keep executable task state in task frontmatter and required sections under `docs/tasks/**`.
 - Archive completed standalone tasks under `docs/archive/tasks/**`.
 - Require Handoff and Verification evidence so another agent can resume or audit the work.
-- Keep the human-readable four-field Handoff as the collaboration surface while repoctl stores only a compact machine-owned binding receipt. Starting or showing a task must never create or refresh that receipt automatically.
+- Keep the human-readable four-field Handoff as the collaboration surface while repoctl stores compact machine-owned origin and binding receipts. Every newly generated task body must carry an independent exact-digest commitment, and repoctl must publish the matching origin state before exposing that task body, so a missing sidecar cannot downgrade unchanged generated prose into the legacy review path. Non-regular, symlinked, unreadable, or inconsistent origin state must fail closed. Starting or showing a task must never create or refresh a binding automatically; generated body digests and template version must survive renderer/config drift, unchanged repoctl-generated placeholder text must not be bindable as reviewed task-specific guidance, and starting a task must not overwrite an already-authored valid Handoff. Prose with neither an origin record nor a task-carried commitment must remain typed inactive without comparison to frozen historical templates; the agent regenerates, replaces, or explicitly reviews it before one fresh provenance-aware bind.
 
 ### Product Repository Boundary
 
@@ -91,6 +94,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - Let an optional Task Pack participate in resume guidance only when the user or agent explicitly binds that exact current artifact. JSON and Markdown artifacts must share one canonical input projection, reject missing/tampered/wrong-task/legacy artifacts, and become inactive when their producer-owned source identities, structured Task inputs, Graph snapshot, or repository observation changes.
 - Resolve bounded lexical file hypotheses into the existing typed Graph projection so ambiguous natural-language work can include owners, direct tests, callers, callees, imports, and structured dependencies without a hidden rebuild or a second traversal engine.
 - Preserve exact typed identities, source refs, digests, repository namespaces, field-level evidence, and typed continuations. Lexical relevance may propose a working-set member but never prove semantic ownership.
+- Let root-only coordination tasks with current task-start evidence bind executed checks to typed non-product workspace artifacts without fabricating product Discovery, Chosen scope, or hot product corroboration; reject pre-start and unsupported legacy mutations before outcome state is written.
 - Publish one coherent bounded projection for compact output, completeness, citations, seed refs, human views, and Task Pack; renderer differences must not change evidence identity.
 - Keep confirmed relations and compatible unresolved relationship candidates as separate typed lanes; candidates must preserve their structured resolution reason and never imply task scope.
 - Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.

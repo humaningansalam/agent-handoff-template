@@ -117,6 +117,7 @@ def test_frontmatter_replace_preserves_other_lines() -> None:
 
 def test_check_does_not_require_repo_ref_for_repository_task(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
     text = task_text("T-20260609184046Z").replace('area: ""', 'area: "backend"').replace('repo_id: ""', 'repo_id: "main"')
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")

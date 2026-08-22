@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
+from tests.repoctl.workspace.test_check import add_task, init_repo, task_text, write_workspace
 
 import json
 from pathlib import Path
@@ -27,6 +27,7 @@ def test_check_reports_board_missing_live_task(tmp_path: Path, monkeypatch, caps
 
 def test_check_warns_when_repo_scoped_task_omits_discovery_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
     text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
@@ -44,6 +45,7 @@ def test_check_warns_when_repo_scoped_task_omits_discovery_evidence(tmp_path: Pa
 
 def test_check_accepts_multiline_discovery_file_lists(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    init_repo(tmp_path / "repos")
     text = task_text("T-20260609184046Z").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     text = replace_section(
         text,

@@ -7,12 +7,13 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .completion_catalogue import prepare_completion_sidecar_writes
 from .discovery_outcomes import (
     add_verification_record as add_discovery_verification_record,
+    add_workspace_artifact_verification_record,
     completion_outcome_projection,
     load_outcome_state,
     outcome_state_path,
@@ -24,7 +25,7 @@ from .io import LOCK_REL, RepoctlError, atomic_write, decode_schema_version
 from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states
 from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
-from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoSelectorStatus, RepoTarget, RepositoryIdentitySource, default_repo_target, repo_layout, resolve_repo_selector_path
+from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoLayout, RepoSelectorStatus, RepoTarget, RepositoryIdentitySource, default_repo_target, repo_layout, resolve_repo_selector_path, resolve_task_repo_target
 from .result_receipts import ResultAuthority as DiscoveryResultAuthority
 from .result_receipts import ResultProducer as DiscoveryResultProducer
 from .result_receipts import ResultSelection, parse_result_request, result_receipt_episode, verify_result_selections
@@ -44,9 +45,13 @@ LEGACY_TASK_STATE_SCHEMA_VERSION = 3
 COMPLETION_RECEIPT_SCHEMA_VERSION = 4
 TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION = 2
-RESUME_BINDING_SCHEMA_VERSION = 2
+RESUME_BINDING_SCHEMA_VERSION = 3
+PRE_PROVENANCE_RESUME_BINDING_SCHEMA_VERSION = 2
 LEGACY_RESUME_BINDING_SCHEMA_VERSION = 1
 ARCHIVE_LOCATOR_SCHEMA_VERSION = 1
+HANDOFF_ORIGIN_SCHEMA_VERSION = 2
+HANDOFF_TEMPLATE_VERSION = 1
+HANDOFF_ORIGIN_COMMITMENT_FIELD = "handoff_origin_commitment"
 
 
 class TaskHandoffStatus(StrEnum):
@@ -55,6 +60,12 @@ class TaskHandoffStatus(StrEnum):
     STALE = "stale"
     UNKNOWN = "unknown"
     HISTORICAL = "historical"
+
+
+class TaskHandoffProvenance(StrEnum):
+    GENERATED = "generated"
+    AUTHORED_OR_REVIEWED = "authored_or_reviewed"
+    UNKNOWN_LEGACY = "unknown_legacy"
 
 
 class TaskResumeSelectionStatus(StrEnum):
@@ -432,7 +443,6 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
     },
 }
 
-
 def _copy(language: str) -> dict[str, Any]:
     return TASK_DOC_COPY.get(language, TASK_DOC_COPY["en"])
 
@@ -448,6 +458,39 @@ def _task_language(root: Path, task: Task) -> str:
 
 def _bullet_lines(items: list[str]) -> str:
     return "".join(f"- {item}\n" for item in items)
+
+
+def _render_created_handoff(
+    *,
+    copy: dict[str, Any],
+    task_type: str,
+    title: str,
+    task_id: str,
+    task_path: str,
+    repo_hint: str,
+) -> str:
+    if task_type == "parent":
+        return (
+            f"- Next exact step: {copy['parent_handoff_next'].format(title=title)}\n"
+            f"- First file to open: `{task_path}`\n"
+            "- First command to run: `./scripts/repoctl task list --json`\n"
+            f"- Done when: {copy['parent_handoff_done']}\n"
+        )
+    return (
+        f"- Next exact step: {copy['task_handoff_next'].format(repo_hint=repo_hint)}\n"
+        f"- First file to open: `{task_path}`\n"
+        f"- First command to run: `./scripts/repoctl task start {task_id} --json`\n"
+        f"- Done when: {copy['task_handoff_done']}\n"
+    )
+
+
+def _render_started_handoff(*, copy: dict[str, Any], task_path: str) -> str:
+    return (
+        f"- Next exact step: {copy['start_handoff_next'].format(task_path=task_path)}\n"
+        f"- First file to open: `{task_path}`\n"
+        "- First command to run: `./scripts/repoctl task list --json`\n"
+        f"- Done when: {copy['start_handoff_done']}\n"
+    )
 
 
 @dataclass(frozen=True)
@@ -610,18 +653,28 @@ def load_tasks(root: Path, *, include_archived: bool = False) -> list[Task]:
         for path in sorted(archive_dir.glob("T-*.md")):
             tasks.append(load_task(path, root, archived=True))
     elif archive_dir.exists():
-        # A live follow-up may point at one immutable archived task. Resolve
-        # only those explicit identities so ordinary checks stay independent
-        # of total archive size while validation still sees the authority.
-        archived_ids = {
+        # Follow-up authority is transitive. Resolve only archived identities
+        # reachable from current tasks so ordinary checks remain independent of
+        # total archive size without dropping a predecessor's own ancestry.
+        pending = sorted({
             str(task.frontmatter.get("follow_up_of") or "")
             for task in tasks
             if ID_RE.fullmatch(str(task.frontmatter.get("follow_up_of") or ""))
-        }
-        for task_id in sorted(archived_ids - {task.id for task in tasks}):
+        })
+        requested = set(pending)
+        loaded_ids = {task.id for task in tasks}
+        for task_id in pending:
+            if task_id in loaded_ids:
+                continue
             path = _task_archive_locator(root, task_id)
             if path is not None:
-                tasks.append(load_task(path, root, archived=True))
+                archived_task = load_task(path, root, archived=True)
+                tasks.append(archived_task)
+                loaded_ids.add(archived_task.id)
+                predecessor = str(archived_task.frontmatter.get("follow_up_of") or "")
+                if ID_RE.fullmatch(predecessor) and predecessor not in loaded_ids and predecessor not in requested:
+                    requested.add(predecessor)
+                    pending.append(predecessor)
     return tasks
 
 
@@ -708,6 +761,20 @@ def _dedupe_preserve(values: list[str]) -> list[str]:
     return result
 
 
+DISCOVERY_PLACEHOLDERS = frozenset({"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"})
+
+
+def _explicit_discovery_values(values: list[str]) -> list[str]:
+    """Discard only a field's sole unquoted template placeholder."""
+
+    if len(values) == 1:
+        raw = values[0].strip()
+        backticked = len(raw) >= 2 and raw[0] == raw[-1] == "`"
+        if not backticked and raw.casefold() in DISCOVERY_PLACEHOLDERS:
+            return []
+    return _dedupe_preserve(values)
+
+
 def task_discovery_values(task: Task) -> dict[str, list[str]]:
     try:
         fields = parse_labeled_list_section(
@@ -717,7 +784,7 @@ def task_discovery_values(task: Task) -> dict[str, list[str]]:
         )
     except RepoctlError:
         return {}
-    return {key: _dedupe_preserve(values) for key, values in fields.items()}
+    return {key: _explicit_discovery_values(values) for key, values in fields.items()}
 
 
 def task_discovery_result_selections(task: Task) -> list[DiscoveryResultSelection]:
@@ -780,18 +847,13 @@ def update_task_discovery(
         raise RepoctlError("task discovery add requires scope evidence, a note, or selected result evidence", code="missing_discovery_input", path=task.rel_path)
 
     fields = task_discovery_values(task)
-    placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
-
-    def without_placeholders(values: list[str]) -> list[str]:
-        return [value for value in values if _strip_ticks(value).lower() not in placeholders]
-
-    previous_queries = without_placeholders(fields.get("Candidate query", []))
-    previous_reviewed = _dedupe_preserve(without_placeholders(fields.get("Candidate files reviewed", [])))
-    previous_chosen = _dedupe_preserve(without_placeholders(fields.get("Chosen files", [])))
-    previous_notes = _dedupe_preserve(without_placeholders(fields.get("Notes", [])))
+    previous_queries = fields.get("Candidate query", [])
+    previous_reviewed = fields.get("Candidate files reviewed", [])
+    previous_chosen = fields.get("Chosen files", [])
+    previous_notes = fields.get("Notes", [])
     previous_result_selections = [
         DiscoveryResultSelection.from_text(value)
-        for value in without_placeholders(fields.get("Selected result evidence", []))
+        for value in fields.get("Selected result evidence", [])
     ]
 
     incoming_result_selections: list[DiscoveryResultSelection] = []
@@ -801,6 +863,7 @@ def update_task_discovery(
     incoming_producer: DiscoveryResultProducer | None = None
     requested_selections: list[ResultSelection] = []
     target = _target_for_task(root, task)
+    _require_task_start_scope_alignment(root, task, target=target)
     if result_refs:
         if target is None:
             raise RepoctlError(
@@ -921,6 +984,9 @@ def update_task_discovery(
         selection.to_text(): selection
         for selection in [*episode_result_selections, *incoming_result_selections]
     }
+    episode_result_selection_texts = {
+        selection.to_text() for selection in episode_result_selections
+    }
     result_selections = [result_selection_by_text[key] for key in sorted(result_selection_by_text)]
     if target is not None:
         for label, values in (("reviewed", reviewed_values), ("excluded", excluded), ("chosen", chosen_values)):
@@ -1037,17 +1103,17 @@ def update_task_discovery(
                 "added": [
                     selection.to_dict()
                     for selection in result_selections
-                    if selection.to_text() not in {value.to_text() for value in episode_result_selections}
+                    if selection.to_text() not in episode_result_selection_texts
                 ],
                 "removed": [
                     selection.to_dict()
                     for selection in previous_result_selections
-                    if selection.to_text() not in {value.to_text() for value in result_selections}
+                    if selection.to_text() not in result_selection_by_text
                 ],
                 "already_present": [
                     selection.to_dict()
                     for selection in incoming_result_selections
-                    if selection.to_text() in {value.to_text() for value in episode_result_selections}
+                    if selection.to_text() in episode_result_selection_texts
                 ],
             },
         },
@@ -1065,6 +1131,51 @@ def update_task_discovery(
     }
 
 
+def _require_task_start_scope_alignment(
+    root: Path,
+    task: Task,
+    *,
+    target: RepoTarget | None,
+    require_current_start: bool = False,
+) -> dict[str, Any] | None:
+    baseline = _read_repo_baseline(root, task.id)
+    if baseline is None:
+        if not require_current_start and task.status == "todo":
+            return None
+        raise RepoctlError(
+            "task mutation requires current task-start transition evidence",
+            code="transition_evidence_incomplete",
+            path=task.rel_path,
+        )
+
+    started_at = baseline.get("started_at") if isinstance(baseline, dict) else None
+    workspace_start = isinstance(baseline.get("repositories"), list)
+    scope_matches = (
+        workspace_start
+        and target is None
+        and baseline.get("repo_id") == ""
+        and baseline.get("repo_path") == ""
+    ) or (
+        not workspace_start
+        and target is not None
+        and baseline.get("repo_id") == target.id
+        and baseline.get("repo_path") == target.display_path
+    )
+    if (
+        not scope_matches
+        or task.status == "todo"
+        or baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION
+        or not isinstance(started_at, str)
+        or not _valid_event_stamp(started_at)
+    ):
+        raise RepoctlError(
+            "task repository scope does not match its immutable start transition; create a follow-up with a fresh baseline",
+            code="transition_evidence_incomplete",
+            path=task.rel_path,
+        )
+    return baseline
+
+
 def record_task_verification_outcome(
     root: Path,
     task_id: str,
@@ -1073,23 +1184,79 @@ def record_task_verification_outcome(
     evidence_ref: str,
     subject_refs: list[str],
     claim_ids: list[str] | None = None,
+    artifact_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     if task.status not in LIVE:
         raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
-    state = add_discovery_verification_record(
-        root,
-        task_id=task.id,
-        target=_target_for_task(root, task),
-        status=status,
-        evidence_ref=evidence_ref,
-        subject_refs=subject_refs,
-        claim_ids=claim_ids or [],
-    )
+    artifacts = artifact_refs or []
+    if artifacts and _repo_scoped_task(task):
+        raise RepoctlError(
+            "--artifact is only valid for root-only workspace tasks; use --subject for product repository files",
+            code="workspace_verification_artifact_invalid",
+            path=task.rel_path,
+        )
+    if artifacts:
+        _require_task_start_scope_alignment(root, task, target=None, require_current_start=True)
+        # The start baseline is monotonic for a task: blocked-task restart
+        # preserves this exact state and no command refreshes it. Therefore a
+        # successful add is already bound to the same generation finish later
+        # validates, without inventing a second mutable lineage owner.
+        state = add_workspace_artifact_verification_record(
+            root,
+            task_id=task.id,
+            status=status,
+            evidence_ref=evidence_ref,
+            artifact_refs=artifacts,
+            subject_refs=subject_refs,
+            claim_ids=claim_ids or [],
+        )
+    else:
+        target = _target_for_task(root, task)
+        _require_task_start_scope_alignment(root, task, target=target, require_current_start=True)
+        state = add_discovery_verification_record(
+            root,
+            task_id=task.id,
+            target=target,
+            status=status,
+            evidence_ref=evidence_ref,
+            subject_refs=subject_refs,
+            claim_ids=claim_ids or [],
+        )
     return {
         "task": task,
         "state": state,
         "state_writes": [(outcome_state_path(root, task.id), serialize_outcome_state(state))],
+    }
+
+
+def task_decomposition_evidence(root: Path, task_id: str) -> dict[str, int]:
+    """Return structural task-growth facts without assigning task meaning."""
+
+    task = resolve_task(root, task_id)
+    state = load_outcome_state(root, task.id)
+    if state is None:
+        return {
+            "chosen_subject_count": 0,
+            "discovery_episode_count": 0,
+            "prior_discovery_episode_count": 0,
+            "structured_verification_record_count": 0,
+        }
+    active = state.get("active_episode")
+    active_has_evidence = bool(
+        isinstance(active, dict)
+        and (
+            active.get("citations")
+            or active.get("reviewed")
+            or active.get("excluded")
+        )
+    )
+    prior_count = len(state.get("prior_episodes") or [])
+    return {
+        "chosen_subject_count": len(state.get("active_chosen") or []),
+        "discovery_episode_count": prior_count + int(active_has_evidence),
+        "prior_discovery_episode_count": prior_count,
+        "structured_verification_record_count": len(state.get("verification_records") or []),
     }
 
 
@@ -1100,15 +1267,7 @@ def discovery_scope_delta(
     *,
     observed_committed_changes: list[ChangedEntry] | None = None,
 ) -> dict[str, list[str]]:
-    values = task_discovery_values(task).get("Chosen files", [])
-    prefix = f"{target.display_path.rstrip('/')}/"
-    chosen: set[str] = set()
-    for value in values:
-        normalized = normalize_repo_path(value)
-        if normalized.startswith(prefix):
-            normalized = normalize_repo_path(normalized[len(prefix) :])
-        if normalized:
-            chosen.add(normalized)
+    chosen, _invalid = _task_chosen_path_projection(task, target=target)
     actual = set(_entry_mutation_paths(changes))
     observed_committed = set(_entry_mutation_paths(observed_committed_changes or []))
     return {
@@ -1120,11 +1279,136 @@ def discovery_scope_delta(
     }
 
 
-def _dirty_entry(dirty: list[str], *, copy: dict[str, Any]) -> str:
-    shown = dirty[:20]
-    suffix = "\n  - ... truncated" if len(dirty) > 20 else ""
-    lines = "\n".join(f"  - {line}" for line in shown)
-    return f"- {utc_stamp()}: {copy['task_started_dirty']}\n{lines}{suffix}"
+def _task_chosen_path_projection(
+    task: Task,
+    *,
+    target: RepoTarget | None,
+) -> tuple[set[str], list[str]]:
+    """Return canonical Task Chosen paths and every explicit invalid value."""
+
+    chosen: set[str] = set()
+    invalid: list[str] = []
+    target_prefix = f"{target.display_path.rstrip('/')}/" if target is not None else ""
+    for value in task_discovery_values(task).get("Chosen files", []):
+        raw = _strip_ticks(value).strip()
+        path = PurePosixPath(raw)
+        if (
+            not raw
+            or "\\" in raw
+            or path.is_absolute()
+            or not path.parts
+            or str(path) != raw
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            invalid.append(raw)
+            continue
+        if target is not None:
+            if raw == target.display_path or (raw.startswith("repos/") and not raw.startswith(target_prefix)):
+                invalid.append(raw)
+                continue
+            if raw.startswith(target_prefix):
+                raw = raw[len(target_prefix) :]
+        normalized = normalize_repo_path(raw)
+        if not normalized:
+            invalid.append(value)
+            continue
+        chosen.add(normalized)
+    return chosen, sorted(set(invalid))
+
+
+def task_discovery_outcome_alignment(
+    root: Path,
+    task: Task,
+    *,
+    target: RepoTarget | None,
+) -> dict[str, Any]:
+    """Compare the human Chosen projection with its machine-owned outcome."""
+
+    state = load_outcome_state(root, task.id)
+    if state is None:
+        return {
+            "status": "not_recorded",
+            "reason_codes": [],
+            "task_chosen_paths": [],
+            "outcome_chosen_paths": [],
+            "task_only_paths": [],
+            "outcome_only_paths": [],
+            "invalid_task_chosen_values": [],
+            "invalid_outcome_subject_ids": [],
+        }
+
+    expected_repository = target.to_dict() if target is not None else None
+    reason_codes: list[str] = []
+    if state.get("repository") != expected_repository:
+        reason_codes.append("discovery_outcome_repository_mismatch")
+
+    task_paths, invalid_task_values = _task_chosen_path_projection(task, target=target)
+
+    outcome_paths: set[str] = set()
+    invalid_subject_ids: list[str] = []
+    for subject in state.get("active_chosen", []):
+        identity = subject.get("identity") if isinstance(subject, dict) else None
+        raw_path = identity.get("path") if isinstance(identity, dict) else None
+        normalized = normalize_repo_path(raw_path) if isinstance(raw_path, str) else ""
+        if not isinstance(subject, dict) or subject.get("kind") != "file" or not normalized:
+            invalid_subject_ids.append(str(subject.get("subject_id") or "") if isinstance(subject, dict) else "")
+            continue
+        outcome_paths.add(normalized)
+
+    task_only = sorted(task_paths - outcome_paths)
+    outcome_only = sorted(outcome_paths - task_paths)
+    if invalid_task_values:
+        reason_codes.append("discovery_task_chosen_invalid")
+    if invalid_subject_ids:
+        reason_codes.append("discovery_outcome_chosen_invalid")
+    if task_only or outcome_only:
+        reason_codes.append("discovery_outcome_chosen_mismatch")
+    return {
+        "status": "mismatch" if reason_codes else "aligned",
+        "reason_codes": reason_codes,
+        "task_chosen_paths": sorted(task_paths),
+        "outcome_chosen_paths": sorted(outcome_paths),
+        "task_only_paths": task_only,
+        "outcome_only_paths": outcome_only,
+        "invalid_task_chosen_values": invalid_task_values,
+        "invalid_outcome_subject_ids": sorted(set(invalid_subject_ids)),
+    }
+
+
+def task_discovery_outcome_alignment_problem(
+    root: Path,
+    task: Task,
+    *,
+    target: RepoTarget | None,
+) -> Problem | None:
+    alignment = task_discovery_outcome_alignment(root, task, target=target)
+    reason_codes = list(alignment["reason_codes"])
+    if not reason_codes:
+        return None
+    code = reason_codes[0]
+    if code == "discovery_outcome_repository_mismatch":
+        message = "task Discovery outcome repository identity does not match the task's current selected repository"
+    elif code == "discovery_task_chosen_invalid":
+        message = (
+            "task Discovery contains explicit Chosen values that are not canonical workspace-relative paths "
+            f"(invalid={len(alignment['invalid_task_chosen_values'])})"
+        )
+    elif code == "discovery_outcome_chosen_invalid":
+        message = "task Discovery outcome contains a non-file or invalid active Chosen subject"
+    else:
+        message = (
+            "task Discovery Chosen projection does not match machine outcome active_chosen "
+            f"(task_only={len(alignment['task_only_paths'])}, outcome_only={len(alignment['outcome_only_paths'])}); "
+            "reconcile scope through repoctl task discovery add before completion"
+        )
+    return Problem("error", code, message, task.rel_path)
+
+
+def _dirty_entry(dirty: list[str], *, copy: dict[str, Any], baseline_ref: str) -> str:
+    return (
+        f"- {utc_stamp()}: {copy['task_started_dirty']} "
+        f"(`dirty_count={len(dirty)}`; machine baseline: `{baseline_ref}`)"
+    )
 
 
 def _git_unavailable_entry(reason: str, *, copy: dict[str, Any]) -> str:
@@ -1431,6 +1715,165 @@ def task_handoff_body(task: Task) -> str | None:
     return _normalized_task_section_body(task, "Handoff")
 
 
+def task_handoff_origin_path(root: Path, task_id: str) -> Path:
+    normalized = normalize_task_id(task_id)
+    return root / "docs/tasks/.repoctl-state/handoff-origins" / f"{normalized}.json"
+
+
+def _handoff_digest(body: str) -> str:
+    return digest_data({"handoff": body})
+
+
+def _task_handoff_origin_commitment(task: Task) -> str:
+    value = task.frontmatter.get(HANDOFF_ORIGIN_COMMITMENT_FIELD)
+    if value is None:
+        return ""
+    if not isinstance(value, str) or not _valid_sha256(value):
+        raise RepoctlError(
+            "task Handoff origin commitment is invalid",
+            code="task_handoff_origin_invalid",
+            path=task.rel_path,
+        )
+    return value
+
+
+def _set_task_frontmatter_line(text: str, key: str, value: str) -> str:
+    frontmatter, _body = parse_frontmatter(text)
+    if key in frontmatter:
+        return replace_frontmatter_line(text, key, value)
+    closing = text.find("\n---\n", 4)
+    if not text.startswith("---\n") or closing == -1:
+        raise RepoctlError("frontmatter closing delimiter missing")
+    return text[:closing] + f"\n{key}: {value}" + text[closing:]
+
+
+def _validate_handoff_origin(root: Path, task_id: str, value: Any) -> dict[str, Any]:
+    path = task_handoff_origin_path(root, task_id)
+    expected = {
+        "schema",
+        "schema_version",
+        "task_id",
+        "template_version",
+        "generated_handoff_digests",
+        "state_digest",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise RepoctlError("task Handoff origin state has invalid fields", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix())
+    generated = value.get("generated_handoff_digests")
+    template_version = value.get("template_version")
+    if (
+        value.get("schema") != "repoctl.task.handoff_origin"
+        or value.get("schema_version") != HANDOFF_ORIGIN_SCHEMA_VERSION
+        or value.get("task_id") != normalize_task_id(task_id)
+        or type(template_version) is not int
+        or not 1 <= template_version <= HANDOFF_TEMPLATE_VERSION
+        or not isinstance(generated, list)
+        or generated != sorted(set(generated))
+        or any(not isinstance(item, str) or not _valid_sha256(item) for item in generated)
+        or not generated
+    ):
+        raise RepoctlError("task Handoff origin state is invalid", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix())
+    basis = {key: value[key] for key in value if key != "state_digest"}
+    if value.get("state_digest") != digest_data(basis):
+        raise RepoctlError("task Handoff origin state digest does not match", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix())
+    return value
+
+
+def load_task_handoff_origin(root: Path, task_id: str) -> dict[str, Any] | None:
+    path = task_handoff_origin_path(root, task_id)
+    current = path.parent
+    while current != root and current != current.parent:
+        if current.is_symlink():
+            raise RepoctlError(
+                "task Handoff origin state crosses a symlinked parent",
+                code="task_handoff_origin_invalid",
+                path=path.relative_to(root).as_posix(),
+            )
+        current = current.parent
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RepoctlError(
+            "task Handoff origin state is not a regular file",
+            code="task_handoff_origin_invalid",
+            path=path.relative_to(root).as_posix(),
+        )
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepoctlError("task Handoff origin state is unreadable", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix()) from exc
+    return _validate_handoff_origin(root, task_id, value)
+
+
+def prepare_generated_handoff_origin_write(
+    root: Path,
+    task: Task,
+    *generated_bodies: str,
+) -> tuple[Path, str]:
+    existing = load_task_handoff_origin(root, task.id)
+    digests = list((existing or {}).get("generated_handoff_digests") or [])
+    digests.extend(_handoff_digest(body) for body in generated_bodies if body)
+    basis = {
+        "schema": "repoctl.task.handoff_origin",
+        "schema_version": HANDOFF_ORIGIN_SCHEMA_VERSION,
+        "task_id": normalize_task_id(task.id),
+        "template_version": HANDOFF_TEMPLATE_VERSION,
+        "generated_handoff_digests": sorted(set(digests)),
+    }
+    payload = {**basis, "state_digest": digest_data(basis)}
+    path = task_handoff_origin_path(root, task.id)
+    validated = _validate_handoff_origin(root, task.id, payload)
+    return path, json.dumps(validated, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def task_handoff_provenance(root: Path, task: Task) -> TaskHandoffProvenance:
+    handoff = task_handoff_body(task)
+    if handoff is None:
+        return TaskHandoffProvenance.UNKNOWN_LEGACY
+    commitment = _task_handoff_origin_commitment(task)
+    handoff_digest = _handoff_digest(handoff)
+    origin = load_task_handoff_origin(root, task.id)
+    if origin is not None:
+        generated_digests = origin["generated_handoff_digests"]
+        if commitment and (
+            commitment not in generated_digests
+            or (handoff_digest in generated_digests and commitment != handoff_digest)
+        ):
+            raise RepoctlError(
+                "task Handoff origin commitment does not match origin state",
+                code="task_handoff_origin_invalid",
+                path=task.rel_path,
+            )
+        if handoff_digest in generated_digests:
+            return TaskHandoffProvenance.GENERATED
+        return TaskHandoffProvenance.AUTHORED_OR_REVIEWED
+    if commitment:
+        if handoff_digest == commitment:
+            return TaskHandoffProvenance.GENERATED
+        return TaskHandoffProvenance.AUTHORED_OR_REVIEWED
+    # Origin-less prose stays unknown. Do not infer provenance by matching it
+    # against current or frozen historical template copy.
+    try:
+        binding = load_task_resume_binding(root, task.id)
+    except RepoctlError:
+        # Binding validation is surfaced by resume/check. Provenance remains
+        # unknown here so an explicit bind can replace a malformed receipt.
+        binding = None
+    if (
+        binding is not None
+        and binding["schema_version"] == RESUME_BINDING_SCHEMA_VERSION
+    ):
+        # Schema v3 establishes reviewed provenance. Its exact digest remains
+        # a separate freshness input, so later Handoff edits become stale
+        # rather than falling back to origin-unknown classification.
+        return TaskHandoffProvenance.AUTHORED_OR_REVIEWED
+    return TaskHandoffProvenance.UNKNOWN_LEGACY
+
+
+def task_handoff_is_generated_template(root: Path, task: Task) -> bool:
+    return task_handoff_provenance(root, task) is TaskHandoffProvenance.GENERATED
+
+
 def task_verification_body(task: Task) -> str:
     return _normalized_task_section_body(task, "Verification") or ""
 
@@ -1460,10 +1903,16 @@ def _resume_observation_unavailable(task: Task, state: RepoGitState) -> RepoctlE
     )
 
 
-def _repository_resume_projection(root: Path, task: Task) -> dict[str, Any]:
-    target = _target_for_task(root, task)
+def _repository_resume_projection(
+    root: Path,
+    task: Task,
+    *,
+    layout: RepoLayout | None = None,
+) -> dict[str, Any]:
+    layout = layout or repo_layout(root)
+    target = _target_for_task(root, task, layout=layout)
     if target is not None:
-        delta = repo_changes_since_task_start(root, task.id)
+        delta = repo_changes_since_task_start(root, task.id, layout=layout)
         head, head_state = repo_git_head(root, target)
         records, fingerprint_state = repo_change_fingerprint_records(
             root,
@@ -1497,7 +1946,7 @@ def _repository_resume_projection(root: Path, task: Task) -> dict[str, Any]:
             ),
         }
 
-    surfaces = _root_task_product_surfaces(root)
+    surfaces = _root_task_product_surfaces(root, layout=layout)
     if not surfaces:
         return {"scope": "not_applicable", "repositories": []}
     repositories: list[dict[str, Any]] = []
@@ -1594,7 +2043,12 @@ def _direct_child_lifecycle_projection(root: Path, task: Task) -> list[dict[str,
     ]
 
 
-def task_resume_input_digests(root: Path, task: Task) -> dict[str, str]:
+def task_resume_input_digests(
+    root: Path,
+    task: Task,
+    *,
+    layout: RepoLayout | None = None,
+) -> dict[str, str]:
     outcome_state = load_outcome_state(root, task.id)
     section_digests = {
         "discovery": digest_data(
@@ -1609,7 +2063,7 @@ def task_resume_input_digests(root: Path, task: Task) -> dict[str, str]:
     return {
         "task_contract": _task_contract_digest(task),
         **section_digests,
-        "repository": digest_data(_repository_resume_projection(root, task)),
+        "repository": digest_data(_repository_resume_projection(root, task, layout=layout)),
         "direct_children": digest_data(_direct_child_lifecycle_projection(root, task)),
     }
 
@@ -1630,7 +2084,11 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
     if (
         data.get("schema") != "repoctl.task.resume_binding"
         or type(schema_version) is not int
-        or schema_version not in {LEGACY_RESUME_BINDING_SCHEMA_VERSION, RESUME_BINDING_SCHEMA_VERSION}
+        or schema_version not in {
+            LEGACY_RESUME_BINDING_SCHEMA_VERSION,
+            PRE_PROVENANCE_RESUME_BINDING_SCHEMA_VERSION,
+            RESUME_BINDING_SCHEMA_VERSION,
+        }
     ):
         raise RepoctlError("task resume binding has invalid schema", code="task_resume_binding_invalid", path=rel)
     if str(data.get("task_id") or "") != task_id:
@@ -1639,7 +2097,7 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
         raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
     input_digests = data.get("input_digests")
     expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository"}
-    if schema_version == RESUME_BINDING_SCHEMA_VERSION:
+    if schema_version in {PRE_PROVENANCE_RESUME_BINDING_SCHEMA_VERSION, RESUME_BINDING_SCHEMA_VERSION}:
         expected_input_keys.add("direct_children")
     if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
         raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)
@@ -1668,8 +2126,14 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
 def load_task_resume_binding(root: Path, task_id: str) -> dict[str, Any] | None:
     normalized_task_id = normalize_task_id(task_id)
     path = _resume_binding_path(root, normalized_task_id)
-    if not path.is_file():
+    if not path.exists() and not path.is_symlink():
         return None
+    if not _contained_regular_file(root, path, _state_dir(root) / "resume"):
+        raise RepoctlError(
+            "task resume binding must be a contained non-symlinked regular file",
+            code="task_resume_binding_invalid",
+            path=path.relative_to(root).as_posix(),
+        )
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1698,6 +2162,13 @@ def bind_task_handoff(
     handoff = task_handoff_body(task)
     if handoff is None:
         raise RepoctlError("live task must contain a Handoff section", code="missing_handoff", path=task.rel_path)
+    provenance = task_handoff_provenance(root, task)
+    if provenance is TaskHandoffProvenance.GENERATED:
+        raise RepoctlError(
+            "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
+            code="task_handoff_generated_template",
+            path=task.rel_path,
+        )
     if context_pack is not None:
         candidate_binding = {
             "path": str(context_pack.get("path") or ""),
@@ -1731,6 +2202,8 @@ def task_handoff_observation(
     task: Task,
     *,
     binding: dict[str, Any] | None,
+    layout: RepoLayout | None = None,
+    repository_observation_available: bool = True,
 ) -> dict[str, Any]:
     handoff = task_handoff_body(task)
     if task.archived or task.status in NON_LIVE:
@@ -1757,11 +2230,13 @@ def task_handoff_observation(
             "changed_inputs": ["handoff"],
         }
     if binding is None:
-        try:
-            current_digests = task_resume_input_digests(root, task)
-            current_revision = digest_data(current_digests)
-        except RepoctlError:
-            current_revision = ""
+        current_revision = ""
+        if repository_observation_available:
+            try:
+                current_digests = task_resume_input_digests(root, task, layout=layout)
+                current_revision = digest_data(current_digests)
+            except RepoctlError:
+                pass
         return {
             "status": TaskHandoffStatus.UNBOUND.value,
             "active": False,
@@ -1773,8 +2248,19 @@ def task_handoff_observation(
             "changed_inputs": [],
         }
     bound_digests = binding["input_digests"]
+    if not repository_observation_available:
+        return {
+            "status": TaskHandoffStatus.UNKNOWN.value,
+            "active": False,
+            "body": handoff,
+            "reason_codes": ["resume_observation_unavailable"],
+            "receipt_ref": _resume_binding_path(root, task.id).relative_to(root).as_posix(),
+            "bound_revision": digest_data(bound_digests),
+            "current_revision": "",
+            "changed_inputs": [],
+        }
     try:
-        current_digests = task_resume_input_digests(root, task)
+        current_digests = task_resume_input_digests(root, task, layout=layout)
     except RepoctlError:
         return {
             "status": TaskHandoffStatus.UNKNOWN.value,
@@ -2459,24 +2945,19 @@ def _entry_key(entry: ChangedEntry) -> tuple[str, str, str]:
     return entry
 
 
-def _target_for_task(root: Path, task: "Task") -> RepoTarget | None:
+def _target_for_task(root: Path, task: "Task", *, layout: RepoLayout | None = None) -> RepoTarget | None:
     repo_id = str(task.frontmatter.get("repo_id") or "").strip()
-    repo_scoped = _repo_scoped_task(task)
-    layout = repo_layout(root)
-    if (repo_id or repo_scoped) and not layout.registry_ready:
-        raise RepoctlError("repository identities are unbound; run repoctl repo adopt before mutating product repositories", code="repository_identity_unbound", path=task.rel_path)
-    if repo_id:
-        for target in layout.targets:
-            if target.id == repo_id:
-                return target
-        raise RepoctlError(f"repository not found for task repo_id: {repo_id}", code="repository_not_found", path=task.rel_path)
-    if repo_scoped:
-        return default_repo_target(root)
-    return None
+    return resolve_task_repo_target(
+        root,
+        repo_id=repo_id,
+        repo_scoped=_repo_scoped_task(task),
+        layout=layout,
+        task_path=task.rel_path,
+    )
 
 
-def _root_task_product_surfaces(root: Path) -> tuple[RepoTarget, ...]:
-    layout = repo_layout(root)
+def _root_task_product_surfaces(root: Path, *, layout: RepoLayout | None = None) -> tuple[RepoTarget, ...]:
+    layout = layout or repo_layout(root)
     targets = list(layout.targets)
     target_paths = {target.display_path for target in targets}
     for candidate in layout.candidates:
@@ -3233,6 +3714,8 @@ def _workspace_receipt_has_repository_claim(receipt: dict[str, Any], *, rel: str
 def _done_descendant_completion_receipts(
     root: Path,
     task: Task,
+    *,
+    layout: RepoLayout,
 ) -> tuple[list[tuple[Task, dict[str, Any]]], list[Problem]]:
     if _repo_scoped_task(task):
         return [], []
@@ -3313,7 +3796,7 @@ def _done_descendant_completion_receipts(
 
         child_repo_scoped = _repo_scoped_task(child)
         try:
-            expected_target = _target_for_task(root, child)
+            expected_target = _target_for_task(root, child, layout=layout)
         except RepoctlError as exc:
             problems.append(
                 Problem(
@@ -4066,12 +4549,15 @@ def _require_no_integrity_problems(delta: dict[str, Any] | None) -> None:
 def repo_changes_since_task_start(
     root: Path,
     task_id: str,
+    *,
+    layout: RepoLayout | None = None,
 ) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     task_id = task.id
-    target = _target_for_task(root, task)
+    layout = layout or repo_layout(root)
+    target = _target_for_task(root, task, layout=layout)
     integrity_problems: list[Problem] = []
-    descendant_receipts, receipt_problems = _done_descendant_completion_receipts(root, task)
+    descendant_receipts, receipt_problems = _done_descendant_completion_receipts(root, task, layout=layout)
     integrity_problems.extend(receipt_problems)
 
     def attribute(
@@ -4106,7 +4592,7 @@ def repo_changes_since_task_start(
             baseline_count = 0
             current_count = 0
             baseline_conflicts: list[str] = []
-            current_targets = _root_task_product_surfaces(root)
+            current_targets = _root_task_product_surfaces(root, layout=layout)
             matched_current_paths: set[str] = set()
             for record in baseline_records:
                 repo_id = str(record.get("repo_id") or "")
@@ -4265,7 +4751,7 @@ def repo_changes_since_task_start(
         changes: list[ChangedEntry] = []
         attributed_changes: list[dict[str, str]] = []
         current_count = 0
-        for product_target in _root_task_product_surfaces(root):
+        for product_target in _root_task_product_surfaces(root, layout=layout):
             current, target_state = repo_changed_entries(root, product_target)
             if not target_state.available:
                 integrity_problems.append(
@@ -4412,6 +4898,12 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     copy = _copy(_task_language(root, task))
     if task.status not in {"todo", "blocked"}:
         raise RepoctlError("task start requires status todo or blocked; an active task baseline cannot be refreshed", code="task_already_started", path=task.rel_path)
+    generated_handoff = task_handoff_is_generated_template(root, task)
+    if task.status == "todo" and not generated_handoff:
+        handoff_problems = _live_handoff_problems(task, root)
+        if handoff_problems:
+            problem = handoff_problems[0]
+            raise RepoctlError(problem.message, code=problem.code, path=problem.path)
     if task.status == "blocked":
         handoff_problems = _live_handoff_problems(task, root)
         if handoff_problems:
@@ -4448,7 +4940,11 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     text = replace_frontmatter_line(text, "status", "doing")
     head, _head_state = repo_git_head(root, target) if target is not None else ("", _no_product_repo_state())
     if dirty:
-        entry = _dirty_entry(dirty, copy=copy)
+        entry = _dirty_entry(
+            dirty,
+            copy=copy,
+            baseline_ref=_baseline_path(root, task.id).relative_to(root).as_posix(),
+        )
     elif not git_state.available:
         entry = _git_unavailable_entry(git_state.reason, copy=copy)
     else:
@@ -4460,18 +4956,33 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
             entry = f"{entry}\n{_repo_head_entry(head, copy=copy)}"
             _write_repo_baseline(root, task, baseline_entries, git_state, target)
     text = append_section_entry(text, "Execution Log", entry)
-    if task.status == "todo":
-        handoff = (
-            f"- Next exact step: {copy['start_handoff_next'].format(task_path=task.rel_path)}\n"
-            f"- First file to open: `{task.rel_path}`\n"
-            "- First command to run: `./scripts/repoctl task list --json`\n"
-            f"- Done when: {copy['start_handoff_done']}\n"
+    handoff_origin_write: tuple[Path, str] | None = None
+    if task.status == "todo" and generated_handoff:
+        handoff = _render_started_handoff(copy=copy, task_path=task.rel_path)
+        existing_handoff = task_handoff_body(task) or ""
+        handoff_origin_write = prepare_generated_handoff_origin_write(
+            root,
+            task,
+            existing_handoff,
+            handoff,
         )
         text = replace_section(text, "Handoff", handoff)
+        text = _set_task_frontmatter_line(
+            text,
+            HANDOFF_ORIGIN_COMMITMENT_FIELD,
+            f'"{_handoff_digest(handoff)}"',
+        )
     warnings: list[Problem] = []
     if dirty and not repo_scoped and not force_dirty:
         warnings.append(Problem("warning", "root_task_repo_dirty_recorded", "task started with existing repos/ dirty state recorded for baseline only", task.rel_path))
-    return {"task": task, "text": text, "dirty": dirty, "repo_git": git_state, "warnings": warnings}
+    return {
+        "task": task,
+        "text": text,
+        "dirty": dirty,
+        "repo_git": git_state,
+        "warnings": warnings,
+        "handoff_origin_write": handoff_origin_write,
+    }
 
 
 def _verification_body(verification: VerificationInput) -> tuple[str, dict[str, Any]]:
@@ -4589,6 +5100,13 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     repo_scoped = _repo_scoped_task(task)
     area = str(task.frontmatter.get("area") or "")
     target = _target_for_task(root, task)
+    alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
+    if alignment_problem is not None:
+        raise RepoctlError(
+            alignment_problem.message,
+            code=alignment_problem.code,
+            path=alignment_problem.path,
+        )
     _assert_repo_baseline_matches(root, task, target)
     repo_changed = bool(meta_gate and meta_gate.get("status") == "passed" and meta_gate.get("scope") == "changed")
     start_head = _repo_head_from_state(root, task)
@@ -4674,9 +5192,17 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
                 path=task.rel_path,
             )
     discovery_outcome = completion_outcome_projection(root, task.id)
+    if discovery_outcome is not None and (
+        path_transitions is None or not _valid_event_stamp(started_at)
+    ):
+        raise RepoctlError(
+            "task Discovery outcome cannot be frozen without current task-start transition evidence; start a todo task first or use a follow-up with a fresh baseline",
+            code="transition_evidence_incomplete",
+            path=task.rel_path,
+        )
     receipt_schema_version = (
         COMPLETION_RECEIPT_SCHEMA_VERSION
-        if discovery_outcome is not None and path_transitions is not None and _valid_event_stamp(started_at)
+        if discovery_outcome is not None
         else TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION
         if path_transitions is not None and _valid_event_stamp(started_at)
         else LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION
@@ -4927,10 +5453,9 @@ def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> li
 
 def discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
     fields = task_discovery_values(task)
-    placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
     required: dict[str, list[str]] = {}
     for key in ("Candidate query", "Candidate files reviewed", "Chosen files"):
-        values = [value for value in fields.get(key, []) if _strip_ticks(value).lower() not in placeholders]
+        values = fields.get(key, [])
         if not values:
             return False
         required[key] = values
@@ -5126,11 +5651,13 @@ def _apply_creation_defaults(
     if task_type == "parent":
         goal = copy["parent_goal"].format(title=title) + "\n"
         plan = _bullet_lines(copy["parent_plan"])
-        handoff = (
-            f"- Next exact step: {copy['parent_handoff_next'].format(title=title)}\n"
-            f"- First file to open: `{rel_path.as_posix()}`\n"
-            "- First command to run: `./scripts/repoctl task list --json`\n"
-            f"- Done when: {copy['parent_handoff_done']}\n"
+        handoff = _render_created_handoff(
+            copy=copy,
+            task_type="parent",
+            title=title,
+            task_id=task_id,
+            task_path=rel_path.as_posix(),
+            repo_hint=repo_hint,
         )
         text = replace_section(text, "Live Child Tasks", f"{copy['live_child_summary']}\n")
         text = replace_section(text, "Non-Live Child Tasks", f"{copy['non_live_child_summary']}\n")
@@ -5139,11 +5666,13 @@ def _apply_creation_defaults(
     else:
         goal = copy["task_goal"].format(title=title) + "\n"
         scope = _bullet_lines(copy["task_scope"] if repo_scoped else copy["root_scope"])
-        handoff = (
-            f"- Next exact step: {copy['task_handoff_next'].format(repo_hint=repo_hint)}\n"
-            f"- First file to open: `{rel_path.as_posix()}`\n"
-            f"- First command to run: `./scripts/repoctl task start {task_id} --json`\n"
-            f"- Done when: {copy['task_handoff_done']}\n"
+        handoff = _render_created_handoff(
+            copy=copy,
+            task_type="task",
+            title=title,
+            task_id=task_id,
+            task_path=rel_path.as_posix(),
+            repo_hint=repo_hint,
         )
     if parent:
         work_area += f"- Parent task: `{parent}`\n"
@@ -5238,7 +5767,13 @@ def create_task_file(
         task_id = f"T-{ts_file}"
         rel_path = Path("docs/tasks") / f"{task_id}--{slug}.md"
         path = root / rel_path
-        if list((root / "docs/tasks").glob(f"{task_id}--*.md")) or archive_locator_path(root, task_id).exists():
+        origin_path = task_handoff_origin_path(root, task_id)
+        if (
+            list((root / "docs/tasks").glob(f"{task_id}--*.md"))
+            or archive_locator_path(root, task_id).exists()
+            or origin_path.exists()
+            or origin_path.is_symlink()
+        ):
             time.sleep(1)
             continue
         if path.exists():
@@ -5278,7 +5813,28 @@ def create_task_file(
         )
         if follow_up_of:
             text = append_section_entry(text, "Work Area", f"- Follow-up of: `{follow_up_of}`")
-        atomic_write(path, text)
+        frontmatter, body = parse_frontmatter(text)
+        task = Task(path=path, rel_path=rel_path.as_posix(), frontmatter=frontmatter, body=body)
+        handoff = task_handoff_body(task)
+        if handoff is None:  # pragma: no cover - creation template contract
+            raise RepoctlError("created task has no Handoff body", code="missing_handoff", path=task.rel_path)
+        text = _set_task_frontmatter_line(
+            text,
+            HANDOFF_ORIGIN_COMMITMENT_FIELD,
+            f'"{_handoff_digest(handoff)}"',
+        )
+        frontmatter, body = parse_frontmatter(text)
+        task = Task(path=path, rel_path=rel_path.as_posix(), frontmatter=frontmatter, body=body)
+        try:
+            origin_path, origin_text = prepare_generated_handoff_origin_write(root, task, handoff)
+            atomic_write(origin_path, origin_text)
+            atomic_write(path, text)
+        except Exception:
+            if path.is_file():
+                path.unlink()
+            if origin_path.is_file():
+                origin_path.unlink()
+            raise
         return load_task(path, root)
     raise RepoctlError("failed to reserve unique task id after 20 retries")
 
@@ -5306,7 +5862,22 @@ def children_by_parent(tasks: list[Task]) -> dict[str, list[Task]]:
 
 def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
     problems: list[Problem] = []
+    try:
+        layout = repo_layout(root)
+    except RepoctlError:
+        layout = None
     for task in live_tasks(tasks):
+        try:
+            load_task_handoff_origin(root, task.id)
+        except RepoctlError as exc:
+            problems.append(
+                Problem(
+                    "error",
+                    exc.code or "task_handoff_origin_invalid",
+                    str(exc),
+                    exc.path or task.rel_path,
+                )
+            )
         path = _baseline_path(root, task.id)
         if path.is_file():
             try:
@@ -5326,6 +5897,22 @@ def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
                         exc.path or resume_path.relative_to(root).as_posix(),
                     )
                 )
+        if layout is not None:
+            try:
+                target = _target_for_task(root, task, layout=layout)
+                alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
+            except RepoctlError as exc:
+                problems.append(
+                    Problem(
+                        "error",
+                        exc.code or "discovery_outcome_state_invalid",
+                        str(exc),
+                        exc.path or task.rel_path,
+                    )
+                )
+            else:
+                if alignment_problem is not None:
+                    problems.append(alignment_problem)
     return problems
 
 
@@ -5387,6 +5974,24 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
         root = _task_workspace_root(task)
         if task.status in LIVE and not task.archived:
             problems.extend(_live_handoff_problems(task, root))
+            generated_handoff = False
+            try:
+                generated_handoff = task_handoff_is_generated_template(root, task)
+            except RepoctlError as exc:
+                problems.append(
+                    Problem(
+                        "error",
+                        exc.code or "task_handoff_origin_invalid",
+                        str(exc),
+                        exc.path or task.rel_path,
+                    )
+                )
+            if generated_handoff:
+                append_warning(
+                    task,
+                    "task_handoff_generated_template",
+                    "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
+                )
         for context_path in _context_doc_paths(task):
             if not (root / context_path).exists():
                 append_warning(task, "missing_context_doc", f"Context Docs path does not exist: {context_path}", context_path)

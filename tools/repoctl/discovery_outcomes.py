@@ -17,6 +17,7 @@ DISCOVERY_OUTCOME_SCHEMA = "repoctl.task.discovery-outcome"
 DISCOVERY_OUTCOME_SCHEMA_VERSION = 1
 VERIFICATION_STATUSES = frozenset({"passed", "failed", "mixed", "blocked"})
 HOT_SUBJECT_KINDS = frozenset({"file"})
+_WORKSPACE_VERIFICATION_QUERY = "repoctl workspace verification artifacts"
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _TASK_ID_RE = re.compile(r"T-[0-9]{14}Z")
 
@@ -195,6 +196,86 @@ def add_verification_record(
             "structured verification requires recorded Discovery outcome state",
             code="discovery_outcome_missing",
         )
+    return _add_verification_record_to_state(
+        root,
+        state=state,
+        status=status,
+        evidence_ref=evidence_ref,
+        subject_refs=subject_refs,
+        claim_ids=claim_ids,
+        target=target,
+    )
+
+
+def add_workspace_artifact_verification_record(
+    root: Path,
+    *,
+    task_id: str,
+    status: str,
+    evidence_ref: str,
+    artifact_refs: Iterable[str],
+    subject_refs: Iterable[str] = (),
+    claim_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Record root-task verification against typed, non-product artifacts."""
+
+    artifacts = [
+        _workspace_artifact_subject(root, str(value))
+        for value in artifact_refs
+    ]
+    if not artifacts:
+        raise RepoctlError(
+            "workspace artifact verification requires at least one artifact",
+            code="verification_coverage_missing",
+        )
+    state = load_outcome_state(root, task_id)
+    if state is not None and state.get("repository") is not None:
+        raise RepoctlError(
+            "workspace verification artifacts cannot be attached to a product repository outcome",
+            code="workspace_verification_artifact_invalid",
+        )
+    state = state or _with_state_digest({
+        "schema": DISCOVERY_OUTCOME_SCHEMA,
+        "schema_version": DISCOVERY_OUTCOME_SCHEMA_VERSION,
+        "task_id": task_id,
+        "repository": None,
+        "active_chosen": [],
+        "prior_episodes": [],
+        "active_episode": None,
+        "verification_records": [],
+    })
+    active = _copy(state.get("active_episode"))
+    episode_id = digest_data({"kind": "workspace_verification_episode", "task_id": task_id})
+    if active is None or active.get("episode_id") != episode_id:
+        if active is not None and _episode_has_evidence(active):
+            state["prior_episodes"] = [*state["prior_episodes"], _seal_episode(active)]
+        active = _empty_episode(
+            episode_id=episode_id,
+            query=_WORKSPACE_VERIFICATION_QUERY,
+        )
+    active["reviewed"] = _subjects_by_identity([*active["reviewed"], *artifacts])
+    state["active_episode"] = active
+    return _add_verification_record_to_state(
+        root,
+        state=state,
+        status=status,
+        evidence_ref=evidence_ref,
+        subject_refs=[*subject_refs, *(str(item["subject_id"]) for item in artifacts)],
+        claim_ids=claim_ids,
+        target=None,
+    )
+
+
+def _add_verification_record_to_state(
+    root: Path,
+    *,
+    state: dict[str, Any],
+    status: str,
+    evidence_ref: str,
+    subject_refs: Iterable[str],
+    claim_ids: Iterable[str],
+    target: RepoTarget | None,
+) -> dict[str, Any]:
     if status not in VERIFICATION_STATUSES:
         raise RepoctlError("verification status is invalid", code="verification_status_invalid")
     evidence = _canonical_evidence(root, evidence_ref)
@@ -248,6 +329,71 @@ def add_verification_record(
         key="record_id",
     )
     return _with_state_digest(state)
+
+
+def structured_verification_coverage(
+    root: Path,
+    *,
+    task_id: str,
+    target: RepoTarget,
+    subject_refs: Iterable[str],
+) -> dict[str, Any]:
+    """Report exact-current passed coverage for selected Discovery file subjects."""
+
+    requested = sorted({
+        relative
+        for value in subject_refs
+        if (relative := _relative_repo_path(target, str(value))) is not None
+    })
+    state = load_outcome_state(root, task_id)
+    if state is None:
+        return {
+            "status": "outcome_missing" if requested else "not_applicable",
+            "required_subjects": requested,
+            "passed_subjects": [],
+            "missing_subjects": requested,
+            "nonpassing_subjects": [],
+        }
+    chosen_paths = {
+        str(identity["path"])
+        for subject in state["active_chosen"]
+        if subject.get("kind") == "file"
+        and isinstance((identity := subject.get("identity")), dict)
+        and isinstance(identity.get("path"), str)
+    }
+    required = [path for path in requested if path in chosen_paths]
+    statuses_by_subject: dict[str, set[str]] = {}
+    for record in state["verification_records"]:
+        for subject_id in record["subject_ids"]:
+            statuses_by_subject.setdefault(str(subject_id), set()).add(str(record["status"]))
+    passed: list[str] = []
+    missing: list[str] = []
+    nonpassing: list[str] = []
+    for path in required:
+        current = current_path_subject(root, target=target, path=path)
+        statuses = statuses_by_subject.get(str(current["subject_id"]), set())
+        if statuses == {"passed"}:
+            passed.append(path)
+        elif not statuses:
+            missing.append(path)
+        else:
+            nonpassing.append(path)
+    status = (
+        "not_applicable"
+        if not required
+        else "missing"
+        if missing
+        else "nonpassing"
+        if nonpassing
+        else "complete"
+    )
+    return {
+        "status": status,
+        "required_subjects": required,
+        "passed_subjects": passed,
+        "missing_subjects": missing,
+        "nonpassing_subjects": nonpassing,
+    }
 
 
 def completion_outcome_projection(root: Path, task_id: str) -> dict[str, Any] | None:
@@ -808,6 +954,44 @@ def _selection_subject(
 
 def _canonical_path_subjects(root: Path, *, target: RepoTarget | None, paths: Iterable[str]) -> list[dict[str, Any]]:
     return [_path_subject(root, target=target, path=str(path), kind="file") for path in paths]
+
+
+def _workspace_artifact_subject(root: Path, value: str) -> dict[str, Any]:
+    raw = str(value)
+    pure = PurePosixPath(raw)
+    invalid = (
+        not raw
+        or raw != raw.strip()
+        or "\\" in raw
+        or pure.is_absolute()
+        or str(pure) != raw
+        or any(part in {"", ".", ".."} for part in pure.parts)
+        or (pure.parts and pure.parts[0] == "repos")
+    )
+    if invalid:
+        raise RepoctlError(
+            "workspace verification artifact must be a canonical non-product path inside the workspace",
+            code="workspace_verification_artifact_invalid",
+            path=raw,
+        )
+    candidate = root / raw
+    try:
+        workspace_root = root.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        resolved_relative = resolved.relative_to(workspace_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RepoctlError(
+            "workspace verification artifact must resolve to an existing file inside the workspace",
+            code="workspace_verification_artifact_invalid",
+            path=raw,
+        ) from exc
+    if not resolved.is_file() or (resolved_relative.parts and resolved_relative.parts[0] == "repos"):
+        raise RepoctlError(
+            "workspace verification artifact must be a regular non-product file",
+            code="workspace_verification_artifact_invalid",
+            path=raw,
+        )
+    return _opaque_subject("artifact", {"path": raw})
 
 
 def current_path_subject(

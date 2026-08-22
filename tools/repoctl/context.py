@@ -29,6 +29,7 @@ from .context_model import (
 )
 from .context_retrieval import (
     ContextRetrievalLane,
+    canonical_identifier_sequence,
     context_query_terms,
     context_retrieval_lane,
     excerpt_for_query,
@@ -90,6 +91,26 @@ GRAPH_DERIVED_CONTEXT_EVIDENCE_KINDS = {
     ContextEvidenceKind.GRAPH_SEED,
     ContextEvidenceKind.GRAPH_RELATION,
     ContextEvidenceKind.HISTORY_CORROBORATION,
+}
+_LEXICAL_QUERY_EVIDENCE_KINDS = {
+    ContextEvidenceKind.PATH_TERMS,
+    ContextEvidenceKind.SECTION_TERMS,
+    ContextEvidenceKind.BODY_TERMS,
+    ContextEvidenceKind.FTS,
+}
+_EXACT_GRAPH_ANCHOR_KINDS = {
+    ContextEvidenceKind.EXACT_PATH,
+    ContextEvidenceKind.EXACT_FILENAME,
+    ContextEvidenceKind.EXACT_SYMBOL,
+    ContextEvidenceKind.EXACT_RELATIONSHIP,
+}
+_NAMED_GRAPH_ANCHOR_KINDS = {
+    ContextEvidenceKind.NAMED_FILE_IDENTITY,
+    ContextEvidenceKind.NAMED_SYMBOL_IDENTITY,
+}
+_EXPLICIT_NAMED_GRAPH_ANCHOR_KINDS = {
+    ContextEvidenceKind.EXPLICIT_NAMED_FILE_IDENTITY,
+    ContextEvidenceKind.EXPLICIT_NAMED_SYMBOL_IDENTITY,
 }
 
 
@@ -1941,6 +1962,19 @@ def _select_compact_evidence_profiles(
             ),
         )
     selected = [primary]
+    identity_bounded = _coverage_profile_has_query_identity(primary)
+
+    def eligible_optional(profile: dict[str, Any]) -> bool:
+        if not identity_bounded:
+            return True
+        return bool(
+            _coverage_profile_has_query_identity(profile)
+            or _coverage_profile_connected_to_selected(
+                profile,
+                selected=[primary],
+            )
+        )
+
     required = [
         profiles_by_path[path]
         for path in required_paths
@@ -1948,6 +1982,7 @@ def _select_compact_evidence_profiles(
     ]
     remaining = [profile for profile in profiles if profile not in selected]
     optional_limit = max(0, limit - len(selected) - len(required))
+    frequencies = _coverage_pair_frequencies(profiles) if remaining and optional_limit else {}
     while remaining and len(selected) < 1 + optional_limit:
         direct_remaining = [
             profile
@@ -1968,12 +2003,14 @@ def _select_compact_evidence_profiles(
             for profile in remaining
             if _coverage_profile_contributes(profile, selected=selected)
         ]
+        candidates = [profile for profile in candidates if eligible_optional(profile)]
         if not candidates:
             direct_cohort = [
                 profile
                 for profile in remaining
                 if profile.get("direct_query", True)
                 and _coverage_profile_is_direct_source(profile)
+                and eligible_optional(profile)
             ]
             if (
                 direct_cohort
@@ -1986,7 +2023,6 @@ def _select_compact_evidence_profiles(
                 candidates = direct_cohort
         if not candidates:
             break
-        frequencies = _coverage_pair_frequencies(profiles)
         next_profile = min(
             candidates,
             key=lambda profile: _coverage_profile_related_key(
@@ -2017,11 +2053,12 @@ def _coverage_profile_anchor_rank_key(
     profile: dict[str, Any],
 ) -> tuple[Any, ...]:
     """Rank direct anchors without letting path echo outweigh body evidence."""
+    body_terms = _coverage_profile_body_terms(profile)
     return (
-        0 if _coverage_profile_has_explicit_identity(profile) else 1,
+        _coverage_profile_identity_tier(profile),
         0 if _coverage_profile_history_corroborated(profile) else 1,
-        -_coverage_term_breadth_tier(_coverage_profile_body_terms(profile)),
-        -len(_coverage_profile_body_terms(profile)),
+        -_coverage_term_breadth_tier(body_terms),
+        -len(body_terms),
         0 if _coverage_profile_graph_supported(profile) else 1,
         _coverage_profile_direct_rank_key(profile),
     )
@@ -2084,6 +2121,8 @@ def _select_anchor_evidence_profiles(
                 in {ContextRetrievalLane.PRODUCT_SOURCE.value, "product_config"}
                 and connected_lane
                 in {ContextRetrievalLane.PRODUCT_SOURCE.value, "product_config"}
+                and _coverage_profile_identity_tier(connected_primary)
+                <= _coverage_profile_identity_tier(primary)
                 and _coverage_profile_anchor_priority(primary)
                 <= _coverage_profile_anchor_priority(connected_primary)
                 and _coverage_term_breadth_tier(
@@ -2624,6 +2663,7 @@ def _compact_projection(
         item_limit=COMPACT_ITEM_LIMIT,
         continuation_limit=COMPACT_CONTINUATION_LIMIT,
         mode=mode,
+        repository_path=repository_path,
     )
     total_items = sum(len(items) for items in groups.values())
     displayed_items = sum(len(items) for items in displayed.values())
@@ -3135,6 +3175,7 @@ def _compact_bundle_projection(
     item_limit: int,
     continuation_limit: int,
     mode: str,
+    repository_path: str,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, Any]]:
     """Project evidence and its producer-owned primary continuations together."""
     group_names = _ordered_context_group_names(all_groups)
@@ -3180,6 +3221,18 @@ def _compact_bundle_projection(
         ]
         for group, items in all_groups.items()
     }
+    if (
+        mode in GRAPH_EXPANSION_MODES
+        and _compact_has_actionable_product_evidence(projection_groups)
+    ):
+        projection_groups["must_read"] = [
+            item
+            for item in projection_groups.get("must_read", [])
+            if not _compact_is_weak_root_operational_document(
+                item,
+                repository_path=repository_path,
+            )
+        ]
     projection_groups["must_read"] = _role_diverse_must_read_items(
         projection_groups.get("must_read", [])
     )
@@ -3264,6 +3317,53 @@ def _compact_bundle_projection(
             "omitted": max(0, len(all_values) - len(selected_continuations)),
         },
     }
+
+
+def _compact_has_actionable_product_evidence(
+    groups: dict[str, list[dict[str, Any]]],
+) -> bool:
+    return any(
+        str(ref.get("kind") or "") in ACTIONABLE_PRODUCT_KINDS
+        for group in ("likely_change_surface", "tests_and_verification")
+        for item in groups.get(group, [])
+        if isinstance(item, dict)
+        and isinstance((ref := item.get("source_ref")), dict)
+    )
+
+
+def _compact_is_weak_root_operational_document(
+    item: dict[str, Any],
+    *,
+    repository_path: str,
+) -> bool:
+    role = str(item.get("document_role") or "")
+    if role not in {
+        DocumentRole.OPERATING_AUTHORITY.value,
+        DocumentRole.GOVERNANCE_AUTHORITY.value,
+        DocumentRole.PROCEDURE.value,
+    }:
+        return False
+    ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    path = str(ref.get("path") or "").replace("\\", "/").strip("/")
+    product_prefix = repository_path.replace("\\", "/").strip("/")
+    if product_prefix and path.startswith(f"{product_prefix}/"):
+        return False
+    if str(item.get("anchor_strength") or "") != ContextAnchorStrength.WEAK.value:
+        return False
+    evidence_kinds = {
+        str(value)
+        for value in item.get("evidence_kinds", [])
+        if str(value)
+    }
+    direct_kinds = evidence_kinds - {
+        kind.value for kind in GRAPH_DERIVED_CONTEXT_EVIDENCE_KINDS
+    }
+    return bool(
+        direct_kinds
+        and direct_kinds <= {
+            kind.value for kind in _LEXICAL_QUERY_EVIDENCE_KINDS
+        }
+    )
 
 
 def _role_diverse_must_read_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3810,12 +3910,6 @@ def _graph_context_candidates(
     return _dedupe_candidates(candidates), warnings, projection
 
 
-_EXACT_GRAPH_ANCHOR_KINDS = {
-    ContextEvidenceKind.EXACT_PATH,
-    ContextEvidenceKind.EXACT_FILENAME,
-    ContextEvidenceKind.EXACT_SYMBOL,
-    ContextEvidenceKind.EXACT_RELATIONSHIP,
-}
 _EXACT_FILE_ANCHOR_KINDS = {
     ContextEvidenceKind.EXACT_PATH,
     ContextEvidenceKind.EXACT_FILENAME,
@@ -3879,6 +3973,7 @@ def _resolve_graph_anchors(
 
     exact_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
     knowledge_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
+    named_file_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
     diagnostic_pairs: list[tuple[ContextCandidate, ContextGraphAnchorCandidate]] = []
     heuristic_candidates_by_path: dict[str, list[ContextCandidate]] = {}
     for candidate in source_candidates:
@@ -3926,8 +4021,19 @@ def _resolve_graph_anchors(
             provenance=provenance,
         )
         diagnostic_pairs.append((candidate, graph_candidate))
+        if ContextEvidenceKind.EXPLICIT_NAMED_FILE_IDENTITY in evidence_kinds:
+            named_file_pairs.append((candidate, graph_candidate))
         if _is_direct_lexical_anchor_candidate(candidate) or _is_provider_symbol_candidate(candidate):
             heuristic_candidates_by_path.setdefault(path.removeprefix(product_prefix), []).append(candidate)
+
+    named_groups: dict[
+        tuple[str, ...],
+        list[tuple[ContextCandidate, ContextGraphAnchorCandidate]],
+    ] = {}
+    for pair in _dedupe_graph_anchor_pairs(named_file_pairs):
+        identity = _named_file_identity(pair[0].source_ref.path)
+        if identity:
+            named_groups.setdefault(identity, []).append(pair)
 
     if exact_pairs:
         exact_symbols = _dedupe_graph_anchor_pairs(
@@ -3949,6 +4055,22 @@ def _resolve_graph_anchors(
                     _ambiguous_graph_anchor_resolution([*exact_symbols, *exact_files]),
                     projection_index,
                 )
+            if not exact_files and len(named_groups) == 1:
+                named_pairs = next(iter(named_groups.values()))
+                named_paths = {
+                    pair[1].anchor.path
+                    for pair in named_pairs
+                }
+                symbol_path = exact_symbols[0][1].anchor.path
+                if len(named_paths) != 1 or symbol_path not in named_paths:
+                    return (
+                        _ambiguous_graph_anchor_resolution(
+                            _dedupe_graph_anchor_pairs(
+                                [*exact_symbols, *named_pairs]
+                            )
+                        ),
+                        projection_index,
+                    )
             selected = exact_symbols
         else:
             selected = exact_files
@@ -4028,6 +4150,67 @@ def _resolve_graph_anchors(
             ),
             projection_index,
         )
+
+    if named_file_pairs:
+        ambiguous_named_pairs = [
+            pair
+            for pairs in named_groups.values()
+            if len({candidate.anchor.path for _source, candidate in pairs}) > 1
+            for pair in pairs
+        ]
+        if ambiguous_named_pairs:
+            return (
+                _ambiguous_graph_anchor_resolution(
+                    _dedupe_graph_anchor_pairs(ambiguous_named_pairs)
+                ),
+                projection_index,
+            )
+        named_paths = {
+            graph_candidate.anchor.path
+            for pairs in named_groups.values()
+            for _candidate, graph_candidate in pairs
+        }
+        named_candidates_by_path = {
+            path: candidates
+            for path, candidates in heuristic_candidates_by_path.items()
+            if path in named_paths
+        }
+        named_anchors, named_candidates, named_coverage = (
+            _ranked_heuristic_graph_anchors(
+                named_candidates_by_path,
+                target=target,
+                graph_support=graph_support_by_path or {},
+                allow_provider_symbol=mode != ContextResultMode.FILE_IMPACT.value,
+                unavailable_paths={
+                    path
+                    for path in named_candidates_by_path
+                    if not selection_available(path)
+                },
+                component_ids_by_path=component_ids_by_path,
+                prefer_product_sources=False,
+            )
+        )
+        if named_anchors:
+            return (
+                ContextAnchorResolution(
+                    status=ContextAnchorStatus.RESOLVED,
+                    code=ContextAnchorResolutionCode.RESOLVED,
+                    anchors=named_anchors,
+                    candidates=named_candidates,
+                    selection_coverage=named_coverage,
+                ),
+                projection_index,
+            )
+        if named_candidates:
+            return (
+                ContextAnchorResolution(
+                    status=ContextAnchorStatus.UNRESOLVED,
+                    code=ContextAnchorResolutionCode.UNRESOLVED,
+                    candidates=named_candidates,
+                    selection_coverage=named_coverage,
+                ),
+                projection_index,
+            )
 
     if projection_index is None and snapshot is not None and heuristic_candidates_by_path:
         projection_index = build_context_projection_index(snapshot)
@@ -4205,6 +4388,7 @@ def _ranked_heuristic_graph_anchors(
     allow_provider_symbol: bool = True,
     unavailable_paths: set[str] | None = None,
     component_ids_by_path: dict[str, tuple[str, ...]] | None = None,
+    prefer_product_sources: bool = True,
 ) -> tuple[
     tuple[ContextGraphAnchorCandidate, ...],
     tuple[ContextGraphAnchorCandidate, ...],
@@ -4300,7 +4484,11 @@ def _ranked_heuristic_graph_anchors(
         if str(entry.get("lane_key") or "")
         in {ContextRetrievalLane.PRODUCT_SOURCE.value, "product_config"}
     ]
-    anchor_entries = source_entries or eligible_entries
+    anchor_entries = (
+        source_entries
+        if prefer_product_sources and source_entries
+        else eligible_entries
+    )
     ordered_entries = _select_coverage_profiles(
         anchor_entries,
         limit=len(anchor_entries),
@@ -5119,14 +5307,6 @@ def _coverage_profile_direct_rank_key(
     profile: dict[str, Any],
 ) -> tuple[Any, ...]:
     """Rank source evidence from typed identity and coverage, never as authority."""
-    strong_evidence = bool(
-        _coverage_profile_has_explicit_identity(profile)
-        or (
-            _coverage_profile_anchor_priority(profile)
-            >= CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.STRONG]
-            and _coverage_profile_provider_evidence_supported(profile)
-        )
-    )
     structural_terms = {
         term
         for field_name, term in _coverage_profile_structural_pairs(profile)
@@ -5143,7 +5323,7 @@ def _coverage_profile_direct_rank_key(
     item = profile.get("item") if isinstance(profile.get("item"), dict) else {}
     breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
     return (
-        0 if strong_evidence else 1,
+        _coverage_profile_identity_tier(profile),
         query_plausibility_priority,
         history_priority,
         -_coverage_profile_anchor_priority(profile),
@@ -5233,6 +5413,52 @@ def _coverage_profile_provider_evidence_supported(profile: dict[str, Any]) -> bo
     )
 
 
+def _coverage_profile_evidence_kinds(profile: dict[str, Any]) -> set[str]:
+    item = profile.get("item") if isinstance(profile.get("item"), dict) else {}
+    values = {
+        str(value)
+        for value in item.get("evidence_kinds", [])
+        if str(value)
+    }
+    primary = profile.get("primary")
+    if isinstance(primary, ContextCandidate):
+        values.update(kind.value for kind in primary.evidence_kinds)
+    candidates = profile.get("candidates")
+    if isinstance(candidates, (list, tuple)):
+        values.update(
+            kind.value
+            for candidate in candidates
+            if isinstance(candidate, ContextCandidate)
+            for kind in candidate.evidence_kinds
+        )
+    return values
+
+
+def _coverage_profile_identity_tier(profile: dict[str, Any]) -> int:
+    """Return a closed lexicographic identity tier for all evidence lanes."""
+
+    if _coverage_profile_has_explicit_identity(profile):
+        return 0
+    evidence_kinds = _coverage_profile_evidence_kinds(profile)
+    named_test_identity = bool(
+        str(profile.get("lane_key") or "")
+        == ContextRetrievalLane.PRODUCT_TEST.value
+        and evidence_kinds
+        & {kind.value for kind in _NAMED_GRAPH_ANCHOR_KINDS}
+    )
+    if (
+        evidence_kinds
+        & {kind.value for kind in _EXPLICIT_NAMED_GRAPH_ANCHOR_KINDS}
+        or named_test_identity
+    ):
+        return 1
+    return 2
+
+
+def _coverage_profile_has_query_identity(profile: dict[str, Any]) -> bool:
+    return _coverage_profile_identity_tier(profile) < 2
+
+
 def _coverage_profile_evidence_supported(profile: dict[str, Any]) -> bool:
     if (
         profile.get("provider_symbol")
@@ -5318,6 +5544,7 @@ def _coverage_profile_reference_key(
         selected=reference_profiles,
     )
     return (
+        _coverage_profile_identity_tier(profile),
         0 if exact_call_connected else 1,
         0 if direct_call_connected else 1,
         -_coverage_profile_anchor_priority(profile),
@@ -5745,14 +5972,14 @@ def _shared_parent_prefix_depth(left: str, right: str) -> int:
     return depth
 
 
+def _named_file_identity(path: str) -> tuple[str, ...]:
+    filename = path.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return canonical_identifier_sequence(stem)
+
+
 def _is_direct_lexical_anchor_candidate(candidate: ContextCandidate) -> bool:
-    lexical_kinds = {
-        ContextEvidenceKind.PATH_TERMS,
-        ContextEvidenceKind.SECTION_TERMS,
-        ContextEvidenceKind.BODY_TERMS,
-        ContextEvidenceKind.FTS,
-    }
-    return bool(set(candidate.evidence_kinds) & lexical_kinds) and (
+    return bool(set(candidate.evidence_kinds) & _LEXICAL_QUERY_EVIDENCE_KINDS) and (
         candidate.score - float(candidate.score_breakdown.get("graph") or 0.0)
     ) > 0
 
@@ -5830,7 +6057,7 @@ def _ambiguous_graph_anchor_resolution(
 def _graph_anchor_warning(resolution: ContextAnchorResolution) -> dict[str, str]:
     return {
         "code": resolution.code.value,
-        "message": "Multiple equally strong Graph anchors remain; no relation expansion was performed",
+        "message": "Graph anchor identity is ambiguous; no relation expansion was performed",
     }
 
 

@@ -19,11 +19,85 @@ from tools.repoctl.result_receipts import (
     ResultSelection,
     collect_result_receipt_cache,
     context_result_citations,
+    context_result_receipt_projection,
     read_result_receipt,
     result_receipt_path,
     verify_result_selections,
     write_result_receipt,
 )
+
+
+def test_context_receipt_default_projection_size_is_independent_of_hidden_manifest_members() -> None:
+    compact_bundle = {
+        "groups": {
+            "likely_change_surface": [
+                {
+                    "source_ref": {
+                        "kind": "current_source",
+                        "path": "repos/src/owner.py",
+                    },
+                    "selection_reason": "exact owner identity",
+                }
+            ],
+            "warnings_and_completeness": [],
+        }
+    }
+
+    def receipt(count: int) -> dict:
+        selectable = [
+            {"authority": "source", "ref": "repos/src/owner.py"},
+            *(
+                {"authority": "graph", "ref": f"src/hidden-{index}.py"}
+                for index in range(count)
+            ),
+        ]
+        return {
+            "producer": "context",
+            "result_id": digest_data({"count": count}),
+            "receipt_digest": digest_data({"selectable": selectable}),
+            "request": {
+                "kind": "context_query",
+                "query": "owner",
+                "mode": "auto",
+            },
+            "selectable": selectable,
+        }
+
+    small = context_result_receipt_projection(
+        receipt(2),
+        compact_bundle=compact_bundle,
+    )
+    large_receipt = receipt(200)
+    large = context_result_receipt_projection(
+        large_receipt,
+        compact_bundle=compact_bundle,
+    )
+    full = context_result_receipt_projection(
+        large_receipt,
+        compact_bundle=compact_bundle,
+        full=True,
+    )
+
+    assert large["compact"]["representative_citations"] == [
+        {
+            "group": "likely_change_surface",
+            "primary_citation": {
+                "authority": "source",
+                "ref": "repos/src/owner.py",
+            },
+            "selection_reason": "exact owner identity",
+        }
+    ]
+    assert large["manifest"]["selectable_count"] == 201
+    assert large["manifest"]["omitted_by_authority"] == {"graph": 200}
+    assert "items" not in large["manifest"]
+    assert full["manifest"]["items"] == large_receipt["selectable"]
+    assert len(json.dumps(large, separators=(",", ":"))) - len(
+        json.dumps(small, separators=(",", ":"))
+    ) < 32
+    assert len(json.dumps(full, separators=(",", ":"))) > 10 * len(
+        json.dumps(large, separators=(",", ":"))
+    )
 
 
 def test_result_receipt_is_idempotent_and_conflicting_membership_does_not_overwrite(tmp_path: Path) -> None:

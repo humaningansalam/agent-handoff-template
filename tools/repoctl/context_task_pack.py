@@ -326,9 +326,9 @@ def _collect_task_context_pack_inputs(
             path=task.rel_path,
         )
     discovery = task_discovery_values(task)
-    chosen = _without_discovery_placeholders(discovery.get("Chosen files", []))
-    reviewed = _without_discovery_placeholders(discovery.get("Candidate files reviewed", []))
-    notes = _without_discovery_placeholders(discovery.get("Notes", []))
+    chosen = discovery.get("Chosen files", [])
+    reviewed = discovery.get("Candidate files reviewed", [])
+    notes = discovery.get("Notes", [])
     selected_results = [selection.to_dict() for selection in task_discovery_result_selections(task)]
     stage = "scoped" if chosen else "bootstrap"
     query = _task_seed_query(task)
@@ -1121,13 +1121,8 @@ def compare_task_context_pack_benchmarks(
 
 def _task_seed_query(task: Task) -> str:
     discovery = task_discovery_values(task)
-    queries = _without_discovery_placeholders(discovery.get("Candidate query", []))
+    queries = discovery.get("Candidate query", [])
     return queries[-1] if queries else ""
-
-
-def _without_discovery_placeholders(values: list[str]) -> list[str]:
-    placeholders = {"none", "none yet", "n/a", "na", "tbd", "todo", "pending", "-"}
-    return [value for value in values if value.strip().strip("`").lower() not in placeholders]
 
 
 def _required_task_candidates(
