@@ -39,6 +39,11 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - Bash
 - Git
 - Python 3.11 or newer
+- Node.js when TypeScript/JavaScript semantic Graph analysis or the complete integration suite is required; without it, repoctl reports that optional provider as unavailable and continues with the remaining evidence
+
+## Upgrading from v0.8.0
+
+v0.9.0 intentionally replaces the unbounded Context `data.result_receipt.selectable` response with a bounded projection and provides no legacy response mode. Migrate Context consumers using the authoritative field mapping and full-view procedure in the [JSON contract](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration). Graph query receipts retain their command-specific flat `selectable` field.
 
 ## Fresh adoption
 
@@ -84,7 +89,9 @@ For a collection layout, place each product Git root at `repos/<name>/`, run `./
 3. Open the selected live task and `docs/BOARD.md` when inspection is needed
 4. Continue only from a non-null `executable_handoff`; otherwise inspect the typed selection or drift before acting
 
-`resume_guidance.status` answers whether the bound Handoff is current. `resume_guidance.health` separately reports whether repository lifecycle evidence is healthy; a current Handoff can coexist with unhealthy lifecycle state.
+`resume_guidance.status` answers whether the bound Handoff is current. `resume_guidance.health` separately reports whether repository lifecycle evidence is healthy; a current Handoff can coexist with unhealthy lifecycle state. In that case `readable_handoff` remains available for inspection, `blocked_by_health` is true, and `executable_handoff` is null.
+
+Repoctl-generated Handoffs carry machine-owned origin digests and remain non-executable until their prose is replaced and explicitly bound. A legacy Handoff with no origin record requires one fresh bind review; that migration commits in the new binding receipt itself, while an older binding alone cannot reactivate it. Repository configuration failures still preserve the selected `single_live` task and appear as typed unhealthy lifecycle evidence.
 
 ## Minimal structure
 
@@ -128,7 +135,8 @@ For a collection layout, place each product Git root at `repos/<name>/`, run `./
 - `.repometa` provides file-level discovery and changed-file metadata gates; `repoctl index code` extracts read-only technical facts, and neither is a generated graph.
 - `repoctl graph build` materializes a deterministic snapshot plus a persistent source/symbol/document evidence index; later builds reuse unchanged Code Index and provider results and update only changed semantic units.
 - `repoctl graph query` reads that snapshot without rebuilding, reports exact freshness, and supports file/topic/import/symbol/call/impact traversal. Explicit task and completion-artifact selectors validate one cold catalogue record and build a query-local projection. Query-visible files and confirmed relations carry set-aware component membership and crossings only when registered manifest providers find valid project declarations.
-- `repoctl context query` is the integrated discovery view for ambiguous repository work. It returns a bounded evidence hypothesis with typed follow-up actions; narrow `rg`, explicit Graph queries, and direct reads remain available for known identities. Its `project_knowledge` summary reports documents, task history, and reviewed reusable records as separate lanes; zero reviewed records never means the document knowledge base is empty. Explicit `past_decision` and `failure_mode` modes isolate bounded cold-history matches in `related_history`; those matches cannot affect the already determined current working set or Graph seeds.
-- Discovery records explicit Reviewed, Excluded, Chosen, result-member, and structured verification evidence; task finish freezes it into the completion receipt and publishes bounded catalogue ingress. Ordinary Context joins independently retrieved current candidates to that freshness-checked hot frontier, while ordinary Graph build and freshness checks use the catalogue head/checkpoint and committed hot projection instead of scanning the completion archive or retained event sidecars. Cold history never defines current candidates, ranking, Graph seeds, relations, component membership, or task scope.
+- `repoctl context query` is the integrated discovery view for ambiguous repository work. It returns a bounded evidence hypothesis with typed follow-up actions; an explicit current-diff review starts from Git's changed set, while narrow `rg`, explicit Graph queries, and direct reads remain available for known identities. Its `project_knowledge` summary reports documents, task history, and reviewed reusable records as separate lanes; zero reviewed records never means the document knowledge base is empty. Explicit `past_decision` and `failure_mode` modes isolate bounded cold-history matches in `related_history`; those matches cannot affect the already determined current working set or Graph seeds.
+- Discovery records explicit Reviewed, Excluded, Chosen, result-member, and structured verification evidence; root-only tasks may also bind checks to existing non-product workspace artifacts without inventing product Discovery or Chosen scope. A `todo` task may record Discovery before start, but `doing`/`blocked` outcome mutations and every verification record require a current immutable start scope. When outcome state exists, repoctl requires its `active_chosen` identities to match every canonical explicit value in the Task's structured Chosen projection; invalid explicit values are errors, not absent data. Task finish freezes the result into the completion receipt and publishes bounded catalogue ingress. Ordinary Context joins independently retrieved current candidates to that freshness-checked hot frontier, while ordinary Graph build and freshness checks use the catalogue head/checkpoint and committed hot projection instead of scanning the completion archive or retained event sidecars. Cold history and workspace artifacts never define current candidates, ranking, Graph seeds, relations, component membership, or task scope.
+- Live task views expose a decomposition advisory only when large Chosen projection, repeated Discovery episodes, and multiple structured verification records coincide. It asks the agent to review the next milestone boundary without inferring semantics or mutating the task.
 - Generated llmwiki pages are non-authoritative views; records/events and original source refs remain the authority.
 - MCP, if ever added, should be transport over repoctl contracts, not a second mutation path.
