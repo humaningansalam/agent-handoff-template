@@ -175,7 +175,7 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
 
     payload = json.loads(capsys.readouterr().out)
     summary = payload["data"]["summary"]
-    assert payload["data"]["question_count"] == 34
+    assert payload["data"]["question_count"] == 35
     assert summary["source_ref_integrity"] is True
     assert summary["mean_recall_at_5"] >= 0.85
     assert summary["by_category"]["method-impact"]["mean_graph_edge_recall"] == 1.0
@@ -191,13 +191,35 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
     assert summary["by_category"]["multi-owner-impact"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["typed-consumer-closure"]["mean_visible_recall"] == 1.0
     assert summary["by_category"]["typed-structured-dependency-closure"]["mean_visible_recall"] == 1.0
+    assert summary["by_category"]["anchor-coherence"]["mean_visible_recall"] == 1.0
+    assert summary["by_category"]["anchor-coherence"]["mean_graph_edge_recall"] == 1.0
     by_id = {result["id"]: result for result in payload["data"]["results"]}
     for question_id in ("Q-004", "Q-005", "Q-020", "Q-025"):
         assert by_id[question_id]["missing_required_from_visible"] == []
     assert by_id["Q-004"]["selected_forbidden"] == []
+    assert by_id["Q-036"]["missing_required_from_visible"] == []
+    assert by_id["Q-036"]["selected_forbidden"] == []
     assert summary["generated_or_ignored_noise"] == 0
     assert summary["forbidden_selected"] == 0
     assert payload["problems"] == []
+
+    assert main(
+        [
+            "context",
+            "query",
+            "packaged/operational_controls.py",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
+    exact_copy = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    assert any(
+        item["source_ref"]["path"] == "repos/packaged/operational_controls.py"
+        and set(item["evidence_kinds"]) & {"exact_path", "exact_filename"}
+        for item in exact_copy["evidence"]
+    )
 
 
 def test_context_benchmark_keeps_multirepo_results_isolated(
@@ -283,7 +305,7 @@ def test_context_benchmark_attribution_is_opt_in_stable_and_read_only(
     assert all(by_case["full-chain"]["stages"].values())
     assert by_case["compact-hidden"]["stages"]["retrieved"] is True
     assert by_case["compact-hidden"]["stages"]["compact_visible"] is False
-    assert by_case["compact-hidden"]["retrieval"]["rank"] == 9
+    assert by_case["compact-hidden"]["retrieval"]["rank"] == 10
     assert by_case["compact-hidden"]["retrieval"]["score"] == 7.216669
     assert by_case["visible-unselected"]["stages"]["compact_visible"] is True
     assert by_case["visible-unselected"]["stages"]["selected"] is False

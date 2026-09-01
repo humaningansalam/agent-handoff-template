@@ -135,6 +135,26 @@
         {
           "path": "routing/audit_router.py",
           "content": "from .shared import VALUE\n\ndef record_event():\n    marker = 'settlement behavior'\n    return VALUE\n"
+        },
+        {
+          "path": "coherence/__init__.py",
+          "content": ""
+        },
+        {
+          "path": "coherence/operational_controls.py",
+          "content": "def apply_operational_controls():\n    return 'current isolated local owner operational controls waitlist pickup dine-in push protocol gate customer denial rollback'\n"
+        },
+        {
+          "path": "coherence/test_operational_controls.py",
+          "content": "from .operational_controls import apply_operational_controls\n\ndef test_operational_controls_protocol():\n    result = apply_operational_controls()\n    assert 'customer denial rollback' in result\n"
+        },
+        {
+          "path": "coherence/menu_order_models.py",
+          "content": "def dineIn():\n    return 'dine-in'\n"
+        },
+        {
+          "path": "packaged/operational_controls.py",
+          "content": "def apply_operational_controls():\n    return 'current isolated local owner operational controls waitlist pickup dine-in push protocol gate customer denial rollback'\n"
         }
       ]
     }

@@ -574,9 +574,13 @@ def context_identity_selectors(query: str) -> ContextIdentityQuery:
 def _is_explicit_identity_token(token: str) -> bool:
     if any(marker in token for marker in ("/", "\\", ".", "_", ":")) or token.startswith("--"):
         return True
-    if any(character.isalpha() for character in token) and any(character.isdigit() for character in token):
+    if (
+        token.isidentifier()
+        and any(character.isalpha() for character in token)
+        and any(character.isdigit() for character in token)
+    ):
         return True
-    return len(IDENTIFIER_PART_RE.findall(token)) > 1
+    return token.isidentifier() and len(IDENTIFIER_PART_RE.findall(token)) > 1
 
 
 def context_identity_evidence(

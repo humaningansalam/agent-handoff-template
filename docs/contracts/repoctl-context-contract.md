@@ -47,6 +47,8 @@ failure_mode
 
 Hyphenated aliases such as `call-impact` are accepted. `authority` and `contract` map to `authority_or_contract`.
 
+An unquoted hyphen-separated natural-language phrase is not a query-explicit named selector for a differently punctuated provider symbol; the exact raw provider surface remains independently eligible. During bounded Graph-anchor selection, byte-identical current candidates share one semantic hypothesis unless the query explicitly identifies a copy or that copy contributes distinct current typed connectivity; full evidence still retains every candidate.
+
 ## Bundle
 
 The JSON payload is `repoctl.context.bundle` schema version 15 with `authoritative: false`.

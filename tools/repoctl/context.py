@@ -2287,6 +2287,30 @@ def _select_anchor_evidence_profiles(
     selected = [primary]
     remaining = [profile for profile in selectable if profile is not primary]
     while remaining and len(selected) < limit:
+        selected_digests = {
+            str(profile.get("content_sha256") or "")
+            for profile in selected
+            if str(profile.get("content_sha256") or "")
+        }
+        selected_neighbors = {
+            path
+            for profile in selected
+            for path in _coverage_profile_evidence_neighbor_paths(profile)
+        }
+        remaining = [
+            profile
+            for profile in remaining
+            if not (
+                str(profile.get("content_sha256") or "") in selected_digests
+                and not _coverage_profile_has_explicit_identity(profile)
+                and not (
+                    _coverage_profile_evidence_neighbor_paths(profile)
+                    - selected_neighbors
+                )
+            )
+        ]
+        if not remaining:
+            break
         primary_pairs = _coverage_profile_pairs(selected[0])
         primary_components = _coverage_profile_component_ids(selected[0])
         covered_terms = {
@@ -3015,6 +3039,7 @@ def _compact_group_coverage_profiles(
                     for section in item.get("sections", [])
                 ),
                 "strong_symbol": ContextEvidenceKind.EXACT_SYMBOL.value in evidence_kinds,
+                "content_sha256": str(ref.get("content_sha256") or ""),
                 "anchor_strength": strength.value,
                 "field_count": sum(1 for terms in matches.values() if isinstance(terms, (list, tuple)) and terms),
                 "query_coverage": float(breakdown.get("exact") or 0.0),
@@ -4592,6 +4617,7 @@ def _ranked_heuristic_graph_anchors(
                 "candidates": path_candidates,
                 "primary": primary,
                 "strong_symbol": strong_symbol,
+                "content_sha256": primary.source_ref.content_sha256,
                 "provider_symbol": provider_symbol,
                 "provider_evidence": provider_evidence,
                 "field_count": _lexical_anchor_field_count(path_candidates),
@@ -4869,9 +4895,10 @@ def _coverage_profile_has_unsupported_provider_echo(profile: dict[str, Any]) -> 
 
 def _coverage_profile_has_explicit_identity(profile: dict[str, Any]) -> bool:
     return bool(
-        profile.get("strong_symbol")
-        or _coverage_profile_anchor_priority(profile)
+        _coverage_profile_anchor_priority(profile)
         >= CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.EXACT]
+        or _coverage_profile_evidence_kinds(profile)
+        & {kind.value for kind in _EXPLICIT_NAMED_GRAPH_ANCHOR_KINDS}
     )
 
 
@@ -5570,6 +5597,8 @@ def _coverage_profile_provider_evidence_supported(profile: dict[str, Any]) -> bo
         )
     except ValueError:
         strength = ContextAnchorStrength.NONE
+    if not _coverage_profile_has_explicit_identity(profile):
+        strength = ContextAnchorStrength.WEAK
     matches = profile.get("query_term_matches")
     return bool(
         isinstance(matches, dict)

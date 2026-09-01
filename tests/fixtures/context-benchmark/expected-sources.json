@@ -533,5 +533,26 @@
       {"path": "repos/routing/settlement_router.py"},
       {"path": "repos/routing/audit_router.py"}
     ]
+  },
+  "Q-036": {
+    "acceptable": [],
+    "noise": [
+      {"path": "repos/coherence/menu_order_models.py"},
+      {"path": "repos/packaged/operational_controls.py"}
+    ],
+    "required_knowledge_source_refs": [],
+    "required_graph_edges": [
+      {
+        "assertion": "resolved",
+        "from": "repo:main:file:coherence%2Ftest_operational_controls.py",
+        "kind": "TESTS_FILE",
+        "source": "python_import_resolver",
+        "to": "repo:main:file:coherence%2Foperational_controls.py"
+      }
+    ],
+    "must_find": [
+      {"path": "repos/coherence/operational_controls.py"},
+      {"path": "repos/coherence/test_operational_controls.py"}
+    ]
   }
 }

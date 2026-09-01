@@ -55,6 +55,8 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
     assert "by_category" in artifact_gates["context_benchmark"]["summary"]
     assert artifact_gates["context_benchmark"]["summary"]["by_category"]["typed-consumer-closure"]["mean_visible_recall"] == 1.0
     assert artifact_gates["context_benchmark"]["summary"]["by_category"]["typed-structured-dependency-closure"]["mean_visible_recall"] == 1.0
+    assert artifact_gates["context_benchmark"]["summary"]["by_category"]["anchor-coherence"]["mean_visible_recall"] == 1.0
+    assert artifact_gates["context_benchmark"]["summary"]["by_category"]["anchor-coherence"]["mean_graph_edge_recall"] == 1.0
     assert artifact_gates["context_benchmark"]["summary"]["forbidden_selected"] == 0
     assert all(
         "mean_knowledge_recall_at_5" not in category
