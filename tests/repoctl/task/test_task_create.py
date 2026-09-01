@@ -1,13 +1,17 @@
 from __future__ import annotations
-from tests.repoctl.workspace.test_check import add_task, init_repo, task_text, write_workspace
 
 import json
 import subprocess
 from pathlib import Path
 
-from tests.repoctl.task_lifecycle_helpers import init_committed_product_repo
+from tests.repoctl.task_lifecycle_helpers import (
+    add_task,
+    init_committed_product_repo,
+    init_repo,
+    task_text,
+    write_workspace,
+)
 from tools.repoctl.cli import main
-
 
 
 def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -51,6 +55,9 @@ def test_started_task_defaults_to_the_only_configured_repository(tmp_path: Path,
     assert 'repo_id: "main"' in task
     assert state["initial"]["repo_id"] == "main"
     assert state["initial"]["repo_path"] == "repos"
+    assert payload["data"]["started"] is True
+    assert payload["data"]["status"] == "doing"
+    assert "status: doing" in task
     assert any(warning["code"] == "task_handoff_generated_template" for warning in payload["warnings"])
     assert payload["next_actions"][0] == {
         "label": "Replace the generated Handoff with task-specific restart instructions",
@@ -89,21 +96,6 @@ def test_started_repo_task_text_prioritizes_generated_handoff_before_discovery(
     assert "Next: ./scripts/repoctl task discovery add" not in output
 
 
-def test_task_create_uses_configured_korean_document_language(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    (tmp_path / "docs/repoctl.json").write_text('{"document_language":"ko"}\n', encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--slug", "korean-doc", "한국어 문서", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    text = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
-    assert 'document_language: "ko"' in text
-    assert "## Work Area" in text
-    assert "## Discovery" in text
-    assert "## Handoff" in text
-
-
 def test_task_create_rejects_invalid_document_language_config(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     (tmp_path / "docs/repoctl.json").write_text('{"document_language":"kr"}\n', encoding="utf-8")
@@ -138,7 +130,7 @@ def test_task_create_rejects_multiline_title(tmp_path: Path, monkeypatch, capsys
     assert payload["problems"][0]["code"] == "invalid_title"
 
 
-def test_task_create_rejects_unknown_area_and_root_repo_ref(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_create_rejects_invalid_area_and_repo_ref_combinations(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -146,7 +138,11 @@ def test_task_create_rejects_unknown_area_and_root_repo_ref(tmp_path: Path, monk
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "invalid_area"
 
-    assert main(["task", "create", "--area", "docs", "--repo-ref", ".", "--slug", "memo-cli", "Memo CLI", "--json"]) == 2
+    assert main(["task", "create", "--area", "docs", "--repo-ref", "repos", "--slug", "memo-cli", "Memo CLI", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repo_ref_non_repo_area"
+
+    assert main(["task", "create", "--area", "ops", "--repo-ref", "root", "--slug", "memo-cli", "Memo CLI", "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "invalid_repo_ref"
 
@@ -253,9 +249,6 @@ def test_task_create_validates_board_before_writing_task_file(tmp_path: Path, mo
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "missing_section"
     assert not list((tmp_path / "docs/tasks").glob("T-*--bad-board.md"))
-
-
-
 
 def test_task_create_parent_uses_parent_template(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

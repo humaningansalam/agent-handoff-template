@@ -2916,18 +2916,6 @@ def test_task_create_print_id_and_root_work_area(tmp_path: Path, monkeypatch, ca
     assert "Do not touch product files under `repos/`" in text
 
 
-def test_task_create_start_returns_started_task(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--slug", "started-task", "--start", "Started Task", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["started"] is True
-    assert payload["data"]["status"] == "doing"
-    assert "status: doing" in (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
-
-
 def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -2942,28 +2930,6 @@ def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_pat
     commands = [action.get("command", "") for action in payload["next_actions"]]
     assert any("task discovery add T-20260609184046Z" in command for command in commands)
     assert any("context query '<query>' --repo-id main" in command for command in commands)
-
-
-def test_task_create_blocks_when_repo_ref_uses_non_repo_area(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--slug", "repo-docs", "--area", "docs", "--repo-ref", "repos", "Update repo docs", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repo_ref_non_repo_area"
-
-
-def test_task_create_blocks_root_repo_ref_alias(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--slug", "root-ref", "--area", "ops", "--repo-ref", "root", "Root ref", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "invalid_repo_ref"
-
-
 
 
 def test_task_start_blocks_repo_scoped_task_without_repo_git(tmp_path: Path, monkeypatch, capsys) -> None:
