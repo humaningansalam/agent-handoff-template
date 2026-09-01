@@ -9,7 +9,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
-from uuid import uuid4
 
 from .context import build_context_bundle, compact_context_bundle
 from .context_model import ContextBundle
@@ -169,11 +168,6 @@ def run_context_benchmark(
         problems.extend(attribution_problems)
         if attribution:
             data["attribution"] = attribution
-        data["execution"] = {
-            "execution_id": str(uuid4()),
-            "fresh_workspace": True,
-            "workspace_witness": digest_data({"workspace_root": root.resolve().as_posix()}),
-        }
     data["benchmark_digest"] = digest_data(data)
     return data, problems
 
@@ -238,8 +232,6 @@ def compare_context_benchmarks(
             "require_current_sources": require_current_sources,
         },
     }
-    if isinstance(baseline.get("attribution"), dict) or isinstance(candidate.get("attribution"), dict):
-        result["causal_eligibility"] = _causal_eligibility(root, baseline, candidate)
     return result, problems
 
 
@@ -376,7 +368,6 @@ def _project_attribution_cases(
         "schema_version": 1,
         "claim_scope": "correlation_only",
         "non_gating": True,
-        "protocol": {"runs": [], "repetition_count": 0},
         "captured_at": str(trace.get("captured_at") or ""),
         "source_artifacts": {
             "question_id": question_id,
@@ -388,58 +379,6 @@ def _project_attribution_cases(
         },
         "candidates": projected,
     }
-
-
-def _attribution_protocol(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {"runs"} or not isinstance(value.get("runs"), list):
-        raise ValueError("attribution protocol is invalid")
-    expected = {
-        "agent",
-        "arm_payload_digest",
-        "artifact_path",
-        "artifact_sha256",
-        "execution_id",
-        "fresh_workspace",
-        "model",
-        "permission_digest",
-        "pinned_commit",
-        "prompt_digest",
-        "run_digest",
-        "run_id",
-        "workspace_witness",
-    }
-    runs: list[dict[str, Any]] = []
-    for raw in value["runs"]:
-        if not isinstance(raw, dict) or set(raw) != expected:
-            raise ValueError("attribution protocol run is invalid")
-        basis = {key: raw[key] for key in raw if key != "run_digest"}
-        if (
-            not isinstance(raw.get("run_id"), str)
-            or not raw["run_id"]
-            or not all(
-                isinstance(raw.get(key), str) and raw[key]
-                for key in ("agent", "artifact_path", "execution_id", "model")
-            )
-            or not all(
-                _sha256(raw.get(key))
-                for key in (
-                    "arm_payload_digest",
-                    "artifact_sha256",
-                    "permission_digest",
-                    "pinned_commit",
-                    "prompt_digest",
-                    "workspace_witness",
-                )
-            )
-            or type(raw.get("fresh_workspace")) is not bool
-            or raw.get("run_id") != raw.get("execution_id")
-            or raw.get("run_digest") != digest_data(basis)
-        ):
-            raise ValueError("attribution protocol run metadata is invalid")
-        runs.append(dict(raw))
-    if len({item["run_id"] for item in runs}) != len(runs) or len({item["run_digest"] for item in runs}) != len(runs):
-        raise ValueError("attribution protocol repetitions are not distinct")
-    return {"runs": sorted(runs, key=lambda item: item["run_id"]), "repetition_count": len(runs)}
 
 
 def _selection_set(value: Any, *, label: str) -> set[tuple[str, str]]:
@@ -876,182 +815,6 @@ def _timestamp(value: Any, *, label: str) -> datetime:
 
 def _sha256(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 71 and value.startswith("sha256:") and all(char in "0123456789abcdef" for char in value[7:])
-
-
-def _benchmark_arm_payload_digest(data: dict[str, Any]) -> str:
-    payload = {
-        key: value
-        for key, value in data.items()
-        if key not in {"artifact", "benchmark_digest", "execution"}
-    }
-    attribution = payload.get("attribution")
-    if isinstance(attribution, dict):
-        payload["attribution"] = {
-            key: (
-                [
-                    {
-                        candidate_key: candidate_value
-                        for candidate_key, candidate_value in candidate.items()
-                        if candidate_key != "member_id"
-                    }
-                    for candidate in value
-                    if isinstance(candidate, dict)
-                ]
-                if key == "candidates" and isinstance(value, list)
-                else value
-            )
-            for key, value in attribution.items()
-            if key not in {"protocol", "source_artifacts"}
-        }
-    return digest_data(payload)
-
-
-def _execution_artifact(
-    root: Path | None,
-    raw_path: str,
-    *,
-    expected_sha256: str,
-) -> tuple[dict[str, Any] | None, str]:
-    path_ref = Path(raw_path)
-    if (
-        root is None
-        or not raw_path
-        or path_ref.is_absolute()
-        or path_ref.as_posix() != raw_path
-        or any(part in {".", ".."} for part in path_ref.parts)
-    ):
-        return None, "artifact_path_invalid"
-    root_resolved = root.resolve()
-    unresolved_path = root_resolved / path_ref
-    path = unresolved_path.resolve()
-    if unresolved_path.is_symlink() or not path.is_relative_to(root_resolved) or not path.is_file():
-        return None, "artifact_path_invalid"
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return None, "artifact_invalid"
-    if "sha256:" + hashlib.sha256(raw).hexdigest() != expected_sha256:
-        return None, "artifact_digest_mismatch"
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return None, "artifact_invalid"
-    if (
-        not isinstance(payload, dict)
-        or payload.get("ok") is not True
-        or payload.get("command") != "context benchmark"
-        or not isinstance(payload.get("data"), dict)
-    ):
-        return None, "artifact_invalid"
-    data = payload["data"]
-    artifact = data.get("artifact") if isinstance(data.get("artifact"), dict) else {}
-    execution = data.get("execution") if isinstance(data.get("execution"), dict) else {}
-    artifact_internal = Path(str(artifact.get("path") or ""))
-    if (
-        not artifact_internal.parts
-        or artifact_internal.is_absolute()
-        or artifact_internal.as_posix() != str(artifact.get("path") or "")
-        or any(part in {".", ".."} for part in artifact_internal.parts)
-        or tuple(path.parts[-len(artifact_internal.parts):]) != artifact_internal.parts
-    ):
-        return None, "artifact_invalid"
-    execution_workspace = path
-    for _part in artifact_internal.parts:
-        execution_workspace = execution_workspace.parent
-    expected_workspace_witness = digest_data({"workspace_root": execution_workspace.resolve().as_posix()})
-    digest_basis = {key: value for key, value in data.items() if key not in {"artifact", "benchmark_digest"}}
-    if (
-        artifact.get("benchmark_digest") != data.get("benchmark_digest")
-        or data.get("benchmark_digest") != digest_data(digest_basis)
-        or set(execution) != {"execution_id", "fresh_workspace", "workspace_witness"}
-        or not isinstance(execution.get("execution_id"), str)
-        or not execution.get("execution_id")
-        or execution.get("fresh_workspace") is not True
-        or execution.get("workspace_witness") != expected_workspace_witness
-    ):
-        return None, "artifact_invalid"
-    return data, ""
-
-
-def _causal_eligibility(root: Path | None, baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
-    baseline_attribution = baseline.get("attribution") if isinstance(baseline.get("attribution"), dict) else {}
-    candidate_attribution = candidate.get("attribution") if isinstance(candidate.get("attribution"), dict) else {}
-    baseline_protocol = baseline_attribution.get("protocol") if isinstance(baseline_attribution.get("protocol"), dict) else {}
-    candidate_protocol = candidate_attribution.get("protocol") if isinstance(candidate_attribution.get("protocol"), dict) else {}
-    # In-band benchmark artifacts are caller-rewritable.  Keep their protocol
-    # diagnostics, but never promote them to causal eligibility without an
-    # independently issued execution receipt.
-    reasons: list[str] = ["independent_execution_receipt_missing"]
-
-    artifact_paths: list[str] = []
-    artifact_digests: list[str] = []
-    execution_ids: list[str] = []
-    run_ids: list[str] = []
-    workspace_witnesses: list[str] = []
-
-    def arm(data: dict[str, Any], protocol: dict[str, Any], label: str) -> dict[str, str]:
-        try:
-            runs = _attribution_protocol({"runs": protocol.get("runs")})["runs"]
-        except ValueError:
-            reasons.append(f"{label}_protocol_invalid")
-            runs = []
-        if len(runs) < 4 or len({str(item.get("run_id") or "") for item in runs if isinstance(item, dict)}) != len(runs):
-            reasons.append(f"{label}_insufficient_repetitions")
-        if protocol.get("repetition_count") != len(runs):
-            reasons.append(f"{label}_repetition_count_mismatch")
-        if any(not isinstance(item, dict) or item.get("fresh_workspace") is not True for item in runs):
-            reasons.append(f"{label}_workspace_not_fresh")
-        arm_payload_digest = _benchmark_arm_payload_digest(data)
-        for run in runs:
-            if not isinstance(run, dict):
-                continue
-            raw_path = str(run.get("artifact_path") or "")
-            raw_digest = str(run.get("artifact_sha256") or "")
-            run_ids.append(str(run.get("run_id") or ""))
-            artifact_paths.append(raw_path)
-            artifact_digests.append(raw_digest)
-            artifact, artifact_problem = _execution_artifact(root, raw_path, expected_sha256=raw_digest)
-            if artifact_problem:
-                reasons.append(f"{label}_{artifact_problem}")
-                continue
-            if (
-                run.get("arm_payload_digest") != arm_payload_digest
-                or _benchmark_arm_payload_digest(artifact or {}) != arm_payload_digest
-                or run.get("execution_id") != (artifact or {}).get("execution", {}).get("execution_id")
-                or run.get("fresh_workspace") != (artifact or {}).get("execution", {}).get("fresh_workspace")
-                or run.get("workspace_witness") != (artifact or {}).get("execution", {}).get("workspace_witness")
-            ):
-                reasons.append(f"{label}_arm_payload_mismatch")
-            execution_ids.append(str(run.get("execution_id") or ""))
-            workspace_witnesses.append(str(run.get("workspace_witness") or ""))
-        metadata: dict[str, str] = {}
-        for key in ("pinned_commit", "agent", "model", "prompt_digest", "permission_digest"):
-            values = {str(item.get(key) or "") for item in runs if isinstance(item, dict)}
-            if len(values) != 1 or not next(iter(values), ""):
-                reasons.append(f"{label}_mixed_{key}")
-            else:
-                metadata[key] = next(iter(values))
-        return metadata
-
-    baseline_metadata = arm(baseline, baseline_protocol, "baseline")
-    candidate_metadata = arm(candidate, candidate_protocol, "candidate")
-    if (
-        len(set(run_ids)) != len(run_ids)
-        or len(set(execution_ids)) != len(execution_ids)
-        or len(set(workspace_witnesses)) != len(workspace_witnesses)
-        or len(set(artifact_paths)) != len(artifact_paths)
-        or len(set(artifact_digests)) != len(artifact_digests)
-    ):
-        reasons.append("shared_execution_artifact")
-    for key in ("pinned_commit", "agent", "model", "prompt_digest", "permission_digest"):
-        if baseline_metadata.get(key) and candidate_metadata.get(key) and baseline_metadata[key] != candidate_metadata[key]:
-            reasons.append(f"mismatched_{key}")
-    return {
-        "status": "eligible" if not reasons else "insufficient_evidence",
-        "claim_scope": "correlation_only",
-        "non_gating": True,
-        "reasons": sorted(set(reasons)),
-    }
 
 
 def _read_questions(path: Path) -> list[dict[str, Any]]:
