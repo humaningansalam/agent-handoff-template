@@ -90,6 +90,8 @@ For a collection layout, place each product Git root at `repos/<name>/`, run `./
 
 `resume_guidance.status` answers whether the bound Handoff is current. `resume_guidance.health` separately reports whether repository lifecycle evidence is healthy; a current Handoff can coexist with unhealthy lifecycle state. In that case `readable_handoff` remains available for inspection, `blocked_by_health` is true, and `executable_handoff` is null.
 
+When the result is `ambiguous`, select a returned live candidate with `./scripts/repoctl task resume <TASK_ID> --json`. Selection is read-only and does not create a persistent current-task pointer.
+
 Repoctl-generated Handoffs carry machine-owned origin digests and remain non-executable until their prose is replaced and explicitly bound. A legacy Handoff with no origin record requires one fresh bind review; that migration commits in the new binding receipt itself, while an older binding alone cannot reactivate it. Repository configuration failures still preserve the selected `single_live` task and appear as typed unhealthy lifecycle evidence.
 
 ## Minimal structure

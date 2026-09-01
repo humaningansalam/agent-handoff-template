@@ -56,6 +56,8 @@ Serialization validates this boundary and rejects missing `command`, non-object 
 
 Task Handoff freshness and repository lifecycle health are separate machine contracts. `task show` returns lifecycle health at `data.health`; `task resume` returns it at `data.resume_guidance.health`, beside the independent `data.resume_guidance.status` Handoff freshness value. A current Handoff may therefore accompany unhealthy lifecycle evidence and does not suppress the corresponding problems or make the command successful. For a current binding, `readable_handoff` preserves the reviewed prose for inspection. `blocked_by_health` is true whenever lifecycle health is not executable, and `executable_handoff` is non-null only when both Handoff freshness and lifecycle health permit execution.
 
+Bare `task resume` reports `no_live | single_live | ambiguous`. `task resume <TASK_ID>` is the read-only selection form for one returned live candidate; it does not persist a current-task pointer or select terminal/archived history.
+
 ## Problem object
 
 ```json

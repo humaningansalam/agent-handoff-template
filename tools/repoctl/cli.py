@@ -644,6 +644,8 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code == "task_not_found":
             add("List live tasks", command="./scripts/repoctl task list --json")
             add("Open Board task registry", path="docs/BOARD.md")
+        elif code == "task_not_live":
+            add("Inspect the terminal or archived task", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"task_handoff_unbound", "task_handoff_stale", "task_handoff_origin_unknown", "task_resume_binding_invalid"}:
             if not generated_resume_handoff:
                 add(
@@ -2242,20 +2244,36 @@ def cmd_task_list(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str, Any]:
+def build_task_resume_projection(
+    root: Path,
+    *,
+    full: bool = False,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     tasks = load_tasks(root, include_archived=False)
     selection = select_task_for_resume(tasks)
+    selected_task = None
+    if task_id is not None:
+        selected_task = resolve_task(root, task_id)
+        if selected_task.archived or selected_task.status not in {"todo", "doing", "blocked"}:
+            raise RepoctlError(
+                "only a live task can be selected for resume",
+                code="task_not_live",
+                path=selected_task.rel_path,
+            )
     selection_data = {
-        "status": selection.status.value,
+        "status": "selected_live" if selected_task is not None else selection.status.value,
         "live_task_count": selection.live_task_count,
     }
+    if selected_task is not None:
+        selection_data["selected_task_id"] = selected_task.id
     data: dict[str, Any] = {
         "selection": selection_data,
         "task": None,
         "resume_guidance": None,
-        "candidates": [task.to_list_dict() for task in selection.candidates],
+        "candidates": [] if selected_task is not None else [task.to_list_dict() for task in selection.candidates],
     }
-    if selection.status is TaskResumeSelectionStatus.NO_LIVE:
+    if selected_task is None and selection.status is TaskResumeSelectionStatus.NO_LIVE:
         return {
             "ok": True,
             "command": "task.resume",
@@ -2264,7 +2282,7 @@ def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str,
             "warnings": [],
             "next_actions": [],
         }
-    if selection.status is TaskResumeSelectionStatus.AMBIGUOUS:
+    if selected_task is None and selection.status is TaskResumeSelectionStatus.AMBIGUOUS:
         problem = Problem(
             "error",
             "task_resume_ambiguous",
@@ -2276,10 +2294,16 @@ def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str,
             "data": data,
             "problems": [problem.to_dict()],
             "warnings": [],
-            "next_actions": [{"label": f"Inspect live task {task.id}", "command": f"./scripts/repoctl task show {task.id} --summary --json"} for task in selection.candidates],
+            "next_actions": [
+                {
+                    "label": f"Resume live task {task.id}",
+                    "command": f"./scripts/repoctl task resume {task.id} --json",
+                }
+                for task in selection.candidates
+            ],
         }
 
-    task = selection.task
+    task = selected_task or selection.task
     if task is None:  # pragma: no cover - closed by TaskResumeSelectionStatus
         raise RepoctlError("single-live resume selection is missing its task", code="task_resume_selection_invalid")
     repository_observation_available = True
@@ -2316,7 +2340,11 @@ def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str,
         "problem_summary": _task_health_problem_summary(health.problems),
         "details_included": full,
         "details_command": f"./scripts/repoctl task doctor {task.id} --json",
-        "full_command": "./scripts/repoctl task resume --full --json",
+        "full_command": (
+            f"./scripts/repoctl task resume {task.id} --full --json"
+            if selected_task is not None
+            else "./scripts/repoctl task resume --full --json"
+        ),
     }
     guidance = {
         **guidance,
@@ -2342,7 +2370,11 @@ def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str,
 
 
 def cmd_task_resume(args: argparse.Namespace) -> int:
-    payload = build_task_resume_projection(find_workspace_root(), full=bool(args.full))
+    payload = build_task_resume_projection(
+        find_workspace_root(),
+        full=bool(args.full),
+        task_id=args.task_id,
+    )
     if args.json:
         _json(payload)
     else:
@@ -7331,6 +7363,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.add_argument("--json", action="store_true")
     task_list.set_defaults(func=cmd_task_list)
     task_resume = task_sub.add_parser("resume")
+    task_resume.add_argument("task_id", nargs="?", help="live task id to select when more than one task is resumable")
     task_resume.add_argument("--full", action="store_true", help="include every repository lifecycle problem instead of the bounded code summary")
     task_resume.add_argument("--json", action="store_true")
     task_resume.set_defaults(func=cmd_task_resume)

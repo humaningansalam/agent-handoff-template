@@ -137,9 +137,29 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     assert [candidate["id"] for candidate in ambiguous["data"]["candidates"]] == [first, second]
     assert ambiguous["problems"][0]["code"] == "task_resume_ambiguous"
     assert [action["command"] for action in ambiguous["next_actions"]] == [
-        f"./scripts/repoctl task show {first} --summary --json",
-        f"./scripts/repoctl task show {second} --summary --json",
+        f"./scripts/repoctl task resume {first} --json",
+        f"./scripts/repoctl task resume {second} --json",
     ]
+
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert main(["task", "resume", second, "--json"]) == 0
+    selected = json.loads(capsys.readouterr().out)
+    assert selected["data"]["selection"] == {
+        "status": "selected_live",
+        "live_task_count": 2,
+        "selected_task_id": second,
+    }
+    assert selected["data"]["task"]["id"] == second
+    assert selected["data"]["resume_guidance"]["status"] == "unbound"
+    assert before == {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    assert main(["task", "resume", "T-20260609184045Z", "--json"]) == 2
+    archived_selection = json.loads(capsys.readouterr().out)
+    assert archived_selection["command"] == "task.resume"
+    assert archived_selection["problems"][0]["code"] == "task_not_found"
+    assert archived_selection["next_actions"][0]["command"] == (
+        "./scripts/repoctl task list --json"
+    )
 
 
 def test_task_resume_compacts_repeated_health_problems_unless_full_is_requested(
