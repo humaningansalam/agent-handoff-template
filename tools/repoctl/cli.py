@@ -48,6 +48,12 @@ class RepoctlArgparseError(RuntimeError):
     pass
 
 
+class RepoctlDataError(RepoctlError):
+    def __init__(self, message: str, *, data: dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.data = data
+
+
 class GraphQueryIntent(StrEnum):
     FILE = "file"
     SYMBOL = "symbol"
@@ -578,7 +584,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             if unchosen:
                 add(
                     "Review repository changes outside the active Chosen scope",
-                    command=f"./scripts/repoctl task discovery add {task_id} --reviewed <approved-task-path> --chosen <approved-task-path> --json",
                     kind=NextActionKind.TASK_SCOPE_REVIEW,
                     source="data.action_inputs.unchosen_actual_paths",
                     choices=[
@@ -3128,7 +3133,6 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "invalid_task_chosen_values": [],
         "invalid_outcome_subject_ids": [],
     }
-    delta_preparation_failed = False
     delta_observation_error: RepoctlError | None = None
     try:
         target = _repo_target_for_task_command(root, task)
@@ -3148,7 +3152,6 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             if isinstance(problem, Problem)
         )
     except RepoctlError as exc:
-        delta_preparation_failed = True
         delta_observation_error = exc
         doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
         delta = {
@@ -3157,8 +3160,8 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             "preexisting_count": 0,
             "baseline_conflicts": [],
         }
-    scope_warning = None if delta_preparation_failed else _task_scope_drift_warning(root, task, delta)
-    if not delta_preparation_failed:
+    if delta_observation_error is None:
+        _task_scope_drift_warning(root, task, delta)
         try:
             if verification is None:
                 _meta_gate, delta = _finish_meta_gate(
@@ -3179,8 +3182,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
             discovery_is_already_advisory = verification is None and exc.code == "placeholder_discovery" and any(
                 problem.code == "missing_discovery_evidence" for problem in task_problems
             )
-            scope_is_already_advisory = exc.code == "actual_changes_outside_chosen" and scope_warning is not None
-            if not discovery_is_already_advisory and not scope_is_already_advisory:
+            if not discovery_is_already_advisory:
                 doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
     structured_coverage = _changed_chosen_structured_verification(
         root,
@@ -3207,26 +3209,21 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
     health = _task_health(
         root,
         task,
-        delta=None if delta_preparation_failed else delta,
+        delta=None if delta_observation_error is not None else delta,
         observation_error=delta_observation_error,
     )
     if alignment_problem is not None:
         health = TaskHealth("unhealthy", tuple([*health.problems, alignment_problem]))
     combined = _dedupe_problems([*task_problems, *doctor_problems, *health.problems])
     blockers = [problem.code for problem in combined if problem.severity == "error"]
-    advisory = [
-        *[problem.code for problem in combined if problem.severity == "warning"],
-        *([str(scope_warning["code"])] if scope_warning is not None else []),
-    ]
-    finish_ready = task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers
     data = {
         "task_id": task.id,
         "status": task.status,
         "path": task.rel_path,
         "health": health.to_dict(),
-        "finish_ready": finish_ready,
+        "finish_ready": task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers,
         "blocked_by": blockers,
-        "advisory": advisory,
+        "advisory": [problem.code for problem in combined if problem.severity == "warning"],
         "repo_changes": _repo_change_summary(
             delta,
             observation=_task_repo_observation(root, task, target, delta),
@@ -3262,10 +3259,7 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "command": "task.doctor",
         "data": data,
         "problems": [problem.to_dict() for problem in combined if problem.severity == "error"],
-        "warnings": [
-            *([scope_warning] if scope_warning is not None else []),
-            *[problem.to_dict() for problem in combined if problem.severity == "warning"],
-        ],
+        "warnings": [problem.to_dict() for problem in combined if problem.severity == "warning"],
     }
     payload["next_actions"] = _next_actions_for_problems(
         [*payload["problems"], *payload["warnings"]],
@@ -3856,10 +3850,11 @@ def _finish_meta_gate(
         if delta.get("baseline_conflicts"):
             conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
             suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
-            raise RepoctlError(
+            raise RepoctlDataError(
                 f"workspace task changed product paths that were dirty at task start: {conflicts}{suffix}; restore the task-start state or move ownership to a repo-scoped child task",
                 code="workspace_baseline_conflict",
                 path=str(delta["baseline_conflicts"][0]),
+                data={"action_inputs": _task_action_inputs(delta)},
             )
         if delta.get("changes"):
             first_changed = str(delta["changes"][0][1])
@@ -3904,10 +3899,11 @@ def _finish_meta_gate(
     if delta.get("baseline_conflicts"):
         conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
         suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
-        raise RepoctlError(
+        raise RepoctlDataError(
             f"task-start dirty paths no longer match their baseline: {conflicts}{suffix}; resolve each path with repoctl task baseline resolve",
             code="baseline_conflict",
             path=str(delta["baseline_conflicts"][0]),
+            data={"action_inputs": _task_action_inputs(delta)},
         )
     task_changes = delta["changes"]
     if task_changes and _repo_scoped_frontmatter(task):
@@ -3927,10 +3923,11 @@ def _finish_meta_gate(
         if scope_delta["unchosen_actual_paths"]:
             missing = ", ".join(scope_delta["unchosen_actual_paths"][:8])
             suffix = "" if len(scope_delta["unchosen_actual_paths"]) <= 8 else f", ... +{len(scope_delta['unchosen_actual_paths']) - 8} more"
-            raise RepoctlError(
+            raise RepoctlDataError(
                 f"actual repository changes are outside the active Chosen files set: {missing}{suffix}",
                 code="actual_changes_outside_chosen",
                 path=scope_delta["unchosen_actual_paths"][0],
+                data={"action_inputs": _task_action_inputs(delta)},
             )
     changed_files, status_problems, meta_summary = meta_status(root, changed=True, changes=task_changes, target=target)
     repo_exists = bool(target and target.root_path.exists()) or (root / "repos").exists()
@@ -7868,6 +7865,7 @@ def main(argv: list[str] | None = None) -> int:
             if error.cause_code:
                 problem["cause_code"] = error.cause_code
             error_data = _error_data(args)
+            error_data.update(getattr(error, "data", {}))
             _json({"ok": False, "command": _command_name(args), "data": error_data, "problems": [problem], "warnings": []})
         else:
             print(f"repoctl: {error}", file=sys.stderr)

@@ -422,17 +422,26 @@ def test_task_doctor_and_finish_share_actual_scope_preflight(tmp_path: Path, mon
     (repo / "extra.py").write_text("value = 2\n", encoding="utf-8")
     (repo / "other.py").write_text("value = 2\n", encoding="utf-8")
 
-    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
     doctor_payload = json.loads(capsys.readouterr().out)
-    assert doctor_payload["problems"] == []
-    assert doctor_payload["warnings"][0]["code"] == "task_chosen_scope_drift"
-    assert doctor_payload["data"]["finish_ready"] is True
+    assert doctor_payload["problems"][0]["code"] == "actual_changes_outside_chosen"
+    assert doctor_payload["warnings"] == []
+    assert doctor_payload["data"]["finish_ready"] is False
+    assert doctor_payload["data"]["action_inputs"]["unchosen_actual_paths"] == ["extra.py", "other.py"]
+    doctor_scope_action = next(
+        action for action in doctor_payload["next_actions"] if action.get("kind") == "task_scope_review"
+    )
+    assert "command" not in doctor_scope_action
+    assert doctor_scope_action["choices"] == ["add_to_chosen", "revert_change", "move_to_follow_up"]
 
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
     finish_payload = json.loads(capsys.readouterr().out)
     assert finish_payload["problems"][0]["code"] == "actual_changes_outside_chosen"
-    assert not any(action.get("kind") == "task_scope_review" for action in finish_payload["next_actions"])
-    assert any(action["label"] == "Inspect task repo changes" for action in finish_payload["next_actions"])
+    assert finish_payload["data"]["action_inputs"]["unchosen_actual_paths"] == ["extra.py", "other.py"]
+    finish_scope_action = next(
+        action for action in finish_payload["next_actions"] if action.get("kind") == "task_scope_review"
+    )
+    assert finish_scope_action == doctor_scope_action
 
 
 def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path, monkeypatch, capsys) -> None:

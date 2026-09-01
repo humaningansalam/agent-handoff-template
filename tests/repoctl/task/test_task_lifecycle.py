@@ -2423,8 +2423,11 @@ def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tm
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
     finish_payload = json.loads(capsys.readouterr().out)
     assert finish_payload["problems"][0]["code"] == "baseline_conflict"
-    assert not any(action.get("kind") == "baseline_ownership_resolution" for action in finish_payload["next_actions"])
-    assert any(action["label"] == "Inspect task repo changes" for action in finish_payload["next_actions"])
+    finish_action = next(
+        action for action in finish_payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution"
+    )
+    assert finish_action == action
+    assert finish_payload["data"]["action_inputs"]["baseline_conflicts"] == ["a.py", "b.py"]
 
 
 
