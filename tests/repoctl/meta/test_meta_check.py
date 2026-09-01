@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tools.repoctl.cli import main
 from tools.repoctl.meta import shard_for_path
-from tests.repoctl.workspace.test_check import write_workspace
+from tests.repoctl.workspace.test_check import init_repo, write_workspace
 
 
 BASE_POLICY = {
@@ -58,11 +58,6 @@ def write_repometa(repo: Path, *, policy: dict | None = None, annotations: dict[
         data["exclusions"][rel] = exclusion
         write_json(path, data)
 
-def init_repo(repo: Path) -> None:
-    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "config", "user.email", "a@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
-
 def commit_all(repo: Path) -> None:
     subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
@@ -84,7 +79,7 @@ def test_meta_check_requires_json_policy(tmp_path: Path, monkeypatch, capsys) ->
         for action in payload["next_actions"]
     )
 
-def test_meta_check_changed_reports_repo_git_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_meta_changed_commands_report_repo_git_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     repo.mkdir()
@@ -99,6 +94,10 @@ def test_meta_check_changed_reports_repo_git_unavailable(tmp_path: Path, monkeyp
     assert payload["ok"] is False
     assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
+    assert main(["meta", "status", "--changed", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "repository_identity_unbound"
+
 def test_meta_check_changed_allows_missing_repo_directory(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
@@ -108,19 +107,6 @@ def test_meta_check_changed_allows_missing_repo_directory(tmp_path: Path, monkey
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["problems"] == []
-
-def test_meta_status_changed_reports_repo_git_unavailable(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    repo.mkdir()
-    write_repometa(repo)
-    (repo / "src.py").write_text("print('hello')\n", encoding="utf-8")
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["meta", "status", "--changed", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "repository_identity_unbound"
 
 def test_meta_inventory_classifies_indexed_only_and_defaults(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

@@ -7,20 +7,9 @@ from pathlib import Path
 from tools.repoctl.cli import main
 from tools.repoctl.io import RepoctlError
 from tools.repoctl.repositories import repo_layout
-from tests.repoctl.workspace.test_check import write_workspace
-from tests.repoctl.meta.test_meta_check import write_repometa
+from tests.repoctl.workspace.test_check import init_repo, write_workspace
+from tests.repoctl.meta.test_meta_check import commit_all, write_repometa
 
-
-
-def init_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "config", "user.email", "a@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "A"], cwd=repo, check=True)
-
-def commit_all(repo: Path) -> None:
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
 
 def write_settings(root: Path, data: dict) -> None:
     path = root / "docs/repoctl.json"
