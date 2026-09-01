@@ -831,7 +831,7 @@ def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list
         )
         add(
             "Run context benchmark gate",
-            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
             mutates_workspace=False,
             requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
         )
@@ -1322,6 +1322,8 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                             "area-isolation": 1.0,
                             "integrated-owner-test": 1.0,
                             "multi-owner-impact": 1.0,
+                            "typed-consumer-closure": 1.0,
+                            "typed-structured-dependency-closure": 1.0,
                         },
                         require_source_integrity=True,
                         require_fixture_corpus=True,
@@ -1345,7 +1347,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 gates.append(
                     _release_candidate_gate_result(
                         name="context_benchmark",
-                        command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+                        command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
                         mutates_workspace=False,
                         data=context_benchmark,
                         problems=context_benchmark_problems,

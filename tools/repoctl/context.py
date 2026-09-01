@@ -812,6 +812,10 @@ def build_context_bundle(
         anchor_resolution=graph_anchor_resolution,
         graph_seed_refs=graph_seed_refs,
         graph_support_by_path=preselection_graph_support_by_path,
+        graph_test_relation_coverage=_graph_test_relation_coverage(
+            snapshot,
+            freshness=freshness,
+        ),
         component_ids_by_path=component_ids_by_path,
     )
     prior_task_outcome, prior_outcome_completeness, prior_outcome_warnings = (
@@ -854,6 +858,10 @@ def build_context_bundle(
             anchor_resolution=graph_anchor_resolution,
             graph_seed_refs=graph_seed_refs,
             graph_support_by_path=preselection_graph_support_by_path,
+            graph_test_relation_coverage=_graph_test_relation_coverage(
+                snapshot,
+                freshness=freshness,
+            ),
             prior_outcome_paths=positive_prior_paths,
             component_ids_by_path=component_ids_by_path,
         )
@@ -1733,25 +1741,152 @@ def _context_group_repo_paths(
     )
 
 
-def _direct_evidence_dependency_path(
+def _direct_evidence_relation_path(
     source_path: str,
     *,
+    profiles: list[dict[str, Any]],
     candidate_paths: tuple[str, ...],
-    graph_support_by_path: dict[str, dict[str, Any]],
 ) -> str:
-    support = graph_support_by_path.get(source_path)
-    connections = support.get("candidate_connections") if isinstance(support, dict) else []
-    direct_dependencies = {
-        _coverage_graph_repo_path(str(connection.get("to_path") or ""))
-        for connection in connections
-        if isinstance(connection, dict)
-        and connection.get("assertion") == "resolved"
-        and str(connection.get("edge") or "")
-        in {"CALLS", "IMPORTS_FILE", STRUCTURED_EDGE_KIND}
-        and _coverage_graph_repo_path(str(connection.get("from_path") or ""))
-        == source_path
+    candidate_rank = {path: rank for rank, path in enumerate(candidate_paths)}
+    allowed_roles = {
+        "called_dependency",
+        "dependent_source",
+        "imported_dependency",
+        "structured_dependency",
     }
-    return next((path for path in candidate_paths if path in direct_dependencies), "")
+    connected: list[dict[str, Any]] = []
+    for profile in profiles:
+        path = _coverage_profile_path_identity(profile)
+        item = profile.get("item") if isinstance(profile.get("item"), dict) else {}
+        ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        if (
+            path == source_path
+            or path not in candidate_rank
+            or not str(ref.get("content_sha256") or "")
+            or (item.get("status") and item.get("status") != "current")
+            or not (_coverage_profile_roles(profile) & allowed_roles)
+        ):
+            continue
+        relations = [
+            *(
+                relation
+                for relation in item.get("graph_path", [])
+                if isinstance(relation, dict)
+            ),
+            *_coverage_profile_preselection_connections(profile),
+        ]
+        if any(
+            _direct_source_relation_connects(
+                relation,
+                source_path=source_path,
+                endpoint_path=path,
+            )
+            for relation in relations
+        ):
+            connected.append(profile)
+    if not connected:
+        return ""
+    return _coverage_profile_path_identity(
+        min(
+            connected,
+            key=lambda profile: (
+                candidate_rank[_coverage_profile_path_identity(profile)],
+                _coverage_profile_initial_connection_priority(profile),
+                _coverage_profile_path_identity(profile),
+            ),
+        )
+    )
+
+
+def _relation_distance(relation: dict[str, Any]) -> int:
+    try:
+        return int(relation.get("distance"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _direct_source_relation_connects(
+    relation: dict[str, Any],
+    *,
+    source_path: str,
+    endpoint_path: str,
+) -> bool:
+    if relation.get("assertion") != "resolved" or _relation_distance(relation) != 1:
+        return False
+    edge = str(relation.get("edge") or "")
+    from_path = _coverage_graph_repo_path(str(relation.get("from_path") or ""))
+    to_path = _coverage_graph_repo_path(str(relation.get("to_path") or ""))
+    if edge == STRUCTURED_EDGE_KIND:
+        return from_path == source_path and to_path == endpoint_path
+    return bool(
+        edge in {"CALLS", "IMPORTS_FILE"}
+        and {from_path, to_path} == {source_path, endpoint_path}
+    )
+
+
+def _graph_test_relation_coverage(
+    snapshot: Any,
+    *,
+    freshness: dict[str, Any],
+) -> dict[str, Any]:
+    if snapshot is None or freshness.get("status") != "current":
+        return {}
+    completeness = snapshot.completeness if isinstance(snapshot.completeness, dict) else {}
+    coverage = completeness.get("provider_coverage")
+    return coverage if isinstance(coverage, dict) else {}
+
+
+def _graph_test_path_relations_usable(
+    coverage: dict[str, Any],
+    *,
+    path: str,
+) -> bool:
+    applicable = False
+    for name in ("imports", "calls"):
+        capability = coverage.get(name)
+        if not isinstance(capability, dict):
+            return False
+        raw_paths = [
+            capability.get(field)
+            for field in (
+                "eligible_paths",
+                "unsupported_paths",
+                "analyzed_paths",
+                "failed_paths",
+            )
+        ]
+        if any(
+            not isinstance(values, list)
+            or any(not isinstance(candidate, str) for candidate in values)
+            for values in raw_paths
+        ):
+            return False
+        eligible_paths = {
+            str(candidate)
+            for candidate in capability.get("eligible_paths", [])
+            if str(candidate)
+        }
+        unsupported_paths = {
+            str(candidate)
+            for candidate in capability.get("unsupported_paths", [])
+            if str(candidate)
+        }
+        if path not in eligible_paths or path in unsupported_paths:
+            continue
+        applicable = True
+        analyzed_paths = {
+            str(candidate)
+            for candidate in capability.get("analyzed_paths", [])
+            if str(candidate)
+        }
+        failed_paths = {
+            str(candidate)
+            for candidate in capability.get("failed_paths", [])
+            if str(candidate)
+        }
+        if path not in analyzed_paths or path in failed_paths:
+            return False
+    return applicable
 
 
 def _build_context_evidence_projection(
@@ -1762,6 +1897,7 @@ def _build_context_evidence_projection(
     anchor_resolution: ContextAnchorResolution | None,
     graph_seed_refs: list[ContextGraphSeedRef] | None = None,
     graph_support_by_path: dict[str, dict[str, Any]],
+    graph_test_relation_coverage: dict[str, Any],
     prior_outcome_paths: tuple[str, ...] = (),
     component_ids_by_path: dict[str, tuple[str, ...]] | None = None,
 ) -> ContextEvidenceProjection:
@@ -1828,23 +1964,29 @@ def _build_context_evidence_projection(
         if source_order and source_order[0] in candidates_by_path
         else None
     )
-    dependency = ""
+    relation_endpoint = ""
     if (
         first_anchor is not None
+        and anchor_resolution is not None
+        and len(anchor_resolution.anchors) == 1
         and first_anchor.anchor_strength
-        in {ContextAnchorStrength.EXACT, ContextAnchorStrength.EXPLICIT}
+        in {
+            ContextAnchorStrength.EXACT,
+            ContextAnchorStrength.EXPLICIT,
+            ContextAnchorStrength.STRONG,
+        }
         and source_order[0] == first_anchor.anchor.path
     ):
-        dependency = _direct_evidence_dependency_path(
+        relation_endpoint = _direct_evidence_relation_path(
             first_anchor.anchor.path,
+            profiles=source_profiles,
             candidate_paths=source_order[1:],
-            graph_support_by_path=graph_support_by_path,
         )
-        if dependency:
+        if relation_endpoint:
             source_order = (
                 source_order[0],
-                dependency,
-                *(path for path in source_order[1:] if path != dependency),
+                relation_endpoint,
+                *(path for path in source_order[1:] if path != relation_endpoint),
             )
     source_limit = (
         3
@@ -1882,7 +2024,7 @@ def _build_context_evidence_projection(
         _eligible_coverage_profiles(source_profiles),
         limit=source_limit,
         primary_path=source_order[0] if source_order else "",
-        required_paths=(*([dependency] if dependency else []),),
+        required_paths=(*([relation_endpoint] if relation_endpoint else []),),
         prior_outcome_paths=effective_prior_paths,
     )
     visible_source_paths = tuple(
@@ -1913,8 +2055,27 @@ def _build_context_evidence_projection(
         for path in visible_source_paths
         if path in source_profiles_by_path
     ]
+    eligible_tests = _eligible_coverage_profiles(test_profiles)
+    if (
+        graph_test_relation_coverage
+        and anchor_resolution is not None
+        and anchor_resolution.status == ContextAnchorStatus.RESOLVED
+    ):
+        eligible_tests = [
+            profile
+            for profile in eligible_tests
+            if _coverage_profile_has_query_identity(profile)
+            or not _graph_test_path_relations_usable(
+                graph_test_relation_coverage,
+                path=_coverage_profile_path_identity(profile),
+            )
+            or _coverage_profile_connected_to_selected(
+                profile,
+                selected=references,
+            )
+        ]
     visible_tests = _select_coverage_profiles(
-        _eligible_coverage_profiles(test_profiles),
+        eligible_tests,
         limit=1,
         reference_profiles=references,
     )
@@ -1961,29 +2122,23 @@ def _select_compact_evidence_profiles(
                 prior_outcome_paths=prior_outcome_paths,
             ),
         )
-    selected = [primary]
-    identity_bounded = _coverage_profile_has_query_identity(primary)
-
-    def eligible_optional(profile: dict[str, Any]) -> bool:
-        if not identity_bounded:
-            return True
-        return bool(
-            _coverage_profile_has_query_identity(profile)
-            or _coverage_profile_connected_to_selected(
-                profile,
-                selected=[primary],
-            )
-        )
-
     required = [
         profiles_by_path[path]
         for path in required_paths
         if path in profiles_by_path and profiles_by_path[path] is not primary
     ]
+    selected = [primary, *required[: max(0, limit - 1)]]
+    identity_bounded = bool(required) or _coverage_profile_has_query_identity(primary)
+
+    def eligible_optional(profile: dict[str, Any]) -> bool:
+        return bool(
+            not identity_bounded
+            or _coverage_profile_has_query_identity(profile)
+        )
+
     remaining = [profile for profile in profiles if profile not in selected]
-    optional_limit = max(0, limit - len(selected) - len(required))
-    frequencies = _coverage_pair_frequencies(profiles) if remaining and optional_limit else {}
-    while remaining and len(selected) < 1 + optional_limit:
+    frequencies = _coverage_pair_frequencies(profiles) if remaining and len(selected) < limit else {}
+    while remaining and len(selected) < limit:
         direct_remaining = [
             profile
             for profile in remaining
@@ -2033,11 +2188,6 @@ def _select_compact_evidence_profiles(
         )
         selected.append(next_profile)
         remaining.remove(next_profile)
-    for profile in required:
-        if len(selected) >= limit:
-            break
-        if profile not in selected:
-            selected.append(profile)
     return selected
 
 
@@ -2738,6 +2888,12 @@ def _compact_group_coverage_profiles(
         preselection_graph_support = dict(
             (preselection_graph_support_by_path or {}).get(path_identity) or {}
         )
+        preselection_connections = [
+            connection
+            for connection in preselection_graph_support.get("candidate_connections", [])
+            if isinstance(connection, dict)
+            and connection.get("assertion") == "resolved"
+        ]
         relation_paths = {
             identity
             for relation in graph_path
@@ -2798,8 +2954,18 @@ def _compact_group_coverage_profiles(
         connection_priority = (
             0
             if "anchor_connected_test" in evidence_roles
+            or float(breakdown.get("path_name") or 0.0) > 0.0
+            and any(
+                connection.get("edge") == "TESTS_FILE"
+                for connection in preselection_connections
+            )
             else 1
             if "directly_connected_test" in evidence_roles
+            or any(
+                str(connection.get("edge") or "")
+                in {"CALLS", "IMPORTS_FILE", "TESTS_FILE", STRUCTURED_EDGE_KIND}
+                for connection in preselection_connections
+            )
             else 2
             if ContextEvidenceKind.GRAPH_RELATION.value in evidence_kinds
             else 3
@@ -4627,7 +4793,10 @@ def _coverage_profile_preselection_connections(
     if not isinstance(values, list):
         return []
     return [
-        connection
+        {
+            **connection,
+            "distance": connection.get("distance", 1),
+        }
         for connection in values
         if isinstance(connection, dict)
         and connection.get("assertion") == "resolved"
@@ -4785,23 +4954,25 @@ def _coverage_profile_test_target_paths(profile: dict[str, Any]) -> set[str]:
     item = profile.get("item") if isinstance(profile.get("item"), dict) else {}
     graph_path = item.get("graph_path") if isinstance(item.get("graph_path"), list) else []
     path_identity = _coverage_profile_path_identity(profile)
-    projected_paths = {
-        _coverage_graph_repo_path(str(relation.get("to_path") or ""))
-        for relation in graph_path
-        if isinstance(relation, dict)
-        and relation.get("edge") == "TESTS_FILE"
-        and _coverage_graph_repo_path(str(relation.get("from_path") or ""))
-        == path_identity
-        and _coverage_graph_repo_path(str(relation.get("to_path") or ""))
-    }
-    preselection_paths = {
-        _coverage_graph_repo_path(str(connection.get("to_path") or ""))
-        for connection in _coverage_profile_preselection_connections(profile)
-        if connection.get("edge") == "TESTS_FILE"
-        and _coverage_graph_repo_path(str(connection.get("from_path") or ""))
-        == path_identity
-        and _coverage_graph_repo_path(str(connection.get("to_path") or ""))
-    }
+    def connected_paths(relations: list[dict[str, Any]]) -> set[str]:
+        return {
+            to_path
+            for relation in relations
+            if relation.get("assertion") == "resolved"
+            and _relation_distance(relation) == 1
+            and str(relation.get("edge") or "")
+            in {"CALLS", "IMPORTS_FILE", "TESTS_FILE"}
+            and _coverage_graph_repo_path(str(relation.get("from_path") or ""))
+            == path_identity
+            and (to_path := _coverage_graph_repo_path(str(relation.get("to_path") or "")))
+        }
+
+    projected_paths = connected_paths(
+        [relation for relation in graph_path if isinstance(relation, dict)]
+    )
+    preselection_paths = connected_paths(
+        _coverage_profile_preselection_connections(profile)
+    )
     return projected_paths | preselection_paths
 
 

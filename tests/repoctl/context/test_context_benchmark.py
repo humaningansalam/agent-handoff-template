@@ -178,7 +178,7 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
 
     payload = json.loads(capsys.readouterr().out)
     summary = payload["data"]["summary"]
-    assert payload["data"]["question_count"] == 34
+    assert payload["data"]["question_count"] == 37
     assert summary["source_ref_integrity"] is True
     assert summary["mean_recall_at_5"] >= 0.85
     assert summary["by_category"]["method-impact"]["mean_graph_edge_recall"] == 1.0
@@ -192,6 +192,12 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
     assert summary["by_category"]["area-isolation"]["mean_visible_recall"] == 1.0
     assert summary["by_category"]["multi-owner-impact"]["mean_visible_recall"] == 1.0
     assert summary["by_category"]["multi-owner-impact"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["typed-consumer-closure"]["mean_visible_recall"] == 1.0
+    assert summary["by_category"]["typed-structured-dependency-closure"]["mean_visible_recall"] == 1.0
+    assert summary["by_category"]["no-disconnected-test"]["forbidden_selected"] == 0
+    by_id = {result["id"]: result for result in payload["data"]["results"]}
+    for question_id in ("Q-004", "Q-005", "Q-020", "Q-025", "Q-036", "Q-037", "Q-038"):
+        assert by_id[question_id]["missing_required_from_visible"] == []
     assert summary["generated_or_ignored_noise"] == 0
     assert summary["forbidden_selected"] == 0
     assert payload["problems"] == []

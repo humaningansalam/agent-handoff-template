@@ -526,5 +526,35 @@
       {"path": "repos/routing/settlement_router.py"},
       {"path": "repos/routing/audit_router.py"}
     ]
+  },
+  "Q-036": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "must_find": [
+      {"path": "repos/handlers/session_tokens.py"},
+      {"path": "repos/handlers/session_login.py"}
+    ]
+  },
+  "Q-037": {
+    "acceptable": [],
+    "noise": [],
+    "required_knowledge_source_refs": [],
+    "must_find": [
+      {"path": "repos/compose.yml"},
+      {"path": "repos/Dockerfile"}
+    ]
+  },
+  "Q-038": {
+    "acceptable": [],
+    "noise": [
+      {"path": "repos/test_render.py"},
+      {"path": "repos/backend/test_reconcile.py"}
+    ],
+    "required_knowledge_source_refs": [],
+    "must_find": [
+      {"path": "repos/handlers/session_tokens.py"},
+      {"path": "repos/handlers/session_login.py"}
+    ]
   }
 }
