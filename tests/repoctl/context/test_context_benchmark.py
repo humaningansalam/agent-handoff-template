@@ -8,8 +8,12 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
+from tools.repoctl.context import build_context_bundle
+from tools.repoctl.context_benchmark import _retrieval_evidence
 from tools.repoctl.graph_model import digest_data
+from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projection
+from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.context_test_helpers import (
     _setup_context_multirepo_workspace,
     _write_context_benchmark_collection_corpus,
@@ -276,6 +280,8 @@ def test_context_benchmark_attribution_is_opt_in_stable_and_read_only(
     assert all(by_case["full-chain"]["stages"].values())
     assert by_case["compact-hidden"]["stages"]["retrieved"] is True
     assert by_case["compact-hidden"]["stages"]["compact_visible"] is False
+    assert by_case["compact-hidden"]["retrieval"]["rank"] == 9
+    assert by_case["compact-hidden"]["retrieval"]["score"] == 7.216669
     assert by_case["visible-unselected"]["stages"]["compact_visible"] is True
     assert by_case["visible-unselected"]["stages"]["selected"] is False
     assert by_case["selected-unverified"]["stages"]["selected"] is True
@@ -292,6 +298,61 @@ def test_context_benchmark_attribution_is_opt_in_stable_and_read_only(
                 "score_breakdown",
                 "typed_contributions",
             }
+
+
+def test_context_benchmark_attribution_unions_duplicate_typed_contributions() -> None:
+    first = {
+        "source_ref": {"kind": "current_source", "path": "repos/example.py"},
+        "score": 10.0,
+        "score_breakdown": {"graph": 0.0},
+    }
+    second = {
+        "source_ref": {"kind": "current_source", "path": "repos/example.py"},
+        "score": 1.0,
+        "score_breakdown": {"knowledge_path": 1.0},
+        "graph_path": ["repos/example.py", "repos/caller.py"],
+    }
+
+    retrieval = _retrieval_evidence({"evidence": [first, second]})[("source", "repos/example.py")]
+
+    assert retrieval["rank"] == 1
+    assert retrieval["score"] == 10.0
+    assert retrieval["score_breakdown"] == {"graph": 0.0}
+    assert retrieval["typed_contributions"] == {"graph": True, "knowledge": True}
+
+
+def test_context_benchmark_attribution_keeps_first_full_occurrence_for_q004(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    fixture = _setup_benchmark_workspace(tmp_path, monkeypatch)
+    assert main(["context", "benchmark-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    target = require_repo_target(tmp_path, repo_id="main")
+    graph_state = tmp_path / ".benchmark-graph-state"
+    graph_result = materialize_graph(tmp_path, target=target, rebuild=True, state_root=graph_state)
+    bundle, problems, _meta = build_context_bundle(
+        tmp_path,
+        target=target,
+        query="What files are impacted if handlers/session_tokens.py changes?",
+        explain=True,
+        graph_result=graph_result,
+        graph_state_root=graph_state,
+    )
+    assert not [problem for problem in problems if problem.severity == "error"]
+    full = bundle.to_dict()
+    occurrences = [
+        (rank, item["score"])
+        for rank, item in enumerate(full["evidence"], start=1)
+        if item.get("source_ref", {}).get("path") == "repos/handlers/session_login.py"
+    ]
+
+    assert occurrences == [(2, 115.065039), (4, 14.171776)]
+    retrieval = _retrieval_evidence(full)[("source", "repos/handlers/session_login.py")]
+    assert retrieval["rank"] == 2
+    assert retrieval["score"] == occurrences[0][1]
+    assert retrieval["typed_contributions"]["graph"] is True
 
 
 def test_context_benchmark_attribution_uses_unknown_and_exact_subject_versions(

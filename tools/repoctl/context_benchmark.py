@@ -843,15 +843,21 @@ def _retrieval_evidence(bundle: dict[str, Any]) -> dict[tuple[str, str], dict[st
         if not ref:
             continue
         breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
-        result[(authority, ref)] = {
+        key = (authority, ref)
+        contributions = {
+            "graph": bool(item.get("graph_path") or float(breakdown.get("graph") or 0.0)),
+            "knowledge": bool(item.get("related_record_ids") or float(breakdown.get("knowledge_path") or 0.0)),
+        }
+        if key in result:
+            for contribution, observed in contributions.items():
+                result[key]["typed_contributions"][contribution] |= observed
+            continue
+        result[key] = {
             "rank": rank,
-            "lane": lane_by_ref.get((authority, ref), kind or authority),
+            "lane": lane_by_ref.get(key, kind or authority),
             "score": item.get("score"),
             "score_breakdown": dict(sorted(breakdown.items())),
-            "typed_contributions": {
-                "graph": bool(item.get("graph_path") or float(breakdown.get("graph") or 0.0)),
-                "knowledge": bool(item.get("related_record_ids") or float(breakdown.get("knowledge_path") or 0.0)),
-            },
+            "typed_contributions": contributions,
         }
     return result
 
