@@ -520,17 +520,6 @@ def _build_completion_outcome(
     return validate_completion_outcome({**base, "outcome_digest": digest_data(base)})
 
 
-def _stable_outcome_subjects(outcome: dict[str, Any]) -> dict[str, str]:
-    return {
-        str(item["id"]): digest_data({
-            "kind": item["kind"],
-            "identity": item["identity"],
-            "version_digest": item["version_digest"],
-        })
-        for item in outcome["subjects"]
-    }
-
-
 def _completion_stage_sets(
     outcome: dict[str, Any] | None,
     *,
@@ -539,7 +528,14 @@ def _completion_stage_sets(
 ) -> tuple[set[str], set[str], set[str], set[str]]:
     if outcome is None:
         return set(), set(), set(), set()
-    stable_by_local = _stable_outcome_subjects(outcome)
+    stable_by_local = {
+        str(item["id"]): digest_data({
+            "kind": item["kind"],
+            "identity": item["identity"],
+            "version_digest": item["version_digest"],
+        })
+        for item in outcome["subjects"]
+    }
     member_by_id = {str(item["member_id"]): item for item in members}
     selected: set[str] = set()
     claim_to_subject: dict[str, str] = {}
