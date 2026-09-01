@@ -52,17 +52,131 @@ from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.test_completion_catalogue import _public_finish_fixture
 from tests.repoctl.context_test_helpers import (
     _rebuild_completion_history,
+    _write_context_pack_task,
     _write_completion_receipt,
     _write_context_benchmark_collection_corpus,
     _setup_context_multirepo_workspace,
     _setup_context_workspace,
 )
+from tests.repoctl.workspace.test_check import init_repo, write_workspace
 
 
 def _materialize(root: Path) -> None:
     snapshot, problems, _meta = materialize_graph(root, target=require_repo_target(root, repo_id="main"))
     assert snapshot is not None
     assert not [problem for problem in problems if problem.severity == "error"]
+
+
+def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    (repo / "app.py").write_text("from helper import value\n\ndef run():\n    return value()\n", encoding="utf-8")
+    (repo / "helper.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    receipt_root = tmp_path / ".repoctl-state/result-receipts"
+
+    def run(args: list[str], expected: int = 0) -> dict:
+        assert main([*args, "--json"]) == expected
+        return json.loads(capsys.readouterr().out)
+
+    def fails(args: list[str], code: str) -> dict:
+        payload = run(args, 1)
+        assert [problem["code"] for problem in payload["problems"]] == [code]
+        return payload
+
+    def receipt_count() -> int:
+        return len(list(receipt_root.rglob("*.json"))) if receipt_root.exists() else 0
+
+    context_payload = run(["context", "query", "where is run", "--repo-id", "main"])
+    assert context_payload["problems"] == []
+    assert {warning["code"] for warning in context_payload["warnings"]} >= {
+        "context_graph_unavailable",
+        "context_metadata_unavailable",
+    }
+    assert any(
+        item.get("source_ref", {}).get("path") == "repos/app.py"
+        for items in context_payload["data"]["bundle"]["groups"].values()
+        for item in items
+    )
+    assert [action.get("kind") for action in context_payload["next_actions"]] == [
+        "graph_build",
+        "completion_catalogue_rebuild",
+        "context_resume",
+    ]
+
+    assert not (tmp_path / ".repoctl-state/knowledge/main/current-head.json").exists()
+    assert not (repo / ".repometa").exists()
+
+    graph_payload = run(["graph", "build", "--repo-id", "main", "--full"])
+    snapshot = graph_payload["data"]["snapshot"]
+    assert snapshot["completeness"]["capabilities"]["metadata"] == "unavailable"
+    assert any(edge["kind"] == "IMPORTS_FILE" for edge in snapshot["edges"])
+    assert not (repo / ".repometa").exists()
+
+    (repo / ".repometa").mkdir()
+    for command in (
+        ["context", "query", "where is run", "--repo-id", "main"],
+        ["graph", "build", "--repo-id", "main"],
+    ):
+        fails(command, "missing_repometa_policy")
+
+    run(["meta", "init", "--repo-id", "main"])
+    run(["graph", "build", "--repo-id", "main"])
+
+    snapshot_path = tmp_path / ".repoctl-state/graph/main/snapshot.json"
+    original_snapshot = snapshot_path.read_text(encoding="utf-8")
+    snapshot_path.write_text("{not-json\n", encoding="utf-8")
+    receipts_before = receipt_count()
+    invalid_graph = fails(["context", "query", "where is run", "--repo-id", "main"], "graph_materialization_invalid")
+    assert invalid_graph["data"]["result_receipt"] is None
+    assert receipt_count() == receipts_before
+    snapshot_path.write_text(original_snapshot, encoding="utf-8")
+
+    _write_context_pack_task(
+        tmp_path,
+        task_id="T-20260902010101Z",
+        slug="cold-bootstrap",
+        title="Cold bootstrap",
+        query="where is run",
+        goal="Verify cold bootstrap.",
+        context_doc="AGENTS.md",
+    )
+    policy = repo / ".repometa/policy.json"
+    original_policy = policy.read_text(encoding="utf-8")
+    policy.write_text("{not-json\n", encoding="utf-8")
+    receipts_before = receipt_count()
+    for command in (
+        ["context", "query", "where is run", "--repo-id", "main"],
+        ["graph", "query", "--repo-id", "main", "--file", "app.py"],
+    ):
+        payload = fails(command, "invalid_policy_json")
+        assert payload["data"]["result_receipt"] is None
+    assert receipt_count() == receipts_before
+
+    pack = tmp_path / ".repoctl-state/context-pack/u03.json"
+    fails(["context", "pack", "--task", "T-20260902010101Z", "--repo-id", "main", "--output", ".repoctl-state/context-pack/u03.json"], "invalid_policy_json")
+    assert not pack.exists()
+    policy.write_text(original_policy, encoding="utf-8")
+
+    for path in (
+        repo / ".repometa",
+        repo / ".repometa/annotations",
+        repo / ".repometa/annotations/0.json",
+        repo / ".repometa/policy.json",
+    ):
+        is_directory = path.is_dir()
+        backup = path.with_name(f"{path.name}.saved")
+        path.rename(backup)
+        path.symlink_to(backup.name, target_is_directory=is_directory)
+        fails(["graph", "build", "--repo-id", "main", "--rebuild"], "repometa_symlink_not_allowed")
+        path.unlink()
+        backup.rename(path)
 
 
 def _publish_prior_outcome_fixture(
@@ -2377,7 +2491,7 @@ def test_context_query_auto_retrieves_root_project_documents_from_materialized_i
     )
 
 
-def test_context_query_preserves_document_meaning_across_index_and_live_fallback(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_query_preserves_document_meaning_in_materialized_index(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_workspace(tmp_path, monkeypatch)
     (tmp_path / "docs/PRD.md").unlink()
     (tmp_path / "docs/prd").mkdir()
@@ -2489,35 +2603,6 @@ def test_context_query_preserves_document_meaning_across_index_and_live_fallback
         if item["source_ref"]["path"] == "docs/workflows/TEMPLATE.md"
     )
     assert template["document_role"] == "template"
-
-    index_path = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
-    saved_index = index_path.with_suffix(".sqlite3.saved")
-    index_path.rename(saved_index)
-    try:
-        fallback_payload = run_full_query()
-    finally:
-        saved_index.rename(index_path)
-    fallback = fallback_payload["data"]["bundle"]
-    fallback_roles = {
-        item["source_ref"]["path"]: item.get("document_role")
-        for item in fallback["evidence"]
-    }
-    for path in (
-        "docs/prd/repository-understanding.md",
-        "docs/prd/metadata-policy.md",
-        "docs/workflows/repo-metadata.md",
-        "docs/README.md",
-    ):
-        assert fallback_roles[path] == indexed_roles[path]
-    assert document_projection(fallback) == indexed_projection
-    assert "docs/workflows/TEMPLATE.md" not in fallback_roles
-    assert "docs/knowledge/generated/repository-metadata.md" not in fallback_roles
-    assert any(
-        problem["code"] == "context_graph_unavailable"
-        and problem.get("cause_code") == "evidence_index_missing"
-        for problem in fallback_payload["problems"]
-    )
-
 
 def test_context_compact_suppresses_weak_root_operational_doc_but_keeps_product_doc_and_explicit_recovery(
     tmp_path: Path,
@@ -3990,14 +4075,12 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     assert "active task changed after Graph build" in board["excerpt"]
     monkeypatch.setattr("tools.repoctl.context.collect_context_sources", original_collect_context_sources)
 
-    def assert_partial_fallback(payload: dict, dependency_code: str) -> None:
-        assert payload["ok"] is True
+    def assert_invalid_graph(payload: dict, dependency_code: str) -> None:
+        assert payload["ok"] is False
         assert payload["data"]["bundle"] is not None
         assert payload["data"]["bundle"]["completeness"]["graph_available"] is False
-        assert any(
-            problem["code"] == "context_graph_unavailable" and problem.get("cause_code") == dependency_code
-            for problem in payload["problems"]
-        )
+        assert any(problem["code"] == dependency_code for problem in payload["problems"])
+        assert payload["data"]["result_receipt"] is None
         assert any(
             item.get("source_ref", {}).get("path") == "repos/app.py"
             for items in payload["data"]["bundle"]["groups"].values()
@@ -4012,9 +4095,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     index_path = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
     saved_index = index_path.with_suffix(".sqlite3.saved")
     index_path.rename(saved_index)
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
     missing = json.loads(capsys.readouterr().out)
-    assert_partial_fallback(missing, "evidence_index_missing")
+    assert_invalid_graph(missing, "evidence_index_missing")
     assert main(["graph", "build", "--repo-id", "main", "--json"]) == 1
     missing_build = json.loads(capsys.readouterr().out)
     assert [problem["code"] for problem in missing_build["problems"]] == ["evidence_index_missing"]
@@ -4030,9 +4113,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
                 "UPDATE metadata SET value = ? WHERE key = ?",
                 (json.dumps(invalid_value), key),
             )
-        assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
+        assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
         invalid_schema = json.loads(capsys.readouterr().out)
-        assert_partial_fallback(invalid_schema, "evidence_index_schema_invalid")
+        assert_invalid_graph(invalid_schema, "evidence_index_schema_invalid")
         with sqlite3.connect(index_path) as connection:
             connection.execute("UPDATE metadata SET value = ? WHERE key = ?", (original_value, key))
 
@@ -4042,9 +4125,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "UPDATE metadata SET value = ? WHERE key = 'snapshot_digest'",
             (json.dumps("sha256:mismatched-snapshot"),),
         )
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
     mismatched = json.loads(capsys.readouterr().out)
-    assert_partial_fallback(mismatched, "evidence_index_snapshot_mismatch")
+    assert_invalid_graph(mismatched, "evidence_index_snapshot_mismatch")
     with sqlite3.connect(index_path) as connection:
         connection.execute(
             "UPDATE metadata SET value = ? WHERE key = 'snapshot_digest'",
@@ -4057,9 +4140,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "UPDATE metadata SET value = ? WHERE key = 'graph_input_digest'",
             (json.dumps("sha256:mismatched-input"),),
         )
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
     mismatched_input = json.loads(capsys.readouterr().out)
-    assert_partial_fallback(mismatched_input, "evidence_index_input_mismatch")
+    assert_invalid_graph(mismatched_input, "evidence_index_input_mismatch")
     with sqlite3.connect(index_path) as connection:
         connection.execute(
             "UPDATE metadata SET value = ? WHERE key = 'graph_input_digest'",
@@ -4074,9 +4157,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     assert [problem["code"] for problem in corrupt_build["problems"]] == ["graph_materialization_invalid"]
     assert corrupt_build["next_actions"] == missing_build["next_actions"]
     assert snapshot_path.read_text(encoding="utf-8") == "{not-json\n"
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
     corrupt_snapshot = json.loads(capsys.readouterr().out)
-    assert_partial_fallback(corrupt_snapshot, "graph_materialization_invalid")
+    assert_invalid_graph(corrupt_snapshot, "graph_materialization_invalid")
     snapshot_path.write_text(original_snapshot, encoding="utf-8")
 
 
@@ -4087,108 +4170,13 @@ def test_context_query_missing_graph_returns_typed_build_and_resume_actions(tmp_
     assert main(["context", "query", "initial discovery owner", "--repo-id", "main", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    unavailable = next(problem for problem in payload["problems"] if problem["code"] == "context_graph_unavailable")
+    unavailable = next(warning for warning in payload["warnings"] if warning["code"] == "context_graph_unavailable")
     assert unavailable["cause_code"] == "graph_snapshot_missing"
     actions = {action.get("kind"): action for action in payload["next_actions"]}
     assert actions["graph_build"]["command"] == "./scripts/repoctl graph build --repo-id main --json"
     assert actions["context_resume"]["command"] == (
         "./scripts/repoctl context query 'initial discovery owner' --repo-id main --json"
     )
-
-
-def test_context_query_live_fallback_resolves_new_and_rejects_deleted_knowledge_paths(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    repo = _setup_context_workspace(tmp_path, monkeypatch)
-    deleted_path = repo / "deleted_owner.py"
-    deleted_path.write_text("def deleted_owner():\n    return 'old'\n", encoding="utf-8")
-    _write_reviewed_knowledge_record(
-        tmp_path,
-        record_id="K-20260719010111Z--deleted-owner",
-        claim="Cobalt horizon dispatch used the deleted owner.",
-        applies_to_paths=["deleted_owner.py"],
-    )
-    _materialize(tmp_path)
-
-    fresh_path = repo / "fresh_owner.py"
-    fresh_path.write_text("def fresh_owner():\n    return 'new'\n", encoding="utf-8")
-    _write_reviewed_knowledge_record(
-        tmp_path,
-        record_id="K-20260719010112Z--fresh-owner",
-        claim="Nebula harbor dispatch uses the fresh owner.",
-        applies_to_paths=["fresh_owner.py"],
-    )
-    deleted_path.unlink()
-    index_path = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
-    index_path.rename(index_path.with_suffix(".sqlite3.saved"))
-
-    assert main(["context", "query", "nebula harbor dispatch", "--repo-id", "main", "--full", "--json"]) == 0
-    fresh_payload = json.loads(capsys.readouterr().out)
-    fresh_bundle = fresh_payload["data"]["bundle"]
-    assert fresh_bundle["completeness"]["graph_available"] is False
-    assert fresh_bundle["knowledge_results"][0]["resolved_code_paths"] == ["fresh_owner.py"]
-    assert any(
-        item["source_ref"]["path"] == "repos/fresh_owner.py"
-        for item in fresh_bundle["groups"]["likely_change_surface"]
-    )
-
-    assert main(["context", "query", "cobalt horizon dispatch", "--repo-id", "main", "--full", "--json"]) == 0
-    deleted_payload = json.loads(capsys.readouterr().out)
-    deleted_bundle = deleted_payload["data"]["bundle"]
-    deleted_result = deleted_bundle["knowledge_results"][0]
-    assert deleted_result["resolved_code_paths"] == []
-    assert deleted_result["code_path_resolutions"][0]["status"] == "not_found"
-    assert not any(
-        item.get("source_ref", {}).get("path") == "repos/deleted_owner.py"
-        for items in deleted_bundle["groups"].values()
-        for item in items
-    )
-    assert not any(
-        continuation.get("selector") == {"kind": "file", "value": "deleted_owner.py"}
-        for items in deleted_bundle["groups"].values()
-        for item in items
-        for continuation in item.get("continuations", [])
-    )
-
-
-def test_context_partial_fallback_keeps_source_and_reviewed_knowledge_without_raw_history_scan(tmp_path: Path, monkeypatch, capsys) -> None:
-    repo = _setup_context_workspace(tmp_path, monkeypatch)
-    token = "partial_fallback_contract_token"
-    (repo / "auth.py").write_text(
-        f"def validate_token(token: str) -> bool:\n    # {token}\n    return bool(token)\n",
-        encoding="utf-8",
-    )
-    _write_completion_receipt(tmp_path, changed_paths=["auth.py"])
-    artifact = tmp_path / "docs/archive/tasks/T-20260625010101Z--knowledge-receipt.md"
-    artifact.write_text(artifact.read_text(encoding="utf-8") + f"\n{token}\n", encoding="utf-8")
-    receipt_path = tmp_path / "docs/tasks/.repoctl-state/completions/T-20260625010101Z.json"
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    receipt["content_sha256"] = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
-    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    contract = tmp_path / "docs/contracts/repoctl-context-contract.md"
-    contract.write_text(contract.read_text(encoding="utf-8") + f"\n## Decision\n\n{token} remains reusable across tasks.\n", encoding="utf-8")
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    _materialize(tmp_path)
-    snapshot_path = tmp_path / ".repoctl-state/graph/main/snapshot.json"
-    snapshot_path.write_text("{broken\n", encoding="utf-8")
-
-    assert main(["context", "query", token, "--repo-id", "main", "--json"]) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    bundle = payload["data"]["bundle"]
-    assert bundle["completeness"]["graph_available"] is False
-    assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == "repos/auth.py"
-    assert bundle["groups"]["reviewed_knowledge"][0]["record_id"] == record_id
-    assert bundle["groups"]["related_history"] == []
-    assert bundle["groups"]["prior_task_outcome"] == []
-    assert bundle["completeness"]["prior_task_outcome"]["status"] == "unavailable"
-    assert any(problem["code"] == "context_graph_unavailable" for problem in payload["problems"])
 
 
 def test_context_query_markdown_uses_same_grouped_sources(tmp_path: Path, monkeypatch, capsys) -> None:

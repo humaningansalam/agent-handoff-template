@@ -23,7 +23,7 @@ from .graph_structured_relations import RpcResolutionOutcome, STRUCTURED_EDGE_KI
 from .language_profiles import graph_language_capabilities, is_semantic_source_language, language_for_path
 from .knowledge_candidates import KnowledgeExplicitPathKind, KnowledgeExplicitPathRole, knowledge_records_for_graph
 from .io import RepoctlError
-from .meta import RepoMetadataFacts, read_metadata_facts
+from .meta import RepoMetadataFacts, read_metadata_facts, without_absent_repometa
 from .path_roles import is_test_path
 from .repositories import RepoSelectorResolution, RepoSelectorStatus, RepoTarget, resolve_repo_selector_path
 from .tasks import Problem, completion_receipt_task_path, normalize_task_id
@@ -324,7 +324,10 @@ def build_graph(
         )
 
     metadata_facts, metadata_problems, metadata_meta = read_metadata_facts(root, target=target)
+    metadata_problems, metadata_absent = without_absent_repometa(metadata_problems, repo=target.root_path)
     problems = [*index_problems, *metadata_problems]
+    if metadata_absent:
+        problems.append(Problem("warning", "graph_metadata_unavailable", "repository metadata is not initialized; Graph source relations were materialized without metadata enrichment", f"{target.display_path}/.repometa/policy.json", "missing_repometa_policy"))
     problems.extend(completion_problems)
     invalid_completion_problems = tuple(
         problem
@@ -884,6 +887,7 @@ def build_graph(
     capability_completeness = {
         "source_inventory": "complete",
         "file_inventory": "complete",
+        "metadata": "unavailable" if metadata_absent else "complete",
         "imports": provider_coverage["imports"].status,
         "symbols": provider_coverage["symbols"].status,
         "calls": provider_coverage["calls"].status,

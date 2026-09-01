@@ -8,7 +8,7 @@ from .context_model import ContextSectionKind, ContextSourceKind
 from .git import normalize_repo_path
 from .graph_model import GraphSnapshot, digest_data
 from .language_profiles import collect_verification_hints, is_context_source_language, language_for_path, product_manifest_patterns
-from .meta import meta_inventory
+from .meta import meta_inventory, without_absent_repometa
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipt_artifacts
 
@@ -198,6 +198,7 @@ def collect_context_sources(
         changed=False,
         target=target,
     )
+    inventory_problems, metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
     current_source_chunks, current_source_problems = _current_source_chunks_from_records(
         root,
         records=[
@@ -208,6 +209,8 @@ def collect_context_sources(
     )
     chunks.extend(current_source_chunks)
     problems.extend(inventory_problems)
+    if metadata_absent:
+        problems.append(Problem("warning", "context_metadata_unavailable", "repository metadata is not initialized; current source remains searchable without metadata enrichment", f"{target.display_path}/.repometa/policy.json", "missing_repometa_policy"))
     problems.extend(current_source_problems)
     completeness = {
         "documents_checked": len(document_paths),
@@ -218,6 +221,7 @@ def collect_context_sources(
         "receipt_problem_count": len(reported_receipt_problems),
         "receipt_problem_paths": receipt_problem_paths,
         "graph_available": snapshot is not None,
+        "metadata": "unavailable" if metadata_absent else "available",
         "graph_meta": graph_meta,
     }
     if snapshot is not None:
@@ -445,7 +449,7 @@ def context_graph_problems(
                     problem.code,
                 )
             )
-        elif graph_available:
+        elif graph_available or problem.code != "graph_snapshot_missing":
             mapped.append(problem)
         else:
             mapped.append(

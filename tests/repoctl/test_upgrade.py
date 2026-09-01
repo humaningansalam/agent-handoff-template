@@ -825,7 +825,7 @@ Promote a context pack into reviewed knowledge after upgrade.
     assert render_check_payload["data"]["check"]["current"] is True
 
 
-def test_initialized_empty_knowledge_store_exposes_projection_recovery(
+def test_empty_knowledge_is_optional_until_its_projection_is_corrupt(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -852,10 +852,21 @@ def test_initialized_empty_knowledge_store_exposes_projection_recovery(
 
     assert main(["context", "query", "product", "--repo-id", "main", "--json"]) == 0
     context = json.loads(capsys.readouterr().out)
-    warning = next(problem for problem in context["problems"] if problem["code"] == "context_linked_knowledge_unavailable")
-    assert warning["cause_code"] == "knowledge_projection_unavailable"
-    assert any(action.get("kind") == "knowledge_rebuild" for action in context["next_actions"])
-    assert any(action.get("kind") == "context_resume" for action in context["next_actions"])
+    assert not any(problem["code"] == "context_linked_knowledge_unavailable" for problem in context["problems"])
+    assert context["data"]["bundle"]["completeness"]["project_knowledge"]["reviewed_records"]["available_record_count"] == 0
+    assert not any(action.get("kind") == "knowledge_rebuild" for action in context["next_actions"])
+
+    projection = knowledge_projection_path(workspace, repo_id="main")
+    projection.parent.mkdir(parents=True)
+    projection.write_text("{not-json\n", encoding="utf-8")
+    assert main(["context", "query", "product", "--repo-id", "main", "--json"]) == 1
+    corrupt = json.loads(capsys.readouterr().out)
+    assert any(
+        problem["code"] == "knowledge_projection_unavailable"
+        and problem.get("cause_code") == "unreadable"
+        for problem in corrupt["problems"]
+    )
+    assert corrupt["data"]["result_receipt"] is None
 
 
 def test_postflight_rejects_projection_that_misses_durable_deprecation(

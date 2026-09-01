@@ -42,6 +42,8 @@ Direct single-repo layout may omit `--repo-id` when `repos/.git` is the only tar
 
 Graph `--rebuild` discards reusable provider results and is reserved for Graph recovery or provider/schema changes. It does not scan completion receipts or repair the completion catalogue. `history rebuild` validates the selected repository's full cold receipt authority and regenerates only completion-catalogue state. Normal Graph/Context operations never invoke it implicitly.
 
+Graph source, import, call, and test relations do not require `.repometa`, completion history, or Reviewed Knowledge to exist. On a fresh adoption, `graph build` materializes the available source relations and marks each absent enrichment capability unavailable or partial without creating its store. Existing malformed, unreadable, incompatible, or digest-mismatched enrichment state remains a typed failure or excluded capability according to its trust boundary.
+
 `graph query` filters the stored snapshot through typed selectors:
 
 ```bash
@@ -123,6 +125,7 @@ The active snapshot materializes only completion events retained by the finite h
     "capabilities": {
       "source_inventory": "complete",
       "file_inventory": "complete",
+      "metadata": "complete",
       "imports": "complete",
       "symbols": "partial",
       "calls": "partial",

@@ -40,6 +40,16 @@ FORBIDDEN_ANNOTATION_FIELDS = {
     "last_reviewed",
     "version",
 }
+
+
+def without_absent_repometa(problems: list[Problem], *, repo: Path) -> tuple[list[Problem], bool]:
+    store = _meta_dir(repo)
+    if store.exists() or store.is_symlink():
+        return problems, False
+    remaining = [problem for problem in problems if problem.code != "missing_repometa_policy"]
+    return remaining, len(remaining) != len(problems)
+
+
 DEFAULT_POLICY: dict[str, Any] = {
     "schema_version": 1,
     "indexing": {"exclude": DEFAULT_INDEXING_EXCLUDES},
@@ -264,9 +274,35 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _ensure_store(repo: Path) -> None:
-    _annotations_dir(repo).mkdir(parents=True, exist_ok=True)
+def _reject_repometa_symlink_chain(
+    repo: Path,
+    path: Path,
+    *,
+    root: Path | None = None,
+    problems: list[Problem] | None = None,
+) -> bool:
+    current = repo
+    for part in path.relative_to(repo).parts:
+        current /= part
+        if not current.is_symlink():
+            continue
+        rel = current.relative_to(repo).as_posix()
+        location = _workspace_path(root, repo, rel) if root is not None else f"repos/{rel}"
+        message = f"{location} must not be a symlink"
+        if problems is None:
+            raise RepoctlError(message, code="repometa_symlink_not_allowed", path=location)
+        if not any(problem.code == "repometa_symlink_not_allowed" and problem.path == location for problem in problems):
+            problems.append(Problem("error", "repometa_symlink_not_allowed", message, location))
+        return True
+    return False
+
+
+def _ensure_store(repo: Path, *, root: Path | None = None) -> None:
+    annotations = _annotations_dir(repo)
+    _reject_repometa_symlink_chain(repo, annotations, root=root)
+    annotations.mkdir(parents=True, exist_ok=True)
     policy = _policy_path(repo)
+    _reject_repometa_symlink_chain(repo, policy, root=root)
     if not policy.exists():
         atomic_write(policy, _json_dumps(DEFAULT_POLICY))
 
@@ -277,8 +313,9 @@ def ensure_store(root: Path, *, target: RepoTarget | None = None) -> dict[str, A
         raise RepoctlError("product repository directory is required before preparing .repometa")
     prefix = _repo_prefix(root, repo)
     policy = _policy_path(repo)
+    _reject_repometa_symlink_chain(repo, policy, root=root)
     existed = policy.is_file()
-    _ensure_store(repo)
+    _ensure_store(repo, root=root)
     return {
         "status": "existing" if existed else "initialized",
         "created": [] if existed else [f"{prefix}/.repometa/policy.json"],
@@ -292,13 +329,17 @@ def init_store(root: Path, *, target: RepoTarget | None = None) -> dict[str, Any
         raise RepoctlError("product repository directory is required before initializing .repometa")
     prefix = _repo_prefix(root, repo)
     created: list[str] = []
-    _annotations_dir(repo).mkdir(parents=True, exist_ok=True)
+    annotations = _annotations_dir(repo)
+    _reject_repometa_symlink_chain(repo, annotations, root=root)
+    annotations.mkdir(parents=True, exist_ok=True)
     policy = _policy_path(repo)
+    _reject_repometa_symlink_chain(repo, policy, root=root)
     if not policy.exists():
         atomic_write(policy, _json_dumps(DEFAULT_POLICY))
         created.append(f"{prefix}/.repometa/policy.json")
     for shard in SHARDS:
         path = _shard_path(repo, shard)
+        _reject_repometa_symlink_chain(repo, path, root=root)
         if not path.exists():
             atomic_write(path, _json_dumps(_empty_shard()))
             created.append(f"{prefix}/.repometa/annotations/{shard}.json")
@@ -308,6 +349,8 @@ def init_store(root: Path, *, target: RepoTarget | None = None) -> dict[str, Any
 def _load_policy(repo: Path, problems: list[Problem] | None = None, *, root: Path | None = None) -> dict[str, Any]:
     path = _policy_path(repo)
     location = _workspace_path(root, repo, ".repometa/policy.json") if root is not None else "repos/.repometa/policy.json"
+    if _reject_repometa_symlink_chain(repo, path, root=root, problems=problems):
+        return {}
     if not path.exists():
         if problems is not None:
             problems.append(Problem("error", "missing_repometa_policy", f"{location} is required", location))
@@ -326,8 +369,10 @@ def _empty_shard() -> dict[str, Any]:
     return {"schema_version": 1, "annotations": {}, "exclusions": {}}
 
 
-def _load_shard(repo: Path, shard: str, *, create: bool = False) -> dict[str, Any]:
+def _load_shard(repo: Path, shard: str, *, create: bool = False, root: Path | None = None, problems: list[Problem] | None = None) -> dict[str, Any]:
     path = _shard_path(repo, shard)
+    if _reject_repometa_symlink_chain(repo, path, root=root, problems=problems):
+        return _empty_shard()
     if not path.exists():
         if create:
             return _empty_shard()
@@ -343,20 +388,30 @@ def _load_shard(repo: Path, shard: str, *, create: bool = False) -> dict[str, An
     return data
 
 
-def _write_shard(repo: Path, shard: str, data: dict[str, Any]) -> None:
+def _write_shard(repo: Path, shard: str, data: dict[str, Any], *, root: Path | None = None) -> None:
     data = {
         "schema_version": 1,
         "annotations": dict(sorted((data.get("annotations") or {}).items())),
         "exclusions": dict(sorted((data.get("exclusions") or {}).items())),
     }
-    atomic_write(_shard_path(repo, shard), _json_dumps(data))
+    path = _shard_path(repo, shard)
+    _reject_repometa_symlink_chain(repo, path, root=root)
+    atomic_write(path, _json_dumps(data))
 
 
-def _all_shard_paths(repo: Path) -> list[Path]:
+def _all_shard_paths(repo: Path, problems: list[Problem] | None = None, *, root: Path | None = None) -> list[Path]:
     directory = _annotations_dir(repo)
+    if _reject_repometa_symlink_chain(repo, directory, root=root, problems=problems):
+        return []
     if not directory.exists():
         return []
-    return sorted(path for path in directory.glob("*.json") if path.is_file())
+    paths: list[Path] = []
+    for path in sorted(directory.glob("*.json")):
+        if _reject_repometa_symlink_chain(repo, path, root=root, problems=problems):
+            continue
+        if path.is_file():
+            paths.append(path)
+    return paths
 
 
 def _load_all_annotations(repo: Path, problems: list[Problem] | None = None, *, root: Path | None = None) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[str]], dict[str, list[str]]]:
@@ -364,7 +419,7 @@ def _load_all_annotations(repo: Path, problems: list[Problem] | None = None, *, 
     exclusions: dict[str, dict[str, Any]] = {}
     annotation_shards: dict[str, list[str]] = {}
     exclusion_shards: dict[str, list[str]] = {}
-    for path in _all_shard_paths(repo):
+    for path in _all_shard_paths(repo, problems, root=root):
         shard = path.stem
         shard_location = _workspace_path(root, repo, f".repometa/annotations/{path.name}") if root is not None else f"repos/.repometa/annotations/{path.name}"
         if shard not in SHARDS:
@@ -373,7 +428,7 @@ def _load_all_annotations(repo: Path, problems: list[Problem] | None = None, *, 
                 continue
             raise RepoctlError(f"invalid annotation shard: {path.name}")
         try:
-            data = _load_shard(repo, shard)
+            data = _load_shard(repo, shard, root=root, problems=problems)
         except RepoctlError as exc:
             if problems is not None:
                 problems.append(Problem("error", "invalid_shard_json", str(exc), shard_location))
@@ -1003,7 +1058,7 @@ def show_annotation(root: Path, path: str, *, target: RepoTarget | None = None) 
     repo = _repo(root, target)
     rel = normalize_repo_path(path, target=target)
     shard = shard_for_path(rel)
-    data = _load_shard(repo, shard)
+    data = _load_shard(repo, shard, root=root)
     annotation = (data.get("annotations") or {}).get(rel)
     exclusion = (data.get("exclusions") or {}).get(rel)
     source_digest = str((annotation or {}).get("source_content_digest") or "")
@@ -1216,11 +1271,11 @@ def set_annotation(root: Path, path: str, *, role: str, purpose: str, topics: li
     errors = [problem for problem in problems if problem.severity == "error"]
     if errors:
         raise RepoctlError(errors[0].message)
-    _ensure_store(repo)
-    data = _load_shard(repo, shard, create=True)
+    _ensure_store(repo, root=root)
+    data = _load_shard(repo, shard, create=True, root=root)
     data.setdefault("annotations", {})[rel] = annotation
     data.setdefault("exclusions", {}).pop(rel, None)
-    _write_shard(repo, shard, data)
+    _write_shard(repo, shard, data, root=root)
     return {"path": rel, "workspace_path": _workspace_path(root, repo, rel), "repository": _repository_meta(root, repo, target), "shard": shard, "annotation": annotation}
 
 
@@ -1228,12 +1283,12 @@ def remove_annotation(root: Path, path: str, *, target: RepoTarget | None = None
     repo = _repo(root, target)
     rel = normalize_repo_path(path, target=target)
     shard = shard_for_path(rel)
-    data = _load_shard(repo, shard)
+    data = _load_shard(repo, shard, root=root)
     removed = data.setdefault("annotations", {}).pop(rel, None)
     removed_exclusion = data.setdefault("exclusions", {}).pop(rel, None)
     if removed is None and removed_exclusion is None:
         raise RepoctlError("annotation or exclusion not found")
-    _write_shard(repo, shard, data)
+    _write_shard(repo, shard, data, root=root)
     return {"path": rel, "workspace_path": _workspace_path(root, repo, rel), "repository": _repository_meta(root, repo, target), "shard": shard, "removed_annotation": removed is not None, "removed_exclusion": removed_exclusion is not None}
 
 
@@ -1243,21 +1298,21 @@ def move_annotation(root: Path, old_path: str, new_path: str, *, target: RepoTar
     new = normalize_repo_path(new_path, target=target)
     old_shard = shard_for_path(old)
     new_shard = shard_for_path(new)
-    old_data = _load_shard(repo, old_shard)
+    old_data = _load_shard(repo, old_shard, root=root)
     annotation = old_data.setdefault("annotations", {}).get(old)
     if annotation is None:
         raise RepoctlError("old annotation not found")
-    new_data = old_data if old_shard == new_shard else _load_shard(repo, new_shard, create=True)
+    new_data = old_data if old_shard == new_shard else _load_shard(repo, new_shard, create=True, root=root)
     if new in new_data.setdefault("annotations", {}):
         raise RepoctlError("new annotation already exists")
     new_data["annotations"][new] = annotation
-    _write_shard(repo, new_shard, new_data)
+    _write_shard(repo, new_shard, new_data, root=root)
     if old_shard == new_shard:
         new_data["annotations"].pop(old, None)
-        _write_shard(repo, new_shard, new_data)
+        _write_shard(repo, new_shard, new_data, root=root)
     else:
         old_data["annotations"].pop(old, None)
-        _write_shard(repo, old_shard, old_data)
+        _write_shard(repo, old_shard, old_data, root=root)
     return {"old_path": old, "new_path": new, "old_workspace_path": _workspace_path(root, repo, old), "new_workspace_path": _workspace_path(root, repo, new), "repository": _repository_meta(root, repo, target), "old_shard": old_shard, "new_shard": new_shard}
 
 
@@ -1268,10 +1323,10 @@ def exclude_path(root: Path, path: str, *, reason: str, excluded_by: str = "agen
     rel = normalize_repo_path(path, target=target)
     if not (repo / rel).is_file():
         raise RepoctlError(f"repo path does not exist: {rel}")
-    _ensure_store(repo)
+    _ensure_store(repo, root=root)
     shard = shard_for_path(rel)
-    data = _load_shard(repo, shard, create=True)
+    data = _load_shard(repo, shard, create=True, root=root)
     data.setdefault("exclusions", {})[rel] = {"reason": reason.strip(), "excluded_by": excluded_by}
     data.setdefault("annotations", {}).pop(rel, None)
-    _write_shard(repo, shard, data)
+    _write_shard(repo, shard, data, root=root)
     return {"path": rel, "workspace_path": _workspace_path(root, repo, rel), "repository": _repository_meta(root, repo, target), "shard": shard, "exclusion": data["exclusions"][rel]}

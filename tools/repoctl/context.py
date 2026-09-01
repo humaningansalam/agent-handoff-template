@@ -403,6 +403,7 @@ def build_context_bundle(
             repository_path=target.display_path,
             limit=24,
         )
+    problems.extend(problem for problem in freshness_problems if problem.severity == "error")
     explicit_history_candidates: list[ContextCandidate] = []
     completeness["graph_freshness"] = freshness
     if _task_history_stale(freshness) and isinstance(completeness.get("graph_completeness"), dict):
@@ -432,16 +433,7 @@ def build_context_bundle(
         )
         knowledge_queried = True
         knowledge_results = knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else []
-        problems.extend(
-            Problem(
-                "warning",
-                "context_linked_knowledge_unavailable",
-                f"{problem.message}; current source and Graph results remain available",
-                problem.path,
-                problem.code,
-            )
-            for problem in knowledge_problems
-        )
+        problems.extend(knowledge_problems)
         problems.extend(knowledge_warnings)
         knowledge_path_resolutions = _resolve_reviewed_knowledge_paths(
             target=target,
@@ -1368,7 +1360,7 @@ def context_graph_freshness_warnings(
                 "message": "Task receipt or artifact evidence changed after Graph materialization; related history is omitted until Graph is rebuilt",
             }
         )
-    if freshness_problems:
+    if any(problem.severity == "warning" for problem in freshness_problems or []):
         warnings.append(
             {
                 "code": "context_graph_freshness_unavailable",

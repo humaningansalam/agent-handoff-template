@@ -1912,9 +1912,14 @@ def query_knowledge_records(
 ) -> tuple[dict[str, Any], list[Problem], list[Problem]]:
     if not include_stale and not include_superseded and not include_deprecated:
         projection, projection_problems = load_knowledge_projection(root, repo_id=repo_id)
-        if projection_problems and not _record_dir(root).exists() and all(
+        projection_missing = bool(projection_problems) and all(
             problem.code == "knowledge_projection_unavailable" and problem.cause_code == "missing"
             for problem in projection_problems
+        )
+        if (
+            projection_missing
+            and next(_record_dir(root).glob("K-*.json"), None) is None
+            and next(_event_dir(root).glob("E-*.json"), None) is None
         ):
             return _empty_public_knowledge_query(repo_id=repo_id, query=query), [], []
         if projection_problems:

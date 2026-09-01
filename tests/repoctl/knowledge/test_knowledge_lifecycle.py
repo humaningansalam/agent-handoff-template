@@ -650,6 +650,11 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     assert event["reason"] == "Candidate is too broad for reviewed knowledge."
     assert Path(tmp_path / reject_payload["data"]["event_path"]).is_file()
 
+    assert main(["knowledge", "query", "broad reviewed knowledge", "--repo-id", "main", "--json"]) == 1
+    query_payload = json.loads(capsys.readouterr().out)
+    assert query_payload["problems"][0]["code"] == "knowledge_projection_unavailable"
+    assert main(["knowledge", "rebuild", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
     assert main(["knowledge", "query", "broad reviewed knowledge", "--repo-id", "main", "--json"]) == 0
     query_payload = json.loads(capsys.readouterr().out)
     assert query_payload["data"]["available_record_count"] == 0

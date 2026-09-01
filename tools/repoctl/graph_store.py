@@ -57,7 +57,7 @@ from .git import repo_file_state_records
 from .io import atomic_write
 from .language_profiles import language_for_path
 from .knowledge_projection import knowledge_projection_path, load_knowledge_projection
-from .meta import meta_inventory
+from .meta import meta_inventory, without_absent_repometa
 from .repositories import RepoTarget
 from .tasks import Problem, collect_completion_receipt_collection
 
@@ -459,6 +459,7 @@ def collect_graph_inputs(
 ]:
     previous_manifest = previous_manifest or {}
     inventory, inventory_problems, inventory_meta = meta_inventory(root, changed=False, target=target)
+    inventory_problems, _metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
     previous_file_records = previous_manifest.get("file_records") if isinstance(previous_manifest.get("file_records"), dict) else {}
     file_records, git_state = repo_file_state_records(
         root,
@@ -1163,6 +1164,7 @@ def graph_materialization_freshness(
             )
             return {"status": provider_status, "changed_paths": []}, provider_problems
     inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
+    inventory_problems, metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
     previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}
     current_records, git_state = repo_file_state_records(
         root,
@@ -1171,6 +1173,8 @@ def graph_materialization_freshness(
         previous={str(path): value for path, value in previous_records.items() if isinstance(value, dict)},
     )
     problems = list(inventory_problems)
+    if metadata_absent:
+        problems.append(Problem("warning", "graph_metadata_unavailable", "repository metadata is not initialized; Graph source relations remain available without metadata enrichment", f"{target.display_path}/.repometa/policy.json", "missing_repometa_policy"))
     if not git_state.available:
         problems.append(Problem("error", "graph_git_unavailable", git_state.reason, target.display_path))
     current_fingerprints = {

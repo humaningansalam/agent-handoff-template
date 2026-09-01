@@ -358,6 +358,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         "task_handoff_origin_unknown" in _string_list(resume_handoff.get("reason_codes"))
     )
     task_path = str(_mapping_at(data, "task").get("path") or f"docs/tasks/{task_id}.md")
+    context_resume_requested = False
 
     def add(
         label: str,
@@ -438,6 +439,10 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             source=source,
         )
 
+    def request_context_resume() -> None:
+        nonlocal context_resume_requested
+        context_resume_requested = True
+
     def add_knowledge_projection_recovery(*, source: str) -> None:
         repo_id = selected_repo_id()
         add(
@@ -446,10 +451,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             kind=NextActionKind.KNOWLEDGE_REBUILD,
             source=source,
         )
-        add_context_resume(
-            label="Rerun the same Context query after Knowledge recovery",
-            source="data.bundle.query",
-        )
+        request_context_resume()
 
     def add_context_graph_recovery(kind: NextActionKind, *, source: str) -> None:
         _bundle, repo_id = context_bundle_and_repo()
@@ -466,10 +468,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             source=source,
         )
 
-        add_context_resume(
-            label="Rerun the same Context query after Graph recovery",
-            source="data.bundle.query",
-        )
+        request_context_resume()
 
     if generated_resume_handoff:
         add(
@@ -734,7 +733,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 if cause_code == "graph_snapshot_missing"
                 else NextActionKind.GRAPH_REBUILD
             )
-            add_context_graph_recovery(recovery_kind, source="problems[].cause_code")
+            add_context_graph_recovery(recovery_kind, source="problems_or_warnings[].cause_code")
         elif code == "graph_snapshot_missing":
             repo_id = selected_repo_id()
             add(
@@ -749,10 +748,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 source="problems[].code",
             )
         elif code == "context_graph_seed_identity_unavailable":
-            add_context_resume(
-                label="Rerun the same Context query to recover the typed seed identity",
-                source="data.bundle.completeness.graph_anchor.identity_coverage",
-            )
+            request_context_resume()
             bundle, repo_id = context_bundle_and_repo()
             identity_coverage = _mapping_at(bundle, "completeness", "graph_anchor", "identity_coverage")
             selectors = identity_coverage.get("recovery_selectors") if isinstance(identity_coverage.get("recovery_selectors"), list) else []
@@ -793,11 +789,9 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             "evidence_index_input_mismatch",
             "evidence_index_snapshot_mismatch",
         }:
-            repository = data.get("repository") if isinstance(data, dict) and isinstance(data.get("repository"), dict) else {}
-            repo_id = str(repository.get("id") or "<id>")
-            add(
-                "Rebuild the materialized Graph and evidence index",
-                command=f"./scripts/repoctl graph build --repo-id {repo_id} --rebuild --json",
+            add_context_graph_recovery(
+                NextActionKind.GRAPH_REBUILD,
+                source="problems_or_warnings[].code",
             )
         elif code == "knowledge_candidate_receipt_invalid":
             add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
@@ -819,6 +813,11 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         add_context_graph_recovery(
             NextActionKind.GRAPH_REFRESH,
             source="data.bundle.completeness.graph_freshness.status",
+        )
+    if context_resume_requested:
+        add_context_resume(
+            label="Rerun the same Context query after prerequisites are ready",
+            source="data.bundle.query",
         )
     return actions
 
@@ -4829,25 +4828,28 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         return 1 if _has_errors(build_problems) else 0
 
     freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
+    freshness_errors = [problem for problem in freshness_problems if problem.severity == "error"]
     stale_paths = graph_stale_paths(freshness)
-
-    result, query_problems = query_graph(
-        snapshot,
-        root=root,
-        file=args.file or "",
-        topic=args.topic or "",
-        import_ref=args.import_ref or "",
-        symbol=args.symbol or "",
-        callers_of=args.callers_of or "",
-        callees_of=args.callees_of or "",
-        impact_file=args.impact_file or "",
-        impact_symbol=args.impact_symbol or "",
-        task=args.task or "",
-        artifact=args.artifact or "",
-        in_file=args.in_file or "",
-        depth=args.depth,
-        stale_paths=stale_paths,
-    )
+    if freshness_errors:
+        result, query_problems = None, freshness_errors
+    else:
+        result, query_problems = query_graph(
+            snapshot,
+            root=root,
+            file=args.file or "",
+            topic=args.topic or "",
+            import_ref=args.import_ref or "",
+            symbol=args.symbol or "",
+            callers_of=args.callers_of or "",
+            callees_of=args.callees_of or "",
+            impact_file=args.impact_file or "",
+            impact_symbol=args.impact_symbol or "",
+            task=args.task or "",
+            artifact=args.artifact or "",
+            in_file=args.in_file or "",
+            depth=args.depth,
+            stale_paths=stale_paths,
+        )
     query_status = str((result or {}).get("query_status") or "unavailable")
     outcome_ok = query_status in {"found", "not_found"}
     compact_result = _compact_graph_query_result(result, freshness=freshness) if result is not None else None
@@ -4891,7 +4893,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
             *[problem.to_dict() for problem in build_problems if problem.severity == "warning"],
-            *[problem.to_dict() for problem in freshness_problems],
+            *[problem.to_dict() for problem in freshness_problems if problem.severity == "warning"],
             *(
                 result_warnings
                 if args.full
@@ -5546,16 +5548,23 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     }
     if args.full or args.explain:
         data.update(meta)
+    optional_absence_warnings = [
+        problem
+        for problem in problems
+        if problem.severity == "warning"
+        and problem.cause_code in {"graph_snapshot_missing", "missing_repometa_policy"}
+    ]
     payload = {
         "ok": bundle is not None and not _has_errors(problems),
         "command": "context query",
         "data": data,
-        "problems": [problem.to_dict() for problem in problems],
+        "problems": [problem.to_dict() for problem in problems if problem not in optional_absence_warnings],
         "warnings": [
             {
                 "code": "context_not_authoritative",
                 "message": "context query returns a non-authoritative evidence bundle; product/task state is unchanged and only a regenerable result receipt is stored",
-            }
+            },
+            *[problem.to_dict() for problem in optional_absence_warnings],
         ],
     }
     output_format = "json" if args.json else args.format

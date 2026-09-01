@@ -492,6 +492,7 @@ def build_task_context_pack(root: Path, *, target: RepoTarget, task_id: str, bud
         snapshot=snapshot,
         bundle=bundle,
     )
+    problems.extend(problem for problem in graph_freshness_problems if problem.severity == "error")
     task_graph_evidence = (
         _direct_task_graph_evidence(
             snapshot,
