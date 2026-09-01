@@ -29,6 +29,8 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Append log: `./scripts/repoctl task log append T-... "message" --json`
 - Record an explicitly rejected Discovery file: `./scripts/repoctl task discovery add T-... --reviewed repos/decoy --excluded repos/decoy --json`
 - Bind a structured check outcome to a recorded subject: `./scripts/repoctl task verification add T-... --status passed --evidence-ref verification.txt --subject repos/path --json`
+- Block with transition intent: `./scripts/repoctl task block T-... --reason "waiting for upstream API" --json`
+- Cancel with transition intent: `./scripts/repoctl task cancel T-... --reason "superseded by T-new" --json`
 - Finish task from completed `## Verification`: `./scripts/repoctl task finish T-... --json`
 - Finish with an external verification artifact: `./scripts/repoctl task finish T-... --verification-file /tmp/T-...-verification.md --json`
 - Finish and create a reusable Knowledge review candidate atomically: `./scripts/repoctl task finish T-... --knowledge-kind invariant --knowledge-claim "<reusable invariant>" --knowledge-applies-to src/owner.py --json`

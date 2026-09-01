@@ -58,6 +58,8 @@ Task Handoff freshness and repository lifecycle health are separate machine cont
 
 Bare `task resume` reports `no_live | single_live | ambiguous`. `task resume <TASK_ID>` is the read-only selection form for one returned live candidate; it does not persist a current-task pointer or select terminal/archived history.
 
+`task block` and `task cancel` require exactly one of `--reason` or `--reason-file`. Their `data.reason` is the whitespace-normalized transition intent and `data.reason_source` is `argument` or `file`. Neither command changes `## Verification`; both append one UTC-stamped Execution Log entry. `task cancel` reports complete `data.cancel_gate.residue_paths` and `baseline_conflicts` arrays, including when dirty cancellation is rejected.
+
 ## Problem object
 
 ```json

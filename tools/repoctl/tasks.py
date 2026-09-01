@@ -298,8 +298,8 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "task_started_dirty": "task started with dirty repo state recorded.",
         "task_started_git_unavailable": "task started; repo dirty check unavailable ({reason}).",
         "task_finished": "task finished and verified.",
-        "task_canceled": "task canceled with verification evidence.",
-        "task_blocked": "task blocked with evidence.",
+        "task_canceled": "task canceled: {reason}",
+        "task_blocked": "task blocked: {reason}",
         "repo_head_at_start": "repo head at start",
         "closure_done": "Implementation and verification completed.",
         "closure_canceled": "Task canceled with recorded evidence.",
@@ -373,8 +373,8 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "task_started_dirty": "작업을 시작했고, 더러운 repo 상태를 기록함.",
         "task_started_git_unavailable": "작업을 시작했으나 repo dirty 확인을 사용할 수 없음({reason}).",
         "task_finished": "작업을 검증하고 완료함.",
-        "task_canceled": "검증 증거와 함께 작업을 취소함.",
-        "task_blocked": "증거와 함께 작업을 blocked로 표시함.",
+        "task_canceled": "작업을 취소함: {reason}",
+        "task_blocked": "작업을 blocked로 표시함: {reason}",
         "repo_head_at_start": "repo head at start",
         "closure_done": "구현과 검증을 완료함.",
         "closure_canceled": "기록된 증거와 함께 작업을 취소함.",
@@ -5249,7 +5249,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     }
 
 
-def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) -> dict[str, Any]:
+def cancel_task(root: Path, task_id: str, *, reason: str, residue_paths: list[str], baseline_conflicts: list[str]) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
     if task.status not in LIVE:
@@ -5258,8 +5258,6 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) ->
     timestamp_problem = _execution_log_timestamp_problem(task, now=finish_timestamp)
     if timestamp_problem:
         raise RepoctlError(f"task cancel would create non-monotonic Execution Log timestamps; {timestamp_problem}")
-    if not verification.text.strip():
-        raise RepoctlError("verification file must contain the cancellation reason and any verification evidence")
     all_tasks = load_tasks(root, include_archived=False)
     children = children_by_parent(all_tasks)
     live_children = [child for child in children.get(task.id, []) if child.status in LIVE]
@@ -5267,9 +5265,12 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) ->
         raise RepoctlError("cannot cancel parent task while live children remain")
 
     text = task.path.read_text(encoding="utf-8")
-    verification_body, verification_metadata = _verification_body(verification)
-    text = replace_section(text, "Verification", verification_body)
-    text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_canceled']}")
+    transition_entry = copy["task_canceled"].format(reason=reason) + "".join(
+        f"; {key}={json.dumps(paths, ensure_ascii=False)}"
+        for key, paths in (("residue_paths", residue_paths), ("baseline_conflicts", baseline_conflicts))
+        if paths
+    )
+    text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {transition_entry}")
     text = replace_frontmatter_line(text, "status", "canceled")
 
     is_child = bool(task.parent)
@@ -5304,28 +5305,24 @@ def cancel_task(root: Path, task_id: str, *, verification: VerificationInput) ->
         "archived": archived,
         "moves": moves,
         "archive_texts": archive_texts,
-        "truncated": bool(verification_metadata["truncated"]),
         "receipt_writes": receipt_writes,
         "archive_writes": archive_writes,
     }
 
 
-def block_task(root: Path, task_id: str, *, verification: VerificationInput) -> dict[str, Any]:
+def block_task(root: Path, task_id: str, *, reason: str) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
+    if task.status == "blocked":
+        raise RepoctlError("task block requires status todo or doing", code="task_already_blocked", path=task.rel_path)
     if task.status not in LIVE:
         raise RepoctlError("task block requires a live status")
     block_timestamp = utc_stamp()
     timestamp_problem = _execution_log_timestamp_problem(task, now=block_timestamp)
     if timestamp_problem:
         raise RepoctlError(f"task block would create non-monotonic Execution Log timestamps; {timestamp_problem}")
-    if not verification.text.strip():
-        raise RepoctlError("verification file must contain the blocker and current evidence")
-
     text = task.path.read_text(encoding="utf-8")
-    verification_body, verification_metadata = _verification_body(verification)
-    text = replace_section(text, "Verification", verification_body)
-    text = append_section_entry(text, "Execution Log", f"- {block_timestamp}: {copy['task_blocked']}")
+    text = append_section_entry(text, "Execution Log", f"- {block_timestamp}: {copy['task_blocked'].format(reason=reason)}")
     text = replace_frontmatter_line(text, "status", "blocked")
     return {
         "task": task,
@@ -5336,7 +5333,6 @@ def block_task(root: Path, task_id: str, *, verification: VerificationInput) -> 
         "keep_board": True,
         "moves": [],
         "archive_texts": {},
-        "truncated": bool(verification_metadata["truncated"]),
     }
 
 

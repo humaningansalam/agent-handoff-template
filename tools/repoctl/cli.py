@@ -40,7 +40,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inven
 from .markdown import find_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, context_result_receipt_projection, graph_result_selections, write_result_receipt
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskHandoffProvenance, TaskResumeSelectionStatus, VerificationInput, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_handoff_origin_path, task_handoff_provenance, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskHandoffProvenance, TaskResumeSelectionStatus, VerificationInput, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_handoff_origin_path, task_handoff_provenance, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -628,7 +628,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Create a new task with a fresh baseline", command="./scripts/repoctl task create --slug <slug> --area repo --repo-id main <title> --start --json")
         elif code == "repo_changes_on_cancel":
             add("Revert or finish repos/ changes before canceling", command="git -C repos status --short")
-            add("Explicitly cancel with dirty repo evidence", command=f"./scripts/repoctl task cancel {task_id} --verification-file /tmp/{task_id}-cancel.md --allow-dirty-cancel --json")
         elif code == "annotation_required":
             repository = data.get("repository") if isinstance(data, dict) else None
             repo_path = str(repository.get("path") or "") if isinstance(repository, dict) else ""
@@ -651,6 +650,8 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Open Board task registry", path="docs/BOARD.md")
         elif code == "task_not_live":
             add("Inspect the terminal or archived task", command=f"./scripts/repoctl task show {task_id} --summary --json")
+        elif code == "task_already_blocked":
+            add("Inspect the existing blocker before resuming or canceling", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code in {"task_handoff_unbound", "task_handoff_stale", "task_handoff_origin_unknown", "task_resume_binding_invalid"}:
             if not generated_resume_handoff:
                 add(
@@ -3718,7 +3719,7 @@ def _task_verification_input(root: Path, task_id: str) -> VerificationInput:
     )
 
 
-def _verification_input_arg(root: Path, task_id: str, *, verification_file: str | None, command: str) -> VerificationInput:
+def _verification_input_arg(root: Path, task_id: str, *, verification_file: str | None) -> VerificationInput:
     if verification_file:
         path = Path(verification_file)
         validate_verification_file(root, path)
@@ -3737,10 +3738,25 @@ def _verification_input_arg(root: Path, task_id: str, *, verification_file: str 
         return _task_verification_input(root, task_id)
     except RepoctlError:
         raise RepoctlError(
-            f"task {command} requires --verification-file or a completed ## Verification section",
+            "task finish requires --verification-file or a completed ## Verification section",
             code="missing_verification_file",
             path=resolve_task(root, task_id).rel_path,
         )
+
+
+def _transition_reason_arg(args: argparse.Namespace) -> tuple[str, str]:
+    source = "file" if args.reason_file else "argument"
+    try:
+        text = args.reason or "" if source == "argument" else args.reason_file.read()
+    except UnicodeDecodeError as exc:
+        raise RepoctlError("transition reason file must be UTF-8", code="transition_reason_file_unreadable", path=args.reason_file.name) from exc
+    finally:
+        if args.reason_file:
+            args.reason_file.close()
+    normalized = " ".join(text.split())
+    if not normalized:
+        raise RepoctlError("transition reason must not be empty", code="empty_transition_reason")
+    return normalized, source
 
 
 def _repo_target_for_task_command(
@@ -4053,34 +4069,44 @@ def _finish_summary(meta_gate: dict[str, Any], delta: dict[str, Any]) -> dict[st
 def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     delta = repo_changes_since_task_start(root, task_id)
-    if delta.get("baseline_conflicts") and not allow_dirty_cancel:
-        conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:5])
-        suffix = " ..." if len(delta["baseline_conflicts"]) > 5 else ""
+    conflicts = sorted(str(path) for path in delta.get("baseline_conflicts") or [])
+    residue_paths = _entry_mutation_paths(list(delta.get("changes") or []))
+    summary = {
+        "status": "allowed_dirty" if allow_dirty_cancel and (conflicts or residue_paths) else "passed",
+        "baseline_available": bool(delta.get("baseline_available")),
+        "preexisting_dirty_files": int(delta.get("preexisting_count") or 0),
+        "task_new_changes": len(delta.get("changes") or []),
+        "residue_paths": residue_paths,
+        "baseline_conflicts": conflicts,
+    }
+
+    def reject(message: str, *, code: str, path: str, input_name: str, paths: list[str]) -> None:
+        error = RepoctlError(message, code=code, path=path)
+        error.data = {"cancel_gate": {**summary, "status": "blocked"}, "action_inputs": {input_name: paths}}
+        raise error
+
+    if conflicts and not allow_dirty_cancel:
         workspace_task = not _repo_scoped_frontmatter(task)
-        raise RepoctlError(
+        reject(
             (
-                f"workspace task changed product paths that were dirty at task start: {conflicts}{suffix}; restore them, move ownership to a repo-scoped child task, or cancel with explicit dirty-state evidence"
+                f"workspace task changed product paths that were dirty at task start: {', '.join(conflicts)}; restore them, move ownership to a repo-scoped child task, or cancel with explicit dirty-state evidence"
                 if workspace_task
-                else f"task-start dirty paths no longer match their baseline: {conflicts}{suffix}; resolve ownership or cancel with explicit dirty-state evidence"
+                else f"task-start dirty paths no longer match their baseline: {', '.join(conflicts)}; resolve ownership or cancel with explicit dirty-state evidence"
             ),
             code="workspace_baseline_conflict" if workspace_task else "baseline_conflict",
-            path=str(delta["baseline_conflicts"][0]),
+            path=conflicts[0],
+            input_name="baseline_conflicts",
+            paths=conflicts,
         )
-    if delta["changes"] and not allow_dirty_cancel:
-        changed = ", ".join(entry[1] for entry in delta["changes"][:5])
-        suffix = " ..." if len(delta["changes"]) > 5 else ""
-        raise RepoctlError(
-            f"task cancel would leave repos/ changes outside a finished metadata gate: {changed}{suffix}; revert them, finish the task, or pass --allow-dirty-cancel with explicit cancellation evidence",
+    if residue_paths and not allow_dirty_cancel:
+        reject(
+            f"task cancel would leave repos/ changes outside a finished metadata gate: {', '.join(residue_paths)}; revert them, finish the task, or pass --allow-dirty-cancel with a reason",
             code="repo_changes_on_cancel",
             path=f"docs/tasks/{task_id}.md",
+            input_name="cancel_residue_paths",
+            paths=residue_paths,
         )
-    return {
-        "status": "skipped",
-        "reason": "task_canceled" if allow_dirty_cancel or not delta["changes"] else "repo_changes_on_cancel",
-        "baseline_available": delta["baseline_available"],
-        "preexisting_dirty_files": delta["preexisting_count"],
-        "task_new_changes": len(delta["changes"]),
-    }
+    return summary
 
 
 def _write_task_result(root: Path, result: dict[str, Any]) -> None:
@@ -4241,7 +4267,7 @@ def _task_finish_knowledge_request(root: Path, args: argparse.Namespace) -> dict
 def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task_id = resolve_task(root, args.task_id).id
-    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="finish")
+    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file)
     knowledge_request = _task_finish_knowledge_request(root, args)
     prepared_candidate = None
     finish_structured_coverage: dict[str, Any]
@@ -4353,10 +4379,16 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
 def cmd_task_cancel(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task_id = resolve_task(root, args.task_id).id
-    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="cancel")
+    reason, reason_source = _transition_reason_arg(args)
     with repoctl_lock(root):
         cancel_gate = _cancel_dirty_gate(root, task_id, allow_dirty_cancel=args.allow_dirty_cancel)
-        result = cancel_task(root, task_id, verification=verification)
+        result = cancel_task(
+            root,
+            task_id,
+            reason=reason,
+            residue_paths=cancel_gate["residue_paths"],
+            baseline_conflicts=cancel_gate["baseline_conflicts"],
+        )
         _write_task_result(root, result)
     data = {
         "task_id": task_id,
@@ -4364,7 +4396,8 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
         "old_path": result["old_path"],
         "new_path": result["new_path"],
         "archived": result["archived"],
-        "truncated": result["truncated"],
+        "reason": reason,
+        "reason_source": reason_source,
         "cancel_gate": cancel_gate,
     }
     payload = {
@@ -4386,9 +4419,9 @@ def cmd_task_cancel(args: argparse.Namespace) -> int:
 def cmd_task_block(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task_id = resolve_task(root, args.task_id).id
-    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file, command="block")
+    reason, reason_source = _transition_reason_arg(args)
     with repoctl_lock(root):
-        result = block_task(root, task_id, verification=verification)
+        result = block_task(root, task_id, reason=reason)
         _write_task_result(root, result)
     payload = {
         "ok": True,
@@ -4397,7 +4430,8 @@ def cmd_task_block(args: argparse.Namespace) -> int:
             "task_id": task_id,
             "status": "blocked",
             "path": result["new_path"],
-            "truncated": result["truncated"],
+            "reason": reason,
+            "reason_source": reason_source,
         },
         "problems": [],
         "warnings": [],
@@ -7450,13 +7484,17 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block")
     task_block.add_argument("task_id")
-    task_block.add_argument("--verification-file")
+    task_block_reason = task_block.add_mutually_exclusive_group(required=True)
+    task_block_reason.add_argument("--reason", help="reason for blocking; appended to Execution Log without changing Verification")
+    task_block_reason.add_argument("--reason-file", type=argparse.FileType("r", encoding="utf-8"), help="UTF-8 file containing the blocking reason")
     task_block.add_argument("--json", action="store_true")
     task_block.set_defaults(func=cmd_task_block)
     task_cancel = task_sub.add_parser("cancel")
     task_cancel.add_argument("task_id")
-    task_cancel.add_argument("--verification-file")
-    task_cancel.add_argument("--allow-dirty-cancel", action="store_true", help="archive cancellation even when task-scoped repos/ changes remain, recording them as explicit evidence")
+    task_cancel_reason = task_cancel.add_mutually_exclusive_group(required=True)
+    task_cancel_reason.add_argument("--reason", help="reason for cancellation; appended to Execution Log without changing Verification")
+    task_cancel_reason.add_argument("--reason-file", type=argparse.FileType("r", encoding="utf-8"), help="UTF-8 file containing the cancellation reason")
+    task_cancel.add_argument("--allow-dirty-cancel", action="store_true", help="archive cancellation while preserving complete dirty-path evidence")
     task_cancel.add_argument("--json", action="store_true")
     task_cancel.set_defaults(func=cmd_task_cancel)
 

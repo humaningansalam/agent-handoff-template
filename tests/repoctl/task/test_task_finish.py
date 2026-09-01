@@ -340,7 +340,6 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
     (repo / "tracked.txt").write_text("committed\n", encoding="utf-8")
     commit_all(repo)
     (repo / "tracked.txt").write_text("dirty before task start\n", encoding="utf-8")
-    verification = write_verification(tmp_path, "explicit cancel evidence\n")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
@@ -358,7 +357,7 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
     assert finish["problems"][0]["code"] == "workspace_baseline_conflict"
     assert not any("task baseline resolve" in action.get("command", "") for action in finish["next_actions"])
 
-    assert main(["task", "cancel", "T-20260609184046Z", "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "cancel", "T-20260609184046Z", "--reason", "baseline ownership cannot be proven", "--json"]) == 2
     canceled = json.loads(capsys.readouterr().out)
     assert canceled["problems"][0]["code"] == "workspace_baseline_conflict"
 
@@ -367,12 +366,16 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
             "task",
             "cancel",
             "T-20260609184046Z",
-            "--verification-file",
-            str(verification),
+            "--reason",
+            "baseline ownership cannot be proven",
             "--allow-dirty-cancel",
             "--json",
         ]
     ) == 0
+    cancel = json.loads(capsys.readouterr().out)
+    assert cancel["data"]["cancel_gate"]["baseline_conflicts"] == ["repos/tracked.txt"]
+    archived = (tmp_path / cancel["data"]["new_path"]).read_text(encoding="utf-8")
+    assert 'baseline_conflicts=["repos/tracked.txt"]' in archived
 
 
 def test_task_doctor_and_finish_share_baseline_conflict_preflight(tmp_path: Path, monkeypatch, capsys) -> None:

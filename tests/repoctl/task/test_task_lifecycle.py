@@ -3160,8 +3160,6 @@ def test_task_block_resume_preserves_initial_head_and_dirty_baseline(tmp_path: P
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     repo = tmp_path / "repos"
     init_committed_product_repo(repo, {"app.py": "old\n"})
-    blocker = tmp_path / "blocker.md"
-    blocker.write_text("waiting for review\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
@@ -3170,7 +3168,7 @@ def test_task_block_resume_preserves_initial_head_and_dirty_baseline(tmp_path: P
     initial_state = state_path.read_bytes()
     (repo / "app.py").write_text("new\n", encoding="utf-8")
 
-    assert main(["task", "block", "T-20260609184046Z", "--verification-file", str(blocker), "--json"]) == 0
+    assert main(["task", "block", "T-20260609184046Z", "--reason", "waiting for review", "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
 
@@ -3887,9 +3885,7 @@ def test_task_handoff_is_readable_but_inactive_until_explicit_bind(tmp_path: Pat
     assert task_path.read_bytes() == before
 
     bound_receipt = receipt.read_bytes()
-    blocker = tmp_path / "blocker.md"
-    blocker.write_text("Waiting for an external decision.\n", encoding="utf-8")
-    assert main(["task", "block", "T-20260609184046Z", "--verification-file", str(blocker), "--json"]) == 0
+    assert main(["task", "block", "T-20260609184046Z", "--reason", "Waiting for an external decision.", "--json"]) == 0
     capsys.readouterr()
     assert receipt.read_bytes() == bound_receipt
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0

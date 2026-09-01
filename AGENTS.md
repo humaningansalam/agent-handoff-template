@@ -110,7 +110,7 @@ Keep the Execution Log short, append-only, and UTC-stamped through `task log app
 
 `task verification add --artifact` is restricted to a currently started root-only task with current root-only start evidence. The artifact must be an existing canonical workspace-relative regular file outside `repos/**`. It records Reviewed evidence only and never creates product Discovery, Chosen scope, or ordinary product-outcome corroboration. Product verification uses `--subject`. Pre-start, unsupported legacy, reclassified product, absolute, missing, traversal, product, non-regular, and symlink-escape artifact inputs fail closed.
 
-Record a blocker in Verification before running `task block`.
+Block or cancel with explicit transition intent: `task block T-... --reason "..."` or `task cancel T-... --reason "..."`. Use `--reason-file` only when that intent already exists in a UTF-8 file. These transitions append the reason to Execution Log and never replace Verification.
 
 ## Finish, Committed Changes, and Archive
 
