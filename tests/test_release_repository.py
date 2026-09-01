@@ -107,6 +107,8 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
         archive.extractall(extract_dir)
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
 
+    assert (package_root / "tests/fixtures/context-benchmark/attribution-cases.json").is_file()
+
     checks = [
         (["./scripts/repoctl", "context", "--help"], "query"),
         (["./scripts/repoctl", "graph", "--help"], "query"),

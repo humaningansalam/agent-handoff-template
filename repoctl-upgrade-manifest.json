@@ -49,6 +49,7 @@
     "tests/fixtures/context-benchmark-multirepo/expected-sources.json",
     "tests/fixtures/context-benchmark-multirepo/mutation-cases.json",
     "tests/fixtures/context-benchmark-multirepo/questions.jsonl",
+    "tests/fixtures/context-benchmark/attribution-cases.json",
     "tests/fixtures/context-benchmark/corpus.json",
     "tests/fixtures/context-benchmark/expected-sources.json",
     "tests/fixtures/context-benchmark/mutation-cases.json",
