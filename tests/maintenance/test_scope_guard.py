@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -124,12 +126,27 @@ class TestMaintenanceScopeGuardContract:
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
 
-    def test_maintenance_scope_guard_blocks_repos_read(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        ("tool_name", "relative_path", "prompt"),
+        [
+            pytest.param("Read", "repos/src/state.md", "/maintenance-workflow scope guard", id="repos-read"),
+            pytest.param("Write", "ops/agent-harness/evidence/plan.json", "/maintenance-workflow improve trace", id="artifact-write"),
+            pytest.param("Write", "tools/maintenance/maintenance_harness.py", "/maintenance-workflow improve trace", id="repo-write"),
+        ],
+    )
+    def test_maintenance_scope_guard_blocks_unapproved_file_operations(
+        self,
+        tmp_path,
+        monkeypatch,
+        tool_name,
+        relative_path,
+        prompt,
+    ):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
         from tools.hooks.maintenance.scope import write_marker
 
         session_id = "maintenance-session"
-        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow scope guard")
+        write_marker(tmp_path, {"session_id": session_id}, prompt=prompt)
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         monkeypatch.setattr(
             sys,
@@ -138,39 +155,9 @@ class TestMaintenanceScopeGuardContract:
                 json.dumps(
                     {
                         "hook_event_name": "PreToolUse",
-                        "tool_name": "Read",
+                        "tool_name": tool_name,
                         "session_id": session_id,
-                        "tool_input": {"file_path": str(tmp_path / "repos" / "src" / "state.md")},
-                    }
-                )
-            ),
-        )
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-
-        enforce_maintenance_scope.main()
-
-        decision = json.loads(captured.getvalue())["hookSpecificOutput"]
-        assert decision["permissionDecision"] == "deny"
-
-
-    def test_maintenance_scope_guard_blocks_direct_artifact_write(self, tmp_path, monkeypatch):
-        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
-        from tools.hooks.maintenance.scope import write_marker
-
-        session_id = "maintenance-session"
-        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow improve trace")
-        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-        monkeypatch.setattr(
-            sys,
-            "stdin",
-            io.StringIO(
-                json.dumps(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "tool_name": "Write",
-                        "session_id": session_id,
-                        "tool_input": {"file_path": str(tmp_path / "ops" / "agent-harness" / "evidence/plan.json")},
+                        "tool_input": {"file_path": str(tmp_path / relative_path)},
                     }
                 )
             ),
@@ -360,35 +347,6 @@ class TestMaintenanceScopeGuardContract:
         decision = json.loads(captured.getvalue())["hookSpecificOutput"]
         assert decision["permissionDecision"] == "deny"
 
-
-    def test_maintenance_scope_guard_does_not_auto_allow_repo_write(self, tmp_path, monkeypatch):
-        from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
-        from tools.hooks.maintenance.scope import write_marker
-
-        session_id = "maintenance-session"
-        write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow improve trace")
-        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-        monkeypatch.setattr(
-            sys,
-            "stdin",
-            io.StringIO(
-                json.dumps(
-                    {
-                        "hook_event_name": "PreToolUse",
-                        "tool_name": "Write",
-                        "session_id": session_id,
-                        "tool_input": {"file_path": str(tmp_path / "tools" / "maintenance" / "maintenance_harness.py")},
-                    }
-                )
-            ),
-        )
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-
-        enforce_maintenance_scope.main()
-
-        decision = json.loads(captured.getvalue())["hookSpecificOutput"]
-        assert decision["permissionDecision"] == "deny"
 
     def test_maintenance_scope_guard_allows_repo_edit_after_approval_freeze(self, tmp_path, monkeypatch):
         from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
@@ -795,11 +753,18 @@ class TestMaintenanceScopeGuardContract:
 
 
 
-def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('cat repos/secret.txt "', id="unparseable"),
+        pytest.param("cat repos/secret.txt", id="parseable-repos-read"),
+    ],
+)
+def test_maintenance_scope_guard_denies_bash_repos_read(tmp_path, monkeypatch, command):
     from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
     from tools.hooks.maintenance.scope import write_marker
 
-    session_id = "maintenance-unparseable-bash"
+    session_id = "maintenance-bash-repos-read"
     write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow docs")
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(
@@ -811,37 +776,7 @@ def test_maintenance_scope_guard_denies_unparseable_bash(tmp_path, monkeypatch):
                     "hook_event_name": "PreToolUse",
                     "tool_name": "Bash",
                     "session_id": session_id,
-                    "tool_input": {"command": "cat repos/secret.txt \""},
-                }
-            )
-        ),
-    )
-    captured = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", captured)
-
-    enforce_maintenance_scope.main()
-
-    decision = json.loads(captured.getvalue())["hookSpecificOutput"]
-    assert decision["permissionDecision"] == "deny"
-
-
-def test_maintenance_scope_guard_denies_parseable_bash_repos_read(tmp_path, monkeypatch):
-    from tools.hooks.maintenance import enforce_scope as enforce_maintenance_scope
-    from tools.hooks.maintenance.scope import write_marker
-
-    session_id = "maintenance-parseable-bash-repos"
-    write_marker(tmp_path, {"session_id": session_id}, prompt="/maintenance-workflow docs")
-    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setattr(
-        sys,
-        "stdin",
-        io.StringIO(
-            json.dumps(
-                {
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                    "session_id": session_id,
-                    "tool_input": {"command": "cat repos/secret.txt"},
+                    "tool_input": {"command": command},
                 }
             )
         ),
