@@ -173,6 +173,27 @@ docs/reviews/repo-wide-test-cleanup-plan.md
 
 Remove only support code with zero live consumers, verify the eight empty marker candidates, reconcile every inventory row to a final disposition, and publish actual before/after lines and cases. Do not add a shared fixture framework.
 
+## Final reconciliation
+
+TC1-TC7 reviewed all 70 inventory rows. The cleanup reduced repeated setup, duplicate fixture executions, redundant public-output assertions, zero-consumer helpers, and empty package markers while preserving the mandatory observable boundaries.
+
+| Wave | Rows | Lines before | Lines after | Delta | Cases before | Cases after | Delta | Local commit |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| TC1 Context | 16 | 9,473 | 9,113 | -360 | 287 | 286 | -1 | `2ba73c4` |
+| TC2 lifecycle/history | 8 | 8,558 | 8,517 | -41 | 241 | 237 | -4 | `182f057` |
+| TC3 Graph/provider | 9 | 4,623 | 4,599 | -24 | 95 | 95 | 0 | `636ab83` |
+| TC4 Knowledge | 5 | 2,427 | 2,399 | -28 | 48 | 47 | -1 | `6648992` |
+| TC5 repository/workspace | 14 | 3,433 | 3,408 | -25 | 135 | 134 | -1 | `dfa5763` |
+| TC6 maintenance/release | 8 | 2,472 | 2,407 | -65 | 76 | 76 | 0 | `22a30fe` |
+| TC7 support/closeout | 10 | 81 | 81 | 0 | 0 | 0 | 0 | TC7 closeout |
+| **Total** | **70** | **31,067** | **30,524** | **-543** | **882** | **875** | **-7** | — |
+
+Final row dispositions are 45 `kept`, 17 `consolidated`, and 8 `deleted`. `docs/reviews/repo-wide-test-inventory.csv` retains the TC0 baseline columns and adds `final_lines`, `final_collected_cases`, `delta_lines`, `delta_cases`, and `final_disposition` for every row.
+
+TC7 deleted the eight zero-byte `tests/repoctl/**/__init__.py` markers after seven representative namespace imports and full pytest collection succeeded without them. Their eight stale managed-file entries were also removed from `repoctl-upgrade-manifest.json`, so upgrade planning and release archives no longer require deleted paths. `tests/conftest.py` remains the eight-line root import bootstrap. `tests/repoctl/io_audit.py` remains because seven test modules still use its bounded-directory-enumeration fault injection.
+
+The seven-case reduction reconciles exactly to named consolidations recorded in the archived TC1, TC2, TC4, and TC5 task evidence. No skip, xfail, dependency, pytest plugin, base class, or production-code change was introduced.
+
 ## Per-wave evidence contract
 
 Every cleanup wave must record:
