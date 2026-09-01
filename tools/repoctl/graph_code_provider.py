@@ -351,10 +351,6 @@ def _binding_execution_certain(scope: _Scope, owner: _Scope, statement_certain: 
     return statement_certain and _scope_executes_in_owner(scope, owner)
 
 
-def _binding_timeline_ordered(scope: _Scope, owner: _Scope) -> bool:
-    return _scope_executes_in_owner(scope, owner)
-
-
 def _add_binding(scope: _Scope, name: str, binding: _Binding) -> None:
     values = scope.bindings.setdefault(name, [])
     if binding not in values:
@@ -510,7 +506,7 @@ def _populate_scope(
                 "local",
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             ),
         )
     for name, alias_name, execution_certain, position, source_position in collector.aliases:
@@ -522,14 +518,14 @@ def _populate_scope(
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
                 source_position=source_position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             )
             if owner.kind == "module"
             else _Binding(
                 "local",
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             )
         )
         _add_binding(owner, name, binding)
@@ -545,14 +541,14 @@ def _populate_scope(
                 import_level=import_level,
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             )
             if owner.kind == "module"
             else _Binding(
                 "local",
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             )
         )
         _add_binding(
@@ -571,14 +567,14 @@ def _populate_scope(
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 identity_certain=identity_certain,
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             )
             if owner.kind == "module"
             else _Binding(
                 "local",
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             )
         )
         _add_binding(owner, name, binding)
@@ -591,7 +587,7 @@ def _populate_scope(
                 "tombstone",
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 position=position,
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             ),
         )
 
@@ -623,7 +619,7 @@ def _populate_scope(
                 execution_certain=_binding_execution_certain(scope, owner, execution_certain),
                 identity_certain=not node.decorator_list,
                 position=_node_end_position(node),
-                timeline_ordered=_binding_timeline_ordered(scope, owner),
+                timeline_ordered=_scope_executes_in_owner(scope, owner),
             ),
         )
         child = _Scope(

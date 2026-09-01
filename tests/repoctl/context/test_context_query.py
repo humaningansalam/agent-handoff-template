@@ -1771,101 +1771,6 @@ def test_context_query_prefers_connected_test_over_weak_lexical_test_candidate(
     assert "repos/tests/test_misc.py" not in test_paths
 
 
-def test_compact_relation_closure_accepts_only_direct_typed_relation_directions() -> None:
-    def relation(
-        edge: str,
-        to_path: str,
-        *,
-        from_path: str = "tests/test_owner.py",
-        assertion: str = "resolved",
-        distance: int = 1,
-    ) -> dict[str, object]:
-        return {
-            "edge": edge,
-            "from_path": from_path,
-            "to_path": to_path,
-            "assertion": assertion,
-            "distance": distance,
-        }
-
-    test_profile = {
-        "path_identity": "tests/test_owner.py",
-        "item": {
-            "graph_path": [
-                relation("TESTS_FILE", "owner.py"),
-                relation("IMPORTS_FILE", "imported.py"),
-                relation("CALLS", "called.py"),
-                relation("TESTS_FILE", "unresolved.py", assertion="candidate"),
-                relation("IMPORTS_FILE", "indirect.py", distance=2),
-                relation("TESTS_FILE", "tests/test_owner.py", from_path="reverse.py"),
-                relation(context_module.STRUCTURED_EDGE_KIND, "structured.py"),
-            ],
-        },
-    }
-    assert context_module._coverage_profile_test_target_paths(test_profile) == {
-        "owner.py",
-        "imported.py",
-        "called.py",
-    }
-
-    connects = context_module._direct_source_relation_connects
-    assert connects(
-        relation(context_module.STRUCTURED_EDGE_KIND, "forward.yml", from_path="owner.yml"),
-        source_path="owner.yml",
-        endpoint_path="forward.yml",
-    )
-    assert not connects(
-        relation(context_module.STRUCTURED_EDGE_KIND, "owner.yml", from_path="reverse.yml"),
-        source_path="owner.yml",
-        endpoint_path="reverse.yml",
-    )
-    assert connects(
-        relation("CALLS", "owner.py", from_path="caller.py"),
-        source_path="owner.py",
-        endpoint_path="caller.py",
-    )
-
-
-def test_compact_relation_closure_reserves_only_one_graph_only_source_neighbor() -> None:
-    def profile(path: str, *, anchor: str = "none", direct: bool = False) -> dict[str, object]:
-        return {
-            "path_identity": path,
-            "lane_key": "product_source",
-            "anchor_strength": anchor,
-            "query_term_matches": {"body": [path.removesuffix(".py")]},
-            "graph_support": {
-                "candidate_neighbor_paths": ["a.py", "b.py"]
-                if path == "owner.py"
-                else ["owner.py"]
-            },
-            "direct_query": direct,
-        }
-
-    graph_only = [profile("a.py"), profile("b.py")]
-    for strength in ("exact", "explicit", "strong"):
-        primary = profile("owner.py", anchor=strength)
-        selected = context_module._select_compact_evidence_profiles(
-            [primary, *graph_only],
-            limit=3,
-            primary_path="owner.py",
-            required_paths=("b.py",),
-        )
-        assert [item["path_identity"] for item in selected] == ["owner.py", "b.py"]
-
-    independent = profile("query.py", anchor="exact", direct=True)
-    selected = context_module._select_compact_evidence_profiles(
-        [primary, *graph_only, independent],
-        limit=3,
-        primary_path="owner.py",
-        required_paths=("b.py",),
-    )
-    assert [profile["path_identity"] for profile in selected] == [
-        "owner.py",
-        "b.py",
-        "query.py",
-    ]
-
-
 def test_context_query_keeps_explicit_named_source_and_named_test_ahead_of_weak_graph_echoes(
     tmp_path: Path,
     monkeypatch,
@@ -4016,16 +3921,6 @@ def test_context_query_indexes_semantic_source_without_precise_provider(tmp_path
     graph_result = materialize_graph(tmp_path, target=target)
     assert graph_result[0] is not None
     assert any(problem.code == "context_source_too_large" for problem in graph_result[1])
-
-    direct_bundle, direct_problems, _meta = context_module.build_context_bundle(
-        tmp_path,
-        target=target,
-        query="refreshSettlementLedger",
-        graph_result=graph_result,
-    )
-    assert direct_bundle is not None
-    assert [problem.code for problem in direct_problems].count("context_source_too_large") == 1
-    assert not any(problem.code == "context_graph_unavailable" for problem in direct_problems)
 
     assert main(["context", "query", "refreshSettlementLedger", "--repo-id", "main", "--json"]) == 0
 

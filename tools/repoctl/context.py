@@ -1930,7 +1930,7 @@ def _build_context_evidence_projection(
     evidence_order = tuple(
         _coverage_profile_path_identity(profile)
         for profile in sorted(
-            _eligible_coverage_profiles(source_profiles),
+            source_profiles,
             key=lambda profile: _coverage_profile_prior_outcome_rank_key(
                 profile,
                 prior_outcome_paths=effective_prior_paths,
@@ -2021,7 +2021,7 @@ def _build_context_evidence_projection(
         )
 
     selected_sources = _select_compact_evidence_profiles(
-        _eligible_coverage_profiles(source_profiles),
+        source_profiles,
         limit=source_limit,
         primary_path=source_order[0] if source_order else "",
         required_paths=(*([relation_endpoint] if relation_endpoint else []),),
@@ -2055,7 +2055,7 @@ def _build_context_evidence_projection(
         for path in visible_source_paths
         if path in source_profiles_by_path
     ]
-    eligible_tests = _eligible_coverage_profiles(test_profiles)
+    eligible_tests = test_profiles
     if (
         graph_test_relation_coverage
         and anchor_resolution is not None
@@ -4669,17 +4669,16 @@ def _ranked_heuristic_graph_anchors(
         )
     if not entries:
         return (), (), {}
-    eligible_entries = _eligible_coverage_profiles(entries)
     source_entries = [
         entry
-        for entry in eligible_entries
+        for entry in entries
         if str(entry.get("lane_key") or "")
         in {ContextRetrievalLane.PRODUCT_SOURCE.value, "product_config"}
     ]
     anchor_entries = (
         source_entries
         if prefer_product_sources and source_entries
-        else eligible_entries
+        else entries
     )
     ordered_entries = _select_coverage_profiles(
         anchor_entries,
@@ -4770,10 +4769,6 @@ def _coverage_profile_structural_pairs(
         for pair in _coverage_profile_pairs(profile)
         if pair[0] in {"path", "section"}
     }
-
-
-def _coverage_profile_term_count(profile: dict[str, Any]) -> int:
-    return len(_coverage_profile_terms(profile))
 
 
 def _coverage_profile_terms(profile: dict[str, Any]) -> set[str]:
@@ -5001,12 +4996,6 @@ def _coverage_profile_test_target_paths(profile: dict[str, Any]) -> set[str]:
         _coverage_profile_preselection_connections(profile)
     )
     return projected_paths | preselection_paths
-
-
-def _coverage_profile_has_preselection_evidence_connection(
-    profile: dict[str, Any],
-) -> bool:
-    return bool(_coverage_profile_preselection_evidence_neighbor_paths(profile))
 
 
 def _coverage_profile_preselection_evidence_neighbor_paths(
@@ -5391,9 +5380,8 @@ def _coverage_profile_related_key(
     new_structural_pairs = {
         pair for pair in new_pairs if pair[0] in {"path", "section"}
     }
-    ranked_structural_pairs = new_structural_pairs
     ranked_structural_terms = {
-        term for _field_name, term in ranked_structural_pairs
+        term for _field_name, term in new_structural_pairs
     }
     covered_terms = {term for _field_name, term in covered_pairs}
     new_terms = _coverage_profile_terms(profile) - covered_terms
@@ -5448,9 +5436,9 @@ def _coverage_profile_related_key(
         0 if lane and lane not in selected_lanes else 1,
         connection_priority if explicit_test_connection else 3,
         -_coverage_term_breadth_tier(new_terms),
-        0 if ranked_structural_pairs else 1,
+        0 if new_structural_pairs else 1,
         -_coverage_term_breadth_tier(ranked_structural_terms),
-        -_coverage_pair_weight(ranked_structural_pairs, frequencies),
+        -_coverage_pair_weight(new_structural_pairs, frequencies),
         0 if new_components else 1,
         -_coverage_term_breadth_tier(_coverage_profile_terms(profile)),
         connection_priority if not explicit_test_connection else 3,
@@ -5474,17 +5462,13 @@ def _coverage_profile_related_key(
     )
 
 
-def _eligible_coverage_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return list(profiles)
-
-
 def _coverage_profiles_use_weak_single_term_fallback(profiles: list[dict[str, Any]]) -> bool:
     selectable = [profile for profile in profiles if profile.get("selection_available", True)]
     terms = {term for profile in selectable for term in _coverage_profile_terms(profile)}
     return bool(selectable) and len(terms) <= 1 and all(
         not profile.get("strong_symbol")
         and not _coverage_profile_graph_supported(profile)
-        and _coverage_profile_term_count(profile) <= 1
+        and len(_coverage_profile_terms(profile)) <= 1
         and _coverage_profile_anchor_priority(profile)
         < CONTEXT_ANCHOR_STRENGTH_PRIORITY[ContextAnchorStrength.EXACT]
         for profile in selectable
@@ -5695,7 +5679,7 @@ def _coverage_profile_is_direct_evidence(profile: dict[str, Any]) -> bool:
         return bool(
             _coverage_profile_has_explicit_identity(profile)
             or (
-                _coverage_profile_has_preselection_evidence_connection(profile)
+                _coverage_profile_preselection_evidence_neighbor_paths(profile)
                 and _coverage_profile_query_evidence_supported(profile)
             )
             or (
