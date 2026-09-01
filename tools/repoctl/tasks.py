@@ -1646,16 +1646,6 @@ def _entry_to_dict(entry: ChangedEntry) -> dict[str, str]:
     return data
 
 
-def _entry_paths(entries: list[ChangedEntry]) -> list[str]:
-    paths: set[str] = set()
-    for _change, path, old_path in entries:
-        if path:
-            paths.add(path)
-        if old_path:
-            paths.add(old_path)
-    return sorted(paths)
-
-
 def _entry_mutation_paths(entries: list[ChangedEntry]) -> list[str]:
     return sorted({path for entry in entries for path, _role, _change in _entry_transition_ports(entry)})
 
@@ -1872,10 +1862,6 @@ def task_handoff_provenance(root: Path, task: Task) -> TaskHandoffProvenance:
 
 def task_handoff_is_generated_template(root: Path, task: Task) -> bool:
     return task_handoff_provenance(root, task) is TaskHandoffProvenance.GENERATED
-
-
-def task_verification_body(task: Task) -> str:
-    return _normalized_task_section_body(task, "Verification") or ""
 
 
 def _task_contract_digest(task: Task) -> str:
@@ -2865,11 +2851,6 @@ def collect_completion_receipt_artifacts(
     return list(collection.artifacts), list(collection.problems)
 
 
-def collect_completion_receipts(root: Path, *, repo_id: str | None = None) -> tuple[list[dict[str, Any]], list[Problem]]:
-    artifacts, problems = collect_completion_receipt_artifacts(root, repo_id=repo_id)
-    return [artifact.receipt for artifact in artifacts], problems
-
-
 def _completion_receipt_data_for_task(
     root: Path,
     *,
@@ -2939,10 +2920,6 @@ def completion_receipt_artifact_for_task(
     except RepoctlError as exc:
         rel = path.relative_to(root).as_posix()
         return None, [Problem("error", exc.code or "invalid_completion_receipt", str(exc), exc.path or rel)]
-
-
-def _entry_key(entry: ChangedEntry) -> tuple[str, str, str]:
-    return entry
 
 
 def _target_for_task(root: Path, task: "Task", *, layout: RepoLayout | None = None) -> RepoTarget | None:
@@ -5021,24 +4998,6 @@ def _normalize_verification_artifact(verification: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _done_handoff(new_path: str, *, copy: dict[str, Any]) -> str:
-    return (
-        f"- Next exact step: {copy['done_handoff_next']}\n"
-        f"- First file to open: `{new_path}`\n"
-        "- First command to run: `./scripts/repoctl check --json`\n"
-        f"- Done when: {copy['done_handoff_done']}\n"
-    )
-
-
-def _canceled_handoff(new_path: str, *, copy: dict[str, Any]) -> str:
-    return (
-        f"- Next exact step: {copy['canceled_handoff_next']}\n"
-        f"- First file to open: `{new_path}`\n"
-        "- First command to run: `./scripts/repoctl check --json`\n"
-        f"- Done when: {copy['canceled_handoff_done']}\n"
-    )
-
-
 def _finalize_handoff(text: str, *, status: str, new_path: str, receipt_path: str, evidence_mode: str, copy: dict[str, Any]) -> str:
     if has_section(text, "Last Active Handoff") or has_section(text, "Closure"):
         raise RepoctlError("task already contains completion-only sections", code="duplicate_closure_section")
@@ -5579,20 +5538,6 @@ def _assert_repo_baseline_matches(root: Path, task: Task, target: RepoTarget | N
         raise RepoctlError("task started with a product repository baseline, but that repository is no longer present", code="repo_target_changed_since_start", path=task.rel_path)
     if problem := _repository_target_identity_problem(target=matched_target, baseline=baseline):
         raise RepoctlError(problem.message, code=problem.code, path=task.rel_path)
-
-
-def _execution_log_timestamps(task: Task) -> list[str]:
-    try:
-        section = find_section(task.body, "Execution Log")
-    except RepoctlError:
-        return []
-    body = task.body[section.body_start : section.end]
-    timestamps: list[str] = []
-    for line in body.splitlines():
-        match = re.match(r"^\s*-\s+(\d{8}T\d{6}Z):", line)
-        if match:
-            timestamps.append(match.group(1))
-    return timestamps
 
 
 def _execution_log_timestamp_entries(task: Task) -> list[tuple[int, str]]:

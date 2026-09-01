@@ -106,11 +106,6 @@ def _canonical_paths_digest(root: Path, paths: list[str]) -> str:
     return _sha256(_hash_bytes(encoded))
 
 
-def _canonical_tree_digest(path: Path) -> str:
-    digest, _records = _canonical_tree_snapshot(path)
-    return digest
-
-
 def _canonical_tree_snapshot(path: Path) -> tuple[str, list[dict[str, Any]]]:
     if not path.exists() and not path.is_symlink():
         return "", []

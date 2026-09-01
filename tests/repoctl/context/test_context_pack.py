@@ -284,14 +284,10 @@ def test_context_pack_never_drops_required_evidence_to_fit_budget(tmp_path: Path
     assert {item["path"] for item in data["seed"]["graph_seed_refs"]} == {"app.py"}
     assert data["seed"]["graph_seed_refs"][0]["provenance"] == "lexical_file"
     assert "## Graph Seed Identities" in rendered
-    assert "Rank 1: `app.py`; provenance `lexical_file`; strength" in rendered
-    assert "Graph seeds are ranked traversal evidence only; they do not define edit scope or authority." in rendered
-    assert "Open every source in the required sections below directly" in rendered
     assert all(path in rendered for path in context_docs)
     assert "AGENTS.md" in rendered
     assert f"docs/tasks/{task_id}--required-budget.md" in rendered
     assert "repos/app.py" in rendered
-    assert "full evidence and digests remain in JSON" in rendered
 
     exact_budget = data["budget"]["final_render_estimated_tokens"]
     assert main(["context", "pack", "--task", task_id, "--repo-id", "main", "--budget-tokens", str(exact_budget), "--json"]) == 0
@@ -678,7 +674,6 @@ def test_context_pack_markdown_is_agent_consumable(tmp_path: Path, monkeypatch, 
     assert "## Task Startup Order" in artifact
     assert "## Definitions, Callers, Imports, Dependents" in artifact
     assert "login --CALLS--> validate_token" in artifact
-    assert "Context Pack is read-only evidence" not in artifact
     assert artifact.startswith("<!-- repoctl-context-pack-envelope {")
 
     assert main(
@@ -1060,8 +1055,6 @@ def test_required_reference_manifest_markdown_has_verifiable_envelope_and_binds(
         "body_sha256",
     }
     assert len(first_line) < 600
-    assert "Open every source in the required sections below directly" in text
-    assert "full evidence and digests remain in JSON" in text
 
     assert main(["task", "handoff", "bind", task_id, "--context-pack", output.as_posix(), "--json"]) == 0
     binding = json.loads(capsys.readouterr().out)

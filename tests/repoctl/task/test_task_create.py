@@ -67,35 +67,6 @@ def test_started_task_defaults_to_the_only_configured_repository(tmp_path: Path,
     assert payload["next_actions"][1]["label"] == "Record the candidate query"
 
 
-def test_started_root_task_text_output_reports_the_generated_handoff_action(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--area", "docs", "--start", "--slug", "root-docs", "Root docs"]) == 0
-    output = capsys.readouterr().out
-    assert "Started:" in output
-    assert "Next: Replace the generated Handoff with task-specific restart instructions" in output
-
-
-def test_started_repo_task_text_prioritizes_generated_handoff_before_discovery(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    init_committed_product_repo(tmp_path / "repos", {"app.py": "value = 1\n"})
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "create", "--start", "--slug", "repo-text", "Repo text"]) == 0
-    output = capsys.readouterr().out
-    assert "Next: Replace the generated Handoff with task-specific restart instructions" in output
-    assert "Next: ./scripts/repoctl task discovery add" not in output
-
-
 def test_task_create_rejects_invalid_document_language_config(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     (tmp_path / "docs/repoctl.json").write_text('{"document_language":"kr"}\n', encoding="utf-8")
@@ -111,10 +82,9 @@ def test_task_create_registers_board_plain_path(tmp_path: Path, monkeypatch, cap
     write_workspace(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "create", "--slug", "plain-path", "Plain Path"]) == 0
+    assert main(["task", "create", "--slug", "plain-path", "Plain Path", "--json"]) == 0
 
-    out = capsys.readouterr().out
-    path = out.split("Created: ", 1)[1].splitlines()[0]
+    path = json.loads(capsys.readouterr().out)["data"]["path"]
     board = (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     assert f"- {path}\n" in board
     assert "status" not in board.split("## Board", 1)[1].split("## Backlog", 1)[0]

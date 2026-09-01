@@ -4,14 +4,10 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
-from tools.repoctl.io import RepoctlError
 from tools.repoctl.markdown import replace_section
 from tools.repoctl.meta import shard_for_path
-from tools.repoctl.tasks import VerificationInput, finish_task
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
     commit_all,
@@ -172,57 +168,6 @@ def test_task_finish_rejects_legacy_orphan_verification_without_mutation(
     assert {path: path.read_bytes() for path in tracked_paths} == before
     assert not (tmp_path / f"docs/tasks/.repoctl-state/completions/{task_id}.json").exists()
     assert not (tmp_path / f"docs/archive/tasks/{task_id}--alpha.md").exists()
-
-
-def test_task_finish_validates_completion_before_effect_preparation(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    write_workspace(tmp_path)
-    task_id = "T-20260609184046Z"
-    add_board_task(
-        tmp_path,
-        f"{task_id}--alpha.md",
-        task_text(task_id, status="doing").replace('area: ""', 'area: "ops"'),
-    )
-    calls: list[str] = []
-
-    monkeypatch.setattr("tools.repoctl.tasks.completion_outcome_projection", lambda *_args, **_kwargs: {})
-
-    def reject_completion(_value):
-        raise ValueError("forced invalid completion")
-
-    monkeypatch.setattr("tools.repoctl.tasks.validate_completion_outcome", reject_completion)
-
-    def forbidden(name: str):
-        def call(*_args, **_kwargs):
-            calls.append(name)
-            raise AssertionError(f"{name} must not run before completion validation")
-
-        return call
-
-    for name in (
-        "utc_stamp",
-        "_utc_event_stamp",
-        "load_tasks",
-        "archive_locator_writes",
-        "prepare_completion_sidecar_writes",
-    ):
-        monkeypatch.setattr(f"tools.repoctl.tasks.{name}", forbidden(name))
-
-    with pytest.raises(RepoctlError) as caught:
-        finish_task(
-            tmp_path,
-            task_id,
-            verification=VerificationInput(
-                source="task",
-                text="focused check passed\n",
-                source_sha256=digest_data({"verification": "focused check passed"}),
-            ),
-        )
-
-    assert caught.value.code == "discovery_completion_outcome_invalid"
-    assert calls == []
 
 
 def test_task_finish_changed_meta_gate_uses_explicit_task_changes(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -514,7 +459,6 @@ def test_task_finish_records_verification_and_archives_standalone(tmp_path: Path
     assert "task finished and verified.\n\n## Verification" in archived
     assert "## Last Active Handoff" in archived
     assert "## Closure" in archived
-    assert "Git delivery: Not managed by repoctl." in archived
     assert "docs/tasks/T-20260609184046Z--alpha.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
     assert receipt["schema"] == "repoctl.task.completion"

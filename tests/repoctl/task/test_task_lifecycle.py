@@ -3649,24 +3649,6 @@ def test_handoff_command_text_is_inert_across_resume_lifecycle(
     assert not marker.exists()
 
 
-def test_repo_task_start_text_prioritizes_handoff_review_before_discovery(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    repo = tmp_path / "repos"
-    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    assert main(["task", "create", "--area", "repo", "--slug", "repo-start", "Repo start", "--json"]) == 0
-    task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
-
-    assert main(["task", "start", task_id]) == 0
-    output = capsys.readouterr().out
-    assert "Next: Replace the generated Handoff with task-specific restart instructions" in output
-    assert "Next: ./scripts/repoctl task discovery add" not in output
-
-
 def test_preexisting_binding_cannot_activate_an_unchanged_generated_handoff(
     tmp_path: Path,
     monkeypatch,

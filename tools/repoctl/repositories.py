@@ -474,20 +474,6 @@ def resolve_task_repo_target(
         ) from exc
 
 
-def repository_for_workspace_path(root: Path, path: Path) -> RepoTarget | None:
-    try:
-        resolved = path.resolve()
-    except OSError:
-        resolved = path.absolute()
-    for target in repo_layout(root).targets:
-        try:
-            resolved.relative_to(target.root_path.resolve())
-            return target
-        except (OSError, ValueError):
-            continue
-    return None
-
-
 def repo_check_problems(layout: RepoLayout) -> list[dict[str, str]]:
     problems: list[dict[str, str]] = list(layout.problems)
     for target in layout.targets:
