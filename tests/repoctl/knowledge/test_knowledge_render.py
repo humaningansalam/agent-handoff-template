@@ -36,10 +36,7 @@ def test_knowledge_render_check_empty_workspace_is_neutral(tmp_path: Path, monke
 def test_knowledge_render_rejects_invalid_lifecycle_events(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
+    approved_event = _approve_knowledge_source(capsys)["data"]["event"]
     event = _read_event(tmp_path, approved_event["id"])
     event["record_digest"] = "sha256:" + "2" * 64
     event["event_digest"] = digest_data({key: value for key, value in event.items() if key != "event_digest"})
@@ -60,10 +57,7 @@ def test_knowledge_render_rejects_invalid_lifecycle_events(tmp_path: Path, monke
 def test_knowledge_render_generated_view_is_not_context_source(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    approved_event = json.loads(capsys.readouterr().out)["data"]["event"]
+    approved_event = _approve_knowledge_source(capsys)["data"]["event"]
 
     assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     render_payload = json.loads(capsys.readouterr().out)
@@ -171,11 +165,7 @@ def test_knowledge_render_uses_current_heads_without_scanning_cold_history(
 
 def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    _approve_knowledge_source(capsys)
 
     assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     first_payload = json.loads(capsys.readouterr().out)
@@ -198,11 +188,7 @@ def test_knowledge_render_is_deterministic(tmp_path: Path, monkeypatch, capsys) 
 
 def test_knowledge_render_removes_manifest_owned_stale_pages_only(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    _approve_knowledge_source(capsys)
 
     assert main(["knowledge", "render", "--repo-id", "main", "--full", "--json"]) == 0
     first_payload = json.loads(capsys.readouterr().out)
@@ -232,11 +218,7 @@ def test_knowledge_render_removes_manifest_owned_stale_pages_only(tmp_path: Path
 
 def test_knowledge_render_check_detects_current_and_stale_outputs_without_writing(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
+    _approve_knowledge_source(capsys)
 
     assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 1
     missing_payload = json.loads(capsys.readouterr().out)
@@ -339,14 +321,8 @@ def test_knowledge_render_defaults_to_repo_namespaced_output_for_multirepo(tmp_p
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "web", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
-    web_record_id = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "api", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
-    capsys.readouterr()
+    web_record_id = _approve_knowledge_source(capsys, repo_id="web")["data"]["record"]["id"]
+    _approve_knowledge_source(capsys, repo_id="api")
 
     assert main(["knowledge", "render", "--repo-id", "web", "--json"]) == 0
     web_render = json.loads(capsys.readouterr().out)

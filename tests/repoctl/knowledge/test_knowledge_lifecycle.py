@@ -727,10 +727,12 @@ def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatc
     assert status_payload["data"]["event_types"] == {"approved": 1, "deprecated": 1}
 
 
-def test_knowledge_event_show_enforces_repo_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_knowledge_record_and_event_show_enforce_repo_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_multirepo_workspace(tmp_path, monkeypatch)
 
-    event_id = _approve_knowledge_source(capsys, repo_id="web")["data"]["event"]["id"]
+    approval = _approve_knowledge_source(capsys, repo_id="web")["data"]
+    event_id = approval["event"]["id"]
+    record_id = approval["record"]["id"]
 
     assert main(["knowledge", "event", "list", "--repo-id", "api", "--json"]) == 0
     list_payload = json.loads(capsys.readouterr().out)
@@ -739,12 +741,6 @@ def test_knowledge_event_show_enforces_repo_namespace(tmp_path: Path, monkeypatc
     assert main(["knowledge", "event", "show", event_id, "--repo-id", "api", "--json"]) == 1
     show_payload = json.loads(capsys.readouterr().out)
     assert show_payload["problems"][0]["code"] == "knowledge_event_repo_mismatch"
-
-
-def test_knowledge_record_show_enforces_repo_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_knowledge_multirepo_workspace(tmp_path, monkeypatch)
-
-    record_id = _approve_knowledge_source(capsys, repo_id="web")["data"]["record"]["id"]
 
     assert main(["knowledge", "show", record_id, "--repo-id", "web", "--json"]) == 0
     web_payload = json.loads(capsys.readouterr().out)
