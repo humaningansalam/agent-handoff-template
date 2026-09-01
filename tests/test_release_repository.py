@@ -135,9 +135,13 @@ def test_release_workflow_pins_actions_and_verifies_existing_tag() -> None:
     mutable_uses = re.findall(r"uses:\s+[^@\s]+@v\d+", workflow)
 
     assert mutable_uses == []
-    assert "steps.existing.outputs.tag_exists == 'true' && steps.existing.outputs.release_exists == 'false'" in workflow
+    assert "if: steps.existing.outputs.tag_exists == 'true'" in workflow
     assert "git rev-list -n 1" in workflow
     assert 'test "$TAG_SHA" = "$GITHUB_SHA"' in workflow
+    verify_tests = workflow.split("- name: Verify tests", 1)[1].split("- name: Verify workspace contracts", 1)[0]
+    verify_contracts = workflow.split("- name: Verify workspace contracts", 1)[1].split("- name: Build release artifact", 1)[0]
+    assert "if:" not in verify_tests
+    assert "if:" not in verify_contracts
 
 
 def test_generated_knowledge_views_are_not_ignored_and_records_are_not_ignored() -> None:

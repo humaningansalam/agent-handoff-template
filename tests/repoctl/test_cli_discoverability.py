@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.repoctl.cli import main
 from tests.repoctl.context_test_helpers import _setup_context_workspace
 
@@ -47,6 +49,18 @@ def test_format_json_errors_return_json(tmp_path: Path, monkeypatch, capsys) -> 
     assert payload["data"] == {"task_id": "T-20260101000000Z", "repo_id": "main"}
     assert payload["problems"][0]["code"] == "task_not_found"
     assert any(action["command"] == "./scripts/repoctl task list --json" for action in payload["next_actions"])
+
+
+@pytest.mark.parametrize("format_args", [["--format", "json"], ["--format=json"]])
+def test_format_json_parse_errors_return_json(tmp_path: Path, monkeypatch, capsys, format_args: list[str]) -> None:
+    _setup_context_workspace(tmp_path, monkeypatch)
+
+    assert main(["context", "query", "example", "--mode", *format_args]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["command"] == "context"
+    assert payload["problems"][0]["code"] == "argparse_error"
 
 
 def test_repository_errors_return_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:

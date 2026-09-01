@@ -521,8 +521,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             )
         if code == "missing_verification_file":
             add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
-            add("Retry finish", command=f"./scripts/repoctl task finish {task_id} --json")
-            add("Use an external verification artifact", command=f"./scripts/repoctl task finish {task_id} --verification-file /tmp/{task_id}-verification.md --json")
         elif code == "verification_file_inside_repo":
             add("Move verification evidence outside repos/", command=f"cp {path or 'repos/...'} /tmp/{task_id}-verification.md")
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
@@ -729,6 +727,14 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 else NextActionKind.GRAPH_REBUILD
             )
             add_context_graph_recovery(recovery_kind, source="problems[].cause_code")
+        elif code == "graph_snapshot_missing":
+            repo_id = selected_repo_id()
+            add(
+                "Build the materialized Graph and evidence index",
+                command=f"./scripts/repoctl graph build --repo-id {repo_id} --json",
+                kind=NextActionKind.GRAPH_BUILD,
+                source="problems[].code",
+            )
         elif code == "context_graph_stale":
             add_context_graph_recovery(
                 NextActionKind.GRAPH_REFRESH,
@@ -2120,7 +2126,15 @@ def cmd_field_gate_compare(args: argparse.Namespace) -> int:
 def cmd_repo_list(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     layout = repo_layout(root)
-    payload = {"ok": True, "command": "repo.list", "data": layout.to_dict(), "problems": [], "warnings": []}
+    next_actions = [
+        {
+            "label": f"Adopt detected repository as {candidate.suggested_id}",
+            "command": f"./scripts/repoctl repo adopt {shlex.quote(candidate.display_path)} --id {shlex.quote(candidate.suggested_id)} --json",
+        }
+        for candidate in layout.candidates
+        if candidate.validation_status == "valid"
+    ]
+    payload = {"ok": True, "command": "repo.list", "data": layout.to_dict(), "problems": [], "warnings": [], "next_actions": next_actions}
     if args.json:
         _json(payload)
     else:
@@ -2225,7 +2239,7 @@ def cmd_task_list(args: argparse.Namespace) -> int:
             print(f"{task['id']} {task['status']} {task['path']}")
         if payload["data"]["board"]["stale"]:
             print("BOARD is stale. Run: repoctl check --fix-board")
-    return 0
+    return 1 if _has_errors(problems) else 0
 
 
 def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str, Any]:
@@ -2262,7 +2276,7 @@ def build_task_resume_projection(root: Path, *, full: bool = False) -> dict[str,
             "data": data,
             "problems": [problem.to_dict()],
             "warnings": [],
-            "next_actions": [],
+            "next_actions": [{"label": f"Inspect live task {task.id}", "command": f"./scripts/repoctl task show {task.id} --summary --json"} for task in selection.candidates],
         }
 
     task = selection.task
@@ -2807,7 +2821,7 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         target = _repo_target_for_task_command(root, result["task"])
     except RepoctlError:
         target = None
-    if args.query and target is not None:
+    if args.query and target is not None and not chosen_files:
         next_actions.append(
             {
                 "label": "Find likely product files",
@@ -2866,7 +2880,7 @@ def cmd_task_verification_add(args: argparse.Namespace) -> int:
         },
         "problems": [],
         "warnings": [],
-        "next_actions": [],
+        "next_actions": [{"label": "Check finish readiness", "command": f"./scripts/repoctl task doctor {result['task'].id} --json"}],
     }
     if args.json:
         _json(payload)
@@ -4283,13 +4297,6 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     else:
         data["knowledge_closeout"] = {"status": "not_requested"}
         next_actions = []
-    if repo_id and prepared_candidate is None:
-        next_actions.append(
-            {
-                "label": "Preview a Knowledge candidate only if this task produced a reusable decision, invariant, or failure mode",
-                "command": f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id {repo_id} --kind <kind> --claim '<reusable claim>' --dry-run --json",
-            }
-        )
     payload = {
         "ok": True,
         "command": "task.finish",
@@ -7802,9 +7809,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    json_requested = "--json" in raw_argv or "--format=json" in raw_argv or any(raw_argv[index : index + 2] == ["--format", "json"] for index in range(len(raw_argv) - 1))
     if raw_argv in (["--version"], ["version"], ["version", "--json"]):
         data = _version_data(_workspace_root_or_cwd())
-        if "--json" in raw_argv:
+        if json_requested:
             _json({"ok": True, "command": "version", "data": data, "problems": [], "warnings": []})
         else:
             print(data["version"])
@@ -7812,7 +7820,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser.parse_args(raw_argv)
     except RepoctlArgparseError as error:
-        if "--json" in raw_argv:
+        if json_requested:
             _json({"ok": False, "command": raw_argv[0] if raw_argv else "repoctl", "data": {}, "problems": [{"severity": "error", "code": "argparse_error", "message": str(error)}], "warnings": []})
         else:
             print(f"repoctl: {error}", file=sys.stderr)

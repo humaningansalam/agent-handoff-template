@@ -244,7 +244,7 @@ def test_task_list_json_reports_board_stale(tmp_path: Path, monkeypatch, capsys)
 
     exit_code = main(["task", "list", "--json"])
 
-    assert exit_code == 0
+    assert exit_code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["tasks"][0]["id"] == "T-20260609184046Z"
     assert payload["data"]["board"]["stale"] is True
@@ -256,7 +256,7 @@ def test_task_list_json_reports_validation_problems(tmp_path: Path, monkeypatch,
     add_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="wip"))
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "list", "--json"]) == 0
+    assert main(["task", "list", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False

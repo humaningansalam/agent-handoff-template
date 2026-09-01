@@ -136,6 +136,10 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     assert ambiguous["data"]["resume_guidance"] is None
     assert [candidate["id"] for candidate in ambiguous["data"]["candidates"]] == [first, second]
     assert ambiguous["problems"][0]["code"] == "task_resume_ambiguous"
+    assert [action["command"] for action in ambiguous["next_actions"]] == [
+        f"./scripts/repoctl task show {first} --summary --json",
+        f"./scripts/repoctl task show {second} --summary --json",
+    ]
 
 
 def test_task_resume_compacts_repeated_health_problems_unless_full_is_requested(
@@ -436,7 +440,13 @@ def test_task_doctor_warns_until_current_changed_chosen_subject_has_passed_struc
             "--json",
         ]
     ) == 0
-    capsys.readouterr()
+    recorded = json.loads(capsys.readouterr().out)
+    assert recorded["next_actions"] == [
+        {
+            "label": "Check finish readiness",
+            "command": f"./scripts/repoctl task doctor {task_id} --json",
+        }
+    ]
 
     assert main(["task", "doctor", task_id, "--json"]) == 0
     covered = json.loads(capsys.readouterr().out)
@@ -1679,8 +1689,7 @@ def test_task_finish_reports_missing_structured_verification_as_immutable_audit_
     }
     warning = next(item for item in finished["warnings"] if item["code"] == "task_structured_verification_missing")
     assert warning["path"] == finished["data"]["new_path"]
-    assert not any(action.get("kind") == "task_verification_add" for action in finished["next_actions"])
-    assert not any("task verification add" in action.get("command", "") for action in finished["next_actions"])
+    assert finished["next_actions"] == []
 
 
 def test_task_show_and_doctor_recommend_decomposition_only_from_combined_structural_signals(
@@ -2433,6 +2442,7 @@ def test_task_discovery_add_records_structured_scope_evidence(tmp_path: Path, mo
     assert payload["data"]["update"]["chosen_files"]["added"] == ["repos/src/checkout.py"]
     assert payload["data"]["totals"]["chosen_file_count"] == 1
     assert "discovery" not in payload["data"]
+    assert not any(action["label"] == "Find likely product files" for action in payload["next_actions"])
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "- Candidate query: `checkout retry behavior`" in task_body
     assert "  - `repos/tests/test_checkout.py`" in task_body

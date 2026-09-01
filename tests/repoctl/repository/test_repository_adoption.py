@@ -27,6 +27,10 @@ def test_unconfigured_collection_lists_unbound_candidates(tmp_path: Path, monkey
         {"path": "repos/api", "suggested_id": "api", "git_toplevel": (tmp_path / "repos/api").resolve().as_posix(), "validation_status": "valid", "identity_status": "unbound"},
         {"path": "repos/web", "suggested_id": "web", "git_toplevel": (tmp_path / "repos/web").resolve().as_posix(), "validation_status": "valid", "identity_status": "unbound"},
     ]
+    assert [action["command"] for action in payload["next_actions"]] == [
+        "./scripts/repoctl repo adopt repos/api --id api --json",
+        "./scripts/repoctl repo adopt repos/web --id web --json",
+    ]
 
 
 def test_unconfigured_collection_repo_check_reports_unbound_identity(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -245,7 +245,7 @@ def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_
     assert payload["data"]["task_id"] == "T-20260609184046Z"
     assert payload["problems"][0]["code"] == "missing_verification_file"
     assert any(action["label"] == "Complete task Verification" for action in payload["next_actions"])
-    assert any(action.get("command", "").endswith("task finish T-20260609184046Z --json") for action in payload["next_actions"])
+    assert all("command" not in action for action in payload["next_actions"])
 
 def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

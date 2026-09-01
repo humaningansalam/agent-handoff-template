@@ -190,6 +190,22 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     assert same_name["data"]["result"]["candidates"][0]["path"] == "app.py"
 
 
+def test_graph_query_missing_snapshot_returns_build_recovery(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--symbol", "run", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "graph_snapshot_missing"
+    action = next(item for item in payload["next_actions"] if item["kind"] == "graph_build")
+    assert action["command"] == "./scripts/repoctl graph build --repo-id main --json"
+
+
 def test_graph_query_reports_snapshot_freshness(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

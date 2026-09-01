@@ -781,6 +781,7 @@ def test_task_finish_missing_verification_file_returns_json_error(tmp_path: Path
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "missing_verification_file"
     assert any(action["label"] == "Complete task Verification" for action in payload["next_actions"])
+    assert all("command" not in action for action in payload["next_actions"])
 
 
 def test_task_finish_rejects_empty_verification_file(tmp_path: Path, monkeypatch, capsys) -> None:

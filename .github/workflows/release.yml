@@ -52,17 +52,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Verify existing tag points at this commit
-        if: steps.existing.outputs.tag_exists == 'true' && steps.existing.outputs.release_exists == 'false'
+        if: steps.existing.outputs.tag_exists == 'true'
         run: |
           TAG_SHA=$(git rev-list -n 1 "${{ steps.version.outputs.tag }}")
           test "$TAG_SHA" = "$GITHUB_SHA"
 
       - name: Verify tests
-        if: steps.existing.outputs.release_exists == 'false'
         run: uv run pytest -q
 
       - name: Verify workspace contracts
-        if: steps.existing.outputs.release_exists == 'false'
         run: |
           ./scripts/repoctl check --json
           ./scripts/repoctl meta check --json
