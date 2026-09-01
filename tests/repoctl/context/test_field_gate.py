@@ -36,6 +36,7 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
 
     compact_output = capsys.readouterr().out
     payload = json.loads(compact_output)
+    assert '"attribution":' not in json.dumps(payload, sort_keys=True)
     gates = {gate["name"]: gate for gate in payload["data"]["gates"]}
     assert payload["data"]["scope"] == "workspace_control_plane"
     assert payload["data"]["applicability"] == "repoctl_release_candidate"
@@ -48,6 +49,7 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
     assert gates["context_pack_benchmark"]["summary"]["mean_must_read_recall"] == 1.0
     artifact_output = output.read_text(encoding="utf-8")
     artifact = json.loads(artifact_output)
+    assert '"attribution":' not in json.dumps(artifact, sort_keys=True)
     assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/release-candidate.json"
     artifact_gates = {gate["name"]: gate for gate in artifact["data"]["gates"]}
     assert "by_category" in artifact_gates["context_benchmark"]["summary"]

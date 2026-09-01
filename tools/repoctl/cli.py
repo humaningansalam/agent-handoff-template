@@ -5580,6 +5580,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         require_no_forbidden=args.require_no_forbidden,
         require_no_cross_repo=args.require_no_cross_repo,
         require_fixture_corpus=args.require_fixture_corpus,
+        include_attribution=args.attribution,
     )
     problems = [*category_gate_problems, *knowledge_category_gate_problems, *edge_category_gate_problems, *visible_category_gate_problems, *problems]
     payload = {
@@ -7640,6 +7641,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--require-no-forbidden", action="store_true")
     context_benchmark.add_argument("--require-no-cross-repo", action="store_true")
     context_benchmark.add_argument("--require-fixture-corpus", action="store_true")
+    context_benchmark.add_argument("--attribution", action="store_true", help="include the non-authoritative fixture attribution capsule")
     context_benchmark.add_argument("--output")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)

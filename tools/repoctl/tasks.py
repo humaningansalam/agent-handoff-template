@@ -5107,6 +5107,16 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
             code=alignment_problem.code,
             path=alignment_problem.path,
         )
+    discovery_outcome = completion_outcome_projection(root, task.id)
+    if discovery_outcome is not None:
+        try:
+            validate_completion_outcome(discovery_outcome)
+        except ValueError as exc:
+            raise RepoctlError(
+                f"task Discovery completion outcome is invalid: {exc}",
+                code="discovery_completion_outcome_invalid",
+                path=task.rel_path,
+            ) from exc
     _assert_repo_baseline_matches(root, task, target)
     repo_changed = bool(meta_gate and meta_gate.get("status") == "passed" and meta_gate.get("scope") == "changed")
     start_head = _repo_head_from_state(root, task)
@@ -5191,7 +5201,6 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
                 code="transition_evidence_incomplete",
                 path=task.rel_path,
             )
-    discovery_outcome = completion_outcome_projection(root, task.id)
     if discovery_outcome is not None and (
         path_transitions is None or not _valid_event_stamp(started_at)
     ):

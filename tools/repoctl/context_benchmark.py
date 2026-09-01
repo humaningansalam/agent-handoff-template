@@ -3,21 +3,44 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
+from uuid import uuid4
 
 from .context import build_context_bundle, compact_context_bundle
 from .context_model import ContextBundle
+from .discovery_outcomes import result_member_capsules, validate_completion_outcome
 from .graph_model import GraphSnapshot
 from .graph_model import digest_data
 from .graph_store import materialize_graph
+from .knowledge_candidates import (
+    KnowledgeSourceRefKind,
+    KnowledgeSourceResolutionStatus,
+    _knowledge_approval_binding,
+    _knowledge_record_contract_problems,
+    knowledge_source_ref_resolutions,
+)
+from .knowledge_projection import rebuild_knowledge_projection
 from .language_profiles import default_indexing_excludes
-from .repositories import require_repo_target
+from .repositories import RepoTarget, RepositoryIdentitySource, require_repo_target
+from .result_receipts import (
+    ContextResultRequest,
+    ResultAuthority,
+    ResultProducer,
+    ResultSelection,
+    context_result_citations,
+    context_result_receipt_projection,
+    write_result_receipt,
+)
 from .tasks import Problem
 
 IGNORED_SOURCE_PATTERNS = tuple(default_indexing_excludes())
+KNOWLEDGE_RECORD_ID_RE = re.compile(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*")
+KNOWLEDGE_EVENT_ID_RE = re.compile(r"E-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def run_context_benchmark(
@@ -37,6 +60,7 @@ def run_context_benchmark(
     require_no_forbidden: bool = False,
     require_no_cross_repo: bool = False,
     require_fixture_corpus: bool = False,
+    include_attribution: bool = False,
 ) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
@@ -52,6 +76,7 @@ def run_context_benchmark(
     if require_fixture_corpus:
         problems.extend(corpus_problems)
     results: list[dict[str, Any]] = []
+    attribution_inputs: dict[str, tuple[ContextBundle, dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = {}
     with TemporaryDirectory(prefix="repoctl-context-benchmark-") as temporary_state:
         graph_state_root = Path(temporary_state)
         graph_cache: dict[str, tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]] = {}
@@ -77,6 +102,28 @@ def run_context_benchmark(
             problems.extend(graph_problems)
             spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
             results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems]))
+            if include_attribution:
+                full_bundle = bundle.to_dict()
+                request = ContextResultRequest(
+                    query=str(question.get("question") or ""),
+                    mode=str(bundle.query.get("mode") or "auto"),
+                )
+                receipt = write_result_receipt(
+                    graph_state_root,
+                    target=target,
+                    producer=ResultProducer.CONTEXT,
+                    result_id=str(full_bundle["bundle_digest"]),
+                    request=request,
+                    selections=context_result_citations(full_bundle),
+                )
+                compact_bundle = compact_context_bundle(bundle)
+                projection = context_result_receipt_projection(receipt, compact_bundle=compact_bundle, full=True)
+                attribution_inputs[question_id] = (
+                    bundle,
+                    projection,
+                    receipt,
+                    result_member_capsules(root, target=target, receipt=receipt),
+                )
 
     summary = _summarize(results)
     problems.extend(
@@ -117,6 +164,16 @@ def run_context_benchmark(
         },
         "fixture_corpus": corpus_status,
     }
+    if include_attribution:
+        attribution, attribution_problems = _attribution_capsule(root, fixture, attribution_inputs=attribution_inputs)
+        problems.extend(attribution_problems)
+        if attribution:
+            data["attribution"] = attribution
+        data["execution"] = {
+            "execution_id": str(uuid4()),
+            "fresh_workspace": True,
+            "workspace_witness": digest_data({"workspace_root": root.resolve().as_posix()}),
+        }
     data["benchmark_digest"] = digest_data(data)
     return data, problems
 
@@ -164,7 +221,7 @@ def compare_context_benchmarks(
         max_question_recall_at_5_drop=max_question_recall_at_5_drop,
     )
     problems.extend(regressions)
-    return {
+    result = {
         "schema": "repoctl.context.benchmark.compare",
         "schema_version": 1,
         "baseline": _artifact_identity(baseline_path, baseline),
@@ -180,7 +237,815 @@ def compare_context_benchmarks(
             "max_question_recall_at_5_drop": max_question_recall_at_5_drop,
             "require_current_sources": require_current_sources,
         },
-    }, problems
+    }
+    if isinstance(baseline.get("attribution"), dict) or isinstance(candidate.get("attribution"), dict):
+        result["causal_eligibility"] = _causal_eligibility(root, baseline, candidate)
+    return result, problems
+
+
+def _attribution_capsule(
+    root: Path,
+    fixture: Path,
+    *,
+    attribution_inputs: dict[str, tuple[ContextBundle, dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
+) -> tuple[dict[str, Any], list[Problem]]:
+    path = fixture / "attribution-cases.json"
+    if not path.is_file():
+        return {}, [Problem("error", "context_benchmark_attribution_missing", "attribution mode requires attribution-cases.json", path.as_posix())]
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return _project_attribution_cases(root, value, attribution_inputs=attribution_inputs), []
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {}, [Problem("error", "context_benchmark_attribution_invalid", f"context benchmark attribution fixture is invalid: {exc}", path.as_posix())]
+
+
+def _project_attribution_cases(
+    root: Path,
+    value: Any,
+    *,
+    attribution_inputs: dict[str, tuple[ContextBundle, dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema", "schema_version", "question_id", "cases", "trace"}:
+        raise ValueError("attribution fixture schema is invalid")
+    if value.get("schema") != "repoctl.context.benchmark.attribution-cases" or value.get("schema_version") != 2:
+        raise ValueError("attribution fixture version is invalid")
+    question_id = str(value.get("question_id") or "")
+    inputs = attribution_inputs.get(question_id)
+    if inputs is None:
+        raise ValueError("attribution fixture question is not a benchmark question")
+    bundle, projection, receipt, members = inputs
+    raw_cases = value.get("cases")
+    trace = value.get("trace")
+    if not isinstance(raw_cases, list) or not isinstance(trace, dict):
+        raise ValueError("attribution cases and trace are required")
+
+    member_by_selection = {(str(item["authority"]), str(item["ref"])): item for item in members}
+    cases: dict[str, dict[str, Any]] = {}
+    for raw in raw_cases:
+        if not isinstance(raw, dict) or set(raw) != {"authority", "case_id", "ref"}:
+            raise ValueError("attribution case is invalid")
+        case_id = str(raw.get("case_id") or "")
+        authority = str(raw.get("authority") or "")
+        ref = str(raw.get("ref") or "")
+        member = member_by_selection.get((authority, ref))
+        if not case_id or case_id in cases:
+            raise ValueError("attribution case identity is invalid")
+        if member is None:
+            raise ValueError(f"attribution case {case_id} is not a selectable receipt member")
+        subject = member["subject"]
+        identity = {
+            "authority": authority,
+            "ref": ref,
+            "subject_key": subject["key"],
+            "version_digest": subject["version_digest"],
+        }
+        cases[case_id] = {
+            "authority": authority,
+            "ref": ref,
+            "member": member,
+            "candidate_id": digest_data(identity),
+        }
+
+    compact_capture = str(trace.get("compact_capture") or "")
+    if compact_capture not in {"captured", "missing"}:
+        raise ValueError("compact projection capture is invalid")
+
+    completion_capture = trace.get("completion")
+    completion_outcome: dict[str, Any] | None = None
+    completed_at: datetime | None = None
+    if completion_capture is not None:
+        if not isinstance(completion_capture, dict) or set(completion_capture) != {"completed_at", "roles"}:
+            raise ValueError("completion capture is invalid")
+        completed_at = _timestamp(completion_capture.get("completed_at"), label="completion outcome")
+        completion_outcome = _build_completion_outcome(receipt, members, completion_capture.get("roles"))
+
+    selected, reviewed, chosen, verified = _completion_stage_sets(completion_outcome, receipt=receipt, members=members)
+    reused = _later_reused_subjects(
+        trace.get("later_results"),
+        completed_at=completed_at,
+        receipt=receipt,
+        members=members,
+    )
+
+    full = bundle.to_dict()
+    knowledge_reused = _knowledge_reused_subjects(
+        trace.get("knowledge_results"),
+        root=root,
+        completed_at=completed_at,
+        bundle=full,
+        receipt=receipt,
+        members=members,
+    )
+    retrieval_by_selection = _retrieval_evidence(full)
+    compact_visible = {
+        (str(entry["primary_citation"]["authority"]), str(entry["primary_citation"]["ref"]))
+        for entry in projection["compact"]["representative_citations"]
+    }
+
+    projected: list[dict[str, Any]] = []
+    for case_id, case in sorted(cases.items(), key=lambda item: item[1]["candidate_id"]):
+        member = case["member"]
+        subject_id = str(member["subject"]["subject_id"])
+        selection = (case["authority"], case["ref"])
+        retrieval = retrieval_by_selection.get(selection)
+        visible: bool | str = "unknown" if compact_capture == "missing" else selection in compact_visible
+        projected.append(
+            {
+                "case_id": case_id,
+                "candidate_id": case["candidate_id"],
+                "authority": case["authority"],
+                "ref": case["ref"],
+                "member_id": member["member_id"],
+                "subject_key": member["subject"]["key"],
+                "version_digest": member["subject"]["version_digest"],
+                "stages": {
+                    "available": True,
+                    "retrieved": retrieval is not None,
+                    "compact_visible": visible,
+                    "selected": "unknown" if completion_outcome is None else subject_id in selected,
+                    "reviewed": "unknown" if completion_outcome is None else subject_id in reviewed,
+                    "chosen": "unknown" if completion_outcome is None else subject_id in chosen,
+                    "verified": "unknown" if completion_outcome is None else subject_id in verified,
+                    "later_reused": _reuse_stage(subject_id, direct=reused, knowledge=knowledge_reused),
+                },
+                "retrieval": retrieval,
+            }
+        )
+    return {
+        "schema": "repoctl.context.benchmark.attribution",
+        "schema_version": 1,
+        "claim_scope": "correlation_only",
+        "non_gating": True,
+        "protocol": {"runs": [], "repetition_count": 0},
+        "captured_at": str(trace.get("captured_at") or ""),
+        "source_artifacts": {
+            "question_id": question_id,
+            "producer": receipt["producer"],
+            "result_id": receipt["result_id"],
+            "receipt_digest": receipt["receipt_digest"],
+            "projection_digest": digest_data(projection) if compact_capture == "captured" else "",
+            "completion_outcome_digest": completion_outcome.get("outcome_digest") if completion_outcome else "",
+        },
+        "candidates": projected,
+    }
+
+
+def _attribution_protocol(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"runs"} or not isinstance(value.get("runs"), list):
+        raise ValueError("attribution protocol is invalid")
+    expected = {
+        "agent",
+        "arm_payload_digest",
+        "artifact_path",
+        "artifact_sha256",
+        "execution_id",
+        "fresh_workspace",
+        "model",
+        "permission_digest",
+        "pinned_commit",
+        "prompt_digest",
+        "run_digest",
+        "run_id",
+        "workspace_witness",
+    }
+    runs: list[dict[str, Any]] = []
+    for raw in value["runs"]:
+        if not isinstance(raw, dict) or set(raw) != expected:
+            raise ValueError("attribution protocol run is invalid")
+        basis = {key: raw[key] for key in raw if key != "run_digest"}
+        if (
+            not isinstance(raw.get("run_id"), str)
+            or not raw["run_id"]
+            or not all(
+                isinstance(raw.get(key), str) and raw[key]
+                for key in ("agent", "artifact_path", "execution_id", "model")
+            )
+            or not all(
+                _sha256(raw.get(key))
+                for key in (
+                    "arm_payload_digest",
+                    "artifact_sha256",
+                    "permission_digest",
+                    "pinned_commit",
+                    "prompt_digest",
+                    "workspace_witness",
+                )
+            )
+            or type(raw.get("fresh_workspace")) is not bool
+            or raw.get("run_id") != raw.get("execution_id")
+            or raw.get("run_digest") != digest_data(basis)
+        ):
+            raise ValueError("attribution protocol run metadata is invalid")
+        runs.append(dict(raw))
+    if len({item["run_id"] for item in runs}) != len(runs) or len({item["run_digest"] for item in runs}) != len(runs):
+        raise ValueError("attribution protocol repetitions are not distinct")
+    return {"runs": sorted(runs, key=lambda item: item["run_id"]), "repetition_count": len(runs)}
+
+
+def _selection_set(value: Any, *, label: str) -> set[tuple[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} is missing")
+    result: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"authority", "ref"}:
+            raise ValueError(f"{label} selection is invalid")
+        selection = (str(item.get("authority") or ""), str(item.get("ref") or ""))
+        if selection[0] not in {authority.value for authority in ResultAuthority} or not selection[1] or selection in result:
+            raise ValueError(f"{label} selection is invalid")
+        result.add(selection)
+    return result
+
+
+def _build_completion_outcome(
+    receipt: dict[str, Any],
+    members: list[dict[str, Any]],
+    roles: Any,
+) -> dict[str, Any]:
+    expected = {"chosen", "reviewed", "selected", "verification", "version_overrides"}
+    if not isinstance(roles, dict) or set(roles) != expected:
+        raise ValueError("completion roles are invalid")
+    member_by_selection = {(str(item["authority"]), str(item["ref"])): item for item in members}
+    selected = _selection_set(roles["selected"], label="selected")
+    reviewed = _selection_set(roles["reviewed"], label="reviewed")
+    chosen = _selection_set(roles["chosen"], label="chosen")
+    raw_verification = roles["verification"]
+    if not isinstance(raw_verification, list):
+        raise ValueError("completion verification is invalid")
+    verification_selections: set[tuple[str, str]] = set()
+    for record in raw_verification:
+        if not isinstance(record, dict) or set(record) != {"refs", "status"} or str(record.get("status") or "") not in {"passed", "failed", "mixed", "blocked"}:
+            raise ValueError("completion verification is invalid")
+        verification_selections.update(_selection_set(record["refs"], label="verification"))
+    overrides: dict[tuple[str, str], str] = {}
+    if not isinstance(roles["version_overrides"], list):
+        raise ValueError("completion version overrides are invalid")
+    for item in roles["version_overrides"]:
+        if not isinstance(item, dict) or set(item) != {"authority", "ref", "version_digest"}:
+            raise ValueError("completion version override is invalid")
+        key = (str(item.get("authority") or ""), str(item.get("ref") or ""))
+        version = str(item.get("version_digest") or "")
+        if key in overrides or key not in member_by_selection or not _sha256(version):
+            raise ValueError("completion version override is invalid")
+        overrides[key] = version
+    referenced = selected | reviewed | chosen | verification_selections
+    if not referenced <= set(member_by_selection):
+        raise ValueError("completion role references a non-member")
+
+    subject_by_selection: dict[tuple[str, str], dict[str, Any]] = {}
+    for key in referenced:
+        subject = json.loads(json.dumps(member_by_selection[key]["subject"]))
+        if key in overrides:
+            subject["version_digest"] = overrides[key]
+            subject["subject_id"] = digest_data({
+                "kind": subject["kind"],
+                "identity": subject["identity"],
+                "version_digest": subject["version_digest"],
+            })
+        subject_by_selection[key] = subject
+    ordered_subjects = sorted(
+        {str(item["subject_id"]): item for item in subject_by_selection.values()}.values(),
+        key=lambda item: (str(item["kind"]), json.dumps(item["identity"], sort_keys=True, separators=(",", ":")), str(item["version_digest"])),
+    )
+    local_by_stable = {str(item["subject_id"]): f"s{index}" for index, item in enumerate(ordered_subjects, start=1)}
+    subject_table = [
+        {
+            "id": local_by_stable[str(item["subject_id"])],
+            "kind": item["kind"],
+            "identity": item["identity"],
+            "key": item["key"],
+            "version_digest": item["version_digest"],
+        }
+        for item in ordered_subjects
+    ]
+    query = str(receipt["request"]["query"])
+    episode_id = digest_data({"kind": "task_discovery_query", "query": query})
+    request_digest = digest_data(receipt["request"])
+    citations = []
+    for key in selected:
+        member = member_by_selection[key]
+        subject = subject_by_selection[key]
+        citations.append({
+            "producer": receipt["producer"],
+            "result_id": receipt["result_id"],
+            "episode_id": episode_id,
+            "canonical_request_digest": request_digest,
+            "member_id": member["member_id"],
+            "source_receipt_digest": receipt["receipt_digest"],
+            "subject_id": local_by_stable[str(subject["subject_id"])],
+            "claims": member["claims"],
+        })
+    citations.sort(key=lambda item: item["member_id"])
+    seed_result = None
+    if citations:
+        seed_result = {
+            "producer": receipt["producer"],
+            "result_id": receipt["result_id"],
+            "source_receipt_digest": receipt["receipt_digest"],
+            "canonical_request_digest": request_digest,
+            "candidate_member_set_digest": digest_data(sorted(str(item["subject"]["subject_id"]) for item in members)),
+        }
+    verification_records = []
+    for index, raw in enumerate(raw_verification, start=1):
+        refs = _selection_set(raw["refs"], label="verification")
+        stable_ids = sorted(str(subject_by_selection[key]["subject_id"]) for key in refs)
+        evidence_digest = digest_data({"fixture": "context-attribution", "record": index})
+        base = {
+            "status": raw["status"],
+            "evidence": {"ref": evidence_digest, "digest": evidence_digest, "kind": "digest"},
+            "subject_ids": stable_ids,
+            "claim_ids": [],
+        }
+        verification_records.append({
+            "record_id": digest_data(base),
+            **base,
+            "subject_ids": sorted(local_by_stable[stable_id] for stable_id in stable_ids),
+        })
+    verification_records.sort(key=lambda item: item["record_id"])
+    base = {
+        "schema": "repoctl.task.discovery-completion-outcome",
+        "schema_version": 1,
+        "repository": receipt["repository"],
+        "subjects": subject_table,
+        "active_chosen": sorted(local_by_stable[str(subject_by_selection[key]["subject_id"])] for key in chosen),
+        "episodes": [{
+            "episode_id": episode_id,
+            "query_digest": digest_data({"query": query}),
+            "seed_result": seed_result,
+            "citations": citations,
+            "reviewed": sorted(local_by_stable[str(subject_by_selection[key]["subject_id"])] for key in reviewed),
+            "excluded": [],
+            "outside_candidate_set": [],
+        }],
+        "verification_records": verification_records,
+    }
+    return validate_completion_outcome({**base, "outcome_digest": digest_data(base)})
+
+
+def _stable_outcome_subjects(outcome: dict[str, Any]) -> dict[str, str]:
+    return {
+        str(item["id"]): digest_data({
+            "kind": item["kind"],
+            "identity": item["identity"],
+            "version_digest": item["version_digest"],
+        })
+        for item in outcome["subjects"]
+    }
+
+
+def _completion_stage_sets(
+    outcome: dict[str, Any] | None,
+    *,
+    receipt: dict[str, Any],
+    members: list[dict[str, Any]],
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    if outcome is None:
+        return set(), set(), set(), set()
+    stable_by_local = _stable_outcome_subjects(outcome)
+    member_by_id = {str(item["member_id"]): item for item in members}
+    selected: set[str] = set()
+    claim_to_subject: dict[str, str] = {}
+    for episode in outcome["episodes"]:
+        for citation in episode["citations"]:
+            member = member_by_id.get(str(citation["member_id"]))
+            stable_id = stable_by_local.get(str(citation["subject_id"]))
+            if (
+                member is None
+                or stable_id != str(member["subject"]["subject_id"])
+                or citation["producer"] != receipt["producer"]
+                or citation["result_id"] != receipt["result_id"]
+                or citation["source_receipt_digest"] != receipt["receipt_digest"]
+                or citation["claims"] != member["claims"]
+            ):
+                continue
+            selected.add(stable_id)
+            claim_to_subject.update((str(claim["evidence_digest"]), stable_id) for claim in citation["claims"])
+    reviewed = {
+        stable_by_local[local_id]
+        for episode in outcome["episodes"]
+        for local_id in episode["reviewed"]
+    }
+    chosen = {stable_by_local[local_id] for local_id in outcome["active_chosen"]}
+    verified: set[str] = set()
+    for record in outcome["verification_records"]:
+        if record["status"] != "passed":
+            continue
+        verified.update(stable_by_local[local_id] for local_id in record["subject_ids"])
+        verified.update(claim_to_subject[claim_id] for claim_id in record["claim_ids"] if claim_id in claim_to_subject)
+    return selected, reviewed, chosen, verified
+
+
+def _later_reused_subjects(
+    value: Any,
+    *,
+    completed_at: datetime | None,
+    receipt: dict[str, Any],
+    members: list[dict[str, Any]],
+) -> set[str] | None:
+    if value is None or completed_at is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("later result capture is invalid")
+    reused: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"captured_at", "roles"}:
+            raise ValueError("later result capture is invalid")
+        if _timestamp(item["captured_at"], label="later result") <= completed_at:
+            continue
+        outcome = _build_completion_outcome(receipt, members, item["roles"])
+        selected, _reviewed, _chosen, _verified = _completion_stage_sets(outcome, receipt=receipt, members=members)
+        reused.update(selected)
+    return reused
+
+
+def _reuse_stage(
+    subject_id: str,
+    *,
+    direct: set[str] | None,
+    knowledge: set[str] | None,
+) -> bool | str:
+    if (direct is not None and subject_id in direct) or (knowledge is not None and subject_id in knowledge):
+        return True
+    if direct is not None and knowledge is not None:
+        return False
+    return "unknown"
+
+
+def _knowledge_reused_subjects(
+    value: Any,
+    *,
+    root: Path,
+    completed_at: datetime | None,
+    bundle: dict[str, Any],
+    receipt: dict[str, Any],
+    members: list[dict[str, Any]],
+) -> set[str] | None:
+    if value is None or completed_at is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("later Knowledge capture is invalid")
+    source_versions = {
+        str(item["source_ref"]["path"]): str(item["source_ref"].get("content_sha256") or "")
+        for item in bundle.get("evidence", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("source_ref"), dict)
+        and isinstance(item["source_ref"].get("path"), str)
+    }
+    source_members = {
+        str(item["ref"]): item
+        for item in members
+        if item.get("authority") == ResultAuthority.SOURCE.value
+    }
+    reused: set[str] = set()
+    for item in value:
+        expected = {"captured_at", "event", "query", "record"}
+        if not isinstance(item, dict) or set(item) != expected:
+            raise ValueError("later Knowledge capture is invalid")
+        captured_at = _timestamp(item["captured_at"], label="later Knowledge result")
+        if captured_at <= completed_at:
+            continue
+        record = item.get("record")
+        event = item.get("event")
+        if not isinstance(record, dict) or not isinstance(event, dict):
+            raise ValueError("later Knowledge artifacts are invalid")
+        record_id = str(record.get("id") or "")
+        event_id = str(event.get("id") or "")
+        if KNOWLEDGE_RECORD_ID_RE.fullmatch(record_id) is None or KNOWLEDGE_EVENT_ID_RE.fullmatch(event_id) is None:
+            raise ValueError("later Knowledge artifact identity is invalid")
+        review = record.get("review") if isinstance(record.get("review"), dict) else {}
+        if (
+            _timestamp(review.get("reviewed_at"), label="Knowledge review") > captured_at
+            or _timestamp(event.get("approved_at"), label="Knowledge approval") > captured_at
+        ):
+            raise ValueError("later Knowledge approval occurs after its result")
+        source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
+        valid_source_kinds = {kind.value for kind in KnowledgeSourceRefKind}
+        if any(
+            not isinstance(source_ref, dict)
+            or str(source_ref.get("kind") or "") not in valid_source_kinds
+            for source_ref in source_refs
+        ):
+            raise ValueError("later Knowledge source ref kind is invalid")
+        source_resolutions = knowledge_source_ref_resolutions(root, record)
+        if len(source_resolutions) != len(source_refs) or any(
+            resolution.status not in {
+                KnowledgeSourceResolutionStatus.CURRENT,
+                KnowledgeSourceResolutionStatus.RELOCATED,
+            }
+            for resolution in source_resolutions
+        ):
+            raise ValueError("later Knowledge source refs are invalid")
+        contract_problems = [
+            *_knowledge_record_contract_problems(
+                record,
+                record_id=record_id,
+                repo_id=str(receipt["repository"]["id"]),
+            ),
+            *_knowledge_approval_binding(record, [event]).problems,
+        ]
+        if any(problem.severity == "error" for problem in contract_problems):
+            codes = ",".join(sorted({problem.code for problem in contract_problems if problem.severity == "error"}))
+            raise ValueError(f"later Knowledge artifacts violate the canonical contract: {codes}")
+        with TemporaryDirectory(prefix="repoctl-context-attribution-knowledge-") as temporary:
+            knowledge_root = Path(temporary)
+            records_dir = knowledge_root / "docs/knowledge/records"
+            events_dir = knowledge_root / "docs/knowledge/events"
+            record_path = (records_dir / f"{record_id}.json").resolve()
+            event_path = (events_dir / f"{event_id}.json").resolve()
+            if record_path.parent != records_dir.resolve() or event_path.parent != events_dir.resolve():
+                raise ValueError("later Knowledge artifact path escapes temporary state")
+            records_dir.mkdir(parents=True, exist_ok=True)
+            events_dir.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            event_path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            projection, problems = rebuild_knowledge_projection(knowledge_root, repo_id=str(receipt["repository"]["id"]))
+            if problems or record_id not in {
+                str(head.get("record", {}).get("id") or "")
+                for head in projection.get("heads", [])
+                if isinstance(head, dict)
+            }:
+                raise ValueError("later Knowledge record is not an approved current head")
+            target = RepoTarget(
+                id=str(receipt["repository"]["id"]),
+                root_path=knowledge_root / str(receipt["repository"]["path"]),
+                display_path=str(receipt["repository"]["path"]),
+                identity_source=RepositoryIdentitySource(str(receipt["repository"]["identity_source"])),
+            )
+            target.root_path.mkdir(parents=True, exist_ok=True)
+            request = ContextResultRequest(query=str(item.get("query") or ""), mode="past_decision")
+            result_id = digest_data({"captured_at": item["captured_at"], "query": request.query, "record_id": record_id})
+            later_receipt = write_result_receipt(
+                knowledge_root,
+                target=target,
+                producer=ResultProducer.CONTEXT,
+                result_id=result_id,
+                request=request,
+                selections=[ResultSelection(ResultAuthority.KNOWLEDGE, record_id)],
+            )
+            later_members = result_member_capsules(knowledge_root, target=target, receipt=later_receipt)
+            knowledge_selection = [{"authority": "knowledge", "ref": record_id}]
+            later_outcome = _build_completion_outcome(
+                later_receipt,
+                later_members,
+                {
+                    "selected": knowledge_selection,
+                    "reviewed": knowledge_selection,
+                    "chosen": knowledge_selection,
+                    "verification": [],
+                    "version_overrides": [],
+                },
+            )
+            selected, _reviewed, _chosen, _verified = _completion_stage_sets(
+                later_outcome,
+                receipt=later_receipt,
+                members=later_members,
+            )
+            if not selected:
+                raise ValueError("later Knowledge result has no exact selected citation")
+        for source_ref, resolution in zip(source_refs, source_resolutions, strict=True):
+            if not isinstance(source_ref, dict):
+                continue
+            path = str(source_ref.get("path") or "")
+            member = source_members.get(path)
+            if (
+                source_ref.get("kind") != KnowledgeSourceRefKind.CURRENT_SOURCE.value
+                or resolution.status is not KnowledgeSourceResolutionStatus.CURRENT
+                or member is None
+                or str(source_ref.get("content_sha256") or "") != resolution.actual_sha256
+                or resolution.actual_sha256 != source_versions.get(path)
+            ):
+                continue
+            reused.add(str(member["subject"]["subject_id"]))
+    return reused
+
+
+def _retrieval_evidence(bundle: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    groups = bundle.get("groups") if isinstance(bundle.get("groups"), dict) else {}
+    lane_by_ref: dict[tuple[str, str], str] = {}
+    for lane, items in groups.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            source_ref = item.get("source_ref") if isinstance(item, dict) and isinstance(item.get("source_ref"), dict) else {}
+            path = str(source_ref.get("path") or "")
+            kind = str(source_ref.get("kind") or "")
+            authority = "document" if kind == "document" else "source"
+            if path:
+                lane_by_ref.setdefault((authority, path), str(lane))
+    result: dict[tuple[str, str], dict[str, Any]] = {}
+    evidence = bundle.get("evidence") if isinstance(bundle.get("evidence"), list) else []
+    for rank, item in enumerate(evidence, start=1):
+        if not isinstance(item, dict):
+            continue
+        source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        ref = str(source_ref.get("path") or "")
+        kind = str(source_ref.get("kind") or "")
+        authority = "document" if kind == "document" else "source"
+        if not ref:
+            continue
+        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+        result[(authority, ref)] = {
+            "rank": rank,
+            "lane": lane_by_ref.get((authority, ref), kind or authority),
+            "score": item.get("score"),
+            "score_breakdown": dict(sorted(breakdown.items())),
+            "typed_contributions": {
+                "graph": bool(item.get("graph_path") or float(breakdown.get("graph") or 0.0)),
+                "knowledge": bool(item.get("related_record_ids") or float(breakdown.get("knowledge_path") or 0.0)),
+            },
+        }
+    return result
+
+
+def _timestamp(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{label} timestamp is invalid")
+    return parsed.astimezone(UTC)
+
+
+def _sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 71 and value.startswith("sha256:") and all(char in "0123456789abcdef" for char in value[7:])
+
+
+def _benchmark_arm_payload_digest(data: dict[str, Any]) -> str:
+    payload = {
+        key: value
+        for key, value in data.items()
+        if key not in {"artifact", "benchmark_digest", "execution"}
+    }
+    attribution = payload.get("attribution")
+    if isinstance(attribution, dict):
+        payload["attribution"] = {
+            key: (
+                [
+                    {
+                        candidate_key: candidate_value
+                        for candidate_key, candidate_value in candidate.items()
+                        if candidate_key != "member_id"
+                    }
+                    for candidate in value
+                    if isinstance(candidate, dict)
+                ]
+                if key == "candidates" and isinstance(value, list)
+                else value
+            )
+            for key, value in attribution.items()
+            if key not in {"protocol", "source_artifacts"}
+        }
+    return digest_data(payload)
+
+
+def _execution_artifact(
+    root: Path | None,
+    raw_path: str,
+    *,
+    expected_sha256: str,
+) -> tuple[dict[str, Any] | None, str]:
+    path_ref = Path(raw_path)
+    if (
+        root is None
+        or not raw_path
+        or path_ref.is_absolute()
+        or path_ref.as_posix() != raw_path
+        or any(part in {".", ".."} for part in path_ref.parts)
+    ):
+        return None, "artifact_path_invalid"
+    root_resolved = root.resolve()
+    unresolved_path = root_resolved / path_ref
+    path = unresolved_path.resolve()
+    if unresolved_path.is_symlink() or not path.is_relative_to(root_resolved) or not path.is_file():
+        return None, "artifact_path_invalid"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None, "artifact_invalid"
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != expected_sha256:
+        return None, "artifact_digest_mismatch"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, "artifact_invalid"
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("command") != "context benchmark"
+        or not isinstance(payload.get("data"), dict)
+    ):
+        return None, "artifact_invalid"
+    data = payload["data"]
+    artifact = data.get("artifact") if isinstance(data.get("artifact"), dict) else {}
+    execution = data.get("execution") if isinstance(data.get("execution"), dict) else {}
+    artifact_internal = Path(str(artifact.get("path") or ""))
+    if (
+        not artifact_internal.parts
+        or artifact_internal.is_absolute()
+        or artifact_internal.as_posix() != str(artifact.get("path") or "")
+        or any(part in {".", ".."} for part in artifact_internal.parts)
+        or tuple(path.parts[-len(artifact_internal.parts):]) != artifact_internal.parts
+    ):
+        return None, "artifact_invalid"
+    execution_workspace = path
+    for _part in artifact_internal.parts:
+        execution_workspace = execution_workspace.parent
+    expected_workspace_witness = digest_data({"workspace_root": execution_workspace.resolve().as_posix()})
+    digest_basis = {key: value for key, value in data.items() if key not in {"artifact", "benchmark_digest"}}
+    if (
+        artifact.get("benchmark_digest") != data.get("benchmark_digest")
+        or data.get("benchmark_digest") != digest_data(digest_basis)
+        or set(execution) != {"execution_id", "fresh_workspace", "workspace_witness"}
+        or not isinstance(execution.get("execution_id"), str)
+        or not execution.get("execution_id")
+        or execution.get("fresh_workspace") is not True
+        or execution.get("workspace_witness") != expected_workspace_witness
+    ):
+        return None, "artifact_invalid"
+    return data, ""
+
+
+def _causal_eligibility(root: Path | None, baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    baseline_attribution = baseline.get("attribution") if isinstance(baseline.get("attribution"), dict) else {}
+    candidate_attribution = candidate.get("attribution") if isinstance(candidate.get("attribution"), dict) else {}
+    baseline_protocol = baseline_attribution.get("protocol") if isinstance(baseline_attribution.get("protocol"), dict) else {}
+    candidate_protocol = candidate_attribution.get("protocol") if isinstance(candidate_attribution.get("protocol"), dict) else {}
+    # In-band benchmark artifacts are caller-rewritable.  Keep their protocol
+    # diagnostics, but never promote them to causal eligibility without an
+    # independently issued execution receipt.
+    reasons: list[str] = ["independent_execution_receipt_missing"]
+
+    artifact_paths: list[str] = []
+    artifact_digests: list[str] = []
+    execution_ids: list[str] = []
+    run_ids: list[str] = []
+    workspace_witnesses: list[str] = []
+
+    def arm(data: dict[str, Any], protocol: dict[str, Any], label: str) -> dict[str, str]:
+        try:
+            runs = _attribution_protocol({"runs": protocol.get("runs")})["runs"]
+        except ValueError:
+            reasons.append(f"{label}_protocol_invalid")
+            runs = []
+        if len(runs) < 4 or len({str(item.get("run_id") or "") for item in runs if isinstance(item, dict)}) != len(runs):
+            reasons.append(f"{label}_insufficient_repetitions")
+        if protocol.get("repetition_count") != len(runs):
+            reasons.append(f"{label}_repetition_count_mismatch")
+        if any(not isinstance(item, dict) or item.get("fresh_workspace") is not True for item in runs):
+            reasons.append(f"{label}_workspace_not_fresh")
+        arm_payload_digest = _benchmark_arm_payload_digest(data)
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            raw_path = str(run.get("artifact_path") or "")
+            raw_digest = str(run.get("artifact_sha256") or "")
+            run_ids.append(str(run.get("run_id") or ""))
+            artifact_paths.append(raw_path)
+            artifact_digests.append(raw_digest)
+            artifact, artifact_problem = _execution_artifact(root, raw_path, expected_sha256=raw_digest)
+            if artifact_problem:
+                reasons.append(f"{label}_{artifact_problem}")
+                continue
+            if (
+                run.get("arm_payload_digest") != arm_payload_digest
+                or _benchmark_arm_payload_digest(artifact or {}) != arm_payload_digest
+                or run.get("execution_id") != (artifact or {}).get("execution", {}).get("execution_id")
+                or run.get("fresh_workspace") != (artifact or {}).get("execution", {}).get("fresh_workspace")
+                or run.get("workspace_witness") != (artifact or {}).get("execution", {}).get("workspace_witness")
+            ):
+                reasons.append(f"{label}_arm_payload_mismatch")
+            execution_ids.append(str(run.get("execution_id") or ""))
+            workspace_witnesses.append(str(run.get("workspace_witness") or ""))
+        metadata: dict[str, str] = {}
+        for key in ("pinned_commit", "agent", "model", "prompt_digest", "permission_digest"):
+            values = {str(item.get(key) or "") for item in runs if isinstance(item, dict)}
+            if len(values) != 1 or not next(iter(values), ""):
+                reasons.append(f"{label}_mixed_{key}")
+            else:
+                metadata[key] = next(iter(values))
+        return metadata
+
+    baseline_metadata = arm(baseline, baseline_protocol, "baseline")
+    candidate_metadata = arm(candidate, candidate_protocol, "candidate")
+    if (
+        len(set(run_ids)) != len(run_ids)
+        or len(set(execution_ids)) != len(execution_ids)
+        or len(set(workspace_witnesses)) != len(workspace_witnesses)
+        or len(set(artifact_paths)) != len(artifact_paths)
+        or len(set(artifact_digests)) != len(artifact_digests)
+    ):
+        reasons.append("shared_execution_artifact")
+    for key in ("pinned_commit", "agent", "model", "prompt_digest", "permission_digest"):
+        if baseline_metadata.get(key) and candidate_metadata.get(key) and baseline_metadata[key] != candidate_metadata[key]:
+            reasons.append(f"mismatched_{key}")
+    return {
+        "status": "eligible" if not reasons else "insufficient_evidence",
+        "claim_scope": "correlation_only",
+        "non_gating": True,
+        "reasons": sorted(set(reasons)),
+    }
 
 
 def _read_questions(path: Path) -> list[dict[str, Any]]:

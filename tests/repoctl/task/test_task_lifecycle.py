@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import TaskHealth, main
-from tools.repoctl.discovery_outcomes import completion_outcome_projection, validate_completion_outcome
+from tools.repoctl.discovery_outcomes import (
+    completion_outcome_projection,
+    load_outcome_state,
+    structured_verification_coverage,
+    validate_completion_outcome,
+)
 from tools.repoctl.graph_model import digest_data
 from tools.repoctl.io import RepoctlError
 from tools.repoctl.markdown import find_section, replace_frontmatter_line, replace_section
@@ -452,6 +457,832 @@ def test_task_doctor_warns_until_current_changed_chosen_subject_has_passed_struc
         "unverified_subjects_truncated": False,
     }
     assert not any(item["code"].startswith("task_structured_verification_") for item in finished["warnings"])
+
+
+def test_completion_outcome_retains_verified_chosen_subject_after_scope_replacement(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(
+        repo,
+        {
+            "app.py": "value = 1\n",
+            "other.py": "value = 1\n",
+        },
+    )
+    task_id = "T-20260609184046Z"
+    task_path = add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS app.py v1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "verify app",
+            "--chosen",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    verified_state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    verified_subject = verified_state["active_chosen"][0]
+
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--replace-chosen",
+            "repos/other.py",
+            "--reason",
+            "move the approved scope after the app check",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--reviewed",
+            "repos/other.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            verified_subject["subject_id"],
+            "--json",
+        ]
+    ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["problems"][0]["code"] == "verification_subject_unknown"
+
+    projection = completion_outcome_projection(tmp_path, task_id)
+    assert projection is not None
+    assert validate_completion_outcome(projection) == projection
+    subjects = {item["id"]: item for item in projection["subjects"]}
+    record = projection["verification_records"][0]
+    assert record["subject_ids"]
+    assert [subjects[item]["identity"] for item in record["subject_ids"]] == [{"path": "app.py"}]
+    assert [subjects[item]["version_digest"] for item in record["subject_ids"]] == [
+        verified_subject["version_digest"]
+    ]
+
+    task_path.write_text(
+        replace_section(
+            task_path.read_text(encoding="utf-8"),
+            "Verification",
+            "- Command: focused check\n- Result: pass\n",
+        ),
+        encoding="utf-8",
+    )
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    finished = json.loads(capsys.readouterr().out)
+    receipt = json.loads((tmp_path / finished["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    assert validate_completion_outcome(receipt["discovery_outcome"]) == receipt["discovery_outcome"]
+
+
+def test_completion_outcome_preserves_each_exact_verified_file_version(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    task_id = "T-20260609184046Z"
+    task_path = add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS app.py v1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "update app",
+            "--chosen",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    version_one = json.loads(outcome_path.read_text(encoding="utf-8"))["active_chosen"][0]["version_digest"]
+
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    missing = structured_verification_coverage(
+        tmp_path,
+        task_id=task_id,
+        target=target,
+        subject_refs=["app.py"],
+    )
+    assert missing["status"] == "missing"
+
+    evidence.write_text("PASS app.py v2\n", encoding="utf-8")
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    version_two = json.loads(outcome_path.read_text(encoding="utf-8"))["active_chosen"][0]["version_digest"]
+    assert version_two != version_one
+
+    covered = structured_verification_coverage(
+        tmp_path,
+        task_id=task_id,
+        target=target,
+        subject_refs=["app.py"],
+    )
+    assert covered["status"] == "complete"
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--reviewed",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    task_path.write_text(
+        replace_section(
+            task_path.read_text(encoding="utf-8"),
+            "Verification",
+            "- Command: focused checks for V1 and V2\n- Result: pass\n",
+        ),
+        encoding="utf-8",
+    )
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    finished = json.loads(capsys.readouterr().out)
+    receipt = json.loads((tmp_path / finished["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    outcome = receipt["discovery_outcome"]
+    assert validate_completion_outcome(outcome) == outcome
+    subjects = {item["id"]: item for item in outcome["subjects"]}
+    verified_versions = {
+        tuple(subjects[item]["version_digest"] for item in record["subject_ids"])
+        for record in outcome["verification_records"]
+    }
+    assert verified_versions == {(version_one,), (version_two,)}
+
+
+def test_verification_alias_rejects_multiple_citation_versions_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS exact citation V2\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    for version in (1, 2):
+        if version == 2:
+            (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+        result_id = digest_data({"context": f"citation version {version}"})
+        write_result_receipt(
+            tmp_path,
+            target=target,
+            producer=ResultProducer.CONTEXT,
+            result_id=result_id,
+            request=ContextResultRequest(query=f"citation version {version}", mode="auto"),
+            selections=[ResultSelection(ResultAuthority.SOURCE, "repos/app.py")],
+        )
+        assert main(
+            [
+                "task",
+                "discovery",
+                "add",
+                task_id,
+                "--result-producer",
+                "context",
+                "--result-id",
+                result_id,
+                "--result-authority",
+                "source",
+                "--result-ref",
+                "repos/app.py",
+                "--json",
+            ]
+        ) == 0
+        capsys.readouterr()
+
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    version_one = state["prior_episodes"][0]["citations"][0]["member"]["subject"]
+    version_two = state["active_episode"]["citations"][0]["member"]["subject"]
+    assert version_one["subject_id"] != version_two["subject_id"]
+    before = outcome_path.read_bytes()
+
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 2
+    ambiguous = json.loads(capsys.readouterr().out)
+    assert ambiguous["problems"][0]["code"] == "verification_subject_ambiguous"
+    assert outcome_path.read_bytes() == before
+
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            version_two["subject_id"],
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    recorded = json.loads(outcome_path.read_text(encoding="utf-8"))
+    assert recorded["verification_records"][0]["subject_ids"] == [version_two["subject_id"]]
+    assert [item["subject_id"] for item in recorded["verification_subjects"]] == [version_two["subject_id"]]
+
+
+def _recorded_verification_state(tmp_path: Path, monkeypatch, capsys) -> tuple[str, Path, Path]:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(
+        repo,
+        {
+            "app.py": "value = 1\n",
+            "other.py": "value = 1\n",
+        },
+    )
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS app.py\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+    result_id = digest_data({"context": "recorded verification state"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=result_id,
+        request=ContextResultRequest(query="inspect app", mode="auto"),
+        selections=[ResultSelection(ResultAuthority.SOURCE, "repos/app.py")],
+    )
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "inspect app",
+            "--reviewed",
+            "repos/app.py",
+            "--chosen",
+            "repos/app.py",
+            "--result-producer",
+            "context",
+            "--result-id",
+            result_id,
+            "--result-authority",
+            "source",
+            "--result-ref",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--reviewed",
+            "repos/other.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    return task_id, outcome_path, evidence
+
+
+def _write_outcome_state(path: Path, state: dict) -> None:
+    basis = {key: value for key, value in state.items() if key != "state_digest"}
+    state["state_digest"] = digest_data(basis)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "field_path",
+    [
+        pytest.param(("active_chosen", 0, "kind"), id="subject-kind"),
+        pytest.param(("active_episode", "citations", 0, "producer"), id="citation-producer"),
+        pytest.param(("active_episode", "citations", 0, "member", "authority"), id="citation-authority"),
+        pytest.param(("verification_records", 0, "status"), id="record-status"),
+        pytest.param(("verification_records", 0, "evidence", "kind"), id="evidence-kind"),
+    ],
+)
+def test_malformed_outcome_field_types_fail_typed_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    field_path: tuple[str | int, ...],
+) -> None:
+    task_id, outcome_path, _evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    target = state
+    for part in field_path[:-1]:
+        target = target[part]
+    target[field_path[-1]] = []
+    _write_outcome_state(outcome_path, state)
+    before = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as caught:
+        load_outcome_state(tmp_path, task_id)
+
+    assert caught.value.code == "discovery_outcome_state_invalid"
+    assert outcome_path.read_bytes() == before
+
+
+def test_verification_subject_pool_requires_exact_record_closure(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_id, outcome_path, _evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    state["verification_subjects"] = []
+    _write_outcome_state(outcome_path, state)
+    missing_before = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as missing:
+        load_outcome_state(tmp_path, task_id)
+
+    assert missing.value.code == "discovery_outcome_verification_reference_invalid"
+    assert outcome_path.read_bytes() == missing_before
+
+    state = json.loads(missing_before)
+    verified_ids = set(state["verification_records"][0]["subject_ids"])
+    extra = next(
+        item
+        for item in state["active_episode"]["reviewed"]
+        if item["subject_id"] not in verified_ids
+    )
+    state["verification_subjects"] = sorted(
+        [state["active_chosen"][0], extra],
+        key=lambda item: item["subject_id"],
+    )
+    _write_outcome_state(outcome_path, state)
+    extra_before = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as extra_error:
+        load_outcome_state(tmp_path, task_id)
+
+    assert extra_error.value.code == "discovery_outcome_state_invalid"
+    assert outcome_path.read_bytes() == extra_before
+
+
+def test_invalid_v1_digest_precedes_orphan_reference_migration(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_id, outcome_path, _evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    state.pop("verification_subjects")
+    state["schema_version"] = 1
+    basis = {key: value for key, value in state.items() if key != "state_digest"}
+    state["state_digest"] = digest_data(basis)
+    record = state["verification_records"][0]
+    record["subject_ids"] = ["sha256:" + ("f" * 64)]
+    record["record_id"] = digest_data(
+        {key: value for key, value in record.items() if key != "record_id"}
+    )
+    outcome_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as caught:
+        load_outcome_state(tmp_path, task_id)
+
+    assert caught.value.code == "discovery_outcome_state_invalid"
+    assert outcome_path.read_bytes() == before
+
+
+def test_mixed_valid_and_orphan_verification_references_fail_without_projection(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_id, outcome_path, _evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    record = state["verification_records"][0]
+    record["subject_ids"] = sorted([*record["subject_ids"], "sha256:" + ("f" * 64)])
+    record["record_id"] = digest_data(
+        {key: value for key, value in record.items() if key != "record_id"}
+    )
+    _write_outcome_state(outcome_path, state)
+    before = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as caught:
+        completion_outcome_projection(tmp_path, task_id)
+
+    assert caught.value.code == "discovery_outcome_verification_reference_invalid"
+    assert outcome_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("corruption", ["subject-capsule", "record-id"])
+def test_forged_verification_capsules_and_record_ids_fail_typed(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    corruption: str,
+) -> None:
+    task_id, outcome_path, _evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    if corruption == "subject-capsule":
+        state["verification_subjects"][0]["subject_id"] = "sha256:" + ("e" * 64)
+    else:
+        state["verification_records"][0]["subject_ids"] = ["sha256:" + ("f" * 64)]
+        state["verification_records"][0]["record_id"] = "sha256:" + ("e" * 64)
+    _write_outcome_state(outcome_path, state)
+    before = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as caught:
+        load_outcome_state(tmp_path, task_id)
+
+    assert caught.value.code == "discovery_outcome_state_invalid"
+    assert outcome_path.read_bytes() == before
+
+
+def test_duplicate_verification_add_keeps_exact_pool_and_record_cardinality(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_id, outcome_path, evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
+    before = outcome_path.read_bytes()
+    initial = json.loads(before)
+
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    repeated = json.loads(outcome_path.read_text(encoding="utf-8"))
+
+    assert len(repeated["verification_subjects"]) == len(initial["verification_subjects"]) == 1
+    assert len(repeated["verification_records"]) == len(initial["verification_records"]) == 1
+    assert outcome_path.read_bytes() == before
+
+
+def test_legacy_verification_subject_migrates_in_memory_without_rewriting_state(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS app.py v1\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "verify app",
+            "--chosen",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    legacy = json.loads(outcome_path.read_text(encoding="utf-8"))
+    version_one = legacy["verification_subjects"][0]["version_digest"]
+    legacy.pop("verification_subjects")
+    legacy["schema_version"] = 1
+    legacy["state_digest"] = digest_data(
+        {key: value for key, value in legacy.items() if key != "state_digest"}
+    )
+    outcome_path.write_text(json.dumps(legacy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before = outcome_path.read_bytes()
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+
+    migrated = load_outcome_state(tmp_path, task_id)
+
+    assert migrated is not None
+    assert migrated["schema_version"] == 2
+    assert [item["subject_id"] for item in migrated["verification_subjects"]] == migrated["verification_records"][0]["subject_ids"]
+    assert migrated["verification_subjects"][0]["version_digest"] == version_one
+    assert outcome_path.read_bytes() == before
+
+
+def test_claim_only_verification_requires_a_frozen_citation_claim(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS cited claim\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+    result_id = digest_data({"context": "claim-only verification"})
+    write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=result_id,
+        request=ContextResultRequest(query="inspect app", mode="auto"),
+        selections=[ResultSelection(ResultAuthority.SOURCE, "repos/app.py")],
+    )
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "inspect app",
+            "--reviewed",
+            "repos/app.py",
+            "--chosen",
+            "repos/app.py",
+            "--result-producer",
+            "context",
+            "--result-id",
+            result_id,
+            "--result-authority",
+            "source",
+            "--result-ref",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    state = json.loads(outcome_path.read_text(encoding="utf-8"))
+    claim_id = state["active_episode"]["citations"][0]["member"]["claims"][0]["evidence_digest"]
+    unknown_claim = "sha256:" + ("f" * 64)
+    before_unknown = outcome_path.read_bytes()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--claim-id",
+            unknown_claim,
+            "--json",
+        ]
+    ) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["problems"][0]["code"] == "verification_claim_unknown"
+    assert outcome_path.read_bytes() == before_unknown
+
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--claim-id",
+            claim_id,
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    projection = completion_outcome_projection(tmp_path, task_id)
+    assert projection is not None
+    assert validate_completion_outcome(projection) == projection
+    assert projection["verification_records"][0]["subject_ids"] == []
+    assert projection["verification_records"][0]["claim_ids"] == [claim_id]
+
+    legacy = json.loads(outcome_path.read_text(encoding="utf-8"))
+    legacy.pop("verification_subjects")
+    legacy["schema_version"] = 1
+    legacy_record = legacy["verification_records"][0]
+    legacy_record["claim_ids"] = [unknown_claim]
+    legacy_record["record_id"] = digest_data(
+        {key: value for key, value in legacy_record.items() if key != "record_id"}
+    )
+    legacy["state_digest"] = digest_data(
+        {key: value for key, value in legacy.items() if key != "state_digest"}
+    )
+    outcome_path.write_text(json.dumps(legacy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before_orphan = outcome_path.read_bytes()
+
+    with pytest.raises(RepoctlError) as caught:
+        load_outcome_state(tmp_path, task_id)
+
+    assert caught.value.code == "discovery_outcome_verification_reference_invalid"
+    assert outcome_path.read_bytes() == before_orphan
 
 
 def test_task_chosen_projection_must_match_machine_outcome_before_resume_or_finish(

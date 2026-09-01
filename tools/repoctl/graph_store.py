@@ -1752,7 +1752,7 @@ def materialize_graph(
         update = (
             build_semantic_provider(
                 provider,
-                root,
+                state_root or root,
                 target=target,
                 entries=provider_entries,
                 import_resolutions=import_resolutions,

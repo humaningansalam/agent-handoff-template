@@ -4,8 +4,14 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tools.repoctl.cli import main
+from tools.repoctl.graph_model import digest_data
+from tools.repoctl.io import RepoctlError
+from tools.repoctl.markdown import replace_section
 from tools.repoctl.meta import shard_for_path
+from tools.repoctl.tasks import VerificationInput, finish_task
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
     commit_all,
@@ -44,6 +50,179 @@ def test_task_finish_uses_task_start_dirty_baseline_for_root_only_task(tmp_path:
     assert receipt["repo_id"] == ""
     archived = (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "non-product update verified" in archived
+
+
+def test_task_finish_rejects_legacy_orphan_verification_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(
+        repo,
+        {
+            "app.py": "value = 1\n",
+            "other.py": "value = 1\n",
+        },
+    )
+    task_id = "T-20260609184046Z"
+    task_path = add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    evidence = tmp_path / "focused-check.log"
+    evidence.write_text("PASS app.py\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            "verify app",
+            "--chosen",
+            "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--replace-chosen",
+            "repos/other.py",
+            "--reason",
+            "move approved scope",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--reviewed",
+            "repos/other.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    task_path.write_text(
+        replace_section(
+            task_path.read_text(encoding="utf-8"),
+            "Verification",
+            "- Command: focused check\n- Result: pass\n",
+        ),
+        encoding="utf-8",
+    )
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    legacy = json.loads(outcome_path.read_text(encoding="utf-8"))
+    legacy.pop("verification_subjects", None)
+    legacy["schema_version"] = 1
+    basis = {key: value for key, value in legacy.items() if key != "state_digest"}
+    legacy["state_digest"] = digest_data(basis)
+    outcome_path.write_text(json.dumps(legacy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    tracked_paths = [
+        task_path,
+        tmp_path / "docs/BOARD.md",
+        outcome_path,
+        tmp_path / f"docs/tasks/.repoctl-state/{task_id}.json",
+    ]
+    before = {path: path.read_bytes() for path in tracked_paths}
+
+    assert main(["task", "doctor", task_id, "--json"]) == 2
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["problems"][0]["code"] == "discovery_outcome_verification_reference_invalid"
+    assert {path: path.read_bytes() for path in tracked_paths} == before
+
+    assert main(["task", "finish", task_id, "--json"]) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["problems"][0]["code"] == "discovery_outcome_verification_reference_invalid"
+    assert {path: path.read_bytes() for path in tracked_paths} == before
+    assert not (tmp_path / f"docs/tasks/.repoctl-state/completions/{task_id}.json").exists()
+    assert not (tmp_path / f"docs/archive/tasks/{task_id}--alpha.md").exists()
+
+
+def test_task_finish_validates_completion_before_effect_preparation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="doing").replace('area: ""', 'area: "ops"'),
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr("tools.repoctl.tasks.completion_outcome_projection", lambda *_args, **_kwargs: {})
+
+    def reject_completion(_value):
+        raise ValueError("forced invalid completion")
+
+    monkeypatch.setattr("tools.repoctl.tasks.validate_completion_outcome", reject_completion)
+
+    def forbidden(name: str):
+        def call(*_args, **_kwargs):
+            calls.append(name)
+            raise AssertionError(f"{name} must not run before completion validation")
+
+        return call
+
+    for name in (
+        "utc_stamp",
+        "_utc_event_stamp",
+        "load_tasks",
+        "archive_locator_writes",
+        "prepare_completion_sidecar_writes",
+    ):
+        monkeypatch.setattr(f"tools.repoctl.tasks.{name}", forbidden(name))
+
+    with pytest.raises(RepoctlError) as caught:
+        finish_task(
+            tmp_path,
+            task_id,
+            verification=VerificationInput(
+                source="task",
+                text="focused check passed\n",
+                source_sha256=digest_data({"verification": "focused check passed"}),
+            ),
+        )
+
+    assert caught.value.code == "discovery_completion_outcome_invalid"
+    assert calls == []
 
 
 def test_task_finish_changed_meta_gate_uses_explicit_task_changes(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -220,6 +220,258 @@ def _prepare_and_publish(root: Path, item: CompletionReceiptInput, *, policy: Co
     _publish(prepared.writes)
 
 
+def _catalogue_manifest(root: Path) -> tuple[tuple[str, str, int, str], ...]:
+    directory = completion_catalogue_paths(root).directory
+    entries: list[tuple[str, str, int, str]] = []
+    for path in sorted(directory.rglob("*")):
+        relative = path.relative_to(directory).as_posix()
+        size = path.lstat().st_size
+        if path.is_symlink():
+            entries.append((relative, "symlink", size, path.readlink().as_posix()))
+        elif path.is_dir():
+            entries.append((relative, "directory", size, ""))
+        else:
+            entries.append((relative, "file", size, hashlib.sha256(path.read_bytes()).hexdigest()))
+    return tuple(entries)
+
+
+def _canonical_event_line(event: dict[str, object]) -> str:
+    return json.dumps(event, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+
+
+def _event_prefix(event: dict[str, object]) -> str:
+    return digest_data(
+        {
+            "previous_prefix_digest": event["previous_prefix_digest"],
+            "event_id": event["event_id"],
+        }
+    )
+
+
+def _replace_pending_head_event(
+    root: Path,
+    *,
+    updates: dict[str, object],
+    update_head_prefix: bool = True,
+) -> tuple[Path, dict[str, object]]:
+    paths = completion_catalogue_paths(root, "main")
+    head = json.loads(paths.head.read_text(encoding="utf-8"))
+    event_path = paths.events_directory / f"{str(head['last_event_id']).removeprefix('sha256:')}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event.update(updates)
+    base = {key: value for key, value in event.items() if key != "event_id"}
+    event["event_id"] = digest_data(base)
+    replacement_path = paths.events_directory / f"{str(event['event_id']).removeprefix('sha256:')}.json"
+    replacement_path.write_text(_canonical_event_line(event), encoding="utf-8")
+    head["last_event_id"] = event["event_id"]
+    if update_head_prefix:
+        head["prefix_digest"] = _event_prefix(event)
+    paths.head.write_text(json.dumps(head, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return replacement_path, event
+
+
+def test_full_audit_accepts_multi_event_pending_tail_without_mutation(tmp_path: Path) -> None:
+    first = _receipt_input(tmp_path, "T-20260813020101Z")
+    second = _receipt_input(tmp_path, "T-20260813020102Z", changed_paths=("src/second.py",))
+    third = _receipt_input(tmp_path, "T-20260813020103Z", changed_paths=("src/third.py",))
+    rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[first])
+    _prepare_and_publish(tmp_path, second)
+    _prepare_and_publish(tmp_path, third)
+    paths = completion_catalogue_paths(tmp_path, "main")
+    head = json.loads(paths.head.read_text(encoding="utf-8"))
+    assert completion_catalogue_status(tmp_path, "main").status == "tail_pending"
+    before = _catalogue_manifest(tmp_path)
+
+    audit = audit_completion_catalogue(
+        tmp_path,
+        "main",
+        receipt_artifacts=[first, second, third],
+    )
+
+    assert audit.event_count == 3
+    assert audit.last_sequence == 3
+    assert audit.last_event_id == head["last_event_id"]
+    assert audit.prefix_digest == head["prefix_digest"]
+    assert audit.task_ids == tuple(item.receipt["task_id"] for item in (first, second, third))
+    assert audit.source_checked is True
+    assert _catalogue_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("payload", CompletionCatalogueUnavailableReason.CORRUPT),
+        ("previous_event", CompletionCatalogueUnavailableReason.GAP),
+        ("sequence", CompletionCatalogueUnavailableReason.GAP),
+        ("prefix", CompletionCatalogueUnavailableReason.PREFIX_MISMATCH),
+        ("head", CompletionCatalogueUnavailableReason.PREFIX_MISMATCH),
+    ],
+)
+def test_full_audit_rejects_pending_tail_tamper_without_mutation(
+    tmp_path: Path,
+    mutation: str,
+    reason: CompletionCatalogueUnavailableReason,
+) -> None:
+    first = _receipt_input(tmp_path, "T-20260813020201Z")
+    second = _receipt_input(tmp_path, "T-20260813020202Z", changed_paths=("src/second.py",))
+    third = _receipt_input(tmp_path, "T-20260813020203Z", changed_paths=("src/third.py",))
+    rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[first])
+    _prepare_and_publish(tmp_path, second)
+    _prepare_and_publish(tmp_path, third)
+    paths = completion_catalogue_paths(tmp_path, "main")
+    head = json.loads(paths.head.read_text(encoding="utf-8"))
+    event_path = paths.events_directory / f"{str(head['last_event_id']).removeprefix('sha256:')}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+
+    if mutation == "payload":
+        event_path.write_text("{\n", encoding="utf-8")
+    elif mutation == "previous_event":
+        _replace_pending_head_event(
+            tmp_path,
+            updates={"previous_event_id": "sha256:" + ("0" * 64)},
+        )
+    elif mutation == "sequence":
+        _replace_pending_head_event(tmp_path, updates={"sequence": 4})
+    elif mutation == "prefix":
+        _replace_pending_head_event(
+            tmp_path,
+            updates={"previous_prefix_digest": "sha256:" + ("0" * 64)},
+        )
+    else:
+        head["prefix_digest"] = "sha256:" + ("0" * 64)
+        paths.head.write_text(json.dumps(head, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    before = _catalogue_manifest(tmp_path)
+    with pytest.raises(CompletionCatalogueUnavailable) as caught:
+        audit_completion_catalogue(
+            tmp_path,
+            "main",
+            receipt_artifacts=[first, second, third],
+        )
+
+    assert caught.value.reason == reason
+    assert caught.value.code == reason.value
+    assert _catalogue_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("mutation", ["cold_prefix", "projection"])
+def test_full_audit_rejects_committed_state_tamper_without_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    item = _receipt_input(tmp_path, "T-20260813020301Z")
+    rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[item])
+    paths = completion_catalogue_paths(tmp_path, "main")
+    if mutation == "cold_prefix":
+        event = json.loads(paths.catalogue.read_text(encoding="utf-8"))
+        event["changed_count"] = int(event["changed_count"]) + 1
+        base = {key: value for key, value in event.items() if key != "event_id"}
+        event["event_id"] = digest_data(base)
+        paths.catalogue.write_text(_canonical_event_line(event), encoding="utf-8")
+        event_path = paths.events_directory / f"{str(event['event_id']).removeprefix('sha256:')}.json"
+        event_path.write_text(_canonical_event_line(event), encoding="utf-8")
+    else:
+        checkpoint = json.loads(paths.checkpoint.read_text(encoding="utf-8"))
+        projection_path = paths.projection_slots[int(checkpoint["projection_slot"])]
+        projection = json.loads(projection_path.read_text(encoding="utf-8"))
+        projection["eviction_count"] = int(projection["eviction_count"]) + 1
+        projection_path.write_text(json.dumps(projection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    before = _catalogue_manifest(tmp_path)
+    with pytest.raises(CompletionCatalogueUnavailable) as caught:
+        audit_completion_catalogue(tmp_path, "main", receipt_artifacts=[item])
+
+    assert caught.value.reason == CompletionCatalogueUnavailableReason.PREFIX_MISMATCH
+    assert _catalogue_manifest(tmp_path) == before
+
+
+@pytest.mark.parametrize("source_case", ["missing_event", "orphan_event"])
+def test_full_audit_checks_source_parity_across_committed_and_pending_events(
+    tmp_path: Path,
+    source_case: str,
+) -> None:
+    first = _receipt_input(tmp_path, "T-20260813020401Z")
+    second = _receipt_input(tmp_path, "T-20260813020402Z", changed_paths=("src/second.py",))
+    third = _receipt_input(tmp_path, "T-20260813020403Z", changed_paths=("src/third.py",))
+    fourth = _receipt_input(tmp_path, "T-20260813020404Z", changed_paths=("src/fourth.py",))
+    rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[first])
+    _prepare_and_publish(tmp_path, second)
+    _prepare_and_publish(tmp_path, third)
+    sources = [first, second, third, fourth] if source_case == "missing_event" else [first, second]
+    before = _catalogue_manifest(tmp_path)
+
+    with pytest.raises(CompletionCatalogueUnavailable) as caught:
+        audit_completion_catalogue(tmp_path, "main", receipt_artifacts=sources)
+
+    assert caught.value.reason == CompletionCatalogueUnavailableReason.SOURCE_MISMATCH
+    assert _catalogue_manifest(tmp_path) == before
+
+
+def test_full_audit_rejects_duplicate_task_across_committed_and_pending_events(tmp_path: Path) -> None:
+    item = _receipt_input(tmp_path, "T-20260813020501Z")
+    rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[item])
+    _prepare_and_publish(tmp_path, item)
+    before = _catalogue_manifest(tmp_path)
+
+    with pytest.raises(CompletionCatalogueUnavailable) as caught:
+        audit_completion_catalogue(tmp_path, "main", receipt_artifacts=[item])
+
+    assert caught.value.reason == CompletionCatalogueUnavailableReason.DUPLICATE_TASK
+    assert _catalogue_manifest(tmp_path) == before
+
+
+def test_check_audits_valid_pending_tail_but_ordinary_check_stays_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_workspace(tmp_path)
+    init_committed_product_repo(tmp_path / "repos", {"src/app.py": "value = 1\n"})
+    first = _receipt_input(tmp_path, "T-20260813020601Z")
+    second = _receipt_input(tmp_path, "T-20260813020602Z", changed_paths=("src/second.py",))
+    third = _receipt_input(tmp_path, "T-20260813020603Z", changed_paths=("src/third.py",))
+    for item in (first, second, third):
+        _publish_receipt_authority(tmp_path, item)
+    rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[first])
+    _prepare_and_publish(tmp_path, second)
+    _prepare_and_publish(tmp_path, third)
+    paths = completion_catalogue_paths(tmp_path, "main")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    with reject_directory_enumeration(
+        monkeypatch,
+        paths.catalogue,
+        paths.events_directory,
+        tmp_path / "docs/tasks/.repoctl-state/completions",
+        tmp_path / "docs/archive/tasks",
+    ) as cold_reads:
+        assert main(["check", "--json"]) == 0
+
+    assert cold_reads == []
+    bounded = json.loads(capsys.readouterr().out)
+    main_catalogue = next(
+        item
+        for item in bounded["data"]["completion_history"]["catalogues"]
+        if item["repo_id"] == "main"
+    )
+    assert main_catalogue["status"] == "tail_pending"
+    assert main_catalogue["head_sequence"] == 3
+    assert main_catalogue["checkpoint_sequence"] == 1
+
+    before = _catalogue_manifest(tmp_path)
+    assert main(["check", "--audit-history", "--json"]) == 0
+    audited = json.loads(capsys.readouterr().out)
+    assert audited["problems"] == []
+    assert {
+        "repo_id": "main",
+        "status": "audited",
+        "event_count": 3,
+        "last_sequence": 3,
+        "source_checked": True,
+    } in audited["data"]["completion_history"]["audited_catalogues"]
+    assert _catalogue_manifest(tmp_path) == before
+
+
 def _public_finish_fixture(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,

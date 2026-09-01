@@ -14,7 +14,8 @@ from .result_receipts import ResultAuthority, ResultProducer, ResultSelection
 
 
 DISCOVERY_OUTCOME_SCHEMA = "repoctl.task.discovery-outcome"
-DISCOVERY_OUTCOME_SCHEMA_VERSION = 1
+LEGACY_DISCOVERY_OUTCOME_SCHEMA_VERSION = 1
+DISCOVERY_OUTCOME_SCHEMA_VERSION = 2
 VERIFICATION_STATUSES = frozenset({"passed", "failed", "mixed", "blocked"})
 HOT_SUBJECT_KINDS = frozenset({"file"})
 _WORKSPACE_VERIFICATION_QUERY = "repoctl workspace verification artifacts"
@@ -42,6 +43,8 @@ def load_outcome_state(root: Path, task_id: str) -> dict[str, Any] | None:
         ) from exc
     try:
         return _validate_state(data, task_id=task_id)
+    except RepoctlError:
+        raise
     except ValueError as exc:
         raise RepoctlError(
             str(exc),
@@ -85,6 +88,7 @@ def update_outcome_state(
         "active_chosen": [],
         "prior_episodes": [],
         "active_episode": None,
+        "verification_subjects": [],
         "verification_records": [],
     })
     active = _copy(state.get("active_episode"))
@@ -242,6 +246,7 @@ def add_workspace_artifact_verification_record(
         "active_chosen": [],
         "prior_episodes": [],
         "active_episode": None,
+        "verification_subjects": [],
         "verification_records": [],
     })
     active = _copy(state.get("active_episode"))
@@ -279,23 +284,77 @@ def _add_verification_record_to_state(
     if status not in VERIFICATION_STATUSES:
         raise RepoctlError("verification status is invalid", code="verification_status_invalid")
     evidence = _canonical_evidence(root, evidence_ref)
-    available_subjects = _state_subjects(state)
-    by_ref: dict[str, dict[str, Any]] = {}
+    requested_subjects = [str(value).strip() for value in subject_refs]
+    requested_claims = [str(value) for value in claim_ids]
+    canonical_claims = sorted(set(requested_claims))
+    if not all(_DIGEST_RE.fullmatch(value) for value in canonical_claims):
+        raise RepoctlError("verification claim IDs must be sha256 digests", code="verification_claim_invalid")
+    missing_claims = sorted(set(canonical_claims) - _state_claim_ids(state))
+    if missing_claims:
+        raise RepoctlError(
+            "verification claim is not part of the task Discovery outcome",
+            code="verification_claim_unknown",
+            path=missing_claims[0],
+        )
+
+    state = _copy(state)
+    available_subjects = _verification_eligible_subjects(state)
+    by_id = {
+        str(subject["subject_id"]): subject
+        for subject in available_subjects
+    }
+    aliases: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def add_alias(alias: str, subject: dict[str, Any]) -> None:
+        aliases.setdefault(alias, {})[str(subject["subject_id"])] = subject
+
     for subject in available_subjects:
-        by_ref[str(subject["subject_id"])] = subject
-        by_ref[str(subject["key"])] = subject
+        add_alias(str(subject["key"]), subject)
         identity = subject.get("identity")
         if isinstance(identity, dict) and isinstance(identity.get("path"), str):
-            by_ref[str(identity["path"])] = subject
+            add_alias(str(identity["path"]), subject)
             repository = state.get("repository")
             if isinstance(repository, dict):
                 prefix = str(repository.get("path") or "").rstrip("/")
                 if prefix:
-                    by_ref[f"{prefix}/{identity['path']}"] = subject
+                    add_alias(f"{prefix}/{identity['path']}", subject)
+    role_subject_ids = {
+        str(subject["subject_id"])
+        for subject in state["active_chosen"]
+    }
+    episodes = [*state["prior_episodes"]]
+    if state.get("active_episode") is not None:
+        episodes.append(state["active_episode"])
+    for episode in episodes:
+        role_subject_ids.update(str(subject["subject_id"]) for subject in episode["reviewed"])
     selected: list[dict[str, Any]] = []
-    for raw in subject_refs:
-        value = str(raw).strip()
-        subject = by_ref.get(value)
+    for value in requested_subjects:
+        subject = by_id.get(value)
+        candidates = list((aliases.get(value) or {}).values()) if subject is None else []
+        if subject is None and len(candidates) == 1:
+            subject = candidates[0]
+        elif subject is None and candidates:
+            current_role_candidates: list[dict[str, Any]] = []
+            if target is not None:
+                for candidate in candidates:
+                    identity = candidate.get("identity")
+                    path = identity.get("path") if isinstance(identity, dict) else None
+                    if (
+                        candidate.get("kind") == "file"
+                        and str(candidate["subject_id"]) in role_subject_ids
+                        and isinstance(path, str)
+                        and current_path_subject(root, target=target, path=path)["subject_id"]
+                        == candidate["subject_id"]
+                    ):
+                        current_role_candidates.append(candidate)
+            if len(current_role_candidates) == 1:
+                subject = current_role_candidates[0]
+            else:
+                raise RepoctlError(
+                    "verification subject reference is ambiguous in the task Discovery outcome",
+                    code="verification_subject_ambiguous",
+                    path=value,
+                )
         if subject is None:
             raise RepoctlError(
                 "verification subject is not part of the task Discovery outcome",
@@ -309,9 +368,6 @@ def _add_verification_record_to_state(
         selected,
         target=target,
     )
-    canonical_claims = sorted(set(str(value) for value in claim_ids if _DIGEST_RE.fullmatch(str(value))))
-    if len(canonical_claims) != len(set(str(value) for value in claim_ids)):
-        raise RepoctlError("verification claim IDs must be sha256 digests", code="verification_claim_invalid")
     if not selected and not canonical_claims:
         raise RepoctlError(
             "structured verification must cover at least one subject or claim",
@@ -324,11 +380,17 @@ def _add_verification_record_to_state(
         "claim_ids": canonical_claims,
     }
     record = {"record_id": digest_data(record_base), **record_base}
+    state["verification_subjects"] = _subjects_by_identity(
+        [*state["verification_subjects"], *selected]
+    )
     state["verification_records"] = _dedupe_dicts(
         [*state["verification_records"], record],
         key="record_id",
     )
-    return _with_state_digest(state)
+    return _validate_state(
+        _with_state_digest(state),
+        task_id=str(state["task_id"]),
+    )
 
 
 def structured_verification_coverage(
@@ -472,7 +534,6 @@ def completion_outcome_projection(root: Path, task_id: str) -> dict[str, Any] | 
             "subject_ids": sorted(
                 local_id_by_stable[subject_id]
                 for subject_id in record["subject_ids"]
-                if subject_id in local_id_by_stable
             ),
         }
         for record in state["verification_records"]
@@ -489,7 +550,15 @@ def completion_outcome_projection(root: Path, task_id: str) -> dict[str, Any] | 
         "episodes": projected_episodes,
         "verification_records": verification_records,
     }
-    return {**projection_base, "outcome_digest": digest_data(projection_base)}
+    projection = {**projection_base, "outcome_digest": digest_data(projection_base)}
+    try:
+        return validate_completion_outcome(projection)
+    except ValueError as exc:
+        raise RepoctlError(
+            f"task Discovery completion outcome is invalid: {exc}",
+            code="discovery_completion_outcome_invalid",
+            path=outcome_state_path(root, task_id).relative_to(root).as_posix(),
+        ) from exc
 
 
 def _bind_current_verification_files(
@@ -592,6 +661,7 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
         or not isinstance(repository.get("id"), str)
         or REPO_ID_RE.fullmatch(repository["id"]) is None
         or not _canonical_completion_ref(repository.get("path"), relative=True)
+        or not isinstance(repository.get("identity_source"), str)
         or repository.get("identity_source")
         not in {item.value for item in RepositoryIdentitySource}
     ):
@@ -611,7 +681,10 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
             raise ValueError("completion Discovery outcome subject identity is invalid")
         kind = subject.get("kind")
         identity = subject.get("identity")
-        if kind not in {"file", "document", "symbol", "task", "artifact", "knowledge", "relationship_fact"}:
+        if (
+            not isinstance(kind, str)
+            or kind not in {"file", "document", "symbol", "task", "artifact", "knowledge", "relationship_fact"}
+        ):
             raise ValueError("completion Discovery outcome subject kind is invalid")
         if not _valid_completion_subject_identity(kind, identity):
             raise ValueError("completion Discovery outcome subject identity is invalid")
@@ -700,7 +773,8 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
         record_claim_ids = record.get("claim_ids")
         evidence = record.get("evidence")
         if (
-            record.get("status") not in VERIFICATION_STATUSES
+            not isinstance(record.get("status"), str)
+            or record.get("status") not in VERIFICATION_STATUSES
             or not _canonical_string_list(record_subject_ids)
             or not set(record_subject_ids) <= subject_ids
             or not _canonical_digest_list(record_claim_ids)
@@ -774,6 +848,7 @@ def _valid_completion_subject_identity(kind: str, identity: Any) -> bool:
         )
     return (
         set(identity) == {"producer", "ref"}
+        and isinstance(identity.get("producer"), str)
         and identity.get("producer") in {item.value for item in ResultProducer}
         and _canonical_completion_ref(identity.get("ref"))
     )
@@ -791,6 +866,7 @@ def _valid_completion_seed(value: Any) -> bool:
             "canonical_request_digest",
             "candidate_member_set_digest",
         }
+        and isinstance(value.get("producer"), str)
         and value.get("producer") in {item.value for item in ResultProducer}
         and all(
             _is_digest(value.get(field))
@@ -817,7 +893,8 @@ def _valid_completion_citation(value: Any, *, episode_id: str) -> bool:
     }:
         return False
     if (
-        value.get("producer") not in {item.value for item in ResultProducer}
+        not isinstance(value.get("producer"), str)
+        or value.get("producer") not in {item.value for item in ResultProducer}
         or value.get("episode_id") != episode_id
         or not all(
             _is_digest(value.get(field))
@@ -867,7 +944,11 @@ def _valid_completion_citation(value: Any, *, episode_id: str) -> bool:
 def _valid_completion_evidence(value: Any) -> bool:
     if not isinstance(value, dict) or set(value) != {"ref", "digest", "kind"}:
         return False
-    if value.get("kind") not in {"digest", "file"} or not _is_digest(value.get("digest")):
+    if (
+        not isinstance(value.get("kind"), str)
+        or value.get("kind") not in {"digest", "file"}
+        or not _is_digest(value.get("digest"))
+    ):
         return False
     if value["kind"] == "digest":
         return value.get("ref") == value["digest"]
@@ -1053,7 +1134,9 @@ def _subject(kind: str, identity: Mapping[str, Any], version_digest: str) -> dic
     return {"subject_id": digest_data(basis), **basis, "key": key}
 
 
-def _state_subjects(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _verification_eligible_subjects(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return Discovery-role subjects eligible for a new verification add."""
+
     values: list[dict[str, Any]] = [*_copy(state.get("active_chosen") or [])]
     episodes = [*_copy(state.get("prior_episodes") or [])]
     if state.get("active_episode") is not None:
@@ -1068,6 +1151,32 @@ def _state_subjects(state: Mapping[str, Any]) -> list[dict[str, Any]]:
         )
     by_id = {str(item["subject_id"]): item for item in values}
     return [by_id[key] for key in sorted(by_id)]
+
+
+def _state_subjects(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the full subject closure needed for integrity and projection."""
+
+    values = [
+        *_verification_eligible_subjects(state),
+        *_copy(state.get("verification_subjects") or []),
+    ]
+    by_id = {str(item["subject_id"]): item for item in values}
+    return [by_id[key] for key in sorted(by_id)]
+
+
+def _state_claim_ids(state: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+    episodes = [*_copy(state.get("prior_episodes") or [])]
+    if state.get("active_episode") is not None:
+        episodes.append(_copy(state["active_episode"]))
+    for episode in episodes:
+        for citation in episode.get("citations") or []:
+            member = citation.get("member") if isinstance(citation, dict) else None
+            for claim in member.get("claims") or [] if isinstance(member, dict) else []:
+                digest = claim.get("evidence_digest") if isinstance(claim, dict) else None
+                if _is_digest(digest):
+                    values.add(str(digest))
+    return values
 
 
 def _canonical_evidence(root: Path, value: str) -> dict[str, str]:
@@ -1138,7 +1247,7 @@ def _with_state_digest(state: Mapping[str, Any]) -> dict[str, Any]:
 def _validate_state(value: Any, *, task_id: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("task Discovery outcome state must be an object")
-    expected = {
+    common = {
         "schema",
         "schema_version",
         "task_id",
@@ -1149,7 +1258,19 @@ def _validate_state(value: Any, *, task_id: str) -> dict[str, Any]:
         "verification_records",
         "state_digest",
     }
-    if set(value) != expected or value.get("schema") != DISCOVERY_OUTCOME_SCHEMA or value.get("schema_version") != DISCOVERY_OUTCOME_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    expected = (
+        common
+        if schema_version == LEGACY_DISCOVERY_OUTCOME_SCHEMA_VERSION
+        else common | {"verification_subjects"}
+        if schema_version == DISCOVERY_OUTCOME_SCHEMA_VERSION
+        else set()
+    )
+    if (
+        set(value) != expected
+        or value.get("schema") != DISCOVERY_OUTCOME_SCHEMA
+        or type(schema_version) is not int
+    ):
         raise ValueError("task Discovery outcome state schema is invalid")
     if value.get("task_id") != task_id or _TASK_ID_RE.fullmatch(task_id) is None:
         raise ValueError("task Discovery outcome identity is invalid")
@@ -1163,24 +1284,257 @@ def _validate_state(value: Any, *, task_id: str) -> dict[str, Any]:
         or not all(isinstance(repository.get(key), str) and repository[key] for key in repository)
     ):
         raise ValueError("task Discovery outcome repository is invalid")
-    if not isinstance(value.get("active_chosen"), list) or not isinstance(value.get("prior_episodes"), list) or not isinstance(value.get("verification_records"), list):
+    if (
+        not _valid_state_subject_list(value.get("active_chosen"))
+        or not isinstance(value.get("prior_episodes"), list)
+        or not isinstance(value.get("verification_records"), list)
+        or (
+            schema_version == DISCOVERY_OUTCOME_SCHEMA_VERSION
+            and not _valid_state_subject_list(value.get("verification_subjects"))
+        )
+    ):
         raise ValueError("task Discovery outcome collections are invalid")
     episodes = [*value["prior_episodes"]]
     if value.get("active_episode") is not None:
         episodes.append(value["active_episode"])
+    claim_ids: set[str] = set()
     for episode in episodes:
-        if not isinstance(episode, dict) or set(episode) != {"episode_id", "query", "seed_result", "citations", "reviewed", "excluded", "outside_candidate_set"}:
+        if (
+            not isinstance(episode, dict)
+            or set(episode) != {
+                "episode_id",
+                "query",
+                "seed_result",
+                "citations",
+                "reviewed",
+                "excluded",
+                "outside_candidate_set",
+            }
+        ):
             raise ValueError("task Discovery episode schema is invalid")
-        if not _DIGEST_RE.fullmatch(str(episode.get("episode_id") or "")) or not isinstance(episode.get("query"), str):
+        if (
+            not _is_digest(episode.get("episode_id"))
+            or not isinstance(episode.get("query"), str)
+            or not _valid_state_subject_list(episode.get("reviewed"))
+            or not _valid_state_subject_list(episode.get("excluded"))
+            or not _canonical_digest_list(episode.get("outside_candidate_set"))
+            or not isinstance(episode.get("citations"), list)
+        ):
             raise ValueError("task Discovery episode identity is invalid")
         reviewed = {_subject_identity_key(item) for item in episode["reviewed"]}
         excluded = {_subject_identity_key(item) for item in episode["excluded"]}
-        if not excluded <= reviewed:
+        if (
+            not excluded <= reviewed
+            or not set(episode["outside_candidate_set"]) <= reviewed
+        ):
             raise ValueError("task Discovery Excluded must be a subset of Reviewed")
+        citation_ids: list[str] = []
+        for citation in episode["citations"]:
+            projected = _state_citation_projection(
+                citation,
+                episode_id=episode["episode_id"],
+            )
+            citation_ids.append(projected["member_id"])
+            claim_ids.update(
+                str(claim["evidence_digest"])
+                for claim in projected["claims"]
+            )
+        if citation_ids != sorted(set(citation_ids)):
+            raise ValueError("task Discovery citations are not canonical")
+        seed = _copy(episode.get("seed_result"))
+        if isinstance(seed, dict):
+            candidate_keys = seed.pop("candidate_subject_keys", None)
+            if not _canonical_string_list(candidate_keys):
+                raise ValueError("task Discovery seed result is invalid")
+        if not _valid_completion_seed(seed):
+            raise ValueError("task Discovery seed result is invalid")
+        if bool(episode["citations"]) != (seed is not None):
+            raise ValueError("task Discovery seed result and citations disagree")
     chosen = {_subject_identity_key(item) for item in value["active_chosen"]}
     if any(chosen & {_subject_identity_key(item) for item in episode["excluded"]} for episode in episodes):
         raise ValueError("task Discovery Excluded and Chosen roles conflict")
+    if schema_version == LEGACY_DISCOVERY_OUTCOME_SCHEMA_VERSION:
+        available = {
+            str(subject["subject_id"]): subject
+            for subject in _state_subjects(value)
+        }
+        referenced = _validate_state_verification_records(
+            value["verification_records"],
+            available_subject_ids=set(available),
+            available_claim_ids=claim_ids,
+        )
+        migrated = _copy(value)
+        migrated["schema_version"] = DISCOVERY_OUTCOME_SCHEMA_VERSION
+        migrated["verification_subjects"] = [
+            available[subject_id]
+            for subject_id in sorted(referenced)
+        ]
+        return _validate_state(
+            _with_state_digest(migrated),
+            task_id=task_id,
+        )
+
+    pool = {
+        str(subject["subject_id"]): subject
+        for subject in value["verification_subjects"]
+    }
+    referenced = _validate_state_verification_records(
+        value["verification_records"],
+        available_subject_ids=set(pool),
+        available_claim_ids=claim_ids,
+    )
+    if referenced != set(pool):
+        raise ValueError("task Discovery verification subject pool is not bounded to its records")
     return _copy(value)
+
+
+def _valid_state_subject_list(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    subject_ids: list[str] = []
+    for subject in value:
+        if not _valid_state_subject(subject):
+            return False
+        subject_ids.append(str(subject["subject_id"]))
+    return subject_ids == sorted(set(subject_ids))
+
+
+def _valid_state_subject(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "subject_id",
+        "kind",
+        "identity",
+        "version_digest",
+        "key",
+    }:
+        return False
+    kind = value.get("kind")
+    identity = value.get("identity")
+    version_digest = value.get("version_digest")
+    if (
+        not isinstance(kind, str)
+        or kind not in {
+            "file",
+            "document",
+            "symbol",
+            "task",
+            "artifact",
+            "knowledge",
+            "relationship_fact",
+        }
+        or not _valid_completion_subject_identity(str(kind), identity)
+        or not _is_digest(version_digest)
+        or (
+            kind not in {"file", "document"}
+            and version_digest != digest_data({"kind": kind, "identity": identity})
+        )
+    ):
+        return False
+    return value == _subject(str(kind), identity, str(version_digest))
+
+
+def _state_citation_projection(value: Any, *, episode_id: str) -> dict[str, Any]:
+    expected = {
+        "producer",
+        "result_id",
+        "episode_id",
+        "canonical_request_digest",
+        "member_id",
+        "source_receipt_digest",
+        "member",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ValueError("task Discovery citation is invalid")
+    member = value.get("member")
+    if not isinstance(member, dict) or set(member) != {
+        "member_id",
+        "authority",
+        "ref",
+        "subject",
+        "claims",
+    }:
+        raise ValueError("task Discovery citation member is invalid")
+    if (
+        value.get("member_id") != member.get("member_id")
+        or not isinstance(member.get("authority"), str)
+        or member.get("authority") not in {item.value for item in ResultAuthority}
+        or not _canonical_completion_ref(member.get("ref"))
+        or not _valid_state_subject(member.get("subject"))
+    ):
+        raise ValueError("task Discovery citation member is invalid")
+    projected = {
+        key: value[key]
+        for key in (
+            "producer",
+            "result_id",
+            "episode_id",
+            "canonical_request_digest",
+            "member_id",
+            "source_receipt_digest",
+        )
+    } | {
+        "subject_id": member["subject"]["subject_id"],
+        "claims": member["claims"],
+    }
+    if (
+        not _valid_completion_citation(projected, episode_id=episode_id)
+        or member["claims"][0]["source_ref"]
+        != f"{member['authority']}:{member['ref']}"
+    ):
+        raise ValueError("task Discovery citation is invalid")
+    return projected
+
+
+def _validate_state_verification_records(
+    records: list[Any],
+    *,
+    available_subject_ids: set[str],
+    available_claim_ids: set[str],
+) -> set[str]:
+    record_ids: list[str] = []
+    referenced_subject_ids: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "record_id",
+            "status",
+            "evidence",
+            "subject_ids",
+            "claim_ids",
+        }:
+            raise ValueError("task Discovery structured verification is invalid")
+        subject_ids = record.get("subject_ids")
+        claim_ids = record.get("claim_ids")
+        if (
+            not isinstance(record.get("status"), str)
+            or record.get("status") not in VERIFICATION_STATUSES
+            or not _canonical_digest_list(subject_ids)
+            or not _canonical_digest_list(claim_ids)
+            or not subject_ids and not claim_ids
+            or not _valid_completion_evidence(record.get("evidence"))
+        ):
+            raise ValueError("task Discovery structured verification is invalid")
+        record_base = {
+            "status": record["status"],
+            "evidence": record["evidence"],
+            "subject_ids": subject_ids,
+            "claim_ids": claim_ids,
+        }
+        if record.get("record_id") != digest_data(record_base):
+            raise ValueError("task Discovery structured verification digest is invalid")
+        missing_subjects = sorted(set(subject_ids) - available_subject_ids)
+        missing_claims = sorted(set(claim_ids) - available_claim_ids)
+        if missing_subjects or missing_claims:
+            missing = (missing_subjects or missing_claims)[0]
+            raise RepoctlError(
+                "task Discovery structured verification reference cannot be resolved to retained evidence",
+                code="discovery_outcome_verification_reference_invalid",
+                path=missing,
+            )
+        record_ids.append(record["record_id"])
+        referenced_subject_ids.update(subject_ids)
+    if record_ids != sorted(set(record_ids)):
+        raise ValueError("task Discovery structured verification is not canonical")
+    return referenced_subject_ids
 
 
 def _canonical_json(value: Any) -> str:

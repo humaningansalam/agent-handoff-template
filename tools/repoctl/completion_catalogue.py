@@ -1046,7 +1046,39 @@ def audit_completion_catalogue(
     checkpoint, projection = _load_committed_projection(paths, repo_id=repo_id, policy=policy, allow_empty=False)
     assert checkpoint is not None and projection is not None
     events = _scan_catalogue(paths, repo_id=repo_id, policy=policy)
-    _validate_scan_against_state(root, paths, checkpoint, projection, events, repo_id=repo_id, policy=policy, verify_sidecars=True)
+    _validate_scan_against_state(
+        root,
+        paths,
+        checkpoint,
+        projection,
+        events,
+        repo_id=repo_id,
+        policy=policy,
+        verify_sidecars=True,
+        verify_head=False,
+    )
+    head = _load_head(paths, repo_id=repo_id, policy=policy, required=bool(events))
+    pending = _pending_sidecar_events(
+        paths,
+        head=head,
+        repo_id=repo_id,
+        policy=policy,
+        anchor_sequence=int(checkpoint["last_sequence"]),
+        anchor_event_id=str(checkpoint["last_event_id"]),
+        anchor_prefix_digest=str(checkpoint["prefix_digest"]),
+    )
+    events = [*events, *pending]
+    seen_tasks: set[str] = set()
+    for event in events:
+        task_id = str(event["task_id"])
+        if task_id in seen_tasks:
+            _unavailable(
+                CompletionCatalogueUnavailableReason.DUPLICATE_TASK,
+                f"duplicate completion task in catalogue: {task_id}",
+                root=root,
+                path=paths.catalogue,
+            )
+        seen_tasks.add(task_id)
     if receipt_artifacts is not None:
         _validate_catalogue_sources(
             root,
@@ -1054,12 +1086,13 @@ def audit_completion_catalogue(
             events=events,
             receipt_artifacts=receipt_artifacts,
         )
+    last = events[-1] if events else None
     return CompletionCatalogueAudit(
         repo_id=repo_id,
         event_count=len(events),
-        last_sequence=int(checkpoint["last_sequence"]),
-        last_event_id=str(checkpoint["last_event_id"]),
-        prefix_digest=str(checkpoint["prefix_digest"]),
+        last_sequence=int(last["sequence"]) if last else 0,
+        last_event_id=str(last["event_id"]) if last else "",
+        prefix_digest=_event_prefix_digest(last) if last else EMPTY_PREFIX_DIGEST,
         task_ids=tuple(str(event["task_id"]) for event in events),
         source_checked=receipt_artifacts is not None,
     )
@@ -2347,6 +2380,7 @@ def _validate_scan_against_state(
     repo_id: str,
     policy: CompletionCataloguePolicy,
     verify_sidecars: bool,
+    verify_head: bool = True,
 ) -> None:
     seen_tasks: set[str] = set()
     replay = _empty_projection(repo_id, policy)
@@ -2373,6 +2407,8 @@ def _validate_scan_against_state(
         _unavailable(CompletionCatalogueUnavailableReason.PREFIX_MISMATCH, "completion catalogue full prefix does not match checkpoint", root=root, path=paths.checkpoint)
     if replay != projection:
         _unavailable(CompletionCatalogueUnavailableReason.PREFIX_MISMATCH, "completion catalogue replay does not match hot projection", root=root, path=paths.projection_slots[int(checkpoint["projection_slot"])])
+    if not verify_head:
+        return
     head = _load_head(paths, repo_id=repo_id, policy=policy, required=bool(events))
     if not events:
         if head is not None:
