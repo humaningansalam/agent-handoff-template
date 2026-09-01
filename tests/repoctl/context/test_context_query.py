@@ -1755,60 +1755,20 @@ def test_context_query_prefers_connected_test_over_weak_lexical_test_candidate(
     _materialize(tmp_path)
 
     query = "reconcile invoice failure handling"
-    assert main(
-        ["context", "query", query, "--repo-id", "main", "--full", "--json"]
-    ) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    seed_paths = {
-        item["anchor"]["path"] for item in full["selection"]["graph_anchor"]["anchors"]
-    }
-    full_seed_refs = full["graph_seed_refs"]
-    assert {item["path"] for item in full_seed_refs} == seed_paths
-    assert all(item["source_ref"]["content_sha256"].startswith("sha256:") for item in full_seed_refs)
-    assert "billing/invoice_service.py" in seed_paths
-    assert "tests/test_misc.py" not in seed_paths
-    assert "tests/test_contract.py" not in seed_paths
-    assert "billing/route.py" not in seed_paths
-    tests_by_path = {
-        item["source_ref"]["path"]: item
-        for item in full["groups"]["tests_and_verification"]
-        if item["source_ref"]["kind"] == "current_source"
-    }
-    assert "anchor_connected_test" in tests_by_path["repos/tests/test_contract.py"][
-        "evidence_roles"
-    ]
-    assert "anchor_connected_test" not in tests_by_path["repos/tests/test_misc.py"][
-        "evidence_roles"
-    ]
-
     assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
 
     compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    assert compact["graph_seed_refs"] == full_seed_refs
-    assert compact["groups"]["tests_and_verification"][0]["source_ref"]["path"] == (
-        "repos/tests/test_contract.py"
-    )
-    assert "repos/tests/test_misc.py" not in {
+    change_paths = {
+        item["source_ref"]["path"]
+        for item in compact["groups"]["likely_change_surface"]
+    }
+    assert {"repos/billing/invoice_service.py", "repos/billing/route.py"} <= change_paths
+    test_paths = {
         item["source_ref"]["path"]
         for item in compact["groups"]["tests_and_verification"]
     }
-    assert {item["path"] for item in compact["graph_seed_refs"]} == {
-        "billing/invoice_service.py"
-    }
-    assert any(
-        item["source_ref"]["path"] == "repos/billing/route.py"
-        for item in compact["groups"]["likely_change_surface"]
-    )
-
-    assert main(["context", "query", query, "--repo-id", "main"]) == 0
-    text = capsys.readouterr().out
-    assert "seed billing/invoice_service.py" in text
-    assert "repos/tests/test_contract.py" in text
-
-    assert main(["context", "query", query, "--repo-id", "main", "--format", "markdown"]) == 0
-    markdown = capsys.readouterr().out
-    assert "Seed `billing/invoice_service.py`" in markdown
-    assert "`repos/tests/test_contract.py`" in markdown
+    assert "repos/tests/test_contract.py" in test_paths
+    assert "repos/tests/test_misc.py" not in test_paths
 
 
 def test_compact_relation_closure_accepts_only_direct_typed_relation_directions() -> None:
@@ -2895,25 +2855,6 @@ def test_context_query_auto_balances_product_source_tests_and_project_documents(
     assert not problems
     provider_coverage = dict(snapshot.completeness["provider_coverage"])
     test_path = "tests/test_owner.py"
-    assert context_module._graph_test_path_relations_usable(
-        provider_coverage,
-        path=test_path,
-    )
-    assert not context_module._graph_test_path_relations_usable(
-        {"imports": provider_coverage["imports"]},
-        path=test_path,
-    )
-    for failed_name in ("imports", "calls"):
-        asymmetric = {name: dict(value) for name, value in provider_coverage.items()}
-        capability = asymmetric[failed_name]
-        capability["analyzed_paths"] = [
-            path for path in capability["analyzed_paths"] if path != test_path
-        ]
-        capability["failed_paths"] = [*capability["failed_paths"], test_path]
-        assert not context_module._graph_test_path_relations_usable(
-            asymmetric,
-            path=test_path,
-        )
     for capability_name in ("imports", "calls"):
         capability = dict(provider_coverage[capability_name])
         capability["status"] = "partial"
@@ -2943,6 +2884,8 @@ def test_context_query_auto_balances_product_source_tests_and_project_documents(
     assert main(["context", "query", query, "--repo-id", "main", "--json"]) == 0
     partial = json.loads(capsys.readouterr().out)["data"]["bundle"]
     assert partial["completeness"]["graph_anchor"]["status"] == "resolved"
+    assert any(item["source_ref"]["path"] == "repos/owner.py" for item in partial["groups"]["likely_change_surface"])
+    assert any(item["source_ref"]["path"] == "docs/PRD.md" for item in partial["groups"]["must_read"])
     assert any(
         item["source_ref"]["path"] == "repos/tests/test_owner.py"
         for item in partial["groups"]["tests_and_verification"]

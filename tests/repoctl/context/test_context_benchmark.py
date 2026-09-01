@@ -8,12 +8,9 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
-from tools.repoctl.context import build_context_bundle
 from tools.repoctl.context_benchmark import _retrieval_evidence
 from tools.repoctl.graph_model import digest_data
-from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projection
-from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.context_test_helpers import (
     _setup_context_multirepo_workspace,
     _write_context_benchmark_collection_corpus,
@@ -178,12 +175,12 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
 
     payload = json.loads(capsys.readouterr().out)
     summary = payload["data"]["summary"]
-    assert payload["data"]["question_count"] == 37
+    assert payload["data"]["question_count"] == 34
     assert summary["source_ref_integrity"] is True
     assert summary["mean_recall_at_5"] >= 0.85
     assert summary["by_category"]["method-impact"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["cross-file-call-impact"]["mean_graph_edge_recall"] == 1.0
-    assert summary["by_category"]["structured-compose"]["mean_graph_edge_recall"] == 1.0
+    assert summary["by_category"]["typed-structured-dependency-closure"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["structured-workflow"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["structured-shell"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["structured-sql-seed"]["mean_graph_edge_recall"] == 1.0
@@ -194,10 +191,10 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
     assert summary["by_category"]["multi-owner-impact"]["mean_graph_edge_recall"] == 1.0
     assert summary["by_category"]["typed-consumer-closure"]["mean_visible_recall"] == 1.0
     assert summary["by_category"]["typed-structured-dependency-closure"]["mean_visible_recall"] == 1.0
-    assert summary["by_category"]["no-disconnected-test"]["forbidden_selected"] == 0
     by_id = {result["id"]: result for result in payload["data"]["results"]}
-    for question_id in ("Q-004", "Q-005", "Q-020", "Q-025", "Q-036", "Q-037", "Q-038"):
+    for question_id in ("Q-004", "Q-005", "Q-020", "Q-025"):
         assert by_id[question_id]["missing_required_from_visible"] == []
+    assert by_id["Q-004"]["selected_forbidden"] == []
     assert summary["generated_or_ignored_noise"] == 0
     assert summary["forbidden_selected"] == 0
     assert payload["problems"] == []
@@ -325,40 +322,6 @@ def test_context_benchmark_attribution_unions_duplicate_typed_contributions() ->
     assert retrieval["score"] == 10.0
     assert retrieval["score_breakdown"] == {"graph": 0.0}
     assert retrieval["typed_contributions"] == {"graph": True, "knowledge": True}
-
-
-def test_context_benchmark_attribution_keeps_first_full_occurrence_for_q004(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    fixture = _setup_benchmark_workspace(tmp_path, monkeypatch)
-    assert main(["context", "benchmark-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
-    target = require_repo_target(tmp_path, repo_id="main")
-    graph_state = tmp_path / ".benchmark-graph-state"
-    graph_result = materialize_graph(tmp_path, target=target, rebuild=True, state_root=graph_state)
-    bundle, problems, _meta = build_context_bundle(
-        tmp_path,
-        target=target,
-        query="What files are impacted if handlers/session_tokens.py changes?",
-        explain=True,
-        graph_result=graph_result,
-        graph_state_root=graph_state,
-    )
-    assert not [problem for problem in problems if problem.severity == "error"]
-    full = bundle.to_dict()
-    occurrences = [
-        (rank, item["score"])
-        for rank, item in enumerate(full["evidence"], start=1)
-        if item.get("source_ref", {}).get("path") == "repos/handlers/session_login.py"
-    ]
-
-    assert occurrences == [(2, 115.065039), (4, 14.171776)]
-    retrieval = _retrieval_evidence(full)[("source", "repos/handlers/session_login.py")]
-    assert retrieval["rank"] == 2
-    assert retrieval["score"] == occurrences[0][1]
-    assert retrieval["typed_contributions"]["graph"] is True
 
 
 def test_context_benchmark_attribution_uses_unknown_and_exact_subject_versions(

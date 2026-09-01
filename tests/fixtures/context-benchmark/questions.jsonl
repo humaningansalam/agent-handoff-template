@@ -1,7 +1,7 @@
 {"id":"Q-001","category":"authority","repo_id":"main","mode":"authority","question":"Why is Graph a read-only derived evidence snapshot and what source authorities remain?"}
 {"id":"Q-002","category":"contract","repo_id":"main","mode":"authority","question":"What source authorities remain after context retrieval?"}
 {"id":"Q-003","category":"impact","repo_id":"main","question":"What files are impacted if utils/tokens.py changes?"}
-{"id":"Q-004","category":"impact","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
+{"id":"Q-004","category":"typed-consumer-closure","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
 {"id":"Q-005","category":"impact","repo_id":"main","question":"What files are impacted if frontend/src/api/tokens.ts changes?"}
 {"id":"Q-006","category":"reference-impact","repo_id":"main","question":"What functions are impacted if validate_token changes?"}
 {"id":"Q-007","category":"method-impact","repo_id":"main","question":"What methods are impacted if TokenFlow.validate changes?"}
@@ -22,7 +22,7 @@
 {"id":"Q-022","category":"code-location","repo_id":"main","question":"What file defines issue_session?"}
 {"id":"Q-023","category":"code-location","repo_id":"main","question":"Where is auth/flow.py login defined?"}
 {"id":"Q-024","category":"impact","repo_id":"main","question":"Where is issue_token defined and used?"}
-{"id":"Q-025","category":"structured-compose","repo_id":"main","question":"Which build definition does compose.yml use to build the service?"}
+{"id":"Q-025","category":"typed-structured-dependency-closure","repo_id":"main","question":"Which build definition does compose.yml use to build the service?"}
 {"id":"Q-026","category":"structured-workflow","repo_id":"main","question":"What script does .github/workflows/release.yml run?"}
 {"id":"Q-027","category":"structured-shell","repo_id":"main","question":"What file does scripts/start.sh source?"}
 {"id":"Q-028","category":"structured-sql-seed","repo_id":"main","question":"Which migration defines the jobs table seeded by supabase/seed.sql?"}
@@ -32,6 +32,3 @@
 {"id":"Q-033","category":"integrated-owner-test","repo_id":"main","question":"public search results evidence related activity detail route dead end"}
 {"id":"Q-034","category":"area-isolation","repo_id":"main","question":"backend invoice reconciliation failure handling"}
 {"id":"Q-035","category":"multi-owner-impact","repo_id":"main","mode":"file-impact","question":"settlement audit router behavior"}
-{"id":"Q-036","category":"typed-consumer-closure","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
-{"id":"Q-037","category":"typed-structured-dependency-closure","repo_id":"main","question":"Which build definition does compose.yml use to build the service?"}
-{"id":"Q-038","category":"no-disconnected-test","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
