@@ -1954,7 +1954,6 @@ def _check_payload(
         + check_board(root, board_paths, tasks, board_text)
         + catalogue_problems
         + history_problems
-        + _generated_adapter_problems(root)
     )
     live_paths = [task.rel_path for task in live_tasks(tasks)]
     release_gates = _release_candidate_field_gates(root)
@@ -1991,62 +1990,6 @@ def _check_payload(
         "warnings": _warnings(problems),
     }
     return payload, problems, live_paths
-
-
-def _generated_adapter_problems(root: Path) -> list[Problem]:
-    manifest_path = root / "ai/generated-manifest.json"
-    rel_manifest = "ai/generated-manifest.json"
-    if not manifest_path.is_file():
-        contract_paths = (
-            root / "ai/roles",
-            root / ".agents/skills/maintenance-workflow/SKILL.md",
-            root / "tools/render_agent_adapters.py",
-        )
-        generated_outputs = (
-            *root.glob(".claude/agents/maintenance-*.md"),
-            *root.glob(".codex/agents/maintenance-*.toml"),
-        )
-        if not any(path.exists() for path in contract_paths) and not generated_outputs:
-            return []
-        return [Problem("error", "generated_adapter_manifest_invalid", "generated adapter manifest is missing", rel_manifest)]
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return [Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest is unreadable: {exc}", rel_manifest)]
-    if not isinstance(data, dict) or data.get("schema") != "repoctl.generated-adapters":
-        return [Problem("error", "generated_adapter_manifest_invalid", "generated adapter manifest has invalid schema", rel_manifest)]
-    problems: list[Problem] = []
-    expected_outputs: set[str] = set()
-    for group in ("sources", "outputs"):
-        entries = data.get(group)
-        if not isinstance(entries, list):
-            problems.append(Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest {group} must be a list", rel_manifest))
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                problems.append(Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest {group} entry is invalid", rel_manifest))
-                continue
-            rel = str(entry.get("path") or "")
-            expected = str(entry.get("sha256") or "")
-            normalized = Path(rel)
-            if not rel or normalized.is_absolute() or ".." in normalized.parts or not expected.startswith("sha256:"):
-                problems.append(Problem("error", "generated_adapter_manifest_invalid", f"generated adapter manifest path or digest is invalid: {rel}", rel_manifest))
-                continue
-            path = root / rel
-            if group == "outputs":
-                expected_outputs.add(rel)
-            try:
-                actual = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                actual = ""
-            if actual != expected:
-                problems.append(Problem("error", "generated_adapter_drift", f"generated adapter {group[:-1]} digest does not match manifest", rel))
-    for pattern in (".claude/agents/maintenance-*.md", ".codex/agents/maintenance-*.toml"):
-        for path in root.glob(pattern):
-            rel = path.relative_to(root).as_posix()
-            if rel not in expected_outputs:
-                problems.append(Problem("error", "generated_adapter_orphan", "generated adapter is not declared by the manifest", rel))
-    return problems
 
 
 def cmd_check(args: argparse.Namespace) -> int:

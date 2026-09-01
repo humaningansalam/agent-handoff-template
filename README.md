@@ -23,7 +23,6 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 | Markdown task managers | Tasks and Kanban | Adds repo separation, finish gates, and `.repometa` checks |
 | Spec-driven tools | Spec -> plan -> tasks | Starts after task intent exists; preserves execution state and verification |
 | Claude/Codex agents | Autonomous coding loop | Provides the workspace/state substrate they operate against |
-| Claude plugins/hooks | Tool-specific enforcement | Core contract stays tool-agnostic through `AGENTS.md` |
 | Knowledge/memory systems | Long-term agent knowledge | Reviewed Knowledge and llmwiki keep durable records separate from generated views |
 
 ## Use this when

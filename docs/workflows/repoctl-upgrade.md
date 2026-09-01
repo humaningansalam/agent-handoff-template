@@ -27,7 +27,7 @@ It must preserve project state:
 5. Inspect the `postflight` result emitted by apply. The upgraded runtime runs in a fresh process and reports repository identity, metadata, candidate, Reviewed Knowledge, and Graph state with typed recovery commands. Run it again directly when needed:
    `./scripts/repoctl upgrade postflight --json`
 6. Run verification:
-   `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q tests/repoctl tests/maintenance`
+   `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q tests/repoctl`
    `./scripts/repoctl check --json`
    `./scripts/repoctl meta check --json`
 

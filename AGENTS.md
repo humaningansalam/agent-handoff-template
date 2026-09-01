@@ -64,13 +64,7 @@ When selecting evidence from a result receipt, record the exact producer, result
 
 A Context Pack is optional read-only handoff evidence and never defines scope or authority. If used, regenerate it after final Chosen scope and bind that exact artifact. `task start` and `task show` never create or refresh a Handoff binding.
 
-## Explicit-Only Maintenance and Backlog
-
-Enter `/maintenance-workflow` only when the current user message literally invokes it. Words such as maintenance, audit, cleanup, review, readiness, hardening, tooling, docs, or tests do not select it.
-
-- Product work under `repos/**` always uses the normal repo-scoped task lifecycle, even when described as maintenance.
-- Root workspace or repoctl work follows the scope table unless the literal command is present.
-- If the skill is opened without that command, do not initialize or resume harness state; return to the normal scope route.
+## Backlog
 
 Backlog is deferred work only. Manage it with `repoctl backlog add/list/show/remove`. Before promotion, list and show the item, then create a task with explicit slug, area, title, and repository selection. Repoctl must not derive implementation scope, files, metadata, or validation from Backlog or PRD prose.
 
@@ -156,5 +150,3 @@ The normal closeout path is `task finish --knowledge-kind ...` with an explicit 
 - Create workflow documents only for reusable, repeated, or high-risk procedures. Keep one-off instructions in the task.
 - Parallel tasks must not share files, generated boundaries, or interface boundaries without coordination.
 - `AGENTS.md` is the single policy source. Adapter files are thin shims and must not duplicate or contradict it.
-- Generated `.claude/agents/` and `.codex/agents/` files come from `ai/roles/`; edit the canonical role sources and re-render.
-- Reusable skills live under `.agents/skills/` and are mirrored only when required by a tool.
