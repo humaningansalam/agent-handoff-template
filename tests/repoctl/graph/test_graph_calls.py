@@ -1,5 +1,4 @@
 from __future__ import annotations
-from tests.repoctl.graph.test_graph_build import _snapshot
 
 import json
 from pathlib import Path
@@ -8,19 +7,12 @@ from types import SimpleNamespace
 from tools.repoctl.cli import main
 from tools.repoctl.code_index import CodeIndexEntry
 from tools.repoctl.graph_model import file_id, symbol_id
-from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.graph_typescript_provider import build_typescript_semantics
-from tools.repoctl.repositories import RepoTarget, require_repo_target
+from tools.repoctl.repositories import RepoTarget
+from tests.repoctl.graph.test_graph_build import _materialize, _snapshot
 from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
-
-
-def _materialize(root: Path) -> None:
-    snapshot, problems, _meta = materialize_graph(root, target=require_repo_target(root, repo_id="main"))
-    assert snapshot is not None
-    assert not [problem for problem in problems if problem.severity == "error"]
-
 
 def test_typescript_provider_rejects_malformed_success_payload(
     tmp_path: Path,

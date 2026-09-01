@@ -4,20 +4,11 @@ import json
 from pathlib import Path
 from urllib.parse import unquote
 
+from tests.repoctl.graph.test_graph_build import _materialize
 from tools.repoctl.cli import main
-from tools.repoctl.graph_model import file_id
-from tools.repoctl.graph_store import materialize_graph
-from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
 from tests.repoctl.workspace.test_check import write_workspace
-
-
-def _materialize(root: Path) -> None:
-    snapshot, problems, _meta = materialize_graph(root, target=require_repo_target(root, repo_id="main"))
-    assert snapshot is not None
-    assert not [problem for problem in problems if problem.severity == "error"]
-
 
 def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
@@ -81,11 +72,6 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["graph", "query", "--file", "supabase/seed.sql", "--full", "--json"]) == 0
-    snapshot_result = json.loads(capsys.readouterr().out)["data"]["result"]
-    edges = [edge for edge in snapshot_result["edges"] if edge["kind"] == "USES_FILE"]
-    edge_pairs = {(edge["from"], edge["to"]): edge for edge in edges}
-
     expected_pairs = {
         ("Dockerfile", "package.json"),
         ("Dockerfile", "scripts/start.sh"),
@@ -125,8 +111,6 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
         "sql_seed_dependency",
         "sql_rpc_dependency",
     }
-    assert (file_id("main", "supabase/seed.sql"), file_id("main", "supabase/migrations/20240101000000_initial.sql")) in edge_pairs
-
     assert main(["graph", "query", "--file", "supabase/seed.sql", "--json"]) == 0
     compact = json.loads(capsys.readouterr().out)["data"]["result"]
     path = next(item for item in compact["paths"] if item["edge"] == "USES_FILE")

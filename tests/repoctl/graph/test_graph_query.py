@@ -3,21 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tests.repoctl.graph.test_graph_build import _materialize
 from tools.repoctl.cli import main
-from tools.repoctl.graph_store import materialize_graph
 from tools.repoctl.graph_model import digest_data, file_id, import_ref_id, topic_id
 from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
-
-
-def _materialize(root: Path) -> None:
-    snapshot, problems, _meta = materialize_graph(root, target=require_repo_target(root, repo_id="main"))
-    assert snapshot is not None
-    assert not [problem for problem in problems if problem.severity == "error"]
-
 
 def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)

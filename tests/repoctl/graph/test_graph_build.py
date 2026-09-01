@@ -21,6 +21,13 @@ from tests.repoctl.repository.test_repositories import init_repo, write_settings
 def _snapshot(payload: dict) -> dict:
     return payload["data"]["snapshot"]
 
+
+def _materialize(root: Path) -> None:
+    snapshot, problems, _meta = materialize_graph(root, target=require_repo_target(root, repo_id="main"))
+    assert snapshot is not None
+    assert not [problem for problem in problems if problem.severity == "error"]
+
+
 def _sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
