@@ -104,16 +104,6 @@ class _QuotedIdentitySpan:
     value: str
 
 
-def retrieve_context(
-    query: str,
-    chunks: list[DocumentChunk],
-    *,
-    limit: int = 20,
-    repository_path: str = "",
-) -> list[ContextCandidate]:
-    return rank_context_chunks(query, chunks, limit=limit, repository_path=repository_path)
-
-
 def retrieve_context_balanced(
     query: str,
     chunks: list[DocumentChunk],
@@ -671,16 +661,6 @@ def _contains_identifier_sequence(
         value[index : index + len(identity)] == identity
         for index in range(len(value) - len(identity) + 1)
     )
-
-
-def _identity_score(query: str, chunk: DocumentChunk) -> tuple[float, str]:
-    kinds = context_identity_evidence(
-        context_identity_selectors(query),
-        path=chunk.source_ref.path,
-        section=chunk.source_ref.section,
-        section_kind=chunk.source_ref.section_kind,
-    )
-    return _identity_score_from_kinds(kinds)
 
 
 def _identity_score_from_kinds(kinds: tuple[ContextEvidenceKind, ...]) -> tuple[float, str]:

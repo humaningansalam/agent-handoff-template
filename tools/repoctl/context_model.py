@@ -68,13 +68,6 @@ class ContextEvidenceKind(StrEnum):
     HISTORY_CORROBORATION = "history_corroboration"
 
 
-class ContextHistoryMatchStrength(StrEnum):
-    NONE = "none"
-    WEAK = "weak"
-    STRONG = "strong"
-    EXACT = "exact"
-
-
 class ContextAnchorStrength(StrEnum):
     NONE = "none"
     WEAK = "weak"
