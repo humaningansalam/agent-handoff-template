@@ -383,10 +383,7 @@ def _add_verification_record_to_state(
     state["verification_subjects"] = _subjects_by_identity(
         [*state["verification_subjects"], *selected]
     )
-    state["verification_records"] = _dedupe_dicts(
-        [*state["verification_records"], record],
-        key="record_id",
-    )
+    state["verification_records"].append(record)
     return _validate_state(
         _with_state_digest(state),
         task_id=str(state["task_id"]),
@@ -424,29 +421,29 @@ def structured_verification_coverage(
         and isinstance(identity.get("path"), str)
     }
     required = [path for path in requested if path in chosen_paths]
-    statuses_by_subject: dict[str, set[str]] = {}
+    latest_status_by_subject: dict[str, str] = {}
     for record in state["verification_records"]:
         for subject_id in record["subject_ids"]:
-            statuses_by_subject.setdefault(str(subject_id), set()).add(str(record["status"]))
+            latest_status_by_subject[str(subject_id)] = str(record["status"])
     passed: list[str] = []
     missing: list[str] = []
     nonpassing: list[str] = []
     for path in required:
         current = current_path_subject(root, target=target, path=path)
-        statuses = statuses_by_subject.get(str(current["subject_id"]), set())
-        if statuses == {"passed"}:
+        status = latest_status_by_subject.get(str(current["subject_id"]))
+        if status == "passed":
             passed.append(path)
-        elif not statuses:
+        elif status is None:
             missing.append(path)
         else:
             nonpassing.append(path)
     status = (
         "not_applicable"
         if not required
-        else "missing"
-        if missing
         else "nonpassing"
         if nonpassing
+        else "missing"
+        if missing
         else "complete"
     )
     return {
@@ -759,7 +756,6 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
             for citation in citations
         ):
             raise ValueError("completion Discovery seed result has no citation")
-    verification_ids: list[str] = []
     for record in value["verification_records"]:
         if not isinstance(record, dict) or set(record) != {
             "record_id",
@@ -792,9 +788,6 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
         }
         if record.get("record_id") != digest_data(record_base):
             raise ValueError("completion structured verification digest is invalid")
-        verification_ids.append(record["record_id"])
-    if verification_ids != sorted(set(verification_ids)):
-        raise ValueError("completion structured verification is not canonical")
     return _copy(value)
 
 
@@ -1491,7 +1484,6 @@ def _validate_state_verification_records(
     available_subject_ids: set[str],
     available_claim_ids: set[str],
 ) -> set[str]:
-    record_ids: list[str] = []
     referenced_subject_ids: set[str] = set()
     for record in records:
         if not isinstance(record, dict) or set(record) != {
@@ -1530,10 +1522,7 @@ def _validate_state_verification_records(
                 code="discovery_outcome_verification_reference_invalid",
                 path=missing,
             )
-        record_ids.append(record["record_id"])
         referenced_subject_ids.update(subject_ids)
-    if record_ids != sorted(set(record_ids)):
-        raise ValueError("task Discovery structured verification is not canonical")
     return referenced_subject_ids
 
 

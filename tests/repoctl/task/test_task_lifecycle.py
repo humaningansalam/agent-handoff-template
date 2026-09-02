@@ -1085,14 +1085,13 @@ def test_forged_verification_capsules_and_record_ids_fail_typed(
     assert outcome_path.read_bytes() == before
 
 
-def test_duplicate_verification_add_keeps_exact_pool_and_record_cardinality(
+def test_repeated_identical_verification_add_preserves_each_audit_record(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     task_id, outcome_path, evidence = _recorded_verification_state(tmp_path, monkeypatch, capsys)
-    before = outcome_path.read_bytes()
-    initial = json.loads(before)
+    initial = json.loads(outcome_path.read_text(encoding="utf-8"))
 
     assert main(
         [
@@ -1113,8 +1112,8 @@ def test_duplicate_verification_add_keeps_exact_pool_and_record_cardinality(
     repeated = json.loads(outcome_path.read_text(encoding="utf-8"))
 
     assert len(repeated["verification_subjects"]) == len(initial["verification_subjects"]) == 1
-    assert len(repeated["verification_records"]) == len(initial["verification_records"]) == 1
-    assert outcome_path.read_bytes() == before
+    assert len(repeated["verification_records"]) == 2
+    assert repeated["verification_records"][0] == repeated["verification_records"][1]
 
 
 def test_legacy_verification_subject_migrates_in_memory_without_rewriting_state(
@@ -1564,14 +1563,14 @@ def test_invalid_explicit_root_chosen_is_not_silently_erased_from_alignment(
     assert not (tmp_path / f"docs/tasks/.repoctl-state/completions/{task_id}.json").exists()
 
 
-def test_task_doctor_does_not_offer_an_ineffective_pass_append_for_nonpassing_current_evidence(
+def test_latest_current_verification_controls_doctor_and_finish_without_rewriting_history(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
-    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    init_committed_product_repo(repo, {"app.py": "value = 1\n", "other.py": "value = 1\n"})
     task_id = "T-20260609184046Z"
     text = (
         task_text(task_id, status="todo")
@@ -1595,15 +1594,20 @@ def test_task_doctor_does_not_offer_an_ineffective_pass_append_for_nonpassing_cu
             "repos/app.py",
             "--chosen",
             "repos/app.py",
+            "--reviewed",
+            "repos/other.py",
+            "--chosen",
+            "repos/other.py",
             "--json",
         ]
     ) == 0
     capsys.readouterr()
     task_path.write_text(
-        replace_section(task_path.read_text(encoding="utf-8"), "Verification", "- Command: focused check\n- Result: failed then passed\n"),
+        replace_section(task_path.read_text(encoding="utf-8"), "Verification", "- Command: focused check\n- Result: pass\n"),
         encoding="utf-8",
     )
     (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    (repo / "other.py").write_text("value = 2\n", encoding="utf-8")
     evidence = tmp_path / "focused-check.log"
     evidence.write_text("FAIL app.py\n", encoding="utf-8")
     assert main(
@@ -1623,13 +1627,15 @@ def test_task_doctor_does_not_offer_an_ineffective_pass_append_for_nonpassing_cu
     ) == 0
     capsys.readouterr()
 
-    assert main(["task", "doctor", task_id, "--json"]) == 0
+    assert main(["task", "doctor", task_id, "--json"]) == 1
     failed = json.loads(capsys.readouterr().out)
+    assert failed["data"]["finish_ready"] is False
     assert failed["data"]["structured_verification"]["status"] == "nonpassing"
+    assert failed["data"]["structured_verification"]["missing_subject_count"] == 1
+    assert failed["data"]["structured_verification"]["nonpassing_subject_count"] == 1
     assert failed["data"]["action_inputs"]["nonpassing_structured_verification_subjects"] == ["app.py"]
-    assert not any(action.get("kind") == "task_verification_add" for action in failed["next_actions"])
-    review = next(action for action in failed["next_actions"] if action.get("target_ref") == "data.action_inputs.nonpassing_structured_verification_subjects")
-    assert review["path"] == task_path.relative_to(tmp_path).as_posix()
+    retry = next(action for action in failed["next_actions"] if action.get("kind") == "task_verification_add")
+    assert retry["target_ref"] == "data.action_inputs.nonpassing_structured_verification_subjects"
 
     evidence.write_text("PASS app.py\n", encoding="utf-8")
     assert main(
@@ -1649,9 +1655,62 @@ def test_task_doctor_does_not_offer_an_ineffective_pass_append_for_nonpassing_cu
     ) == 0
     capsys.readouterr()
     assert main(["task", "doctor", task_id, "--json"]) == 0
-    still_nonpassing = json.loads(capsys.readouterr().out)
-    assert still_nonpassing["data"]["structured_verification"]["status"] == "nonpassing"
-    assert not any(action.get("kind") == "task_verification_add" for action in still_nonpassing["next_actions"])
+    passed = json.loads(capsys.readouterr().out)
+    assert passed["data"]["finish_ready"] is True
+    assert passed["data"]["structured_verification"]["status"] == "missing"
+
+    evidence.write_text("FAIL app.py\n", encoding="utf-8")
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "failed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(["task", "doctor", task_id, "--json"]) == 1
+    failed_again = json.loads(capsys.readouterr().out)
+    assert failed_again["data"]["finish_ready"] is False
+    assert failed_again["data"]["structured_verification"]["status"] == "nonpassing"
+    assert main(["task", "finish", task_id, "--json"]) == 2
+    finish_blocked = json.loads(capsys.readouterr().out)
+    assert finish_blocked["problems"][0]["code"] == "task_structured_verification_nonpassing"
+    assert task_path.is_file()
+
+    outcome_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+    assert [record["status"] for record in outcome["verification_records"]] == ["failed", "passed", "failed"]
+
+    evidence.write_text("PASS app.py\n", encoding="utf-8")
+    assert main(
+        [
+            "task",
+            "verification",
+            "add",
+            task_id,
+            "--status",
+            "passed",
+            "--evidence-ref",
+            evidence.as_posix(),
+            "--subject",
+            "app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    finished = json.loads(capsys.readouterr().out)
+    assert finished["data"]["structured_verification"]["status"] == "missing"
+    receipt = json.loads((tmp_path / finished["data"]["completion_receipt"]).read_text(encoding="utf-8"))
+    assert [record["status"] for record in receipt["discovery_outcome"]["verification_records"]] == ["failed", "passed", "failed", "passed"]
 
 
 def test_task_finish_reports_missing_structured_verification_as_immutable_audit_warning(

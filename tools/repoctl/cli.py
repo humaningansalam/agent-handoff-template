@@ -531,26 +531,21 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
             add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
             add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
-        elif code == "task_structured_verification_missing":
+        elif code in {"task_structured_verification_missing", "task_structured_verification_nonpassing"}:
             action_inputs = _mapping_at(data, "action_inputs")
-            subjects = _string_list(action_inputs.get("missing_structured_verification_subjects"))
+            input_key = (
+                "missing_structured_verification_subjects"
+                if code.endswith("missing")
+                else "nonpassing_structured_verification_subjects"
+            )
+            subjects = _string_list(action_inputs.get(input_key))
             if subjects:
                 add(
-                    "Record passed structured verification for each missing current changed Chosen subject",
+                    "Record passed structured verification for each unverified current changed Chosen subject",
                     command=f"./scripts/repoctl task verification add {task_id} --status passed --evidence-ref <evidence-ref> --subject <verified-subject> --json",
                     kind=NextActionKind.TASK_VERIFICATION_ADD,
-                    source="data.action_inputs.missing_structured_verification_subjects",
-                    target_ref="data.action_inputs.missing_structured_verification_subjects",
-                )
-        elif code == "task_structured_verification_nonpassing":
-            action_inputs = _mapping_at(data, "action_inputs")
-            subjects = _string_list(action_inputs.get("nonpassing_structured_verification_subjects"))
-            if subjects:
-                add(
-                    "Review nonpassing structured evidence; another passed record does not erase prior current-version outcomes",
-                    path=path or f"docs/tasks/{task_id}.md",
-                    source="data.action_inputs.nonpassing_structured_verification_subjects",
-                    target_ref="data.action_inputs.nonpassing_structured_verification_subjects",
+                    source=f"data.action_inputs.{input_key}",
+                    target_ref=f"data.action_inputs.{input_key}",
                 )
         elif code == "task_handoff_generated_template":
             add(
@@ -3024,9 +3019,9 @@ def _structured_verification_warnings(
     if nonpassing_subjects:
         warnings.append(
             Problem(
-                "warning",
+                "error",
                 "task_structured_verification_nonpassing",
-                f"{len(nonpassing_subjects)} current changed Chosen subject(s) do not have exactly passed structured verification",
+                f"{len(nonpassing_subjects)} current changed Chosen subject(s) have a nonpassing latest structured verification record",
                 path,
             )
         )
@@ -4310,6 +4305,8 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
             target=finish_target,
             delta=delta,
         )
+        if finish_structured_coverage["status"] == "nonpassing":
+            raise RepoctlError("current changed Chosen subjects have nonpassing structured verification", code="task_structured_verification_nonpassing", path=str(result["old_path"]))
         finish_structured_warnings = _structured_verification_warnings(
             finish_structured_coverage,
             path=str(result["new_path"]),
