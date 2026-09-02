@@ -38,7 +38,7 @@ def test_backlog_list_returns_freeform_items_without_interpreting_fields(tmp_pat
         ]
     )
     assert payload["ok"] is True
-    assert payload["command"] == "backlog list"
+    assert payload["command"] == "backlog.list"
     assert payload["warnings"] == []
     assert payload["data"]["items"] == [
         {"id": "BL-" + sha256(raw.encode("utf-8")).hexdigest()[:12], "title": title, "raw": raw, "line_start": 7, "line_end": 12}

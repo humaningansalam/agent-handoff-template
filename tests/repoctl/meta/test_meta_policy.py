@@ -121,7 +121,7 @@ def test_orphan_exclusion_has_own_classification_and_repoctl_repair(tmp_path: Pa
     write_repometa(repo, exclusions={"missing.py": {"reason": "stale", "excluded_by": "agent"}})
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "inventory", "--json"]) == 0
+    assert main(["meta", "status", "--verbose", "--json"]) == 0
     inventory = json.loads(capsys.readouterr().out)
     item = next(file for file in inventory["data"]["files"] if file["path"] == "missing.py")
     assert item["classification"] == "orphan_exclusion"

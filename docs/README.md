@@ -36,7 +36,7 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Finish and create a reusable Knowledge review candidate atomically: `./scripts/repoctl task finish T-... --knowledge-kind invariant --knowledge-claim "<reusable invariant>" --knowledge-applies-to src/owner.py --json`
 - Finish after an accidental product commit: `./scripts/repoctl task finish T-... --use-committed-diff --json`
 - Create follow-up work: `./scripts/repoctl task create --follow-up-of T-old --slug follow-up "Follow-up title" --json`
-- Show version: `./scripts/repoctl --version` or `./scripts/repoctl version --json`
+- Show version: `./scripts/repoctl version` or `./scripts/repoctl version --json`
 - Check workspace: `./scripts/repoctl check --json`
 - Audit every completion receipt, task artifact, and derived catalogue: `./scripts/repoctl check --audit-history --json`
 - Rebuild workspace-scoped completion history: `./scripts/repoctl history rebuild --workspace --json`
@@ -48,12 +48,28 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Query Context raw/debug JSON: `./scripts/repoctl context query "question" --repo-id main --full --json`
 - Pack task context compact JSON: `./scripts/repoctl context pack --task T-... --repo-id main --json`
 - Build knowledge candidate: `./scripts/repoctl knowledge candidate build --source docs/adr/example.md --repo-id main --kind decision --claim '<reusable claim>' --json`
-- Suggest knowledge candidate from an already-finished task receipt: `./scripts/repoctl knowledge candidate suggest --from-task T-... --repo-id main --kind invariant --claim "<reusable invariant>" --dry-run --json`. This is a preview/recovery path; normal closeout uses the `task finish --knowledge-*` flags. The task receipt supplies provenance, while `--claim` or `--claim-file` supplies the reusable statement.
+- Preview a knowledge candidate from an already-finished task receipt: `./scripts/repoctl knowledge candidate build --from-task T-... --repo-id main --kind invariant --claim "<reusable invariant>" --dry-run --json`. Normal closeout uses the `task finish --knowledge-*` flags. The task receipt supplies provenance, while `--claim` or `--claim-file` supplies the reusable statement.
 - Approve knowledge and synchronize Graph: `./scripts/repoctl knowledge approve KC-... --repo-id main --reviewed-by <label> --note-file /tmp/review.md --json`
 - Query reviewed knowledge compact JSON: `./scripts/repoctl knowledge query "question" --repo-id main --json`
 - Inspect a full reviewed record: `./scripts/repoctl knowledge show K-... --repo-id main --json` or add `--full` to the query.
 - Render llmwiki view: `./scripts/repoctl knowledge render --repo-id main --json`
 - Check llmwiki view: `./scripts/repoctl knowledge render --repo-id main --check --json`
+
+## Visible Command Reference
+
+Run any listed leaf with `--help` for its inputs. Context benchmark/materialization commands are internal field-gate diagnostics and are intentionally absent from normal help.
+
+| Surface | Visible command leaves |
+|---|---|
+| Root | `version`, `check` |
+| Field gates | `field-gate run`, `field-gate compare` |
+| Repositories | `repo list`, `repo show`, `repo check`, `repo adopt` |
+| Tasks | `task create`, `task list`, `task resume`, `task show`, `task doctor`, `task log append`, `task handoff bind`, `task discovery add`, `task verification add`, `task baseline resolve`, `task start`, `task finish`, `task block`, `task cancel` |
+| Backlog | `backlog add`, `backlog list`, `backlog show`, `backlog remove` |
+| Metadata | `meta init`, `meta check`, `meta status`, `meta show`, `meta query`, `meta suggest`, `meta set`, `meta remove`, `meta move`, `meta exclude` |
+| Evidence | `index code`, `graph build`, `graph query`, `history rebuild`, `context query`, `context pack` |
+| Knowledge | `knowledge candidate build`, `knowledge candidate list`, `knowledge candidate show`, `knowledge candidate check`, `knowledge candidate refresh`, `knowledge rebuild`, `knowledge status`, `knowledge event list`, `knowledge event show`, `knowledge approve`, `knowledge show`, `knowledge reject`, `knowledge deprecate`, `knowledge check`, `knowledge query`, `knowledge render` |
+| Upgrade | `upgrade status`, `upgrade plan`, `upgrade postflight`, `upgrade apply` |
 
 ## Boundaries
 

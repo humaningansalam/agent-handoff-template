@@ -45,7 +45,7 @@ This contract freezes the common envelope, not every command's full payload.
 ## Fields
 
 - `ok`: `true` when no error-severity problem exists.
-- `command`: stable dotted command name where practical, such as `task.finish` or `meta.check`.
+- `command`: stable dotted command name, such as `task.finish` or `meta.check`.
 - `data`: command-specific structured result. It must be an object.
 - `warnings`: advisory problem objects that do not fail the command.
 - `problems`: error or warning objects with stable `code` values.
@@ -93,7 +93,7 @@ Repo-aware payloads should include repository context instead of overloading `pa
 
 `path` inside file entries remains repo-relative. `workspace_path` is workspace-root-relative when a caller needs a clickable location.
 
-Command results that could be mistaken for broader readiness carry an explicit scope. `task.finish` reports `closure_scope: "task"` and `product_readiness: "not_evaluated"`. The release-candidate field gate reports `scope: "workspace_control_plane"`, `applicability: "repoctl_release_candidate"`, and `product_readiness: "not_evaluated"`.
+Command results that could be mistaken for broader readiness carry an explicit scope. `task.finish` reports `closure_scope: "task"` and `product_readiness: "not_evaluated"`. The `repoctl-release` field gate reports `scope: "workspace_control_plane"`, `applicability: "repoctl_release"`, and `product_readiness: "not_evaluated"`.
 
 ## v0.9.0 Context receipt migration
 
@@ -146,7 +146,7 @@ Context result receipts use a versioned public projection rather than returning 
 
 The default projection size is bounded by visible compact evidence, not hidden manifest cardinality. `--full --json` changes `view` to `full` and adds the complete immutable membership at `manifest.items`; it does not change `result_id`, `receipt_digest`, request, compact citations, counts, or stored receipt bytes. Discovery may select a default `primary_citation` or an exact full `manifest.items` member. A representative citation outside the stored manifest is a typed `result_receipt_projection_invalid` failure. Graph query receipts retain their command-specific flat `selectable` surface.
 
-`field-gate run release-candidate --json` returns the compact gate view by default: gate status, scalar summary values, problem/warning counts and codes, and the run digest. `--full --json` exposes child commands and nested diagnostic summaries. `--output` always writes the full digest-verifiable artifact even when stdout uses the compact view.
+`field-gate run repoctl-release --json` returns the compact gate view by default: gate status, scalar summary values, problem/warning counts and codes, and the run digest. `--full --json` exposes child commands and nested diagnostic summaries. `--output` always writes the full digest-verifiable artifact even when stdout uses the compact view.
 
 Repository diagnostics separate stable targets from unbound candidates:
 

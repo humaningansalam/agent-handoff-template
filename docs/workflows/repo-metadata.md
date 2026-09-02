@@ -168,7 +168,7 @@ repoctl-managed provenance:
 - `reviewed_at`: UTC time when repoctl wrote the annotation
 - `reviewed_by`: reviewer label, default `agent`, or the explicit `--reviewed-by` value
 
-Do not store `possibly_stale`. `meta status`, `meta inventory`, and `meta show` calculate it by comparing the current file digest with `source_content_digest`. An older annotation without a source digest remains readable but cannot be proven current, so it is counted as possibly stale until `meta set` refreshes it.
+Do not store `possibly_stale`. `meta status` and `meta show` calculate it by comparing the current file digest with `source_content_digest`. An older annotation without a source digest remains readable but cannot be proven current, so it is counted as possibly stale until `meta set` refreshes it.
 
 Forbidden fields:
 
@@ -178,7 +178,7 @@ Technical facts such as language, imports, calls, deps, symbols, and observed ef
 
 ## Classification
 
-`repoctl meta inventory --json` classifies files as:
+`repoctl meta status --verbose --json` classifies files as:
 
 ```text
 excluded
@@ -209,7 +209,7 @@ Read/status commands:
 
 ```bash
 repoctl meta init --json
-repoctl meta inventory --json
+repoctl meta status --verbose --json
 repoctl meta status --changed --json
 repoctl meta query --topic <topic> --role <role> --area <area> --json
 repoctl meta suggest --text "short feature or PRD phrase" --json

@@ -1164,7 +1164,7 @@ def test_public_history_rebuild_recovers_typed_unavailable_catalogue(
     assert main(["history", "rebuild", "--repo-id", "main", "--json"]) == 0
     rebuilt = json.loads(capsys.readouterr().out)
     assert rebuilt["ok"] is True
-    assert rebuilt["command"] == "history rebuild"
+    assert rebuilt["command"] == "history.rebuild"
     assert rebuilt["data"]["repository"]["id"] == "main"
     assert rebuilt["data"]["mode"] == "rebuild"
     assert rebuilt["data"]["ingested_count"] == 1

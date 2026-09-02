@@ -40,7 +40,7 @@ def test_context_pack_groups_task_evidence(tmp_path: Path, monkeypatch, capsys) 
     artifact = json.loads(output.read_text(encoding="utf-8"))
     data = payload["data"]
     assert artifact == payload
-    assert payload["command"] == "context pack"
+    assert payload["command"] == "context.pack"
     assert data["schema_version"] == 4
     assert data["authoritative"] is False
     assert data["view"] == "compact"

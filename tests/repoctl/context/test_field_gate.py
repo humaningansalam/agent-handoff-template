@@ -16,7 +16,7 @@ def _copy_release_fixtures(root: Path) -> None:
     shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", root / "tests/fixtures/context-pack-benchmark")
 
 
-def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixture_state(
+def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_state(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -30,16 +30,16 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
     source_annotation.write_text("{}\n", encoding="utf-8")
     _copy_release_fixtures(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    output = tmp_path / ".repoctl-state/field-gates/release-candidate.json"
+    output = tmp_path / ".repoctl-state/field-gates/repoctl-release.json"
 
-    assert main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
+    assert main(["field-gate", "run", "repoctl-release", "--repo-id", "main", "--output", output.as_posix(), "--json"]) == 0
 
     compact_output = capsys.readouterr().out
     payload = json.loads(compact_output)
     assert '"attribution":' not in json.dumps(payload, sort_keys=True)
     gates = {gate["name"]: gate for gate in payload["data"]["gates"]}
     assert payload["data"]["scope"] == "workspace_control_plane"
-    assert payload["data"]["applicability"] == "repoctl_release_candidate"
+    assert payload["data"]["applicability"] == "repoctl_release"
     assert payload["data"]["product_readiness"] == "not_evaluated"
     assert payload["data"]["failed_count"] == 0
     assert "reviewed_knowledge_check" in gates
@@ -50,7 +50,7 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
     artifact_output = output.read_text(encoding="utf-8")
     artifact = json.loads(artifact_output)
     assert '"attribution":' not in json.dumps(artifact, sort_keys=True)
-    assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/release-candidate.json"
+    assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/repoctl-release.json"
     artifact_gates = {gate["name"]: gate for gate in artifact["data"]["gates"]}
     assert "by_category" in artifact_gates["context_benchmark"]["summary"]
     assert artifact_gates["context_benchmark"]["summary"]["by_category"]["typed-consumer-closure"]["mean_visible_recall"] == 1.0
@@ -70,13 +70,13 @@ def test_release_candidate_field_gate_runs_real_quality_checks_and_cleans_fixtur
 
     assert main(["check", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
-    release_gate = check_payload["data"]["field_gates"]["release_candidate"]
+    release_gate = check_payload["data"]["field_gates"]["repoctl_release"]
     assert release_gate["scope"] == "workspace_control_plane"
-    assert release_gate["applicability"] == "repoctl_release_candidate"
+    assert release_gate["applicability"] == "repoctl_release"
     assert release_gate["product_readiness"] == "not_evaluated"
 
 
-def test_release_candidate_field_gate_cleans_materialized_state_when_a_gate_raises(
+def test_repoctl_release_field_gate_cleans_materialized_state_when_a_gate_raises(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -94,7 +94,7 @@ def test_release_candidate_field_gate_cleans_materialized_state_when_a_gate_rais
     monkeypatch.setattr("tools.repoctl.cli.run_context_benchmark", fail_benchmark)
 
     with pytest.raises(RuntimeError):
-        main(["field-gate", "run", "release-candidate", "--repo-id", "main", "--json"])
+        main(["field-gate", "run", "repoctl-release", "--repo-id", "main", "--json"])
 
     assert not (repo / "auth").exists()
     assert not (repo / ".repometa").exists()

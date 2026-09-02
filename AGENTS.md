@@ -134,7 +134,7 @@ Create durable Knowledge only for a reusable cross-task decision, invariant, or 
 
 The normal closeout path is `task finish --knowledge-kind ...` with an explicit `--knowledge-claim` or `--knowledge-claim-file` and any literal applicability paths. Source documents, task artifacts, and completion receipts provide provenance; they never substitute for the reusable claim.
 
-`knowledge candidate suggest --from-task ... --dry-run` is a preview for an already-finished task, not the normal closeout path. Candidate review and approval are explicit. Never hand-edit candidate, record, or event JSON. Approval creates the durable record and attempts Graph synchronization; if synchronization fails, keep the durable record and perform the reported typed rebuild action.
+`knowledge candidate build --from-task ... --dry-run` is a preview for an already-finished task, not the normal closeout path. Candidate review and approval are explicit. Never hand-edit candidate, record, or event JSON. Approval creates the durable record and attempts Graph synchronization; if synchronization fails, keep the durable record and perform the reported typed rebuild action.
 
 ## Repository Metadata
 

@@ -68,11 +68,11 @@ def test_configured_multi_requires_repo_id_for_meta(tmp_path: Path, monkeypatch,
     write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "inventory", "--json"]) == 2
+    assert main(["meta", "status", "--verbose", "--json"]) == 2
     missing_selector = json.loads(capsys.readouterr().out)
     assert missing_selector["problems"][0]["code"] == "repository_selector_required"
 
-    assert main(["meta", "inventory", "--repo-id", "web", "--json"]) == 0
+    assert main(["meta", "status", "--verbose", "--repo-id", "web", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["repository"] == {"id": "web", "path": "repos/web", "identity_source": "pinned"}
     assert payload["data"]["files"][0]["path"] == "app.py"

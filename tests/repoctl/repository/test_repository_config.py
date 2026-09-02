@@ -111,7 +111,7 @@ def test_repo_relative_path_starting_with_repos_is_not_stripped(tmp_path: Path, 
     (nested / "client.py").write_text("print('nested')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "inventory", "--json"]) == 0
+    assert main(["meta", "status", "--verbose", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     files = payload["data"]["files"]

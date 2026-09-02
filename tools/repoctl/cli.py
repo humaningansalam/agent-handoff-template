@@ -36,7 +36,7 @@ from .knowledge_projection import (
     rebuild_knowledge_projection,
 )
 from .knowledge_render import render_knowledge
-from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inventory, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
+from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, context_result_receipt_projection, graph_result_selections, write_result_receipt
@@ -45,7 +45,29 @@ from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
 class RepoctlArgparseError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, command: str = "repoctl") -> None:
+        super().__init__(message)
+        self.command = command
+
+
+def _parser_command_identity(prog: str) -> str:
+    return ".".join(prog.split()[1:]) or "repoctl"
+
+
+class RepoctlSubParsersAction(argparse._SubParsersAction):
+    def add_parser(self, name: str, **kwargs: Any) -> argparse.ArgumentParser:
+        internal = bool(kwargs.pop("internal", False))
+        command = _parser_command_identity(f"{self._prog_prefix} {name}")
+        subject, _, verb = command.rpartition(".")
+        purpose = str(kwargs.get("help") or (f"{verb.capitalize()} {subject.replace('.', ' ')}." if subject else f"Manage {verb} operations."))
+        kwargs.setdefault("help", purpose)
+        kwargs.setdefault("description", purpose)
+        parser = super().add_parser(name, **kwargs)
+        if internal:
+            self._choices_actions = [action for action in self._choices_actions if action.dest != name]
+        self.metavar = "{" + ",".join(action.dest for action in self._choices_actions) + "}"
+        parser.set_defaults(command_id=command)
+        return parser
 
 
 class RepoctlDataError(RepoctlError):
@@ -73,10 +95,6 @@ class ProductReadiness(StrEnum):
 class UpgradePostflightStatus(StrEnum):
     READY = "ready"
     RECOVERY_REQUIRED = "recovery_required"
-
-
-class FieldGateApplicability(StrEnum):
-    REPOCTL_RELEASE_CANDIDATE = "repoctl_release_candidate"
 
 
 class NextActionKind(StrEnum):
@@ -174,12 +192,37 @@ def _compact_task_health_problems(problems: tuple[Problem, ...]) -> list[Problem
 
 
 class RepoctlArgumentParser(argparse.ArgumentParser):
+    def add_argument(self, *args: str, **kwargs: Any) -> argparse.Action:
+        positional = bool(args) and not args[0].startswith("-")
+        if "help" not in kwargs and (positional or kwargs.get("required", False)):
+            dest = str(kwargs.get("dest") or (args[0] if positional else args[0].lstrip("-").replace("-", "_")))
+            label = dest.replace("_", " ")
+            qualifier = "optional" if kwargs.get("nargs") in {"?", "*"} else "required"
+            source = " from the matching list command" if dest.endswith("_id") or dest in {"repo_id", "task"} else ""
+            artifact = " artifact path" if dest in {"baseline", "candidate", "plan_file"} else ""
+            kwargs["help"] = f"{qualifier} {label}{source}{artifact}; constrained values appear in usage"
+        return super().add_argument(*args, **kwargs)
+
+    def add_subparsers(self, **kwargs: Any) -> Any:
+        kwargs.setdefault("action", RepoctlSubParsersAction)
+        return super().add_subparsers(**kwargs)
+
+    def parse_args(self, args: list[str] | None = None, namespace: argparse.Namespace | None = None) -> argparse.Namespace:
+        parsed, extras = self.parse_known_args(args, namespace)
+        if extras: raise RepoctlArgparseError(f"unrecognized arguments: {' '.join(extras)}", command=parsed.command_id)
+        return parsed
+
+    def _check_value(self, action: argparse.Action, value: Any) -> None:
+        if isinstance(action, RepoctlSubParsersAction) and value not in action.choices:
+            raise argparse.ArgumentError(action, f"invalid choice: {value!r} (choose from {', '.join(repr(choice.dest) for choice in action._choices_actions)})")
+        super()._check_value(action, value)
+
     def error(self, message: str) -> None:
-        raise RepoctlArgparseError(message)
+        raise RepoctlArgparseError(message, command=_parser_command_identity(self.prog))
 
     def exit(self, status: int = 0, message: str | None = None) -> None:
         if status:
-            raise RepoctlArgparseError((message or "argument parsing failed").strip())
+            raise RepoctlArgparseError((message or "argument parsing failed").strip(), command=_parser_command_identity(self.prog))
         super().exit(status, message)
 
 
@@ -287,10 +330,6 @@ def _read_pyproject_version(path: Path) -> str:
             _key, _sep, value = stripped.partition("=")
             return value.strip().strip('"')
     return ""
-
-
-def _wants_json_output(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "json", False)) or str(getattr(args, "format", "")) == "json"
 
 
 def _workspace_output_path(root: Path, output: str, *, code: str) -> tuple[Path | None, Problem | None]:
@@ -778,12 +817,12 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             )
         elif code == "knowledge_candidate_receipt_invalid":
             add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
-            add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+            add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate build --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
         elif code == "knowledge_candidate_claim_required":
             add("State the reusable decision, invariant, or failure mode explicitly", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --kind <kind> --claim '<reusable claim>' --json")
         elif code == "knowledge_records_empty":
             add("Build a reviewable candidate from a source document", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --kind <kind> --claim '<reusable claim>' --json")
-            add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate suggest --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+            add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate build --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
     bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
     completeness = bundle.get("completeness") if isinstance(bundle.get("completeness"), dict) else {}
     prior_outcome = completeness.get("prior_task_outcome") if isinstance(completeness.get("prior_task_outcome"), dict) else {}
@@ -805,7 +844,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
     return actions
 
 
-def _release_candidate_field_gates(root: Path, *, repo_id: str = "main") -> list[dict[str, Any]]:
+def _repoctl_release_field_gates(root: Path, *, repo_id: str = "main") -> list[dict[str, Any]]:
     gates: list[dict[str, Any]] = []
 
     def add(label: str, *, command: str, mutates_workspace: bool, requires: list[str] | None = None) -> None:
@@ -1048,7 +1087,7 @@ def _cleanup_materialized_entries(root: Path, entries: list[dict[str, str]]) -> 
     }, problems
 
 
-def _release_candidate_gate_result(
+def _repoctl_release_gate_result(
     *,
     name: str,
     command: str,
@@ -1121,7 +1160,7 @@ def _context_retrieval_field_gate_summary(summary: Any) -> dict[str, Any]:
     return projected
 
 
-def _compact_release_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
+def _compact_repoctl_release_data(data: dict[str, Any]) -> dict[str, Any]:
     compact = {
         key: data[key]
         for key in (
@@ -1207,11 +1246,11 @@ def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirecto
     return temporary, isolated
 
 
-def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str, Any]:
+def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, Any]:
     gates: list[dict[str, Any]] = []
     check_payload, check_problems, _live_paths = _check_payload(root)
     gates.append(
-        _release_candidate_gate_result(
+        _repoctl_release_gate_result(
             name="workspace_check",
             command="./scripts/repoctl check --json",
             mutates_workspace=False,
@@ -1222,7 +1261,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         )
     )
     if _has_errors(check_problems):
-        return _release_candidate_payload(repo_id=repo_id, gates=gates)
+        return _repoctl_release_payload(repo_id=repo_id, gates=gates)
 
     try:
         layout = repo_layout(root)
@@ -1232,7 +1271,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         repo_problems = [Problem("error", exc.code, str(exc), exc.path)]
         repo_data = {}
     gates.append(
-        _release_candidate_gate_result(
+        _repoctl_release_gate_result(
             name="repository_check",
             command="./scripts/repoctl repo check --json",
             mutates_workspace=False,
@@ -1246,7 +1285,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         )
     )
     if _has_errors(repo_problems):
-        return _release_candidate_payload(repo_id=repo_id, gates=gates)
+        return _repoctl_release_payload(repo_id=repo_id, gates=gates)
 
     knowledge_data, knowledge_problems = check_knowledge_records(root, repo_id=repo_id)
     candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=repo_id, pending_only=True)
@@ -1257,7 +1296,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
     ]
     knowledge_gate_warnings = [problem for problem in candidate_problems if problem.severity == "warning"]
     gates.append(
-        _release_candidate_gate_result(
+        _repoctl_release_gate_result(
             name="reviewed_knowledge_check",
             command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --include-candidates --json",
             mutates_workspace=False,
@@ -1333,7 +1372,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 context_cleanup, context_cleanup_problems = _cleanup_materialized_entries(benchmark_root, context_cleanup_entries)
                 context_materialize_problems.extend(context_cleanup_problems)
             gates.append(
-                _release_candidate_gate_result(
+                _repoctl_release_gate_result(
                     name="context_benchmark_materialize",
                     command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
                     mutates_workspace=False,
@@ -1345,7 +1384,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
             )
             if not _has_errors(context_materialize_problems):
                 gates.append(
-                    _release_candidate_gate_result(
+                    _repoctl_release_gate_result(
                         name="context_benchmark",
                         command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-visible-recall anchor-coherence=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --min-category-graph-edge-recall anchor-coherence=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
                         mutates_workspace=False,
@@ -1378,7 +1417,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                     pack_cleanup, pack_cleanup_problems = _cleanup_materialized_entries(benchmark_root, pack_cleanup_entries)
                     pack_materialize_problems.extend(pack_cleanup_problems)
                 gates.append(
-                    _release_candidate_gate_result(
+                    _repoctl_release_gate_result(
                         name="context_pack_benchmark_materialize",
                         command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
                         mutates_workspace=False,
@@ -1394,7 +1433,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
                 pack_benchmark_problems = []
             if not _has_errors(pack_materialize_problems):
                 gates.append(
-                    _release_candidate_gate_result(
+                    _repoctl_release_gate_result(
                         name="context_pack_benchmark",
                         command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
                         mutates_workspace=False,
@@ -1449,7 +1488,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
             multi_cleanup, multi_cleanup_problems = _cleanup_materialized_entries(benchmark_root, multi_cleanup_entries)
             multi_materialize_problems.extend(multi_cleanup_problems)
         gates.append(
-            _release_candidate_gate_result(
+            _repoctl_release_gate_result(
                 name="context_benchmark_multirepo_materialize",
                 command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
                 mutates_workspace=False,
@@ -1461,7 +1500,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         )
         if not _has_errors(multi_materialize_problems):
             gates.append(
-                _release_candidate_gate_result(
+                _repoctl_release_gate_result(
                     name="context_benchmark_multirepo_isolation",
                     command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
                     mutates_workspace=False,
@@ -1482,7 +1521,7 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
         render_output = Path("docs/knowledge/generated")
         render_data, render_problems = render_knowledge(root, repo_id=repo_id, output=render_output, check=True)
         gates.append(
-            _release_candidate_gate_result(
+            _repoctl_release_gate_result(
                 name="knowledge_render_check",
                 command=f"./scripts/repoctl knowledge render --repo-id {repo_id} --check --json",
                 mutates_workspace=False,
@@ -1493,17 +1532,17 @@ def _run_release_candidate_field_gates(root: Path, *, repo_id: str) -> dict[str,
             )
         )
 
-    return _release_candidate_payload(repo_id=repo_id, gates=gates)
+    return _repoctl_release_payload(repo_id=repo_id, gates=gates)
 
 
-def _release_candidate_payload(*, repo_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
+def _repoctl_release_payload(*, repo_id: str, gates: list[dict[str, Any]]) -> dict[str, Any]:
     error_count = sum(1 for gate in gates if not gate.get("ok"))
     data = {
-        "schema": "repoctl.field_gate.release_candidate",
+        "schema": "repoctl.field_gate.repoctl_release",
         "schema_version": 1,
         "repo_id": repo_id,
         "scope": ResultScope.WORKSPACE_CONTROL_PLANE,
-        "applicability": FieldGateApplicability.REPOCTL_RELEASE_CANDIDATE,
+        "applicability": "repoctl_release",
         "product_readiness": ProductReadiness.NOT_EVALUATED,
         "gate_count": len(gates),
         "passed_count": len(gates) - error_count,
@@ -1526,15 +1565,15 @@ def _read_field_gate_artifact(path: Path, problems: list[Problem], *, label: str
     if not isinstance(payload, dict):
         problems.append(Problem("error", "field_gate_artifact_invalid", f"{label} field gate artifact must be an object", path.as_posix()))
         return {}
-    if str(payload.get("command") or "") == "field-gate run" and payload.get("ok") is False and not allow_failed:
+    if str(payload.get("command") or "") == "field-gate.run" and payload.get("ok") is False and not allow_failed:
         problems.append(Problem("error", "field_gate_artifact_failed", f"{label} field gate artifact was produced by a failed command", path.as_posix()))
         return {}
-    data = payload.get("data") if str(payload.get("command") or "") == "field-gate run" else payload
+    data = payload.get("data") if str(payload.get("command") or "") == "field-gate.run" else payload
     if not isinstance(data, dict):
         problems.append(Problem("error", "field_gate_artifact_missing_data", f"{label} field gate artifact is missing data", path.as_posix()))
         return {}
-    if str(data.get("schema") or "") != "repoctl.field_gate.release_candidate":
-        problems.append(Problem("error", "field_gate_artifact_wrong_schema", f"{label} artifact is not a release-candidate field gate run", path.as_posix()))
+    if str(data.get("schema") or "") != "repoctl.field_gate.repoctl_release":
+        problems.append(Problem("error", "field_gate_artifact_wrong_schema", f"{label} artifact is not a repoctl-release field gate run", path.as_posix()))
         return {}
     gates = data.get("gates")
     if not isinstance(gates, list) or not all(isinstance(gate, dict) for gate in gates):
@@ -1777,11 +1816,6 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
     return default_repo_target(root)
 
 
-def _command_name(args: argparse.Namespace) -> str:
-    parts = [str(getattr(args, name)) for name in ("command", "field_gate_command", "repo_command", "task_command", "task_log_command", "task_discovery_command", "task_verification_command", "backlog_command", "meta_command", "index_command", "graph_command", "history_command", "context_command", "knowledge_command", "knowledge_candidate_command", "knowledge_event_command", "upgrade_command") if getattr(args, name, None)]
-    return ".".join(parts) if parts else "repoctl"
-
-
 def _error_data(args: argparse.Namespace) -> dict[str, Any]:
     data: dict[str, Any] = {}
     task_id = str(getattr(args, "task_id", "") or getattr(args, "task", "") or "")
@@ -1952,15 +1986,15 @@ def _check_payload(
         + history_problems
     )
     live_paths = [task.rel_path for task in live_tasks(tasks)]
-    release_gates = _release_candidate_field_gates(root)
+    release_gates = _repoctl_release_field_gates(root)
     release_gate_data: dict[str, Any] = {
         "scope": ResultScope.WORKSPACE_CONTROL_PLANE,
-        "applicability": FieldGateApplicability.REPOCTL_RELEASE_CANDIDATE,
+        "applicability": "repoctl_release",
         "product_readiness": ProductReadiness.NOT_EVALUATED,
         "details_included": full,
         "gate_count": len(release_gates),
         "mutating_gate_count": sum(1 for gate in release_gates if gate.get("mutates_workspace")),
-        "run_command": "./scripts/repoctl field-gate run release-candidate --repo-id main --json",
+        "run_command": "./scripts/repoctl field-gate run repoctl-release --repo-id main --json",
     }
     if full:
         release_gate_data["gates"] = release_gates
@@ -1969,7 +2003,7 @@ def _check_payload(
         "command": "check",
         "data": {
             "field_gates": {
-                "release_candidate": release_gate_data,
+                "repoctl_release": release_gate_data,
             },
             "board": {
                 "stale": set(board_paths) != set(live_paths),
@@ -2027,15 +2061,13 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_field_gate_run(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    if args.gate != "release-candidate":
-        raise RepoctlError(f"unsupported field gate: {args.gate}")
     output: Path | None = None
     if args.output:
         output, output_problem = _workspace_output_path(root, args.output, code="field_gate_output_outside_workspace")
         if output_problem is not None:
             payload = {
                 "ok": False,
-                "command": "field-gate run",
+                "command": "field-gate.run",
                 "data": {},
                 "problems": [output_problem.to_dict()],
                 "warnings": [],
@@ -2045,7 +2077,7 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
             else:
                 print(output_problem.message)
             return 1
-    data = _run_release_candidate_field_gates(root, repo_id=args.repo_id)
+    data = _run_repoctl_release_field_gates(root, repo_id=args.repo_id)
     problems = [
         Problem("error", "field_gate_failed", f"field gate failed: {gate.get('name', '')}")
         for gate in data.get("gates", [])
@@ -2054,12 +2086,12 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
     warnings = [
         {
             "code": "field_gate_benchmarks_isolated",
-            "message": "release-candidate benchmarks run in an isolated temporary workspace and do not materialize fixtures in product repositories",
+            "message": "repoctl-release benchmarks run in an isolated temporary workspace and do not materialize fixtures in product repositories",
         }
     ]
     full_payload = {
         "ok": not problems,
-        "command": "field-gate run",
+        "command": "field-gate.run",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
@@ -2073,8 +2105,8 @@ def cmd_field_gate_run(args: argparse.Namespace) -> int:
         atomic_write(output, json.dumps(full_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     payload = {
         "ok": not problems,
-        "command": "field-gate run",
-        "data": data if args.full else _compact_release_candidate_data(data),
+        "command": "field-gate.run",
+        "data": data if args.full else _compact_repoctl_release_data(data),
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
     }
@@ -2098,7 +2130,7 @@ def cmd_field_gate_compare(args: argparse.Namespace) -> int:
     )
     payload = {
         "ok": not _has_errors(problems),
-        "command": "field-gate compare",
+        "command": "field-gate.compare",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -3482,7 +3514,7 @@ def cmd_backlog_list(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     board_text = (root / "docs/BOARD.md").read_text(encoding="utf-8")
     items = read_backlog_items(board_text)
-    payload = {"ok": True, "command": "backlog list", "data": {"items": [item.to_dict() for item in items]}, "problems": [], "warnings": backlog_warnings(items)}
+    payload = {"ok": True, "command": "backlog.list", "data": {"items": [item.to_dict() for item in items]}, "problems": [], "warnings": backlog_warnings(items)}
     if args.json:
         _json(payload)
     else:
@@ -3499,7 +3531,7 @@ def cmd_backlog_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     board_text = (root / "docs/BOARD.md").read_text(encoding="utf-8")
     item = resolve_backlog_item(board_text, args.backlog_id)
-    payload = {"ok": True, "command": "backlog show", "data": {"item": item.to_dict()}, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "backlog.show", "data": {"item": item.to_dict()}, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -3527,7 +3559,7 @@ def cmd_backlog_add(args: argparse.Namespace) -> int:
         atomic_write(board_path, updated)
     items = read_backlog_items(updated)
     item = items[-1]
-    payload = {"ok": True, "command": "backlog add", "data": {"item": item.to_dict()}, "problems": [], "warnings": backlog_warnings(items)}
+    payload = {"ok": True, "command": "backlog.add", "data": {"item": item.to_dict()}, "problems": [], "warnings": backlog_warnings(items)}
     if args.json:
         _json(payload)
     else:
@@ -3542,7 +3574,7 @@ def cmd_backlog_remove(args: argparse.Namespace) -> int:
         board_text = board_path.read_text(encoding="utf-8")
         updated, item = remove_backlog_item(board_text, args.backlog_id)
         atomic_write(board_path, updated)
-    payload = {"ok": True, "command": "backlog remove", "data": {"removed": item.to_dict()}, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "backlog.remove", "data": {"removed": item.to_dict()}, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -4385,7 +4417,7 @@ def cmd_meta_check(args: argparse.Namespace) -> int:
         data["repository"] = target.to_dict()
     payload = {
         "ok": not _has_errors(problems),
-        "command": "meta check --changed" if args.changed else "meta check",
+        "command": "meta.check",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -4408,7 +4440,7 @@ def cmd_meta_init(args: argparse.Namespace) -> int:
     target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
         data = init_store(root, target=target)
-    payload = {"ok": True, "command": "meta init", "data": data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "meta.init", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -4421,7 +4453,7 @@ def cmd_meta_status(args: argparse.Namespace) -> int:
     target = _repo_target_from_args(root, args)
     files, problems, meta = meta_status(root, changed=args.changed, target=target)
     visible_files = files
-    if not args.include_excluded:
+    if not args.verbose and not args.include_excluded:
         visible_files = [file for file in visible_files if file.classification != "excluded"]
     data: dict[str, Any] = {**meta}
     if args.verbose or args.include_excluded:
@@ -4429,7 +4461,7 @@ def cmd_meta_status(args: argparse.Namespace) -> int:
     warnings = _metadata_coverage_warnings(meta)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "meta status",
+        "command": "meta.status",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
@@ -4456,29 +4488,6 @@ def cmd_meta_status(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def cmd_meta_inventory(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    target = _repo_target_from_args(root, args)
-    files, problems, meta = meta_inventory(root, changed=False, target=target)
-    warnings = _metadata_coverage_warnings(meta)
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "meta inventory",
-        "data": {**meta, "files": [file.to_dict() for file in files]},
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": warnings,
-    }
-    if args.json:
-        _json(payload)
-    else:
-        summary = meta.get("summary", {})
-        print(f"repoctl meta inventory: {summary.get('total', 0)} files")
-        for key in ("excluded", "annotated", "annotation_required", "indexed_only", "excluded_override", "orphan_annotation", "move_candidate"):
-            if summary.get(key):
-                print(f"{key}: {summary[key]}")
-    return 1 if _has_errors(problems) else 0
-
-
 def _read_optional_file(path: str | None) -> str:
     if not path:
         return ""
@@ -4492,7 +4501,7 @@ def cmd_meta_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = _repo_target_from_args(root, args)
     data = show_annotation(root, args.path, target=target)
-    payload = {"ok": True, "command": "meta show", "data": data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "meta.show", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -4507,7 +4516,7 @@ def cmd_meta_query(args: argparse.Namespace) -> int:
     warnings = _metadata_coverage_warnings(meta)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "meta query",
+        "command": "meta.query",
         "data": {**meta, "candidates": [candidate.to_dict() for candidate in candidates]},
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
@@ -4530,7 +4539,7 @@ def cmd_meta_suggest(args: argparse.Namespace) -> int:
     }
     payload = {
         "ok": not _has_errors(problems),
-        "command": "meta suggest",
+        "command": "meta.suggest",
         "data": {**meta, "candidates": [candidate.to_dict() for candidate in candidates]},
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [warning, *_metadata_coverage_warnings(meta)],
@@ -4563,7 +4572,7 @@ def cmd_index_code(args: argparse.Namespace) -> int:
         )
     payload = {
         "ok": not _has_errors(problems),
-        "command": "index code",
+        "command": "index.code",
         "data": {**meta, "files": [entry.to_dict() for entry in entries]},
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
@@ -4593,7 +4602,7 @@ def cmd_graph_build(args: argparse.Namespace) -> int:
         data["snapshot"] = snapshot.to_dict() if snapshot is not None else None
     payload = {
         "ok": snapshot is not None and not _has_errors(problems),
-        "command": "graph build",
+        "command": "graph.build",
         "data": data,
         "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [
@@ -4642,7 +4651,7 @@ def cmd_history_rebuild(args: argparse.Namespace) -> int:
     }
     payload = {
         "ok": True,
-        "command": "history rebuild",
+        "command": "history.rebuild",
         "data": data,
         "problems": [],
         "warnings": [
@@ -4743,7 +4752,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     if snapshot is None or _has_errors(build_problems):
         payload = {
             "ok": False,
-            "command": "graph query",
+            "command": "graph.query",
             "data": {"result": None, **meta},
             "problems": [problem.to_dict() for problem in build_problems],
             "warnings": [],
@@ -4808,7 +4817,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         stale_warning["changed_root_paths"] = freshness.get("changed_root_paths", [])
     payload = {
         "ok": result is not None and outcome_ok and not _has_errors(query_problems),
-        "command": "graph query",
+        "command": "graph.query",
         "data": {
             "result": result_data,
             "query_status": query_status,
@@ -5484,7 +5493,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     ]
     payload = {
         "ok": bundle is not None and not _has_errors(problems),
-        "command": "context query",
+        "command": "context.query",
         "data": data,
         "problems": [problem.to_dict() for problem in problems if problem not in optional_absence_warnings],
         "warnings": [
@@ -5541,7 +5550,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
     problems = [*category_gate_problems, *knowledge_category_gate_problems, *edge_category_gate_problems, *visible_category_gate_problems, *problems]
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context benchmark",
+        "command": "context.benchmark",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -5583,7 +5592,7 @@ def cmd_context_benchmark_materialize(args: argparse.Namespace) -> int:
     data, problems = materialize_context_benchmark_corpus(root, fixture=fixture, repo_id=args.repo_id or "", force=args.force)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context benchmark-materialize",
+        "command": "context.benchmark-materialize",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -5645,7 +5654,7 @@ def cmd_context_benchmark_compare(args: argparse.Namespace) -> int:
     )
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context benchmark-compare",
+        "command": "context.benchmark-compare",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -5676,7 +5685,7 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     payload_data = {**data, **meta} if args.full else {**compact_task_context_pack(data), **meta}
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context pack",
+        "command": "context.pack",
         "data": payload_data,
         "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [*data.get("warnings", []), *[problem.to_dict() for problem in problems if problem.severity == "warning"]],
@@ -5732,7 +5741,7 @@ def cmd_context_pack_compare(args: argparse.Namespace) -> int:
     )
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context pack-compare",
+        "command": "context.pack-compare",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -5764,7 +5773,7 @@ def cmd_context_pack_benchmark(args: argparse.Namespace) -> int:
     )
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context pack-benchmark",
+        "command": "context.pack-benchmark",
         "data": data,
         "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [
@@ -5808,7 +5817,7 @@ def cmd_context_pack_benchmark_materialize(args: argparse.Namespace) -> int:
         data, problems = materialize_task_context_pack_benchmark_tasks(root, fixture=fixture, force=args.force)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context pack-benchmark-materialize",
+        "command": "context.pack-benchmark-materialize",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -5838,7 +5847,7 @@ def cmd_context_pack_benchmark_compare(args: argparse.Namespace) -> int:
     )
     payload = {
         "ok": not _has_errors(problems),
-        "command": "context pack-benchmark-compare",
+        "command": "context.pack-benchmark-compare",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -5905,13 +5914,10 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
                     claim=claim,
                     applies_to=list(getattr(args, "applies_to", []) or []),
                 )
-    response_data = data
-    if getattr(args, "knowledge_candidate_command", "") == "suggest" and not getattr(args, "full", False):
-        response_data = _compact_knowledge_candidate_data(data)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge candidate suggest" if getattr(args, "knowledge_candidate_command", "") == "suggest" else "knowledge candidate build",
-        "data": response_data,
+        "command": "knowledge.candidate.build",
+        "data": data if getattr(args, "full", False) else _compact_knowledge_candidate_data(data),
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
             {
@@ -6009,7 +6015,7 @@ def cmd_knowledge_candidate_list(args: argparse.Namespace) -> int:
     data = list_knowledge_candidates(root, repo_id=args.repo_id, with_checks=args.with_checks)
     payload = {
         "ok": True,
-        "command": "knowledge candidate list",
+        "command": "knowledge.candidate.list",
         "data": data,
         "problems": [],
         "warnings": [
@@ -6032,7 +6038,7 @@ def cmd_knowledge_status(args: argparse.Namespace) -> int:
     data = knowledge_status(root, repo_id=args.repo_id)
     payload = {
         "ok": True,
-        "command": "knowledge status",
+        "command": "knowledge.status",
         "data": data,
         "problems": [],
         "warnings": [],
@@ -6063,7 +6069,7 @@ def cmd_knowledge_rebuild(args: argparse.Namespace) -> int:
     }
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge rebuild",
+        "command": "knowledge.rebuild",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -6091,7 +6097,7 @@ def cmd_knowledge_event_list(args: argparse.Namespace) -> int:
     data = list_knowledge_events(root, repo_id=args.repo_id, event_type=args.type, candidate_id=args.candidate_id, record_id=args.record_id)
     payload = {
         "ok": True,
-        "command": "knowledge event list",
+        "command": "knowledge.event.list",
         "data": data,
         "problems": [],
         "warnings": [
@@ -6114,7 +6120,7 @@ def cmd_knowledge_event_show(args: argparse.Namespace) -> int:
     data, problems = show_knowledge_event(root, repo_id=args.repo_id, event_id=args.event_id)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge event show",
+        "command": "knowledge.event.show",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -6158,7 +6164,7 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
         ]
     payload = {
         "ok": not _has_errors([*problems, *check_problems]),
-        "command": "knowledge candidate show",
+        "command": "knowledge.candidate.show",
         "data": {**data, "review_summary": check_data} if data else data,
         "problems": [problem.to_dict() for problem in [*problems, *check_problems] if problem.severity == "error"],
         "warnings": [
@@ -6288,7 +6294,7 @@ def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
         problems = [Problem("error", "knowledge_candidate_check_target_required", "provide a candidate id or --all")]
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge candidate check",
+        "command": "knowledge.candidate.check",
         "data": data,
         "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [problem.to_dict() for problem in problems if problem.severity == "warning"],
@@ -6320,7 +6326,7 @@ def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
             problems = [Problem("error", "knowledge_candidate_refresh_target_required", "provide a candidate id, --record-id, or --all-stale")]
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge candidate refresh",
+        "command": "knowledge.candidate.refresh",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -6426,7 +6432,7 @@ def cmd_knowledge_approve(args: argparse.Namespace) -> int:
         next_actions.extend(_next_actions_for_problems(problems, data={"repository": target.to_dict()}))
     payload = {
         "ok": not _has_errors(all_problems),
-        "command": "knowledge approve",
+        "command": "knowledge.approve",
         "data": response_data,
         "problems": [problem.to_dict() for problem in all_problems if problem.severity == "error"],
         "warnings": [*_knowledge_approval_warnings(record), *graph_warnings],
@@ -6463,7 +6469,7 @@ def cmd_knowledge_show(args: argparse.Namespace) -> int:
     data, problems = show_knowledge_record(root, record_id=args.record_id, repo_id=args.repo_id)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge show",
+        "command": "knowledge.show",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -6485,7 +6491,7 @@ def cmd_knowledge_reject(args: argparse.Namespace) -> int:
         data, problems = reject_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, reason_file=Path(args.reason_file))
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge reject",
+        "command": "knowledge.reject",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
@@ -6507,7 +6513,7 @@ def cmd_knowledge_deprecate(args: argparse.Namespace) -> int:
         data, problems = deprecate_knowledge_record(root, repo_id=args.repo_id, record_id=args.record_id, reason_file=Path(args.reason_file))
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge deprecate",
+        "command": "knowledge.deprecate",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -6540,7 +6546,7 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
         warnings.extend(problem for problem in candidate_problems if problem.severity == "warning")
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge check",
+        "command": "knowledge.check",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [problem.to_dict() for problem in warnings],
@@ -6573,7 +6579,7 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
     response_data = data if args.full else _compact_knowledge_query_data(data)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge query",
+        "command": "knowledge.query",
         "data": response_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [problem.to_dict() for problem in warnings],
@@ -6614,7 +6620,7 @@ def cmd_knowledge_render(args: argparse.Namespace) -> int:
     response_data = data if args.full else _compact_knowledge_render_data(data)
     payload = {
         "ok": not _has_errors(problems),
-        "command": "knowledge render",
+        "command": "knowledge.render",
         "data": response_data,
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [
@@ -6675,7 +6681,7 @@ def cmd_upgrade_status(args: argparse.Namespace) -> int:
     }
     payload = {
         "ok": not problems,
-        "command": "upgrade status",
+        "command": "upgrade.status",
         "data": data,
         "problems": problems,
         "warnings": [],
@@ -7210,7 +7216,7 @@ def cmd_meta_set(args: argparse.Namespace) -> int:
             reviewed_by=args.reviewed_by,
             target=target,
         )
-    payload = {"ok": True, "command": "meta set", "data": data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "meta.set", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -7223,7 +7229,7 @@ def cmd_meta_remove(args: argparse.Namespace) -> int:
     target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
         data = remove_annotation(root, args.path, target=target)
-    payload = {"ok": True, "command": "meta remove", "data": data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "meta.remove", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -7236,7 +7242,7 @@ def cmd_meta_move(args: argparse.Namespace) -> int:
     target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
         data = move_annotation(root, args.old_path, args.new_path, target=target)
-    payload = {"ok": True, "command": "meta move", "data": data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "meta.move", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -7249,7 +7255,7 @@ def cmd_meta_exclude(args: argparse.Namespace) -> int:
     target = _repo_target_from_args(root, args)
     with repoctl_lock(root):
         data = exclude_path(root, args.path, reason=args.reason, excluded_by=args.excluded_by, target=target)
-    payload = {"ok": True, "command": "meta exclude", "data": data, "problems": [], "warnings": []}
+    payload = {"ok": True, "command": "meta.exclude", "data": data, "problems": [], "warnings": []}
     if args.json:
         _json(payload)
     else:
@@ -7257,11 +7263,24 @@ def cmd_meta_exclude(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = RepoctlArgumentParser(prog="repoctl")
-    sub = parser.add_subparsers(dest="command", required=True, parser_class=RepoctlArgumentParser)
+def cmd_version(args: argparse.Namespace) -> int:
+    data = _version_data(_workspace_root_or_cwd())
+    if args.json:
+        _json({"ok": True, "command": "version", "data": data, "problems": [], "warnings": []})
+    else:
+        print(data["version"])
+    return 0
 
-    check = sub.add_parser("check")
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = RepoctlArgumentParser(prog="repoctl", description="Workspace task, repository, discovery, and upgrade control plane.")
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=RepoctlArgumentParser, metavar="COMMAND")
+
+    version = sub.add_parser("version", help="Show the repoctl release version.", description="Show repoctl and manifest version information.")
+    version.add_argument("--json", action="store_true", help="emit the canonical JSON envelope")
+    version.set_defaults(func=cmd_version)
+
+    check = sub.add_parser("check", help="Validate workspace lifecycle and control-plane state.")
     check.add_argument("--fix-board", action="store_true")
     check.add_argument("--include-archived-warnings", action="store_true")
     check.add_argument("--audit-history", action="store_true", help="validate every cold completion receipt and task artifact (O(total history bytes))")
@@ -7269,23 +7288,23 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--json", action="store_true")
     check.set_defaults(func=cmd_check)
 
-    field_gate = sub.add_parser("field-gate")
+    field_gate = sub.add_parser("field-gate", help="Run or compare repoctl field gates.")
     field_gate_sub = field_gate.add_subparsers(dest="field_gate_command", required=True, parser_class=RepoctlArgumentParser)
-    field_gate_run = field_gate_sub.add_parser("run")
-    field_gate_run.add_argument("gate", choices=["release-candidate"])
+    field_gate_run = field_gate_sub.add_parser("run", help="Run a named control-plane field gate.")
+    field_gate_run.add_argument("gate", choices=["repoctl-release"], help="field gate to run")
     field_gate_run.add_argument("--repo-id", default="main")
     field_gate_run.add_argument("--output")
     field_gate_run.add_argument("--full", action="store_true", help="include child gate commands and full diagnostic summaries")
     field_gate_run.add_argument("--json", action="store_true")
-    field_gate_run.set_defaults(func=cmd_field_gate_run)
-    field_gate_compare = field_gate_sub.add_parser("compare")
+    field_gate_run.set_defaults(func=cmd_field_gate_run, command_id="field-gate.run")
+    field_gate_compare = field_gate_sub.add_parser("compare", help="Compare two saved field-gate artifacts.")
     field_gate_compare.add_argument("--baseline", required=True)
     field_gate_compare.add_argument("--candidate", required=True)
     field_gate_compare.add_argument("--max-failed-count-increase", type=int)
     field_gate_compare.add_argument("--require-same-gates", action="store_true")
     field_gate_compare.add_argument("--require-no-gate-regressions", action="store_true")
     field_gate_compare.add_argument("--json", action="store_true")
-    field_gate_compare.set_defaults(func=cmd_field_gate_compare)
+    field_gate_compare.set_defaults(func=cmd_field_gate_compare, command_id="field-gate.compare")
     repo = sub.add_parser("repo")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True, parser_class=RepoctlArgumentParser)
     repo_list = repo_sub.add_parser("list")
@@ -7330,7 +7349,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_list = task_sub.add_parser("list")
     task_list.add_argument("--json", action="store_true")
     task_list.set_defaults(func=cmd_task_list)
-    task_resume = task_sub.add_parser("resume")
+    task_resume = task_sub.add_parser("resume", help="Select resumable task state without mutation.")
     task_resume.add_argument("task_id", nargs="?", help="live task id to select when more than one task is resumable")
     task_resume.add_argument("--full", action="store_true", help="include every repository lifecycle problem instead of the bounded code summary")
     task_resume.add_argument("--json", action="store_true")
@@ -7341,26 +7360,26 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("--section", choices=["Discovery", "Verification", "Handoff", "Closure"], help="return only one canonical task section")
     task_show.add_argument("--json", action="store_true")
     task_show.set_defaults(func=cmd_task_show)
-    task_doctor = task_sub.add_parser("doctor")
+    task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness and lifecycle problems.")
     task_doctor.add_argument("task_id")
     task_doctor.add_argument("--use-committed-diff", action="store_true", help="preflight the recorded task-start HEAD through current HEAD")
     task_doctor.add_argument("--json", action="store_true")
     task_doctor.set_defaults(func=cmd_task_doctor)
-    task_log = task_sub.add_parser("log")
+    task_log = task_sub.add_parser("log", help="Manage task execution logs.")
     task_log_sub = task_log.add_subparsers(dest="task_log_command", required=True, parser_class=RepoctlArgumentParser)
     task_log_append = task_log_sub.add_parser("append")
     task_log_append.add_argument("task_id")
     task_log_append.add_argument("message")
     task_log_append.add_argument("--json", action="store_true")
     task_log_append.set_defaults(func=cmd_task_log_append)
-    task_handoff = task_sub.add_parser("handoff")
+    task_handoff = task_sub.add_parser("handoff", help="Manage task Handoff bindings.")
     task_handoff_sub = task_handoff.add_subparsers(dest="task_handoff_command", required=True, parser_class=RepoctlArgumentParser)
     task_handoff_bind = task_handoff_sub.add_parser("bind")
     task_handoff_bind.add_argument("task_id")
     task_handoff_bind.add_argument("--context-pack", help="workspace-local Context Pack to bind as optional active resume evidence")
     task_handoff_bind.add_argument("--json", action="store_true")
     task_handoff_bind.set_defaults(func=cmd_task_handoff_bind)
-    task_discovery = task_sub.add_parser("discovery")
+    task_discovery = task_sub.add_parser("discovery", help="Manage task Discovery outcomes.")
     task_discovery_sub = task_discovery.add_subparsers(dest="task_discovery_command", required=True, parser_class=RepoctlArgumentParser)
     task_discovery_add = task_discovery_sub.add_parser("add")
     task_discovery_add.add_argument("task_id")
@@ -7382,7 +7401,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_discovery_add.add_argument("--full", action="store_true", help="include the full cumulative Discovery state")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)
-    task_verification = task_sub.add_parser("verification")
+    task_verification = task_sub.add_parser("verification", help="Manage task verification evidence.")
     task_verification_sub = task_verification.add_subparsers(dest="task_verification_command", required=True, parser_class=RepoctlArgumentParser)
     task_verification_add = task_verification_sub.add_parser("add")
     task_verification_add.add_argument("task_id")
@@ -7393,7 +7412,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_verification_add.add_argument("--claim-id", action="append", default=[], help="sha256 claim ID covered by this check")
     task_verification_add.add_argument("--json", action="store_true")
     task_verification_add.set_defaults(func=cmd_task_verification_add)
-    task_baseline = task_sub.add_parser("baseline")
+    task_baseline = task_sub.add_parser("baseline", help="Manage task baseline ownership.")
     task_baseline_sub = task_baseline.add_subparsers(dest="task_baseline_command", required=True, parser_class=RepoctlArgumentParser)
     task_baseline_resolve = task_baseline_sub.add_parser("resolve")
     task_baseline_resolve.add_argument("task_id")
@@ -7403,12 +7422,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_baseline_resolve.add_argument("--preview", action="store_true", help="validate and show every resolution without writing task state")
     task_baseline_resolve.add_argument("--json", action="store_true")
     task_baseline_resolve.set_defaults(func=cmd_task_baseline_resolve)
-    task_start = task_sub.add_parser("start")
+    task_start = task_sub.add_parser("start", help="Start task execution with a fixed repository baseline.")
     task_start.add_argument("task_id")
     task_start.add_argument("--force-dirty", action="store_true")
     task_start.add_argument("--json", action="store_true")
     task_start.set_defaults(func=cmd_task_start)
-    task_finish = task_sub.add_parser("finish")
+    task_finish = task_sub.add_parser("finish", help="Verify, close, and archive a task.")
     task_finish.add_argument("task_id")
     task_finish.add_argument("--verification-file")
     task_finish.add_argument("--use-committed-diff", action="store_true", help="validate recorded task-start HEAD through current HEAD when product changes were committed before finish")
@@ -7419,14 +7438,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.add_argument("--knowledge-applies-to", action="append", default=[], help="current selected-repository file governed by the reusable claim; repeat as needed")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
-    task_block = task_sub.add_parser("block")
+    task_block = task_sub.add_parser("block", help="Block a live task with explicit transition intent.")
     task_block.add_argument("task_id")
     task_block_reason = task_block.add_mutually_exclusive_group(required=True)
     task_block_reason.add_argument("--reason", help="reason for blocking; appended to Execution Log without changing Verification")
     task_block_reason.add_argument("--reason-file", type=argparse.FileType("r", encoding="utf-8"), help="UTF-8 file containing the blocking reason")
     task_block.add_argument("--json", action="store_true")
     task_block.set_defaults(func=cmd_task_block)
-    task_cancel = task_sub.add_parser("cancel")
+    task_cancel = task_sub.add_parser("cancel", help="Cancel and archive a task with explicit transition intent.")
     task_cancel.add_argument("task_id")
     task_cancel_reason = task_cancel.add_mutually_exclusive_group(required=True)
     task_cancel_reason.add_argument("--reason", help="reason for cancellation; appended to Execution Log without changing Verification")
@@ -7472,10 +7491,6 @@ def build_parser() -> argparse.ArgumentParser:
     meta_status_cmd.add_argument("--include-excluded", action="store_true")
     meta_status_cmd.add_argument("--json", action="store_true")
     meta_status_cmd.set_defaults(func=cmd_meta_status)
-    meta_inventory_cmd = meta_sub.add_parser("inventory")
-    meta_inventory_cmd.add_argument("--repo-id")
-    meta_inventory_cmd.add_argument("--json", action="store_true")
-    meta_inventory_cmd.set_defaults(func=cmd_meta_inventory)
     meta_show = meta_sub.add_parser("show")
     meta_show.add_argument("path")
     meta_show.add_argument("--repo-id")
@@ -7499,10 +7514,10 @@ def build_parser() -> argparse.ArgumentParser:
     meta_set = meta_sub.add_parser("set")
     meta_set.add_argument("path")
     meta_set.add_argument("--repo-id")
-    meta_set.add_argument("--role", required=True)
+    meta_set.add_argument("--role", required=True, help="role allowed by the selected repo's .repometa/policy.json")
     meta_set.add_argument("--purpose")
     meta_set.add_argument("--purpose-file")
-    meta_set.add_argument("--topic", action="append", required=True)
+    meta_set.add_argument("--topic", action="append", required=True, help="reviewed project topic; repeat for additional topics")
     meta_set.add_argument("--declared-effect", action="append")
     meta_set.add_argument("--caution", action="append")
     meta_set.add_argument("--caution-file")
@@ -7582,12 +7597,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="auto, startup-reading, code-location, call-impact, file-impact, authority, contract, past-decision, failure-mode, or invariant",
     )
-    context_query.add_argument("--format", choices=["text", "json", "markdown"], default="text")
+    context_query.add_argument("--format", choices=["text", "markdown"], default="text", help="human-readable output format; use --json for machine output")
     context_query.add_argument("--explain", action="store_true")
     context_query.add_argument("--full", action="store_true", help="include full evidence and source diagnostics in JSON output")
     context_query.add_argument("--json", action="store_true")
     context_query.set_defaults(func=cmd_context_query)
-    context_benchmark = context_sub.add_parser("benchmark")
+    context_benchmark = context_sub.add_parser("benchmark", internal=True)
     context_benchmark.add_argument("--fixture", default="tests/fixtures/context-benchmark")
     context_benchmark.add_argument("--repo-id")
     context_benchmark.add_argument("--min-recall-at-5", type=float)
@@ -7606,13 +7621,13 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--output")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)
-    context_benchmark_materialize = context_sub.add_parser("benchmark-materialize")
+    context_benchmark_materialize = context_sub.add_parser("benchmark-materialize", internal=True)
     context_benchmark_materialize.add_argument("--fixture", default="tests/fixtures/context-benchmark")
     context_benchmark_materialize.add_argument("--repo-id")
     context_benchmark_materialize.add_argument("--force", action="store_true")
     context_benchmark_materialize.add_argument("--json", action="store_true")
     context_benchmark_materialize.set_defaults(func=cmd_context_benchmark_materialize)
-    context_benchmark_compare = context_sub.add_parser("benchmark-compare")
+    context_benchmark_compare = context_sub.add_parser("benchmark-compare", internal=True)
     context_benchmark_compare.add_argument("--baseline", required=True)
     context_benchmark_compare.add_argument("--candidate", required=True)
     context_benchmark_compare.add_argument("--max-recall-at-5-drop", type=float)
@@ -7622,24 +7637,24 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark_compare.add_argument("--require-current-sources", action="store_true")
     context_benchmark_compare.add_argument("--json", action="store_true")
     context_benchmark_compare.set_defaults(func=cmd_context_benchmark_compare)
-    context_pack = context_sub.add_parser("pack")
+    context_pack = context_sub.add_parser("pack", help="Build a bounded task Context Pack.")
     context_pack.add_argument("--task", required=True)
     context_pack.add_argument("--repo-id", required=True)
     context_pack.add_argument("--budget-tokens", type=int, default=1500)
     context_pack.add_argument("--explain", action="store_true")
     context_pack.add_argument("--output")
-    context_pack.add_argument("--format", choices=["text", "json", "markdown"], default="text")
+    context_pack.add_argument("--format", choices=["text", "markdown"], default="text", help="human-readable output format; use --json for machine output")
     context_pack.add_argument("--full", action="store_true", help="include raw bundle/candidates in JSON output")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
-    context_pack_compare = context_sub.add_parser("pack-compare")
+    context_pack_compare = context_sub.add_parser("pack-compare", internal=True)
     context_pack_compare.add_argument("--baseline", required=True)
     context_pack_compare.add_argument("--candidate", required=True)
     context_pack_compare.add_argument("--max-must-read-drop", type=int)
     context_pack_compare.add_argument("--require-warning-stability", action="store_true")
     context_pack_compare.add_argument("--json", action="store_true")
     context_pack_compare.set_defaults(func=cmd_context_pack_compare)
-    context_pack_benchmark = context_sub.add_parser("pack-benchmark")
+    context_pack_benchmark = context_sub.add_parser("pack-benchmark", internal=True)
     context_pack_benchmark.add_argument("--fixture", default="tests/fixtures/context-pack-benchmark")
     context_pack_benchmark.add_argument("--repo-id", required=True)
     context_pack_benchmark.add_argument("--budget-tokens", type=int, default=1500)
@@ -7648,12 +7663,12 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_benchmark.add_argument("--output")
     context_pack_benchmark.add_argument("--json", action="store_true")
     context_pack_benchmark.set_defaults(func=cmd_context_pack_benchmark)
-    context_pack_benchmark_materialize = context_sub.add_parser("pack-benchmark-materialize")
+    context_pack_benchmark_materialize = context_sub.add_parser("pack-benchmark-materialize", internal=True)
     context_pack_benchmark_materialize.add_argument("--fixture", default="tests/fixtures/context-pack-benchmark")
     context_pack_benchmark_materialize.add_argument("--force", action="store_true")
     context_pack_benchmark_materialize.add_argument("--json", action="store_true")
     context_pack_benchmark_materialize.set_defaults(func=cmd_context_pack_benchmark_materialize)
-    context_pack_benchmark_compare = context_sub.add_parser("pack-benchmark-compare")
+    context_pack_benchmark_compare = context_sub.add_parser("pack-benchmark-compare", internal=True)
     context_pack_benchmark_compare.add_argument("--baseline", required=True)
     context_pack_benchmark_compare.add_argument("--candidate", required=True)
     context_pack_benchmark_compare.add_argument("--max-mean-must-read-recall-drop", type=float)
@@ -7662,7 +7677,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
-    knowledge_candidate = knowledge_sub.add_parser("candidate")
+    knowledge_candidate = knowledge_sub.add_parser("candidate", help="Manage Knowledge candidates.")
     knowledge_candidate_sub = knowledge_candidate.add_subparsers(dest="knowledge_candidate_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_candidate_build = knowledge_candidate_sub.add_parser("build")
     knowledge_candidate_build.add_argument("--source")
@@ -7675,20 +7690,10 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_candidate_build_claim.add_argument("--claim", default="")
     knowledge_candidate_build_claim.add_argument("--claim-file", default="")
     knowledge_candidate_build.add_argument("--applies-to", action="append", default=[], help="current selected-repository file governed by the claim; repeat as needed")
+    knowledge_candidate_build.add_argument("--dry-run", action="store_true", help="preview a --from-task candidate without writing it")
+    knowledge_candidate_build.add_argument("--full", action="store_true", help="include the full candidate summary")
     knowledge_candidate_build.add_argument("--json", action="store_true")
-    knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build, knowledge_candidate_command="build")
-    knowledge_candidate_suggest = knowledge_candidate_sub.add_parser("suggest")
-    knowledge_candidate_suggest.add_argument("--from-task", dest="from_task", required=True)
-    knowledge_candidate_suggest.add_argument("--repo-id", required=True)
-    knowledge_candidate_suggest.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
-    knowledge_candidate_suggest.add_argument("--dry-run", action="store_true")
-    knowledge_candidate_suggest_claim = knowledge_candidate_suggest.add_mutually_exclusive_group()
-    knowledge_candidate_suggest_claim.add_argument("--claim", default="")
-    knowledge_candidate_suggest_claim.add_argument("--claim-file", default="")
-    knowledge_candidate_suggest.add_argument("--applies-to", action="append", default=[], help="current selected-repository file governed by the claim; repeat as needed")
-    knowledge_candidate_suggest.add_argument("--full", action="store_true", help="include the full candidate summary")
-    knowledge_candidate_suggest.add_argument("--json", action="store_true")
-    knowledge_candidate_suggest.set_defaults(func=cmd_knowledge_candidate_build, source="", from_receipt="", from_pack="", knowledge_candidate_command="suggest")
+    knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build)
     knowledge_candidate_list = knowledge_candidate_sub.add_parser("list")
     knowledge_candidate_list.add_argument("--repo-id", required=True)
     knowledge_candidate_list.add_argument("--with-checks", action="store_true")
@@ -7723,7 +7728,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_status_parser.add_argument("--repo-id", required=True)
     knowledge_status_parser.add_argument("--json", action="store_true")
     knowledge_status_parser.set_defaults(func=cmd_knowledge_status)
-    knowledge_event = knowledge_sub.add_parser("event")
+    knowledge_event = knowledge_sub.add_parser("event", help="Manage Knowledge lifecycle events.")
     knowledge_event_sub = knowledge_event.add_subparsers(dest="knowledge_event_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_event_list = knowledge_event_sub.add_parser("list")
     knowledge_event_list.add_argument("--repo-id", required=True)
@@ -7799,7 +7804,7 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_plan.add_argument("--output", help="optional path for a plan artifact; omitted keeps the command read-only")
     upgrade_plan.add_argument("--json", action="store_true")
     upgrade_plan.set_defaults(func=cmd_upgrade_plan)
-    upgrade_postflight = upgrade_sub.add_parser("postflight")
+    upgrade_postflight = upgrade_sub.add_parser("postflight", help="Validate an upgraded workspace in a fresh process.")
     upgrade_postflight.add_argument("--workspace-root", help="workspace to inspect; defaults to the current workspace")
     upgrade_postflight.add_argument("--json", action="store_true")
     upgrade_postflight.set_defaults(func=cmd_upgrade_postflight)
@@ -7814,26 +7819,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    json_requested = "--json" in raw_argv or "--format=json" in raw_argv or any(raw_argv[index : index + 2] == ["--format", "json"] for index in range(len(raw_argv) - 1))
-    if raw_argv in (["--version"], ["version"], ["version", "--json"]):
-        data = _version_data(_workspace_root_or_cwd())
-        if json_requested:
-            _json({"ok": True, "command": "version", "data": data, "problems": [], "warnings": []})
-        else:
-            print(data["version"])
-        return 0
+    json_requested = "--json" in raw_argv
     try:
         args = parser.parse_args(raw_argv)
     except RepoctlArgparseError as error:
         if json_requested:
-            _json({"ok": False, "command": raw_argv[0] if raw_argv else "repoctl", "data": {}, "problems": [{"severity": "error", "code": "argparse_error", "message": str(error)}], "warnings": []})
+            command = error.command
+            help_command = "./scripts/repoctl" + (f" {command.replace('.', ' ')}" if command != "repoctl" else "") + " --help"
+            _json({"ok": False, "command": command, "data": {}, "problems": [{"severity": "error", "code": "argparse_error", "message": str(error)}], "warnings": [], "next_actions": [{"label": "Show command help", "command": help_command}]})
         else:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2
     try:
         return args.func(args)
     except RepoctlError as error:
-        if _wants_json_output(args):
+        if getattr(args, "json", False):
             problem = {"severity": "error", "code": error.code, "message": str(error)}
             if error.path:
                 problem["path"] = error.path
@@ -7841,14 +7841,14 @@ def main(argv: list[str] | None = None) -> int:
                 problem["cause_code"] = error.cause_code
             error_data = _error_data(args)
             error_data.update(getattr(error, "data", {}))
-            _json({"ok": False, "command": _command_name(args), "data": error_data, "problems": [problem], "warnings": []})
+            _json({"ok": False, "command": args.command_id, "data": error_data, "problems": [problem], "warnings": []})
         else:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2
     except OSError as error:
         message = str(error)
-        if _wants_json_output(args):
-            _json({"ok": False, "command": _command_name(args), "data": {}, "problems": [{"severity": "error", "code": "io_error", "message": message}], "warnings": []})
+        if getattr(args, "json", False):
+            _json({"ok": False, "command": args.command_id, "data": {}, "problems": [{"severity": "error", "code": "io_error", "message": message}], "warnings": []})
         else:
             print(f"repoctl: {message}", file=sys.stderr)
         return 2

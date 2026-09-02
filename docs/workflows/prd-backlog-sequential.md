@@ -43,7 +43,7 @@ Required sequence:
 
 ```bash
 ./scripts/repoctl backlog list --json
-./scripts/repoctl meta inventory --json
+./scripts/repoctl meta status --verbose --json
 ./scripts/repoctl meta query --topic <known-topic> --json   # when a known topic exists
 ./scripts/repoctl meta suggest --text "<PRD phrase>" --json  # candidate hint only
 ```

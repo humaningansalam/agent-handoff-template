@@ -30,7 +30,7 @@ def test_index_code_extracts_python_facts_without_writing_annotations(tmp_path: 
     assert main(["index", "code", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["command"] == "index code"
+    assert payload["command"] == "index.code"
     assert payload["data"]["authoritative"] is False
     entry = next(file for file in payload["data"]["files"] if file["path"] == rel)
     assert entry["language"] == "python"

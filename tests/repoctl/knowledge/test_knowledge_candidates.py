@@ -197,7 +197,7 @@ Keep token validation centralized.
     )
 
     claim = "Token validation must remain centralized in the reviewed validation owner."
-    assert main(["knowledge", "candidate", "suggest", "--from-task", task_id, "--repo-id", "main", "--claim", claim, "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--from-task", task_id, "--repo-id", "main", "--claim", claim, "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -214,7 +214,7 @@ def test_knowledge_candidate_from_task_reports_target_invalid_receipt(tmp_path: 
         encoding="utf-8",
     )
 
-    assert main(["knowledge", "candidate", "suggest", "--from-task", task_id, "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-task", task_id, "--repo-id", "main", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_receipt_invalid"
@@ -589,7 +589,7 @@ def test_receipt_knowledge_resolves_byte_identical_parent_archive_move(tmp_path:
         [
             "knowledge",
             "candidate",
-            "suggest",
+            "build",
             "--from-task",
             child_id,
             "--repo-id",
@@ -954,7 +954,7 @@ def test_receipt_knowledge_resolves_byte_identical_parent_archive_move(tmp_path:
     )
 
 
-def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_knowledge_candidate_builds_from_task_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
@@ -987,14 +987,14 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert main(["task", "finish", "T-20260609184047Z", "--verification-file", verification.as_posix(), "--json"]) == 0
     capsys.readouterr()
 
-    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 1
     missing_claim = json.loads(capsys.readouterr().out)
     assert missing_claim["problems"][0]["code"] == "knowledge_candidate_claim_required"
     assert any("--claim '<reusable claim>'" in action.get("command", "") for action in missing_claim["next_actions"])
     assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
 
     claim = "Persist retry scheduling as a reviewed invariant without editing machine-owned candidate state."
-    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--claim", claim, "--dry-run", "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--claim", claim, "--dry-run", "--json"]) == 0
     dry_run_payload = json.loads(capsys.readouterr().out)
     assert dry_run_payload["data"]["dry_run"] is True
     assert dry_run_payload["data"]["path"] == ""
@@ -1003,11 +1003,11 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
 
     claim_file = tmp_path / "knowledge-claim.md"
     claim_file.write_text(claim + "\n", encoding="utf-8")
-    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--claim-file", claim_file.as_posix(), "--json"]) == 0
+    assert main(["knowledge", "candidate", "build", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--claim-file", claim_file.as_posix(), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     candidate = payload["data"]["candidate"]
-    assert payload["command"] == "knowledge candidate suggest"
+    assert payload["command"] == "knowledge.candidate.build"
     assert candidate["authoritative"] is False
     assert candidate["status"] == "candidate"
     assert candidate["review"]["status"] == "pending"
@@ -1022,17 +1022,17 @@ def test_knowledge_candidate_suggests_from_task_receipt(tmp_path: Path, monkeypa
     assert not (tmp_path / "docs/knowledge/records").exists()
 
 
-def test_knowledge_candidate_suggest_from_task_requires_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_knowledge_candidate_build_from_task_requires_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["knowledge", "candidate", "suggest", "--from-task", "T-20260609184048Z", "--repo-id", "main", "--json"]) == 1
+    assert main(["knowledge", "candidate", "build", "--from-task", "T-20260609184048Z", "--repo-id", "main", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["command"] == "knowledge candidate suggest"
+    assert payload["command"] == "knowledge.candidate.build"
     assert payload["problems"][0]["code"] == "knowledge_candidate_receipt_missing"
 
 

@@ -108,7 +108,7 @@ def test_meta_check_changed_allows_missing_repo_directory(tmp_path: Path, monkey
     assert payload["ok"] is True
     assert payload["problems"] == []
 
-def test_meta_inventory_classifies_indexed_only_and_defaults(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_meta_status_verbose_classifies_indexed_only_and_defaults(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     repo.mkdir()
@@ -118,7 +118,7 @@ def test_meta_inventory_classifies_indexed_only_and_defaults(tmp_path: Path, mon
     (repo / "frontend/src/api/client.ts").write_text("export {}\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["meta", "inventory", "--json"]) == 0
+    assert main(["meta", "status", "--verbose", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     item = next(file for file in payload["data"]["files"] if file["path"] == "frontend/src/api/client.ts")

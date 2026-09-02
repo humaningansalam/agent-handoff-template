@@ -1695,10 +1695,10 @@ def _read_pack_artifact(path: Path, problems: list[Problem], *, label: str) -> d
     if not isinstance(payload, dict):
         problems.append(Problem("error", "context_pack_artifact_invalid", f"{label} context pack artifact must be an object", path.as_posix()))
         return {}
-    if str(payload.get("command") or "") == "context pack" and payload.get("ok") is False:
+    if str(payload.get("command") or "") == "context.pack" and payload.get("ok") is False:
         problems.append(Problem("error", "context_pack_artifact_failed", f"{label} context pack artifact was produced by a failed command", path.as_posix()))
         return {}
-    data = payload.get("data") if str(payload.get("command") or "") == "context pack" else payload
+    data = payload.get("data") if str(payload.get("command") or "") == "context.pack" else payload
     if not isinstance(data, dict):
         problems.append(Problem("error", "context_pack_artifact_missing_data", f"{label} context pack artifact is missing data", path.as_posix()))
         return {}
@@ -1921,10 +1921,10 @@ def _read_pack_benchmark_artifact(path: Path, problems: list[Problem], *, label:
     if not isinstance(payload, dict):
         problems.append(Problem("error", "context_pack_benchmark_artifact_invalid", f"{label} context pack benchmark artifact must be an object", path.as_posix()))
         return {}
-    if str(payload.get("command") or "") == "context pack-benchmark" and payload.get("ok") is False:
+    if str(payload.get("command") or "") == "context.pack-benchmark" and payload.get("ok") is False:
         problems.append(Problem("error", "context_pack_benchmark_artifact_failed", f"{label} context pack benchmark artifact was produced by a failed command", path.as_posix()))
         return {}
-    data = payload.get("data") if str(payload.get("command") or "") == "context pack-benchmark" else payload
+    data = payload.get("data") if str(payload.get("command") or "") == "context.pack-benchmark" else payload
     if not isinstance(data, dict):
         problems.append(Problem("error", "context_pack_benchmark_artifact_missing_data", f"{label} context pack benchmark artifact is missing data", path.as_posix()))
         return {}
