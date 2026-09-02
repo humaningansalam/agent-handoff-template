@@ -12,6 +12,7 @@ from tools.repoctl.cli import main
 from tools.repoctl.graph_model import digest_data
 from tools.repoctl.io import RepoctlError
 from tools.repoctl.knowledge_projection import knowledge_projection_path
+from tools.repoctl.tasks import archive_locator_text
 from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 from tests.repoctl.knowledge_test_helpers import (
     _approve_knowledge_source,
@@ -109,6 +110,49 @@ def test_upgrade_plan_is_read_only_and_reports_managed_changes(tmp_path: Path, m
     assert (workspace / "docs/BOARD.md").read_text(encoding="utf-8") == before["board"]
     assert (workspace / "docs/tasks/T-20260609120000Z--live.md").read_text(encoding="utf-8") == before["task"]
     assert (workspace / "repos/app.py").read_text(encoding="utf-8") == before["repos"]
+
+
+def test_upgrade_plan_rejects_same_version_drift_without_writing_plan(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(source)
+    version = "0.1.0"
+    (workspace / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n', encoding="utf-8")
+    (workspace / "repoctl-upgrade-manifest.json").write_text(
+        json.dumps({"schema_version": 1, "version": version}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
+
+    assert main(["upgrade", "plan", "--from", str(source), "--output", str(plan_file), "--json"]) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "same_version_managed_content_drift"
+    assert not plan_file.exists()
+    assert (workspace / "scripts/repoctl").read_text(encoding="utf-8") == "old repoctl\n"
+
+
+def test_upgrade_same_version_plan_treats_current_archive_locator_as_noop(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    write_workspace(workspace)
+    write_source(source)
+    archive, locator = add_legacy_follow_up(workspace)
+    locator.parent.mkdir(parents=True)
+    locator.write_text(
+        archive_locator_text("T-20260608120000Z", archive.relative_to(workspace).as_posix()),
+        encoding="utf-8",
+    )
+    (workspace / "scripts/repoctl").write_bytes((source / "scripts/repoctl").read_bytes())
+    (workspace / "docs/tasks/TEMPLATE.md").write_bytes((source / "docs/tasks/TEMPLATE.md").read_bytes())
+    (workspace / "repoctl-upgrade-manifest.json").write_bytes((source / "repoctl-upgrade-manifest.json").read_bytes())
+
+    plan = plan_upgrade(workspace, source=source)
+
+    assert plan["operations"] == []
+    assert plan["migrations"] == []
 
 
 def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, monkeypatch, capsys) -> None:

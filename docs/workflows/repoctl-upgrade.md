@@ -27,11 +27,10 @@ It must preserve project state:
 5. Inspect the `postflight` result emitted by apply. The upgraded runtime runs in a fresh process and reports repository identity, metadata, candidate, Reviewed Knowledge, and Graph state with typed recovery commands. Run it again directly when needed:
    `./scripts/repoctl upgrade postflight --json`
 6. Run verification:
-   `UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q tests/repoctl`
    `./scripts/repoctl check --json`
    `./scripts/repoctl meta check --json`
 
-The adopter test command covers managed runtime and workspace contracts. Template release/publication policy tests remain in the source repository CI and are not distributed to adopting workspaces.
+The release archive contains runtime field-gate fixtures, not Python test modules. Source tests and release/publication policy checks remain in the source repository CI and are not distributed to adopting workspaces.
 
 ## Manifest Policy
 
@@ -39,6 +38,8 @@ The adopter test command covers managed runtime and workspace contracts. Templat
 - `create_paths` are canonical docs/examples that are copied only when missing.
 - `preserve_paths` are adopter-owned state and must not be overwritten.
 - `postflight_command`, when present, is the fixed `repoctl upgrade postflight --json` command. Arbitrary manifest commands are rejected.
+
+Planning is read-only and rejects managed-content drift when the adopter already reports the source release version. Existing `create_paths` are adopter-owned and excluded from that identity because upgrade never overwrites them; missing `create_paths` remain planned creates. There is no same-version override; publish and use a new version for changed managed content.
 
 Upgrade never rewrites task baselines, ownership decisions, completion receipts, archived tasks, or other preserved authority state. These records remain byte-for-byte unchanged while managed control-plane code is replaced. One explicit versioned migration may create a derived fixed archive locator when an exact live `follow_up_of` identity has no valid completion-receipt lookup and resolves to exactly one regular, non-symlink archived task with matching canonical ID and terminal status. The migration, authority fingerprints, target content, and existing-target state are visible in and bound to the inspected plan; any missing, ambiguous, changed, invalid, conflicting, or escaping input fails closed before apply mutates the workspace. Apply receipts record planned and applied migrations, and rollback removes a newly published locator. No archived task or receipt is changed or inferred.
 

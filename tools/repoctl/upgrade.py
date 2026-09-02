@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -213,6 +214,33 @@ def _source_root(source: str | Path) -> Path:
     return root
 
 
+def _reported_version(root: Path) -> str:
+    versions: list[str] = []
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        if pyproject.is_symlink() or not pyproject.is_file():
+            raise RepoctlError("target pyproject is not a regular file", code="invalid_upgrade_target", path="pyproject.toml")
+        try:
+            project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise RepoctlError("target pyproject version is unreadable", code="invalid_upgrade_target", path="pyproject.toml") from exc
+        if isinstance(project, dict) and project.get("version"):
+            versions.append(str(project["version"]))
+    target_manifest = root / MANIFEST_REL
+    if target_manifest.exists():
+        if target_manifest.is_symlink() or not target_manifest.is_file():
+            raise RepoctlError("target upgrade manifest is not a regular file", code="invalid_upgrade_target", path=MANIFEST_REL.as_posix())
+        try:
+            manifest = json.loads(target_manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RepoctlError("target upgrade manifest version is unreadable", code="invalid_upgrade_target", path=MANIFEST_REL.as_posix()) from exc
+        if isinstance(manifest, dict) and manifest.get("version"):
+            versions.append(str(manifest["version"]))
+    if len(set(versions)) > 1:
+        raise RepoctlError("target repoctl versions disagree", code="upgrade_target_version_mismatch")
+    return versions[0] if versions else ""
+
+
 def _plan_payload(
     root: Path,
     source_root: Path,
@@ -254,6 +282,7 @@ def _canonical_plan_hash(plan: dict[str, Any]) -> str:
 def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
     source_root = _source_root(source)
     manifest = _load_manifest(source_root)
+    target_version = _reported_version(root)
     operations: list[UpgradeOperation] = []
     conflicts: list[dict[str, str]] = []
     for rel in manifest["replace_paths"]:
@@ -333,6 +362,13 @@ def plan_upgrade(root: Path, *, source: str | Path) -> dict[str, Any]:
             )
         )
     migrations, migration_conflicts = _plan_archive_locator_migration(root)
+    if target_version == str(manifest.get("version") or "") and (
+        operations or conflicts or migrations or migration_conflicts
+    ):
+        raise RepoctlError(
+            "same-version repoctl content differs; publish and use a new release version",
+            code="same_version_managed_content_drift",
+        )
     return _plan_payload(root, source_root, manifest, operations, [*conflicts, *migration_conflicts], migrations)
 
 
@@ -451,26 +487,11 @@ def _plan_archive_locator_migration(root: Path) -> tuple[list[dict[str, Any]], l
     for task_id, live_sources in sorted(references.items()):
         locator_rel = archive_locator_path(root, task_id).relative_to(root).as_posix()
         try:
-            locator_state, bound_archive_rel, bound_archive_digest, locator_digest = _existing_locator_binding(root, task_id)
+            locator_state, _archive_rel, _archive_digest, _locator_digest = _existing_locator_binding(root, task_id)
         except RepoctlError as exc:
             conflicts.append(_migration_conflict(exc.code, str(exc), exc.path or task_id))
             continue
         if locator_state == "current":
-            locator_text = archive_locator_text(task_id, bound_archive_rel)
-            migrations.append(
-                {
-                    "name": ARCHIVE_LOCATOR_MIGRATION,
-                    "version": ARCHIVE_LOCATOR_MIGRATION_VERSION,
-                    "task_id": task_id,
-                    "live_follow_ups": live_sources,
-                    "archive_path": bound_archive_rel,
-                    "archive_content_sha256": bound_archive_digest,
-                    "locator_path": locator_rel,
-                    "locator_state": locator_state,
-                    "locator_content_sha256": _sha256(_hash_bytes(locator_text.encode("utf-8"))),
-                    "observed_locator_sha256": locator_digest,
-                }
-            )
             continue
         receipt, receipt_problems = completion_receipt_artifact_for_task(root, task_id=task_id)
         if receipt is not None and not receipt_problems:
