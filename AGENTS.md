@@ -77,7 +77,7 @@ Backlog is deferred work only. Manage it with `repoctl backlog add/list/show/rem
 - Child `parent` frontmatter is authoritative. Parent child lists are summaries; `owner` and `depends_on` are informational.
 - Repoctl is the mutation boundary for Board, Backlog, task lifecycle/archive, and `.repometa`.
 - Repoctl Task and Board writes must hold `docs/tasks/.repoctl.lock.d` and use atomic writes.
-- Do not hand-edit lifecycle-managed frontmatter, baselines, fingerprints, ownership decisions, Handoff origin/binding records, result receipts, completion receipts, catalogue state, or archive metadata.
+- Do not hand-edit lifecycle-managed frontmatter, baselines, fingerprints, ownership decisions, Handoff binding receipts, result receipts, completion receipts, catalogue state, or archive metadata.
 - Humans and agents own Goal, Discovery, Execution Log, Verification, and Handoff meaning.
 
 The task-start repository scope is immutable.
@@ -102,9 +102,9 @@ Every task contains a four-field Handoff:
 - **First command to run**: inert text that repoctl never parses or executes
 - **Done when**
 
-Generated Handoff text is an inactive placeholder. Replace it with task-specific restart instructions before binding. Repoctl preserves a valid authored Handoff and rejects generated, stale, malformed, or mismatched bindings. An origin-unknown Handoff is never classified by comparing its prose with current or historical templates; it remains inactive until regenerated, replaced, or explicitly reviewed and freshly bound.
+Generated Handoff text contains exactly one `<!-- repoctl: generated-handoff -->` marker and is an inactive placeholder. Replace the four fields with task-specific restart instructions and remove the marker before binding. Repoctl preserves a valid authored Handoff and rejects marked, malformed, or mismatched bindings; it never infers authorship from prose.
 
-A Handoff binding records review of the exact four fields, structured task inputs, and observed repository state. Any later Handoff, task contract, Discovery, Execution Log, Verification, bound Context Pack, or observed repository-state change makes it stale until reviewed and rebound. `unbound`, `stale`, `unknown`, and `historical` Handoffs may be readable but are not execution instructions. Historical `Last Active Handoff` content is not revalidated after completion.
+A Handoff binding records review of the exact four fields, structured task inputs, and observed repository state. Any later Handoff, task contract, Discovery, Execution Log, Verification, bound Context Pack, child lifecycle, or observed repository-state change makes it `inactive` until reviewed and rebound. Public Handoff freshness is only `current | inactive | historical`; only `current` is an execution instruction. Historical `Last Active Handoff` content is not revalidated after completion.
 
 Keep the Execution Log short, append-only, and UTC-stamped through `task log append`. Verification records commands, evidence, and results. A Worker's inability to run a gate is evidence of an unrun gate, not passed verification. Before pause or transfer, align Handoff with the latest meaningful log and run `task handoff bind`.
 

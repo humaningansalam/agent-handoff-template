@@ -91,6 +91,8 @@ Update on a best-effort basis; omissions are not rule violations.
 
 ## Handoff
 
+<!-- repoctl: generated-handoff -->
+
 - Next exact step: Check child task statuses and update the coordination summary.
 - First file to open: `docs/tasks/T-YYYYMMDDHHMMSSZ--parent-title.md`
 - First command to run: `rg "^parent:" docs/tasks/`

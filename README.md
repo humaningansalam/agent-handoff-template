@@ -92,7 +92,7 @@ For a collection layout, place each product Git root at `repos/<name>/`, run `./
 
 When the result is `ambiguous`, select a returned live candidate with `./scripts/repoctl task resume <TASK_ID> --json`. Selection is read-only and does not create a persistent current-task pointer.
 
-Repoctl-generated Handoffs carry machine-owned origin digests and remain non-executable until their prose is replaced and explicitly bound. A legacy Handoff with no origin record requires one fresh bind review; that migration commits in the new binding receipt itself, while an older binding alone cannot reactivate it. Repository configuration failures still preserve the selected `single_live` task and appear as typed unhealthy lifecycle evidence.
+Repoctl-generated Handoffs carry one explicit marker and remain non-executable until their four fields are replaced, the marker is removed, and the Handoff is explicitly bound. Legacy unmarked Handoffs likewise require one fresh bind; legacy v3 receipts remain readable but inactive until replaced by a v4 binding. Repository configuration failures still preserve the selected `single_live` task and appear as typed unhealthy lifecycle evidence.
 
 ## Minimal structure
 

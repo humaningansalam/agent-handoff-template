@@ -40,7 +40,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_inven
 from .markdown import find_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, context_result_receipt_projection, graph_result_selections, write_result_receipt
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskHandoffProvenance, TaskResumeSelectionStatus, VerificationInput, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_handoff_origin_path, task_handoff_provenance, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -354,9 +354,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
     task_id = str((data or {}).get("task_id") or "T-...")
     resume_handoff = _mapping_at(data, "resume_guidance", "handoff")
     generated_resume_handoff = resume_handoff.get("generated_template") is True
-    origin_unknown_resume_handoff = (
-        "task_handoff_origin_unknown" in _string_list(resume_handoff.get("reason_codes"))
-    )
     task_path = str(_mapping_at(data, "task").get("path") or f"docs/tasks/{task_id}.md")
     context_resume_requested = False
 
@@ -473,11 +470,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
     if generated_resume_handoff:
         add(
             "Replace the generated Handoff with task-specific restart instructions",
-            path=task_path,
-        )
-    elif origin_unknown_resume_handoff:
-        add(
-            "Regenerate or replace the origin-unknown Handoff with task-specific restart instructions",
             path=task_path,
         )
 
@@ -646,14 +638,10 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Inspect the terminal or archived task", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code == "task_already_blocked":
             add("Inspect the existing blocker before resuming or canceling", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_handoff_origin_unknown", "task_resume_binding_invalid"}:
+        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_resume_binding_invalid"}:
             if not generated_resume_handoff:
                 add(
-                    (
-                        "Bind the regenerated or reviewed Handoff under the current provenance contract"
-                        if origin_unknown_resume_handoff
-                        else "Bind the reviewed Handoff to the current task and repository inputs"
-                    ),
+                    "Bind the reviewed Handoff to the current task and repository inputs",
                     command=f"./scripts/repoctl task handoff bind {task_id} --json",
                     kind=NextActionKind.TASK_HANDOFF_BIND,
                     source="data.resume_guidance.handoff.status",
@@ -2487,58 +2475,37 @@ def _task_resume_guidance(
         layout=layout,
         repository_observation_available=repository_observation_available,
     )
-    provenance = TaskHandoffProvenance.AUTHORED_OR_REVIEWED
-    if not historical:
-        try:
-            provenance = task_handoff_provenance(root, task)
-        except RepoctlError as exc:
-            problems.append(
-                Problem(
-                    "error",
-                    exc.code or "task_handoff_origin_invalid",
-                    str(exc),
-                    exc.path or task.rel_path,
-                )
-            )
-    generated_template = provenance is TaskHandoffProvenance.GENERATED
-    origin_unknown = bool(not historical and provenance is TaskHandoffProvenance.UNKNOWN_LEGACY)
+    generated_template = bool(not historical and task_handoff_is_generated_template(task))
     handoff["generated_template"] = generated_template
-    if generated_template and handoff["status"] == "current":
-        # A receipt created by an older repoctl must not activate unchanged
-        # placeholder prose under the stronger current contract.
+    if generated_template:
         handoff.update(
             {
-                "status": "unbound",
+                "status": "inactive",
                 "active": False,
                 "reason_codes": ["task_handoff_generated_template"],
-                "changed_inputs": [],
-            }
-        )
-    if origin_unknown and handoff["status"] in {"current", "unbound", "stale"}:
-        # Origin-less prose is never classified from its wording. A fresh bind
-        # is the only explicit review boundary.
-        handoff.update(
-            {
-                "status": "unbound",
-                "active": False,
-                "reason_codes": ["task_handoff_origin_unknown"],
                 "changed_inputs": [],
             }
         )
     if problems and handoff["status"] != "historical":
         handoff.update(
             {
-                "status": "unknown",
+                "status": "inactive",
                 "active": False,
                 "reason_codes": ["resume_binding_invalid"],
                 "changed_inputs": ["binding"],
             }
         )
-    elif handoff["status"] == "unknown":
+    elif handoff["status"] == "inactive":
         structural_codes = [
             code
             for code in handoff.get("reason_codes", [])
-            if code != "resume_observation_unavailable"
+            if code in {
+                "missing_handoff",
+                "invalid_handoff_structure",
+                "invalid_handoff_first_file",
+                "handoff_first_file_outside_workspace",
+                "handoff_first_file_missing",
+            }
         ]
         if structural_codes:
             problems.append(
@@ -2563,7 +2530,7 @@ def _task_resume_guidance(
             "path": str(context_pack_binding.get("path") or ""),
             "reason_codes": ["pack_repository_unavailable"],
         }
-        overall_status = "unknown" if handoff["status"] == "current" else handoff["status"]
+        overall_status = "inactive" if handoff["status"] == "current" else handoff["status"]
     else:
         context_pack = inspect_task_context_pack_binding(
             root,
@@ -2573,11 +2540,12 @@ def _task_resume_guidance(
         )
         overall_status = handoff["status"]
         if handoff["status"] == "current" and context_pack["status"] != "current":
-            overall_status = "unknown" if context_pack["status"] == "unknown" else "stale"
+            overall_status = "inactive"
     handoff["active"] = overall_status == "current"
     context_pack["active"] = overall_status == "current" and context_pack.get("status") == "current"
 
-    if overall_status == "unbound":
+    handoff_reasons = set(handoff.get("reason_codes") or [])
+    if overall_status == "inactive" and "handoff_unbound" in handoff_reasons:
         warnings.append(
             {
                 "severity": "warning",
@@ -2586,7 +2554,7 @@ def _task_resume_guidance(
                 "path": task.rel_path,
             }
         )
-    elif overall_status == "stale":
+    elif overall_status == "inactive" and handoff_reasons - {"resume_observation_unavailable"}:
         warnings.append(
             {
                 "severity": "warning",
@@ -2595,7 +2563,7 @@ def _task_resume_guidance(
                 "path": task.rel_path,
             }
         )
-    elif overall_status == "unknown" and not problems:
+    elif overall_status == "inactive" and not problems:
         warnings.append(
             {
                 "severity": "warning",
@@ -2610,15 +2578,6 @@ def _task_resume_guidance(
                 "severity": "warning",
                 "code": "task_handoff_generated_template",
                 "message": "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
-                "path": task.rel_path,
-            }
-        )
-    elif origin_unknown:
-        warnings.append(
-            {
-                "severity": "warning",
-                "code": "task_handoff_origin_unknown",
-                "message": "regenerate or replace this origin-unknown Handoff with task-specific instructions, then bind it under the current provenance contract",
                 "path": task.rel_path,
             }
         )
@@ -3438,17 +3397,10 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             start_result = None
             if args.start:
                 start_result = start_task(root, task.id, force_dirty=args.force_dirty)
-                origin_write = start_result.get("handoff_origin_write")
-                if origin_write is not None:
-                    atomic_write(*origin_write)
                 atomic_write(start_result["task"].path, start_result["text"])
         except Exception:
             if task is not None and task.path.exists() and task.path.is_file():
                 task.path.unlink()
-            if task is not None:
-                origin_path = task_handoff_origin_path(root, task.id)
-                if origin_path.is_file():
-                    origin_path.unlink()
             if original_board_text:
                 atomic_write(board_path, original_board_text)
             raise
@@ -3467,7 +3419,7 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             pass
         next_actions = _discovery_guidance_actions(task.id, repo_id=repo_id, repo_path=repo_path)
     started_task = resolve_task(root, task.id) if start_result else task
-    generated_handoff = task_handoff_is_generated_template(root, started_task)
+    generated_handoff = task_handoff_is_generated_template(started_task)
     if start_result and generated_handoff:
         next_actions = _with_task_safety_prerequisite(
             next_actions,
@@ -3605,9 +3557,6 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     with repoctl_lock(root):
         load_task_resume_binding(root, task_id)
         result = start_task(root, task_id, force_dirty=args.force_dirty)
-        origin_write = result.get("handoff_origin_write")
-        if origin_write is not None:
-            atomic_write(*origin_write)
         atomic_write(result["task"].path, result["text"])
     started_task = resolve_task(root, task_id)
     delta = repo_changes_since_task_start(root, task_id)
@@ -3648,24 +3597,6 @@ def cmd_task_start(args: argparse.Namespace) -> int:
                 "label": "Replace the generated Handoff with task-specific restart instructions",
                 "path": started_task.rel_path,
                 "source": "data.resume_guidance.handoff.generated_template",
-            },
-        )
-    elif "task_handoff_origin_unknown" in resume_guidance["handoff"].get("reason_codes", []):
-        next_actions = _with_task_safety_prerequisite(
-            next_actions,
-            {
-                "label": "Bind the regenerated or reviewed Handoff under the current provenance contract",
-                "command": f"./scripts/repoctl task handoff bind {task_id} --json",
-                "kind": NextActionKind.TASK_HANDOFF_BIND.value,
-                "source": "data.resume_guidance.handoff.status",
-            },
-        )
-        next_actions = _with_task_safety_prerequisite(
-            next_actions,
-            {
-                "label": "Regenerate or replace the origin-unknown Handoff with task-specific restart instructions",
-                "path": started_task.rel_path,
-                "source": "data.resume_guidance.handoff.status",
             },
         )
     else:

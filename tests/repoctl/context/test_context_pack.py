@@ -862,7 +862,7 @@ def test_bound_context_pack_detects_same_head_source_drift_without_rewriting_art
     app.write_text("def run():\n    return 2\n", encoding="utf-8")
     assert main(["task", "show", task_id, "--summary", "--json"]) == 0
     stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
-    assert stale["status"] == "stale"
+    assert stale["status"] == "inactive"
     assert stale["context_pack"]["status"] == "stale"
     assert {"pack_inputs_changed", "pack_source_changed"} & set(stale["context_pack"]["reason_codes"])
     assert output.read_bytes() == artifact

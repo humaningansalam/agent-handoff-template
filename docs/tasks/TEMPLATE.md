@@ -73,6 +73,8 @@ State the outcome in one clear sentence.
 
 ## Handoff
 
+<!-- repoctl: generated-handoff -->
+
 - Next exact step: <single precise action>
 - First file to open: `<path/to/file>`
 - First command to run: `<command>`

@@ -45,27 +45,16 @@ LEGACY_TASK_STATE_SCHEMA_VERSION = 3
 COMPLETION_RECEIPT_SCHEMA_VERSION = 4
 TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION = 2
-RESUME_BINDING_SCHEMA_VERSION = 3
-PRE_PROVENANCE_RESUME_BINDING_SCHEMA_VERSION = 2
-LEGACY_RESUME_BINDING_SCHEMA_VERSION = 1
+RESUME_BINDING_SCHEMA_VERSION = 4
+LEGACY_RESUME_BINDING_SCHEMA_VERSION = 3
 ARCHIVE_LOCATOR_SCHEMA_VERSION = 1
-HANDOFF_ORIGIN_SCHEMA_VERSION = 2
-HANDOFF_TEMPLATE_VERSION = 1
-HANDOFF_ORIGIN_COMMITMENT_FIELD = "handoff_origin_commitment"
+HANDOFF_GENERATED_MARKER = "<!-- repoctl: generated-handoff -->"
 
 
 class TaskHandoffStatus(StrEnum):
-    UNBOUND = "unbound"
     CURRENT = "current"
-    STALE = "stale"
-    UNKNOWN = "unknown"
+    INACTIVE = "inactive"
     HISTORICAL = "historical"
-
-
-class TaskHandoffProvenance(StrEnum):
-    GENERATED = "generated"
-    AUTHORED_OR_REVIEWED = "authored_or_reviewed"
-    UNKNOWN_LEGACY = "unknown_legacy"
 
 
 class TaskResumeSelectionStatus(StrEnum):
@@ -357,8 +346,6 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
             "Branch, commit, PR, deploy, or release automation unless explicitly requested.",
         ],
         "verification_pending": "Pending.",
-        "start_handoff_next": "Continue implementation for `{task_path}`.",
-        "start_handoff_done": "The task names exact touched files, focused validation is recorded, `./scripts/repoctl meta check --changed` is clean for changed `repos/` files, and the task is finished.",
         "context_docs": "<!-- Add only the minimum context docs needed for this task, or leave empty. -->",
         "discovery": [
             "Candidate query: none yet",
@@ -432,8 +419,6 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
             "명시적으로 요청되지 않은 branch, commit, PR, deploy, release 자동화.",
         ],
         "verification_pending": "대기 중.",
-        "start_handoff_next": "`{task_path}` 구현을 계속한다.",
-        "start_handoff_done": "작업에 정확한 변경 파일이 기록되고, 집중 검증이 남아 있으며, 변경된 `repos/` 파일에 대해 `./scripts/repoctl meta check --changed`가 깨끗하고, 작업이 완료됨.",
         "context_docs": "<!-- 이 작업에 필요한 최소 context docs만 추가한다. 없으면 비워 둔다. -->",
         "discovery": [
             "Candidate query: none yet",
@@ -471,25 +456,18 @@ def _render_created_handoff(
 ) -> str:
     if task_type == "parent":
         return (
+            f"{HANDOFF_GENERATED_MARKER}\n"
             f"- Next exact step: {copy['parent_handoff_next'].format(title=title)}\n"
             f"- First file to open: `{task_path}`\n"
             "- First command to run: `./scripts/repoctl task list --json`\n"
             f"- Done when: {copy['parent_handoff_done']}\n"
         )
     return (
+        f"{HANDOFF_GENERATED_MARKER}\n"
         f"- Next exact step: {copy['task_handoff_next'].format(repo_hint=repo_hint)}\n"
         f"- First file to open: `{task_path}`\n"
         f"- First command to run: `./scripts/repoctl task start {task_id} --json`\n"
         f"- Done when: {copy['task_handoff_done']}\n"
-    )
-
-
-def _render_started_handoff(*, copy: dict[str, Any], task_path: str) -> str:
-    return (
-        f"- Next exact step: {copy['start_handoff_next'].format(task_path=task_path)}\n"
-        f"- First file to open: `{task_path}`\n"
-        "- First command to run: `./scripts/repoctl task list --json`\n"
-        f"- Done when: {copy['start_handoff_done']}\n"
     )
 
 
@@ -1705,163 +1683,8 @@ def task_handoff_body(task: Task) -> str | None:
     return _normalized_task_section_body(task, "Handoff")
 
 
-def task_handoff_origin_path(root: Path, task_id: str) -> Path:
-    normalized = normalize_task_id(task_id)
-    return root / "docs/tasks/.repoctl-state/handoff-origins" / f"{normalized}.json"
-
-
-def _handoff_digest(body: str) -> str:
-    return digest_data({"handoff": body})
-
-
-def _task_handoff_origin_commitment(task: Task) -> str:
-    value = task.frontmatter.get(HANDOFF_ORIGIN_COMMITMENT_FIELD)
-    if value is None:
-        return ""
-    if not isinstance(value, str) or not _valid_sha256(value):
-        raise RepoctlError(
-            "task Handoff origin commitment is invalid",
-            code="task_handoff_origin_invalid",
-            path=task.rel_path,
-        )
-    return value
-
-
-def _set_task_frontmatter_line(text: str, key: str, value: str) -> str:
-    frontmatter, _body = parse_frontmatter(text)
-    if key in frontmatter:
-        return replace_frontmatter_line(text, key, value)
-    closing = text.find("\n---\n", 4)
-    if not text.startswith("---\n") or closing == -1:
-        raise RepoctlError("frontmatter closing delimiter missing")
-    return text[:closing] + f"\n{key}: {value}" + text[closing:]
-
-
-def _validate_handoff_origin(root: Path, task_id: str, value: Any) -> dict[str, Any]:
-    path = task_handoff_origin_path(root, task_id)
-    expected = {
-        "schema",
-        "schema_version",
-        "task_id",
-        "template_version",
-        "generated_handoff_digests",
-        "state_digest",
-    }
-    if not isinstance(value, dict) or set(value) != expected:
-        raise RepoctlError("task Handoff origin state has invalid fields", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix())
-    generated = value.get("generated_handoff_digests")
-    template_version = value.get("template_version")
-    if (
-        value.get("schema") != "repoctl.task.handoff_origin"
-        or value.get("schema_version") != HANDOFF_ORIGIN_SCHEMA_VERSION
-        or value.get("task_id") != normalize_task_id(task_id)
-        or type(template_version) is not int
-        or not 1 <= template_version <= HANDOFF_TEMPLATE_VERSION
-        or not isinstance(generated, list)
-        or generated != sorted(set(generated))
-        or any(not isinstance(item, str) or not _valid_sha256(item) for item in generated)
-        or not generated
-    ):
-        raise RepoctlError("task Handoff origin state is invalid", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix())
-    basis = {key: value[key] for key in value if key != "state_digest"}
-    if value.get("state_digest") != digest_data(basis):
-        raise RepoctlError("task Handoff origin state digest does not match", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix())
-    return value
-
-
-def load_task_handoff_origin(root: Path, task_id: str) -> dict[str, Any] | None:
-    path = task_handoff_origin_path(root, task_id)
-    current = path.parent
-    while current != root and current != current.parent:
-        if current.is_symlink():
-            raise RepoctlError(
-                "task Handoff origin state crosses a symlinked parent",
-                code="task_handoff_origin_invalid",
-                path=path.relative_to(root).as_posix(),
-            )
-        current = current.parent
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise RepoctlError(
-            "task Handoff origin state is not a regular file",
-            code="task_handoff_origin_invalid",
-            path=path.relative_to(root).as_posix(),
-        )
-    if not path.exists():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RepoctlError("task Handoff origin state is unreadable", code="task_handoff_origin_invalid", path=path.relative_to(root).as_posix()) from exc
-    return _validate_handoff_origin(root, task_id, value)
-
-
-def prepare_generated_handoff_origin_write(
-    root: Path,
-    task: Task,
-    *generated_bodies: str,
-) -> tuple[Path, str]:
-    existing = load_task_handoff_origin(root, task.id)
-    digests = list((existing or {}).get("generated_handoff_digests") or [])
-    digests.extend(_handoff_digest(body) for body in generated_bodies if body)
-    basis = {
-        "schema": "repoctl.task.handoff_origin",
-        "schema_version": HANDOFF_ORIGIN_SCHEMA_VERSION,
-        "task_id": normalize_task_id(task.id),
-        "template_version": HANDOFF_TEMPLATE_VERSION,
-        "generated_handoff_digests": sorted(set(digests)),
-    }
-    payload = {**basis, "state_digest": digest_data(basis)}
-    path = task_handoff_origin_path(root, task.id)
-    validated = _validate_handoff_origin(root, task.id, payload)
-    return path, json.dumps(validated, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-
-
-def task_handoff_provenance(root: Path, task: Task) -> TaskHandoffProvenance:
-    handoff = task_handoff_body(task)
-    if handoff is None:
-        return TaskHandoffProvenance.UNKNOWN_LEGACY
-    commitment = _task_handoff_origin_commitment(task)
-    handoff_digest = _handoff_digest(handoff)
-    origin = load_task_handoff_origin(root, task.id)
-    if origin is not None:
-        generated_digests = origin["generated_handoff_digests"]
-        if commitment and (
-            commitment not in generated_digests
-            or (handoff_digest in generated_digests and commitment != handoff_digest)
-        ):
-            raise RepoctlError(
-                "task Handoff origin commitment does not match origin state",
-                code="task_handoff_origin_invalid",
-                path=task.rel_path,
-            )
-        if handoff_digest in generated_digests:
-            return TaskHandoffProvenance.GENERATED
-        return TaskHandoffProvenance.AUTHORED_OR_REVIEWED
-    if commitment:
-        if handoff_digest == commitment:
-            return TaskHandoffProvenance.GENERATED
-        return TaskHandoffProvenance.AUTHORED_OR_REVIEWED
-    # Origin-less prose stays unknown. Do not infer provenance by matching it
-    # against current or frozen historical template copy.
-    try:
-        binding = load_task_resume_binding(root, task.id)
-    except RepoctlError:
-        # Binding validation is surfaced by resume/check. Provenance remains
-        # unknown here so an explicit bind can replace a malformed receipt.
-        binding = None
-    if (
-        binding is not None
-        and binding["schema_version"] == RESUME_BINDING_SCHEMA_VERSION
-    ):
-        # Schema v3 establishes reviewed provenance. Its exact digest remains
-        # a separate freshness input, so later Handoff edits become stale
-        # rather than falling back to origin-unknown classification.
-        return TaskHandoffProvenance.AUTHORED_OR_REVIEWED
-    return TaskHandoffProvenance.UNKNOWN_LEGACY
-
-
-def task_handoff_is_generated_template(root: Path, task: Task) -> bool:
-    return task_handoff_provenance(root, task) is TaskHandoffProvenance.GENERATED
+def task_handoff_is_generated_template(task: Task) -> bool:
+    return HANDOFF_GENERATED_MARKER in (task_handoff_body(task) or "")
 
 
 def _task_contract_digest(task: Task) -> str:
@@ -2072,7 +1895,6 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
         or type(schema_version) is not int
         or schema_version not in {
             LEGACY_RESUME_BINDING_SCHEMA_VERSION,
-            PRE_PROVENANCE_RESUME_BINDING_SCHEMA_VERSION,
             RESUME_BINDING_SCHEMA_VERSION,
         }
     ):
@@ -2083,7 +1905,7 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
         raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
     input_digests = data.get("input_digests")
     expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository"}
-    if schema_version in {PRE_PROVENANCE_RESUME_BINDING_SCHEMA_VERSION, RESUME_BINDING_SCHEMA_VERSION}:
+    if schema_version in {LEGACY_RESUME_BINDING_SCHEMA_VERSION, RESUME_BINDING_SCHEMA_VERSION}:
         expected_input_keys.add("direct_children")
     if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
         raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)
@@ -2141,6 +1963,12 @@ def bind_task_handoff(
     task = resolve_live_task(root, task_id)
     if task.status not in LIVE:
         raise RepoctlError("only a live task Handoff can be bound", code="task_not_live", path=task.rel_path)
+    if task_handoff_is_generated_template(task):
+        raise RepoctlError(
+            "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
+            code="task_handoff_generated_template",
+            path=task.rel_path,
+        )
     handoff_problems = _live_handoff_problems(task, root)
     if handoff_problems:
         problem = handoff_problems[0]
@@ -2148,13 +1976,6 @@ def bind_task_handoff(
     handoff = task_handoff_body(task)
     if handoff is None:
         raise RepoctlError("live task must contain a Handoff section", code="missing_handoff", path=task.rel_path)
-    provenance = task_handoff_provenance(root, task)
-    if provenance is TaskHandoffProvenance.GENERATED:
-        raise RepoctlError(
-            "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
-            code="task_handoff_generated_template",
-            path=task.rel_path,
-        )
     if context_pack is not None:
         candidate_binding = {
             "path": str(context_pack.get("path") or ""),
@@ -2206,7 +2027,7 @@ def task_handoff_observation(
     handoff_problems = _live_handoff_problems(task, root)
     if handoff_problems:
         return {
-            "status": TaskHandoffStatus.UNKNOWN.value,
+            "status": TaskHandoffStatus.INACTIVE.value,
             "active": False,
             "body": handoff or "",
             "reason_codes": [problem.code for problem in handoff_problems],
@@ -2224,7 +2045,7 @@ def task_handoff_observation(
             except RepoctlError:
                 pass
         return {
-            "status": TaskHandoffStatus.UNBOUND.value,
+            "status": TaskHandoffStatus.INACTIVE.value,
             "active": False,
             "body": handoff,
             "reason_codes": ["handoff_unbound"],
@@ -2233,10 +2054,21 @@ def task_handoff_observation(
             "current_revision": current_revision,
             "changed_inputs": [],
         }
+    if binding["schema_version"] != RESUME_BINDING_SCHEMA_VERSION:
+        return {
+            "status": TaskHandoffStatus.INACTIVE.value,
+            "active": False,
+            "body": handoff,
+            "reason_codes": ["handoff_binding_legacy"],
+            "receipt_ref": _resume_binding_path(root, task.id).relative_to(root).as_posix(),
+            "bound_revision": digest_data(binding["input_digests"]),
+            "current_revision": "",
+            "changed_inputs": ["binding"],
+        }
     bound_digests = binding["input_digests"]
     if not repository_observation_available:
         return {
-            "status": TaskHandoffStatus.UNKNOWN.value,
+            "status": TaskHandoffStatus.INACTIVE.value,
             "active": False,
             "body": handoff,
             "reason_codes": ["resume_observation_unavailable"],
@@ -2249,7 +2081,7 @@ def task_handoff_observation(
         current_digests = task_resume_input_digests(root, task, layout=layout)
     except RepoctlError:
         return {
-            "status": TaskHandoffStatus.UNKNOWN.value,
+            "status": TaskHandoffStatus.INACTIVE.value,
             "active": False,
             "body": handoff,
             "reason_codes": ["resume_observation_unavailable"],
@@ -2267,7 +2099,7 @@ def task_handoff_observation(
     if str(binding.get("handoff_digest") or "") != digest_data({"handoff": handoff}):
         changed_inputs.insert(0, "handoff")
         reason_codes.insert(0, "handoff_changed")
-    status = TaskHandoffStatus.STALE if reason_codes else TaskHandoffStatus.CURRENT
+    status = TaskHandoffStatus.INACTIVE if reason_codes else TaskHandoffStatus.CURRENT
     return {
         "status": status.value,
         "active": status == TaskHandoffStatus.CURRENT,
@@ -4875,7 +4707,7 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     copy = _copy(_task_language(root, task))
     if task.status not in {"todo", "blocked"}:
         raise RepoctlError("task start requires status todo or blocked; an active task baseline cannot be refreshed", code="task_already_started", path=task.rel_path)
-    generated_handoff = task_handoff_is_generated_template(root, task)
+    generated_handoff = task_handoff_is_generated_template(task)
     if task.status == "todo" and not generated_handoff:
         handoff_problems = _live_handoff_problems(task, root)
         if handoff_problems:
@@ -4933,22 +4765,6 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
             entry = f"{entry}\n{_repo_head_entry(head, copy=copy)}"
             _write_repo_baseline(root, task, baseline_entries, git_state, target)
     text = append_section_entry(text, "Execution Log", entry)
-    handoff_origin_write: tuple[Path, str] | None = None
-    if task.status == "todo" and generated_handoff:
-        handoff = _render_started_handoff(copy=copy, task_path=task.rel_path)
-        existing_handoff = task_handoff_body(task) or ""
-        handoff_origin_write = prepare_generated_handoff_origin_write(
-            root,
-            task,
-            existing_handoff,
-            handoff,
-        )
-        text = replace_section(text, "Handoff", handoff)
-        text = _set_task_frontmatter_line(
-            text,
-            HANDOFF_ORIGIN_COMMITMENT_FIELD,
-            f'"{_handoff_digest(handoff)}"',
-        )
     warnings: list[Problem] = []
     if dirty and not repo_scoped and not force_dirty:
         warnings.append(Problem("warning", "root_task_repo_dirty_recorded", "task started with existing repos/ dirty state recorded for baseline only", task.rel_path))
@@ -4958,7 +4774,6 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
         "dirty": dirty,
         "repo_git": git_state,
         "warnings": warnings,
-        "handoff_origin_write": handoff_origin_write,
     }
 
 
@@ -5717,12 +5532,9 @@ def create_task_file(
         task_id = f"T-{ts_file}"
         rel_path = Path("docs/tasks") / f"{task_id}--{slug}.md"
         path = root / rel_path
-        origin_path = task_handoff_origin_path(root, task_id)
         if (
             list((root / "docs/tasks").glob(f"{task_id}--*.md"))
             or archive_locator_path(root, task_id).exists()
-            or origin_path.exists()
-            or origin_path.is_symlink()
         ):
             time.sleep(1)
             continue
@@ -5765,26 +5577,7 @@ def create_task_file(
             text = append_section_entry(text, "Work Area", f"- Follow-up of: `{follow_up_of}`")
         frontmatter, body = parse_frontmatter(text)
         task = Task(path=path, rel_path=rel_path.as_posix(), frontmatter=frontmatter, body=body)
-        handoff = task_handoff_body(task)
-        if handoff is None:  # pragma: no cover - creation template contract
-            raise RepoctlError("created task has no Handoff body", code="missing_handoff", path=task.rel_path)
-        text = _set_task_frontmatter_line(
-            text,
-            HANDOFF_ORIGIN_COMMITMENT_FIELD,
-            f'"{_handoff_digest(handoff)}"',
-        )
-        frontmatter, body = parse_frontmatter(text)
-        task = Task(path=path, rel_path=rel_path.as_posix(), frontmatter=frontmatter, body=body)
-        try:
-            origin_path, origin_text = prepare_generated_handoff_origin_write(root, task, handoff)
-            atomic_write(origin_path, origin_text)
-            atomic_write(path, text)
-        except Exception:
-            if path.is_file():
-                path.unlink()
-            if origin_path.is_file():
-                origin_path.unlink()
-            raise
+        atomic_write(path, text)
         return load_task(path, root)
     raise RepoctlError("failed to reserve unique task id after 20 retries")
 
@@ -5817,17 +5610,6 @@ def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
     except RepoctlError:
         layout = None
     for task in live_tasks(tasks):
-        try:
-            load_task_handoff_origin(root, task.id)
-        except RepoctlError as exc:
-            problems.append(
-                Problem(
-                    "error",
-                    exc.code or "task_handoff_origin_invalid",
-                    str(exc),
-                    exc.path or task.rel_path,
-                )
-            )
         path = _baseline_path(root, task.id)
         if path.is_file():
             try:
@@ -5924,19 +5706,7 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
         root = _task_workspace_root(task)
         if task.status in LIVE and not task.archived:
             problems.extend(_live_handoff_problems(task, root))
-            generated_handoff = False
-            try:
-                generated_handoff = task_handoff_is_generated_template(root, task)
-            except RepoctlError as exc:
-                problems.append(
-                    Problem(
-                        "error",
-                        exc.code or "task_handoff_origin_invalid",
-                        str(exc),
-                        exc.path or task.rel_path,
-                    )
-                )
-            if generated_handoff:
+            if task_handoff_is_generated_template(task):
                 append_warning(
                     task,
                     "task_handoff_generated_template",

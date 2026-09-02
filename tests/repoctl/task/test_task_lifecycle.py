@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -20,7 +19,7 @@ from tools.repoctl.io import RepoctlError
 from tools.repoctl.markdown import find_section, replace_frontmatter_line, replace_section
 from tools.repoctl.repositories import require_repo_target
 from tools.repoctl.result_receipts import ContextResultRequest, GraphResultRequest, ResultAuthority, ResultProducer, ResultSelection, write_result_receipt
-from tools.repoctl.tasks import TASK_DOC_COPY, DiscoveryResultSelection, Problem, TaskHandoffProvenance, resolve_task, task_discovery_result_selections, task_handoff_provenance
+from tools.repoctl.tasks import DiscoveryResultSelection, Problem, resolve_task, task_discovery_result_selections
 from tests.repoctl.io_audit import reject_directory_enumeration
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
@@ -99,7 +98,7 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     assert main(["task", "resume", "--json"]) == 0
     unbound = json.loads(capsys.readouterr().out)["data"]
     assert unbound["selection"] == {"status": "single_live", "live_task_count": 1}
-    assert unbound["resume_guidance"]["status"] == "unbound"
+    assert unbound["resume_guidance"]["status"] == "inactive"
     assert unbound["resume_guidance"]["executable_handoff"] is None
     assert "body" not in unbound["resume_guidance"]["handoff"]
 
@@ -108,7 +107,7 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     binding = json.loads(
         (tmp_path / f"docs/tasks/.repoctl-state/resume/{first}.json").read_text(encoding="utf-8")
     )
-    assert binding["schema_version"] == 3
+    assert binding["schema_version"] == 4
     assert not (tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{first}.json").exists()
     assert main(["task", "resume", "--json"]) == 0
     current = json.loads(capsys.readouterr().out)["data"]
@@ -122,7 +121,7 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     capsys.readouterr()
     assert main(["task", "resume", "--json"]) == 0
     stale = json.loads(capsys.readouterr().out)["data"]
-    assert stale["resume_guidance"]["status"] == "stale"
+    assert stale["resume_guidance"]["status"] == "inactive"
     assert stale["resume_guidance"]["readable_handoff"] is None
     assert stale["resume_guidance"]["executable_handoff"] is None
 
@@ -150,7 +149,7 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
         "selected_task_id": second,
     }
     assert selected["data"]["task"]["id"] == second
-    assert selected["data"]["resume_guidance"]["status"] == "unbound"
+    assert selected["data"]["resume_guidance"]["status"] == "inactive"
     assert before == {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     assert main(["task", "resume", "T-20260609184045Z", "--json"]) == 2
@@ -3161,15 +3160,19 @@ def test_task_lifecycle_keeps_created_document_language_when_workspace_setting_c
     payload = json.loads(capsys.readouterr().out)
     task_id = payload["data"]["task_id"]
     task_path = tmp_path / payload["data"]["path"]
-    assert 'document_language: "ko"' in task_path.read_text(encoding="utf-8")
+    created = task_path.read_text(encoding="utf-8")
+    created_handoff = find_section(created, "Handoff")
+    created_handoff_body = created[created_handoff.body_start : created_handoff.end]
+    assert 'document_language: "ko"' in created
 
     (tmp_path / "docs/repoctl.json").write_text('{"document_language":"en"}\n', encoding="utf-8")
 
     assert main(["task", "start", task_id, "--json"]) == 0
     capsys.readouterr()
     started = task_path.read_text(encoding="utf-8")
+    started_handoff = find_section(started, "Handoff")
     assert "작업을 시작" in started
-    assert "구현을 계속한다" in started
+    assert started[started_handoff.body_start : started_handoff.end] == created_handoff_body
     assert "task started." not in started
 
     verification = tmp_path / "verification.md"
@@ -3288,311 +3291,21 @@ def test_repoctl_generated_handoff_is_readable_but_cannot_be_bound(
 ) -> None:
     task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
 
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    origin = json.loads(origin_path.read_text(encoding="utf-8"))
-    created_task = resolve_task(tmp_path, task_id)
-    assert origin["template_version"] == 1
-    assert len(origin["generated_handoff_digests"]) == 1
-    assert created_task.frontmatter["handoff_origin_commitment"] in origin["generated_handoff_digests"]
+    created = task_path.read_text(encoding="utf-8")
+    assert created.count("<!-- repoctl: generated-handoff -->") == 1
+    assert not (tmp_path / "docs/tasks/.repoctl-state/handoff-origins").exists()
+    assert "handoff_origin_commitment" not in resolve_task(tmp_path, task_id).frontmatter
 
     assert main(["task", "start", task_id, "--json"]) == 0
-    start_payload = json.loads(capsys.readouterr().out)
-    assert any(warning["code"] == "task_handoff_generated_template" for warning in start_payload["warnings"])
-    assert not any("task handoff bind" in action.get("command", "") for action in start_payload["next_actions"])
-    assert start_payload["next_actions"][0]["source"] == "data.resume_guidance.handoff.generated_template"
-
-    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
-    show_payload = json.loads(capsys.readouterr().out)
-    assert show_payload["data"]["resume_guidance"]["handoff"]["generated_template"] is True
-    assert any(warning["code"] == "task_handoff_generated_template" for warning in show_payload["warnings"])
-
-    assert main(["task", "resume", "--json"]) == 0
-    resume_payload = json.loads(capsys.readouterr().out)
-    assert resume_payload["next_actions"][0] == {
-        "label": "Replace the generated Handoff with task-specific restart instructions",
-        "path": task_path.relative_to(tmp_path).as_posix(),
-    }
-    assert not any(action.get("kind") == "task_handoff_bind" for action in resume_payload["next_actions"])
-
-    assert main(["task", "doctor", task_id, "--json"]) == 0
-    doctor_payload = json.loads(capsys.readouterr().out)
-    assert any(warning["code"] == "task_handoff_generated_template" for warning in doctor_payload["warnings"])
-    generated_action = next(
-        action
-        for action in doctor_payload["next_actions"]
-        if action["label"].startswith("Replace the generated Handoff")
-    )
-    assert generated_action == {
-        "label": "Replace the generated Handoff with task-specific restart instructions",
-        "path": task_path.relative_to(tmp_path).as_posix(),
-    }
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
-    bind_payload = json.loads(capsys.readouterr().out)
-    assert bind_payload["problems"][0]["code"] == "task_handoff_generated_template"
-    assert "Next exact step" in task_path.read_text(encoding="utf-8")
-    assert not (tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json").exists()
-    started_origin = json.loads(origin_path.read_text(encoding="utf-8"))
-    started_task = resolve_task(tmp_path, task_id)
-    assert len(started_origin["generated_handoff_digests"]) == 2
-    assert started_task.frontmatter["handoff_origin_commitment"] in started_origin["generated_handoff_digests"]
-
-
-def test_generated_handoff_origin_survives_supported_template_version_upgrade(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    original_origin_text = origin_path.read_text(encoding="utf-8")
-    original_origin = json.loads(original_origin_text)
-    original_commitment = resolve_task(tmp_path, task_id).frontmatter[
-        "handoff_origin_commitment"
-    ]
-    assert original_origin["template_version"] == 1
-    assert original_commitment in original_origin["generated_handoff_digests"]
-
-    monkeypatch.setattr("tools.repoctl.tasks.HANDOFF_TEMPLATE_VERSION", 2)
-    monkeypatch.setitem(
-        TASK_DOC_COPY["en"],
-        "start_handoff_next",
-        "Continue renderer-v2 implementation for `{task_path}`.",
-    )
-
-    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
-    shown = json.loads(capsys.readouterr().out)
-    assert shown["data"]["resume_guidance"]["handoff"]["generated_template"] is True
-    assert origin_path.read_text(encoding="utf-8") == original_origin_text
-
-    assert main(["task", "resume", "--json"]) == 0
-    resumed = json.loads(capsys.readouterr().out)
-    guidance = resumed["data"]["resume_guidance"]
-    assert guidance["status"] == "unbound"
-    assert guidance["handoff"]["generated_template"] is True
-    assert guidance["handoff"]["active"] is False
-    assert guidance["readable_handoff"] is None
-    assert guidance["executable_handoff"] is None
-    assert origin_path.read_text(encoding="utf-8") == original_origin_text
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
-    rejected_bind = json.loads(capsys.readouterr().out)
-    assert rejected_bind["problems"][0]["code"] == "task_handoff_generated_template"
-    assert origin_path.read_text(encoding="utf-8") == original_origin_text
-    assert not (tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json").exists()
-
-    assert main(["task", "start", task_id, "--json"]) == 0
-    capsys.readouterr()
-    started_task = resolve_task(tmp_path, task_id)
-    migrated_origin = json.loads(origin_path.read_text(encoding="utf-8"))
-    started_commitment = started_task.frontmatter["handoff_origin_commitment"]
-    assert "Continue renderer-v2 implementation" in task_path.read_text(encoding="utf-8")
-    assert migrated_origin["template_version"] == 2
-    assert started_commitment != original_commitment
-    assert set(migrated_origin["generated_handoff_digests"]) == {
-        original_commitment,
-        started_commitment,
-    }
-    assert task_handoff_provenance(tmp_path, started_task) is TaskHandoffProvenance.GENERATED
-
-
-@pytest.mark.parametrize("interrupt_after", ["origin", "task"])
-def test_generated_handoff_template_upgrade_publication_is_interrupt_safe(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-    interrupt_after: str,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    original_task_text = task_path.read_text(encoding="utf-8")
-    original_commitment = resolve_task(tmp_path, task_id).frontmatter[
-        "handoff_origin_commitment"
-    ]
-    monkeypatch.setattr("tools.repoctl.tasks.HANDOFF_TEMPLATE_VERSION", 2)
-    monkeypatch.setitem(
-        TASK_DOC_COPY["en"],
-        "start_handoff_next",
-        "Continue renderer-v2 implementation for `{task_path}`.",
-    )
-    cli_module = __import__("tools.repoctl.cli", fromlist=["atomic_write"])
-    real_atomic_write = cli_module.atomic_write
-    writes: list[Path] = []
-
-    def interrupt_publication(path: Path, value: str) -> None:
-        real_atomic_write(path, value)
-        writes.append(path)
-        if (interrupt_after == "origin" and path == origin_path) or (
-            interrupt_after == "task" and path == task_path
-        ):
-            raise KeyboardInterrupt
-
-    with monkeypatch.context() as interruption:
-        interruption.setattr("tools.repoctl.cli.atomic_write", interrupt_publication)
-        with pytest.raises(KeyboardInterrupt):
-            main(["task", "start", task_id, "--json"])
-
-    expected_writes = [origin_path] if interrupt_after == "origin" else [origin_path, task_path]
-    assert writes == expected_writes
-    interrupted_origin = json.loads(origin_path.read_text(encoding="utf-8"))
-    interrupted_task = resolve_task(tmp_path, task_id)
-    assert interrupted_origin["template_version"] == 2
-    assert original_commitment in interrupted_origin["generated_handoff_digests"]
-    assert task_handoff_provenance(tmp_path, interrupted_task) is TaskHandoffProvenance.GENERATED
-    assert not (tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json").exists()
-
-    if interrupt_after == "origin":
-        assert interrupted_task.status == "todo"
-        assert task_path.read_text(encoding="utf-8") == original_task_text
-        assert interrupted_task.frontmatter["handoff_origin_commitment"] == original_commitment
-        assert main(["task", "start", task_id, "--json"]) == 0
-        capsys.readouterr()
-        interrupted_task = resolve_task(tmp_path, task_id)
-        interrupted_origin = json.loads(origin_path.read_text(encoding="utf-8"))
-    else:
-        assert interrupted_task.status == "doing"
-
-    current_commitment = interrupted_task.frontmatter["handoff_origin_commitment"]
-    assert interrupted_task.status == "doing"
-    assert current_commitment != original_commitment
-    assert "Continue renderer-v2 implementation" in task_path.read_text(encoding="utf-8")
-    assert set(interrupted_origin["generated_handoff_digests"]) == {
-        original_commitment,
-        current_commitment,
-    }
-    assert task_handoff_provenance(tmp_path, interrupted_task) is TaskHandoffProvenance.GENERATED
-
-
-def test_generated_handoff_origin_rejects_template_version_from_newer_binary(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, _task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    origin = json.loads(origin_path.read_text(encoding="utf-8"))
-    origin["template_version"] = 2
-    basis = {key: value for key, value in origin.items() if key != "state_digest"}
-    origin["state_digest"] = digest_data(basis)
-    origin_path.write_text(json.dumps(origin, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    assert main(["task", "show", task_id, "--summary", "--json"]) == 1
-    rejected = json.loads(capsys.readouterr().out)
-    assert any(
-        problem["code"] == "task_handoff_origin_invalid"
-        for problem in rejected["problems"]
-    )
-
-
-def test_generated_handoff_provenance_fails_closed_with_invalid_document_language(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    assert main(["task", "start", task_id, "--json"]) == 0
-    capsys.readouterr()
-    task_path.write_text(
-        task_path.read_text(encoding="utf-8").replace(
-            'document_language: "en"',
-            'document_language: "invalid"',
-        ),
-        encoding="utf-8",
-    )
+    started = json.loads(capsys.readouterr().out)
+    assert any(warning["code"] == "task_handoff_generated_template" for warning in started["warnings"])
+    assert task_path.read_text(encoding="utf-8").count("<!-- repoctl: generated-handoff -->") == 1
 
     assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
     rejected = json.loads(capsys.readouterr().out)
     assert rejected["problems"][0]["code"] == "task_handoff_generated_template"
-
-
-def test_generated_handoff_origin_state_corruption_is_not_treated_as_authored(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, _task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    origin_path.write_text("{}\n", encoding="utf-8")
-
-    assert main(["task", "resume", "--json"]) == 1
-    resumed = json.loads(capsys.readouterr().out)
-    assert resumed["data"]["selection"] == {"status": "single_live", "live_task_count": 1}
-    assert resumed["data"]["resume_guidance"]["executable_handoff"] is None
-    assert any(problem["code"] == "task_handoff_origin_invalid" for problem in resumed["problems"])
-
-    assert main(["task", "start", task_id, "--json"]) == 2
-    rejected = json.loads(capsys.readouterr().out)
-    assert rejected["problems"][0]["code"] == "task_handoff_origin_invalid"
-
-
-@pytest.mark.parametrize(
-    "origin_kind",
-    ["directory", "dangling_symlink", "regular_symlink", "fifo"],
-)
-def test_generated_handoff_nonregular_origin_cannot_downgrade_to_legacy(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-    origin_kind: str,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    origin_text = origin_path.read_text(encoding="utf-8")
-    origin_path.unlink()
-    if origin_kind == "directory":
-        origin_path.mkdir()
-    elif origin_kind == "dangling_symlink":
-        origin_path.symlink_to(tmp_path / "missing-origin.json")
-    elif origin_kind == "regular_symlink":
-        target = tmp_path / "outside-origin.json"
-        target.write_text(origin_text, encoding="utf-8")
-        origin_path.symlink_to(target)
-    else:
-        os.mkfifo(origin_path)
-    original_task_text = task_path.read_text(encoding="utf-8")
-
-    assert main(["task", "start", task_id, "--json"]) == 2
-    rejected_start = json.loads(capsys.readouterr().out)
-    assert rejected_start["problems"][0]["code"] == "task_handoff_origin_invalid"
-    assert task_path.read_text(encoding="utf-8") == original_task_text
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
-    rejected_bind = json.loads(capsys.readouterr().out)
-    assert rejected_bind["problems"][0]["code"] == "task_handoff_origin_invalid"
     assert not (tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json").exists()
 
-
-def test_generated_handoff_missing_origin_remains_generated_and_is_recovered_on_start(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, _task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    origin_path.unlink()
-
-    assert task_handoff_provenance(tmp_path, resolve_task(tmp_path, task_id)) is TaskHandoffProvenance.GENERATED
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
-    rejected_bind = json.loads(capsys.readouterr().out)
-    assert rejected_bind["problems"][0]["code"] == "task_handoff_generated_template"
-
-    assert main(["task", "start", task_id, "--json"]) == 0
-    capsys.readouterr()
-    assert origin_path.is_file()
-    assert not origin_path.is_symlink()
-    assert task_handoff_provenance(tmp_path, resolve_task(tmp_path, task_id)) is TaskHandoffProvenance.GENERATED
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
-    rejected_started_bind = json.loads(capsys.readouterr().out)
-    assert rejected_started_bind["problems"][0]["code"] == "task_handoff_generated_template"
-
-
-def test_authored_handoff_can_migrate_after_generated_origin_is_lost(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
     task_path.write_text(
         replace_section(
             task_path.read_text(encoding="utf-8"),
@@ -3604,104 +3317,10 @@ def test_authored_handoff_can_migrate_after_generated_origin_is_lost(
         ),
         encoding="utf-8",
     )
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    origin_path.unlink()
-
-    assert task_handoff_provenance(tmp_path, resolve_task(tmp_path, task_id)) is TaskHandoffProvenance.AUTHORED_OR_REVIEWED
-    assert main(["task", "start", task_id, "--json"]) == 0
-    capsys.readouterr()
-    assert "inspect the authored recovery path" in task_path.read_text(encoding="utf-8")
-    assert not origin_path.exists()
-
     assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
     rebound = json.loads(capsys.readouterr().out)
     assert rebound["data"]["resume_guidance"]["status"] == "current"
 
-
-def test_generated_handoff_commitment_mismatch_fails_closed(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    task_path.write_text(
-        replace_frontmatter_line(
-            task_path.read_text(encoding="utf-8"),
-            "handoff_origin_commitment",
-            f'"sha256:{"0" * 64}"',
-        ),
-        encoding="utf-8",
-    )
-
-    assert main(["task", "start", task_id, "--json"]) == 2
-    rejected = json.loads(capsys.readouterr().out)
-    assert rejected["problems"][0]["code"] == "task_handoff_origin_invalid"
-
-
-def test_generated_handoff_stale_but_valid_commitment_fails_closed(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    task_id, task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    creation_commitment = resolve_task(tmp_path, task_id).frontmatter["handoff_origin_commitment"]
-
-    assert main(["task", "start", task_id, "--json"]) == 0
-    capsys.readouterr()
-    started_task = resolve_task(tmp_path, task_id)
-    assert started_task.frontmatter["handoff_origin_commitment"] != creation_commitment
-    assert creation_commitment in json.loads(origin_path.read_text(encoding="utf-8"))["generated_handoff_digests"]
-    task_path.write_text(
-        replace_frontmatter_line(
-            task_path.read_text(encoding="utf-8"),
-            "handoff_origin_commitment",
-            f'"{creation_commitment}"',
-        ),
-        encoding="utf-8",
-    )
-
-    assert main(["task", "resume", "--json"]) == 1
-    resumed = json.loads(capsys.readouterr().out)
-    assert resumed["data"]["resume_guidance"]["executable_handoff"] is None
-    assert any(problem["code"] == "task_handoff_origin_invalid" for problem in resumed["problems"])
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 2
-    rejected_bind = json.loads(capsys.readouterr().out)
-    assert rejected_bind["problems"][0]["code"] == "task_handoff_origin_invalid"
-
-
-def test_task_creation_commits_origin_before_publishing_generated_task(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    write_workspace(tmp_path)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    task_module = __import__("tools.repoctl.tasks", fromlist=["atomic_write"])
-    real_atomic_write = task_module.atomic_write
-    writes: list[Path] = []
-
-    def interrupt_after_publish(path: Path, value: str) -> None:
-        real_atomic_write(path, value)
-        writes.append(path)
-        if path.parent == tmp_path / "docs/tasks" and path.name.startswith("T-"):
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr("tools.repoctl.tasks.atomic_write", interrupt_after_publish)
-    try:
-        main(["task", "create", "--slug", "interrupted", "Interrupted create", "--json"])
-    except KeyboardInterrupt:
-        pass
-    else:  # pragma: no cover - the simulated interruption must escape cleanup
-        raise AssertionError("task creation was not interrupted")
-
-    task_paths = list((tmp_path / "docs/tasks").glob("T-*--interrupted.md"))
-    assert len(task_paths) == 1
-    task_id = task_paths[0].name.split("--", 1)[0]
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    assert writes[:2] == [origin_path, task_paths[0]]
-    assert origin_path.is_file()
-    assert task_handoff_provenance(tmp_path, resolve_task(tmp_path, task_id)) is TaskHandoffProvenance.GENERATED
 
 
 def test_handoff_command_text_is_inert_across_resume_lifecycle(
@@ -3739,172 +3358,26 @@ def test_handoff_command_text_is_inert_across_resume_lifecycle(
     assert not marker.exists()
 
 
-def test_preexisting_binding_cannot_activate_an_unchanged_generated_handoff(
+def test_legacy_v3_handoff_binding_is_inactive_until_v4_rebind(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    task_id, _task_path = _create_repoctl_generated_task(tmp_path, monkeypatch, capsys)
+    task_path, _repo, receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
+    _bind_handoff(capsys)
+    binding = json.loads(receipt.read_text(encoding="utf-8"))
+    binding["schema_version"] = 3
+    receipt.write_text(json.dumps(binding, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["task", "start", task_id, "--json"]) == 0
-    capsys.readouterr()
-    with monkeypatch.context() as legacy:
-        legacy.setattr(
-            "tools.repoctl.tasks.task_handoff_provenance",
-            lambda _root, _task: TaskHandoffProvenance.AUTHORED_OR_REVIEWED,
-        )
-        assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
-        capsys.readouterr()
-
-    receipt = tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json"
-    assert receipt.is_file()
-    with monkeypatch.context() as upgraded_renderer:
-        upgraded_renderer.setitem(
-            TASK_DOC_COPY["en"],
-            "start_handoff_next",
-            "A later repoctl renderer uses different generated copy for `{task_path}`.",
-        )
-        assert main(["task", "resume", "--json"]) == 0
-        payload = json.loads(capsys.readouterr().out)
-    guidance = payload["data"]["resume_guidance"]
-    assert guidance["status"] == "unbound"
-    assert guidance["handoff"]["generated_template"] is True
+    guidance = _show_resume_guidance(capsys)
+    assert guidance["status"] == "inactive"
+    assert guidance["handoff"]["reason_codes"] == ["handoff_binding_legacy"]
     assert guidance["handoff"]["active"] is False
-    assert guidance["handoff"]["reason_codes"] == ["task_handoff_generated_template"]
-    assert guidance["readable_handoff"] is None
-    assert guidance["executable_handoff"] is None
 
-
-def test_unknown_legacy_handoff_binding_requires_one_fresh_review_migration(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    task_id = "T-20260609184046Z"
-    add_board_task(tmp_path, f"{task_id}--legacy.md", task_text(task_id, status="doing"))
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
-    capsys.readouterr()
-    binding_path = tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json"
-    old_binding = json.loads(binding_path.read_text(encoding="utf-8"))
-    old_binding["schema_version"] = 2
-    binding_path.write_text(json.dumps(old_binding, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    assert main(["task", "resume", "--json"]) == 0
-    legacy = json.loads(capsys.readouterr().out)
-    guidance = legacy["data"]["resume_guidance"]
-    assert guidance["status"] == "unbound"
-    assert guidance["handoff"]["reason_codes"] == ["task_handoff_origin_unknown"]
-    assert guidance["executable_handoff"] is None
-    assert any(item["code"] == "task_handoff_origin_unknown" for item in legacy["warnings"])
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
-    rebound = json.loads(capsys.readouterr().out)
+    rebound = _bind_handoff(capsys)
     assert rebound["data"]["resume_guidance"]["status"] == "current"
-    assert json.loads(binding_path.read_text(encoding="utf-8"))["schema_version"] == 3
-    assert not (tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json").exists()
-
-
-def test_unknown_legacy_handoff_rejects_symlinked_resume_binding(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    task_id = "T-20260609184046Z"
-    add_board_task(tmp_path, f"{task_id}--legacy.md", task_text(task_id, status="doing"))
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
-    capsys.readouterr()
-    binding_path = tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json"
-    outside = tmp_path.parent / f"{tmp_path.name}-outside-binding.json"
-    outside.write_bytes(binding_path.read_bytes())
-    binding_path.unlink()
-    binding_path.symlink_to(outside)
-
-    assert main(["task", "resume", "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "task_resume_binding_invalid"
-    assert payload["data"]["resume_guidance"]["status"] == "unknown"
-
-
-def test_originless_placeholder_copy_is_not_used_to_infer_handoff_provenance(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    task_id = "T-20260609184046Z"
-    rel_path = f"docs/tasks/{task_id}--legacy.md"
-    copy = TASK_DOC_COPY["en"]
-    originless_placeholder = (
-        f"- Next exact step: {copy['start_handoff_next'].format(task_path=rel_path)}\n"
-        f"- First file to open: `{rel_path}`\n"
-        "- First command to run: `./scripts/repoctl task list --json`\n"
-        f"- Done when: {copy['start_handoff_done']}\n"
-    )
-    text = replace_section(
-        task_text(task_id, status="doing"),
-        "Handoff",
-        originless_placeholder,
-    )
-    add_board_task(tmp_path, f"{task_id}--legacy.md", text)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    task = resolve_task(tmp_path, task_id)
-    assert task_handoff_provenance(tmp_path, task) is TaskHandoffProvenance.UNKNOWN_LEGACY
-
-    assert main(["task", "resume", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    guidance = payload["data"]["resume_guidance"]
-    assert guidance["status"] == "unbound"
-    assert guidance["handoff"]["generated_template"] is False
-    assert guidance["handoff"]["reason_codes"] == ["task_handoff_origin_unknown"]
-    assert payload["next_actions"][0] == {
-        "label": "Regenerate or replace the origin-unknown Handoff with task-specific restart instructions",
-        "path": rel_path,
-    }
-    assert any(
-        action.get("kind") == "task_handoff_bind"
-        for action in payload["next_actions"]
-    )
-
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
-    rebound = json.loads(capsys.readouterr().out)
-    assert rebound["data"]["resume_guidance"]["status"] == "current"
-
-
-def test_unknown_legacy_handoff_review_commits_in_one_binding_write(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    write_workspace(tmp_path)
-    task_id = "T-20260609184046Z"
-    add_board_task(tmp_path, f"{task_id}--legacy.md", task_text(task_id, status="doing"))
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-    binding_path = tmp_path / f"docs/tasks/.repoctl-state/resume/{task_id}.json"
-    origin_path = tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{task_id}.json"
-    task_module = __import__("tools.repoctl.tasks", fromlist=["atomic_write"])
-    real_atomic_write = task_module.atomic_write
-    writes: list[Path] = []
-
-    def reject_origin_write(path: Path, value: str) -> None:
-        writes.append(path)
-        if path == origin_path:
-            raise OSError("simulated second machine-state write failure")
-        real_atomic_write(path, value)
-
-    monkeypatch.setattr("tools.repoctl.tasks.atomic_write", reject_origin_write)
-    assert main(["task", "handoff", "bind", task_id, "--json"]) == 0
-    bound = json.loads(capsys.readouterr().out)
-    assert bound["data"]["resume_guidance"]["status"] == "current"
-    assert writes == [binding_path]
-    assert json.loads(binding_path.read_text(encoding="utf-8"))["schema_version"] == 3
-    assert not origin_path.exists()
+    assert json.loads(receipt.read_text(encoding="utf-8"))["schema_version"] == 4
+    assert task_path.is_file()
 
 
 def test_invalid_task_document_language_remains_a_check_diagnostic(
@@ -3933,7 +3406,7 @@ def test_task_handoff_is_readable_but_inactive_until_explicit_bind(tmp_path: Pat
     assert not receipt.exists()
     before = task_path.read_bytes()
     guidance = _show_resume_guidance(capsys)
-    assert guidance["status"] == "unbound"
+    assert guidance["status"] == "inactive"
     assert guidance["handoff"]["active"] is False
     assert "Next exact step" in guidance["handoff"]["body"]
 
@@ -3950,7 +3423,7 @@ def test_task_handoff_is_readable_but_inactive_until_explicit_bind(tmp_path: Pat
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
     start_payload = json.loads(capsys.readouterr().out)
     assert receipt.read_bytes() == bound_receipt
-    assert start_payload["data"]["resume_guidance"]["status"] == "stale"
+    assert start_payload["data"]["resume_guidance"]["status"] == "inactive"
 
 
 def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -3959,7 +3432,7 @@ def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, 
 
     def assert_stale(input_name: str) -> None:
         guidance = _show_resume_guidance(capsys)
-        assert guidance["status"] == "stale"
+        assert guidance["status"] == "inactive"
         assert input_name in guidance["changed_inputs"]
         _bind_handoff(capsys)
         assert _show_resume_guidance(capsys)["status"] == "current"
@@ -3993,7 +3466,7 @@ def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, 
     text = task_path.read_text(encoding="utf-8")
     task_path.write_text(replace_frontmatter_line(text, "status", "blocked"), encoding="utf-8")
     guidance = _show_resume_guidance(capsys)
-    assert guidance["status"] == "stale"
+    assert guidance["status"] == "inactive"
     assert "task_contract" in guidance["changed_inputs"]
 
 
@@ -4033,7 +3506,7 @@ def test_parent_handoff_binding_tracks_direct_child_lifecycle(
         encoding="utf-8",
     )
     guidance = show_parent()["data"]["resume_guidance"]
-    assert guidance["status"] == "stale"
+    assert guidance["status"] == "inactive"
     assert guidance["changed_inputs"] == ["direct_children"]
 
 
@@ -4051,7 +3524,7 @@ def test_task_handoff_repository_digest_detects_same_head_content_drift_but_not_
     app.write_text("value = 3\n", encoding="utf-8")
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == head
     guidance = _show_resume_guidance(capsys)
-    assert guidance["status"] == "stale"
+    assert guidance["status"] == "inactive"
     assert "repository" in guidance["changed_inputs"]
 
     _bind_handoff(capsys)
@@ -4112,7 +3585,7 @@ def test_task_handoff_invalid_receipt_fails_closed_and_archived_handoff_is_histo
     guidance = show_payload["data"]["resume_guidance"]
     assert show_payload["ok"] is False
     assert show_payload["problems"][0]["code"] == "task_resume_binding_invalid"
-    assert guidance["status"] == "unknown"
+    assert guidance["status"] == "inactive"
     assert guidance["handoff"]["reason_codes"] == ["resume_binding_invalid"]
     assert guidance["handoff"]["active"] is False
     assert main(["check", "--json"]) == 1
@@ -4214,7 +3687,7 @@ def test_task_show_rejects_strictly_malformed_resume_receipts(tmp_path: Path, mo
         payload = json.loads(capsys.readouterr().out)
         assert payload["ok"] is False
         assert payload["problems"][0]["code"] == "task_resume_binding_invalid"
-        assert payload["data"]["resume_guidance"]["status"] == "unknown"
+        assert payload["data"]["resume_guidance"]["status"] == "inactive"
 
 
 def test_task_show_rejects_missing_handoff_and_keeps_summary_inputs_bounded(
@@ -4248,4 +3721,4 @@ def test_task_show_rejects_missing_handoff_and_keeps_summary_inputs_bounded(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["problems"][0]["code"] == "missing_handoff"
-    assert payload["data"]["resume_guidance"]["status"] == "unknown"
+    assert payload["data"]["resume_guidance"]["status"] == "inactive"
