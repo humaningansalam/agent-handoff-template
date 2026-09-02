@@ -64,7 +64,8 @@ def test_started_task_defaults_to_the_only_configured_repository(tmp_path: Path,
         "path": payload["data"]["path"],
         "source": "data.generated_handoff",
     }
-    assert payload["next_actions"][1]["label"] == "Record the candidate query"
+    assert payload["next_actions"][1]["kind"] == "discovery_input"
+    assert "command" not in payload["next_actions"][1]
 
 
 def test_task_create_rejects_invalid_document_language_config(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -355,9 +356,8 @@ def test_repo_scoped_task_create_reports_structured_discovery_next_action(tmp_pa
     assert main(["task", "create", "--area", "repo", "--repo-id", "main", "--slug", "repo-work", "Repo Work", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    commands = [action.get("command", "") for action in payload["next_actions"]]
-    assert any("task discovery add" in command for command in commands)
-    assert any("--reviewed repos/<path> --chosen repos/<path>" in command for command in commands)
+    assert payload["next_actions"][-1]["kind"] == "discovery_input"
+    assert "command" not in payload["next_actions"][-1]
 
 
 def test_task_create_rejects_invalid_parent_id(tmp_path: Path, monkeypatch, capsys) -> None:

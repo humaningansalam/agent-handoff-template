@@ -31,6 +31,11 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert candidate["source_refs"][0]["path"] == "docs/contracts/repoctl-context-contract.md"
     assert candidate["source_refs"][0]["content_sha256"].startswith("sha256:")
     assert build_payload["warnings"][0]["code"] == "knowledge_candidate_not_authoritative"
+    assert build_payload["next_actions"][2]["command"] == (
+        f"./scripts/repoctl knowledge approve {candidate['id']} --repo-id main --json"
+    )
+    assert build_payload["next_actions"][3]["choices"] == ["reject"]
+    assert "command" not in build_payload["next_actions"][3]
 
     assert main(["knowledge", "candidate", "list", "--repo-id", "main", "--json"]) == 0
     list_payload = json.loads(capsys.readouterr().out)
@@ -47,7 +52,7 @@ def test_knowledge_candidate_build_list_show(tmp_path: Path, monkeypatch, capsys
     assert "## Source Refs" in markdown
     assert "docs/contracts/repoctl-context-contract.md" in markdown
     assert "digest_matches=`True`" in markdown
-    assert "## Next Commands" in markdown
+    assert "## Next Actions" in markdown
 
     assert main(["knowledge", "candidate", "check", candidate["id"], "--repo-id", "main", "--json"]) == 0
     check_payload = json.loads(capsys.readouterr().out)
@@ -218,7 +223,8 @@ def test_knowledge_candidate_from_task_reports_target_invalid_receipt(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "knowledge_candidate_receipt_invalid"
-    assert any("--dry-run" in action.get("command", "") for action in payload["next_actions"])
+    assert payload["next_actions"][-1]["kind"] == "knowledge_review"
+    assert "command" not in payload["next_actions"][-1]
 
 
 def test_knowledge_candidate_check_reports_related_record_statuses(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -990,7 +996,9 @@ def test_knowledge_candidate_builds_from_task_receipt(tmp_path: Path, monkeypatc
     assert main(["knowledge", "candidate", "build", "--from-task", "T-20260609184047Z", "--repo-id", "main", "--kind", "invariant", "--dry-run", "--json"]) == 1
     missing_claim = json.loads(capsys.readouterr().out)
     assert missing_claim["problems"][0]["code"] == "knowledge_candidate_claim_required"
-    assert any("--claim '<reusable claim>'" in action.get("command", "") for action in missing_claim["next_actions"])
+    assert missing_claim["next_actions"] == [
+        {"label": "State the reusable decision, invariant, or failure mode explicitly", "kind": "knowledge_review"}
+    ]
     assert not (tmp_path / ".repoctl-state/knowledge/candidates/main").exists()
 
     claim = "Persist retry scheduling as a reviewed invariant without editing machine-owned candidate state."

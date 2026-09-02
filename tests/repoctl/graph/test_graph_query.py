@@ -50,6 +50,10 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
         ambiguous_result = ambiguous_path["data"]["result"]
         assert ambiguous_path["problems"][0]["code"] == "graph_query_ambiguous_path"
         assert [item["path"] for item in ambiguous_result["candidates"]] == ["repos/src/app.py", "src/app.py"]
+        assert ambiguous_path["next_actions"] == [
+            {"label": "Inspect Graph candidate repos/repos/src/app.py", "path": "repos/repos/src/app.py"},
+            {"label": "Inspect Graph candidate repos/src/app.py", "path": "repos/src/app.py"},
+        ]
         assert main(["graph", "query", "--file", "repos/only.py", "--json"]) == 0
         exact_repo_path = json.loads(capsys.readouterr().out)["data"]["result"]
         assert exact_repo_path["query"] == {"type": "file", "path": "repos/only.py"}

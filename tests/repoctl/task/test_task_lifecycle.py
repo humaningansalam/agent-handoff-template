@@ -440,7 +440,7 @@ def test_task_doctor_warns_until_current_changed_chosen_subject_has_passed_struc
     assert warning["path"] == task_path.relative_to(tmp_path).as_posix()
     action = next(item for item in missing["next_actions"] if item.get("kind") == "task_verification_add")
     assert action["target_ref"] == "data.action_inputs.missing_structured_verification_subjects"
-    assert "task verification add" in action["command"]
+    assert "command" not in action
 
     evidence = tmp_path / "focused-check.log"
     evidence.write_text("PASS app.py\n", encoding="utf-8")
@@ -1399,7 +1399,9 @@ def test_task_chosen_projection_must_match_machine_outcome_before_resume_or_fini
         for action in doctor["next_actions"]
         if action["label"].startswith("Reconcile the approved Chosen scope")
     )
-    assert "--replace-chosen" in reconcile["command"]
+    assert "command" not in reconcile
+    assert reconcile["choices"] == ["add_to_chosen", "revert_change", "move_to_follow_up"]
+    assert reconcile["target_ref"] == "data.discovery_outcome_alignment.task_chosen_paths"
 
     assert main(["task", "finish", task_id, "--json"]) == 2
     rejected = json.loads(capsys.readouterr().out)
@@ -2472,11 +2474,7 @@ def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tm
     assert action["target_ref"] == "data.action_inputs.baseline_conflicts"
     assert "targets" not in action
     assert payload["data"]["action_inputs"]["baseline_conflicts"] == ["a.py", "b.py"]
-    command = shlex.split(action["command"])
-    resolutions = [command[index + 1] for index, token in enumerate(command) if token == "--resolution"]
-    assert resolutions == ["<path>=<task|preexisting>"]
-    assert "--preview" in command
-    assert "--ownership" not in command
+    assert "command" not in action
 
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
     finish_payload = json.loads(capsys.readouterr().out)
@@ -3018,9 +3016,8 @@ def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_pat
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    commands = [action.get("command", "") for action in payload["next_actions"]]
-    assert any("task discovery add T-20260609184046Z" in command for command in commands)
-    assert any("context query '<query>' --repo-id main" in command for command in commands)
+    discovery = next(action for action in payload["next_actions"] if action.get("kind") == "discovery_input")
+    assert "command" not in discovery
 
 
 def test_task_start_blocks_repo_scoped_task_without_repo_git(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -109,6 +109,9 @@ class NextActionKind(StrEnum):
     TASK_HANDOFF_BIND = "task_handoff_bind"
     TASK_VERIFICATION_ADD = "task_verification_add"
     CONTEXT_PACK_REFRESH = "context_pack_refresh"
+    DISCOVERY_INPUT = "discovery_input"
+    KNOWLEDGE_REVIEW = "knowledge_review"
+    METADATA_INPUT = "metadata_input"
 
 
 class BaselineOwnership(StrEnum):
@@ -120,6 +123,16 @@ class TaskScopeResolution(StrEnum):
     ADD_TO_CHOSEN = "add_to_chosen"
     REVERT_CHANGE = "revert_change"
     MOVE_TO_FOLLOW_UP = "move_to_follow_up"
+
+
+class WorkspaceBaselineResolution(StrEnum):
+    RESTORE_TASK_START = "restore_task_start"
+    MOVE_TO_REPO_CHILD = "move_to_repo_child"
+
+
+class KnowledgeReviewDecision(StrEnum):
+    APPROVE = "approve"
+    REJECT = "reject"
 
 
 COMPACT_PATH_LIMIT = 20
@@ -387,13 +400,65 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value if isinstance(item, str) and item]
 
 
+def _selected_repo_id(data: dict[str, Any] | None) -> str:
+    payload = data or {}
+    for owner in (payload.get("repository"), _mapping_at(payload, "bundle", "repository")):
+        if isinstance(owner, dict) and owner.get("id") is not None:
+            return str(owner["id"])
+    return str(payload.get("repo_id") or "")
+
+
+def _context_replay_action(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    bundle = _mapping_at(data, "bundle")
+    query = _mapping_at(bundle, "query")
+    query_text = str(query.get("text") or "")
+    repo_id = _selected_repo_id(data)
+    if not query_text or not repo_id:
+        return None
+    mode = str(query.get("mode") or "auto")
+    mode_arg = f" --mode {shlex.quote(mode.replace('_', '-'))}" if mode != "auto" else ""
+    explain_arg = " --explain" if bool(query.get("explain")) else ""
+    return {
+        "label": "Rerun the same Context query after prerequisites are ready",
+        "command": f"./scripts/repoctl context query {shlex.quote(query_text)} --repo-id {repo_id}{mode_arg}{explain_arg} --json",
+        "kind": NextActionKind.CONTEXT_RESUME,
+        "source": "data.bundle.query",
+    }
+
+
+def _recovery_action(kind: NextActionKind, *, repo_id: str, source: str) -> dict[str, Any] | None:
+    if kind is NextActionKind.COMPLETION_CATALOGUE_REBUILD:
+        selector = f" --repo-id {repo_id}" if repo_id else " --workspace"
+        return {
+            "label": "Rebuild completion history from validated cold receipts",
+            "command": f"./scripts/repoctl history rebuild{selector} --json",
+            "kind": kind,
+            "source": source,
+        }
+    if not repo_id:
+        return None
+    label, leaf = {
+        NextActionKind.KNOWLEDGE_REBUILD: ("Rebuild Reviewed Knowledge from validated records and events", "knowledge rebuild"),
+        NextActionKind.GRAPH_BUILD: ("Build the materialized Graph and evidence index", "graph build"),
+        NextActionKind.GRAPH_REBUILD: ("Rebuild the materialized Graph and evidence index", "graph build"),
+        NextActionKind.GRAPH_REFRESH: ("Refresh the materialized Graph and evidence index", "graph build"),
+    }[kind]
+    rebuild = " --rebuild" if kind is NextActionKind.GRAPH_REBUILD else ""
+    return {
+        "label": label,
+        "command": f"./scripts/repoctl {leaf} --repo-id {repo_id}{rebuild} --json",
+        "kind": kind,
+        "source": source,
+    }
+
+
 def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     seen: set[str] = set()
-    task_id = str((data or {}).get("task_id") or "T-...")
+    task_id = str((data or {}).get("task_id") or "")
     resume_handoff = _mapping_at(data, "resume_guidance", "handoff")
     generated_resume_handoff = resume_handoff.get("generated_template") is True
-    task_path = str(_mapping_at(data, "task").get("path") or f"docs/tasks/{task_id}.md")
+    task_path = str(_mapping_at(data, "task").get("path") or (f"docs/tasks/{task_id}.md" if task_id else "docs/tasks/"))
     context_resume_requested = False
 
     def add(
@@ -419,92 +484,10 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             action["choices"] = list(choices)
         if target_ref:
             action["target_ref"] = target_ref
-        key = json.dumps(action, ensure_ascii=False, sort_keys=True)
+        key = f"command:{command}" if command else json.dumps(action, ensure_ascii=False, sort_keys=True)
         if key not in seen:
             seen.add(key)
             actions.append(action)
-
-    def context_bundle_and_repo() -> tuple[dict[str, Any], str]:
-        bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
-        repository = (data or {}).get("repository") if isinstance((data or {}).get("repository"), dict) else {}
-        if not repository and isinstance(bundle.get("repository"), dict):
-            repository = bundle["repository"]
-        return bundle, str(repository.get("id") or "<id>")
-
-    def selected_repo_id() -> str:
-        payload = data or {}
-        repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
-        if "id" in repository:
-            return str(repository["id"])
-        if "repo_id" in payload:
-            return str(payload["repo_id"])
-        bundle = payload.get("bundle") if isinstance(payload.get("bundle"), dict) else {}
-        bundle_repository = bundle.get("repository") if isinstance(bundle.get("repository"), dict) else {}
-        return str(bundle_repository["id"]) if "id" in bundle_repository else "<id>"
-
-    def add_completion_catalogue_recovery(
-        *,
-        source: str,
-        repo_id_override: str | None = None,
-    ) -> None:
-        repo_id = selected_repo_id() if repo_id_override is None else repo_id_override
-        selector = f" --repo-id {repo_id}" if repo_id else " --workspace"
-        add(
-            "Rebuild completion history from validated cold receipts",
-            command=f"./scripts/repoctl history rebuild{selector} --json",
-            kind=NextActionKind.COMPLETION_CATALOGUE_REBUILD,
-            source=source,
-        )
-
-    def add_context_resume(*, label: str, source: str) -> None:
-        bundle, repo_id = context_bundle_and_repo()
-        query = bundle.get("query") if isinstance(bundle.get("query"), dict) else {}
-        query_text = str(query.get("text") or "")
-        if not query_text:
-            return
-        mode = str(query.get("mode") or "auto")
-        mode_arg = f" --mode {shlex.quote(mode.replace('_', '-'))}" if mode != "auto" else ""
-        explain_arg = " --explain" if bool(query.get("explain")) else ""
-        add(
-            label,
-            command=(
-                f"./scripts/repoctl context query {shlex.quote(query_text)} --repo-id {repo_id}"
-                f"{mode_arg}{explain_arg} --json"
-            ),
-            kind=NextActionKind.CONTEXT_RESUME,
-            source=source,
-        )
-
-    def request_context_resume() -> None:
-        nonlocal context_resume_requested
-        context_resume_requested = True
-
-    def add_knowledge_projection_recovery(*, source: str) -> None:
-        repo_id = selected_repo_id()
-        add(
-            "Rebuild Reviewed Knowledge from validated records and events",
-            command=f"./scripts/repoctl knowledge rebuild --repo-id {repo_id} --json",
-            kind=NextActionKind.KNOWLEDGE_REBUILD,
-            source=source,
-        )
-        request_context_resume()
-
-    def add_context_graph_recovery(kind: NextActionKind, *, source: str) -> None:
-        _bundle, repo_id = context_bundle_and_repo()
-        rebuild = kind == NextActionKind.GRAPH_REBUILD
-        label = {
-            NextActionKind.GRAPH_BUILD: "Build the materialized Graph and evidence index",
-            NextActionKind.GRAPH_REBUILD: "Rebuild the materialized Graph and evidence index",
-            NextActionKind.GRAPH_REFRESH: "Refresh the materialized Graph and evidence index",
-        }[kind]
-        add(
-            label,
-            command=f"./scripts/repoctl graph build --repo-id {repo_id}{' --rebuild' if rebuild else ''} --json",
-            kind=kind,
-            source=source,
-        )
-
-        request_context_resume()
 
     if generated_resume_handoff:
         add(
@@ -532,14 +515,16 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             ]
             if entries:
                 for entry in entries:
-                    add_completion_catalogue_recovery(
+                    action = _recovery_action(
+                        NextActionKind.COMPLETION_CATALOGUE_REBUILD,
                         source=f"data.completion_history.{('catalogues' if entry in history.get('catalogues', []) else 'audited_catalogues')}[].problem_code",
-                        repo_id_override=str(entry.get("repo_id") or ""),
+                        repo_id=str(entry.get("repo_id") or ""),
                     )
+                    if action: add(**action)
             else:
-                add_completion_catalogue_recovery(
-                    source="problems_or_warnings[].code" if code == catalogue_reason else "problems_or_warnings[].cause_code"
-                )
+                action = _recovery_action(NextActionKind.COMPLETION_CATALOGUE_REBUILD, repo_id=_selected_repo_id(data), source="problems_or_warnings[].code" if code == catalogue_reason else "problems_or_warnings[].cause_code")
+                if action: add(**action)
+            context_resume_requested = True
         knowledge_projection_problem_codes = {
             "knowledge_projection_unavailable",
             "knowledge_projection_schema_mismatch",
@@ -548,20 +533,16 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             "knowledge_projection_tail_digest_mismatch",
         }
         if code in knowledge_projection_problem_codes or cause_code in knowledge_projection_problem_codes:
-            add_knowledge_projection_recovery(
-                source=(
-                    "problems_or_warnings[].code"
-                    if code in knowledge_projection_problem_codes
-                    else "problems_or_warnings[].cause_code"
-                )
-            )
+            action = _recovery_action(NextActionKind.KNOWLEDGE_REBUILD, repo_id=_selected_repo_id(data), source="problems_or_warnings[].code" if code in knowledge_projection_problem_codes else "problems_or_warnings[].cause_code")
+            if action:
+                add(**action)
+                context_resume_requested = True
         if code == "missing_verification_file":
             add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
         elif code == "verification_file_inside_repo":
-            add("Move verification evidence outside repos/", command=f"cp {path or 'repos/...'} /tmp/{task_id}-verification.md")
+            add("Move verification evidence to an existing workspace file outside repos/", path=path)
         elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
-            add("Record task discovery evidence", command=f"./scripts/repoctl task discovery add {task_id} --query '<query>' --reviewed repos/<path> --chosen repos/<path> --json")
-            add("Open Discovery section", path=path or f"docs/tasks/{task_id}.md")
+            add("Record task discovery evidence", path=path or f"docs/tasks/{task_id}.md", kind=NextActionKind.DISCOVERY_INPUT)
         elif code in {"task_structured_verification_missing", "task_structured_verification_nonpassing"}:
             action_inputs = _mapping_at(data, "action_inputs")
             input_key = (
@@ -572,8 +553,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             subjects = _string_list(action_inputs.get(input_key))
             if subjects:
                 add(
-                    "Record passed structured verification for each unverified current changed Chosen subject",
-                    command=f"./scripts/repoctl task verification add {task_id} --status passed --evidence-ref <evidence-ref> --subject <verified-subject> --json",
+                    "Record an evidence-backed result for each unverified current changed Chosen subject",
                     kind=NextActionKind.TASK_VERIFICATION_ADD,
                     source=f"data.action_inputs.{input_key}",
                     target_ref=f"data.action_inputs.{input_key}",
@@ -593,10 +573,19 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             "discovery_outcome_chosen_mismatch",
             "discovery_outcome_chosen_invalid",
         }:
-            add(
-                "Reconcile the approved Chosen scope through the repoctl Discovery boundary",
-                command=f"./scripts/repoctl task discovery add {task_id} --replace-chosen repos/<approved-path> --reason '<scope reconciliation reason>' --json",
+            alignment = _mapping_at(data, "discovery_outcome_alignment")
+            target_key = next(
+                (key for key in ("task_chosen_paths", "outcome_chosen_paths", "invalid_task_chosen_values", "invalid_outcome_subject_ids") if _string_list(alignment.get(key))),
+                "",
             )
+            if target_key:
+                add(
+                    "Reconcile the approved Chosen scope through the repoctl Discovery boundary",
+                    kind=NextActionKind.TASK_SCOPE_REVIEW,
+                    source="data.discovery_outcome_alignment",
+                    choices=[TaskScopeResolution.ADD_TO_CHOSEN, TaskScopeResolution.REVERT_CHANGE, TaskScopeResolution.MOVE_TO_FOLLOW_UP],
+                    target_ref=f"data.discovery_outcome_alignment.{target_key}",
+                )
             add("Open the Task Discovery section", path=path or f"docs/tasks/{task_id}.md")
         elif code == "discovery_outcome_repository_mismatch":
             add(
@@ -630,7 +619,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             if conflicts:
                 add(
                     "Preview baseline ownership resolutions",
-                    command=f"./scripts/repoctl task baseline resolve {task_id} --resolution '<path>=<task|preexisting>' --preview --json",
                     kind=NextActionKind.BASELINE_OWNERSHIP_RESOLUTION,
                     source="data.action_inputs.baseline_conflicts",
                     choices=[BaselineOwnership.TASK, BaselineOwnership.PREEXISTING],
@@ -645,28 +633,31 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                     "Restore task-start product state or move ownership to a repo-scoped child task",
                     kind=NextActionKind.TASK_SCOPE_REVIEW,
                     source="data.action_inputs.baseline_conflicts",
+                    choices=[WorkspaceBaselineResolution.RESTORE_TASK_START, WorkspaceBaselineResolution.MOVE_TO_REPO_CHILD],
                     target_ref="data.action_inputs.baseline_conflicts",
                 )
             add("Inspect workspace task repository state", command=f"./scripts/repoctl task show {task_id} --summary --json")
         elif code == "repo_history_rewritten":
             add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
-            add("Create a new task with a fresh baseline", command="./scripts/repoctl task create --slug <slug> --area repo --repo-id main <title> --start --json")
+            add("Create a new task with a fresh baseline after choosing its title and slug", path="docs/tasks/")
         elif code == "repo_changes_on_cancel":
             add("Revert or finish repos/ changes before canceling", command="git -C repos status --short")
         elif code == "annotation_required":
-            repository = data.get("repository") if isinstance(data, dict) else None
-            repo_path = str(repository.get("path") or "") if isinstance(repository, dict) else ""
-            repo_id = str(repository.get("id") or "") if isinstance(repository, dict) else ""
-            if repo_path and path.startswith(f"{repo_path}/"):
-                rel = path[len(repo_path) + 1 :]
-            else:
-                rel = path[6:] if path.startswith("repos/") else path
-            selector = f" --repo-id {repo_id}" if repo_id and repo_id != "main" else ""
-            add("Add required metadata annotation", command=f"./scripts/repoctl meta set {rel or '<path>'}{selector} --role <role> --purpose <purpose> --topic <topic> --json")
+            repository = _mapping_at(data, "repository")
+            repo_path = str(repository.get("path") or "").rstrip("/")
+            repo_id = str(repository.get("id") or "")
+            rel = path[len(repo_path) + 1 :] if repo_path and path.startswith(f"{repo_path}/") else path
+            add(
+                "Add required metadata annotation",
+                command=f"./scripts/repoctl meta show {shlex.quote(rel)} --repo-id {shlex.quote(repo_id)} --json" if rel and repo_id else "",
+                path=path,
+                kind=NextActionKind.METADATA_INPUT,
+                source="problems[].path",
+            )
         elif code == "move_candidate":
-            add("Repair metadata path explicitly", command="./scripts/repoctl meta move <old-path> <new-path> --json")
+            add("Review the reported metadata move candidate", path=path, kind=NextActionKind.METADATA_INPUT)
         elif code == "inline_meta_residue":
-            add("Move inline metadata into .repometa", command="./scripts/repoctl meta set <path> --role <role> --purpose <purpose> --topic <topic> --json", path=path)
+            add("Choose equivalent sparse metadata for this source file", path=path, kind=NextActionKind.METADATA_INPUT)
             add("Remove inline @meta/frontmatter metadata from the source file", path=path)
         elif code in {"invalid_frontmatter", "missing_frontmatter", "invalid_status"}:
             add("Open and fix task frontmatter", path=path or f"docs/tasks/{task_id}.md")
@@ -690,9 +681,12 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         elif code in {"context_pack_stale", "context_pack_missing", "context_pack_invalid", "context_pack_unknown"}:
             resume = _mapping_at(data, "resume_guidance")
             context_pack = _mapping_at(resume, "context_pack")
-            pack_path = str(context_pack.get("path") or ".repoctl-state/context-pack/<task>.json")
+            pack_path = str(context_pack.get("path") or "")
             task_data = _mapping_at(data, "task")
             repo_id = str(task_data.get("repo_id") or "main")
+            if not task_id or not pack_path:
+                add("Review the optional Context Pack binding", path=task_path)
+                continue
             if pack_path.endswith(".md"):
                 command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --format markdown --output {shlex.quote(pack_path)}"
             else:
@@ -714,39 +708,47 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add("Inspect configured repositories", command="./scripts/repoctl repo list --json")
             add("Adopt detected product repositories", command="./scripts/repoctl repo adopt --all --json")
         elif code in {"repository_selector_required", "repository_identity_unbound"}:
-            add("Inspect repository identities", command="./scripts/repoctl repo list --json")
-            add("Pass an explicit repo id", command="./scripts/repoctl <command> --repo-id <id> --json")
+            candidates = (data or {}).get("repository_candidates")
+            for candidate in candidates if isinstance(candidates, list) else []:
+                if not isinstance(candidate, dict):
+                    continue
+                repo_id = str(candidate.get("suggested_id") or candidate.get("id") or "")
+                candidate_path = str(candidate.get("path") or "")
+                if code == "repository_identity_unbound" and repo_id and candidate_path:
+                    add(f"Adopt repository {repo_id}", command=f"./scripts/repoctl repo adopt {shlex.quote(candidate_path)} --id {shlex.quote(repo_id)} --json")
+                elif repo_id:
+                    add(f"Inspect repository {repo_id}", command=f"./scripts/repoctl repo show {shlex.quote(repo_id)} --json")
+            if not candidates:
+                add("Inspect repository identities", command="./scripts/repoctl repo list --json")
         elif code in {"invalid_task_id", "invalid_task_id_format"}:
             add("Use task id format T-YYYYMMDDHHMMSSZ", command="./scripts/repoctl task list --json")
         elif code == "invalid_area":
-            add("Use a broad area enum and keep detailed surface in task text", command="./scripts/repoctl task create --area frontend --slug <slug> \"<title>\" --json")
+            add("Choose one of the area values shown by task create --help", command="./scripts/repoctl task create --help")
         elif code == "invalid_repo_ref":
-            add("When no product repo is selected, omit --repo-ref", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
-            add("For repo work, use stable repo_id", command="./scripts/repoctl task create --area repo --repo-id <id> --slug <slug> \"<title>\" --json")
+            add("Inspect stable repository identities before creating the task", command="./scripts/repoctl repo list --json")
         elif code == "repo_ref_non_repo_area":
-            add("Use a repo-scoped area and stable repo_id for repos/ work", command="./scripts/repoctl task create --area repo --repo-id <id> --slug <slug> \"<title>\" --json")
-            add("Omit --repo-ref when no product repo is selected", command="./scripts/repoctl task create --area docs --slug <slug> \"<title>\" --json")
+            add("Review task create repository and area inputs", command="./scripts/repoctl task create --help")
         elif code == "missing_repometa_policy":
-            repo_id = selected_repo_id()
+            repo_id = _selected_repo_id(data)
             add(
                 "Initialize repository metadata",
                 command=f"./scripts/repoctl meta init --repo-id {repo_id} --json",
             )
             add("Review repository metadata setup", path="docs/workflows/repo-metadata.md")
         elif code == "metadata_coverage_empty":
-            add("Configure sparse metadata coverage", command="./scripts/repoctl meta set <path> --role <role> --purpose <purpose> --topic <topic> --json")
+            add("Choose the first sparse metadata path and values", path="docs/workflows/repo-metadata.md", kind=NextActionKind.METADATA_INPUT)
         elif code == "board_missing_live_task":
             add("Repair Board registry", command="./scripts/repoctl check --fix-board --json")
         elif code == "stale_lock":
             add("Inspect repoctl lock before removing it", path=path or "docs/tasks/.repoctl.lock.d")
         elif code in {"missing_upgrade_manifest", "invalid_upgrade_source"}:
-            add("Choose a repoctl release checkout or extracted artifact", command="./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --json")
+            add("Choose an existing repoctl release checkout or extracted artifact", command="./scripts/repoctl upgrade plan --help")
         elif code == "missing_upgrade_plan":
-            add("Create an upgrade plan first", command="./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --output /tmp/repoctl-upgrade-plan.json --json")
+            add("Create an upgrade plan from an existing release checkout", command="./scripts/repoctl upgrade plan --help")
         elif code in {"upgrade_plan_stale", "upgrade_plan_workspace_mismatch"}:
-            add("Regenerate the upgrade plan", command="./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --output /tmp/repoctl-upgrade-plan.json --json")
+            add("Regenerate the upgrade plan from its selected release checkout", command="./scripts/repoctl upgrade plan --help")
         elif code == "upgrade_plan_has_conflicts":
-            add("Inspect plan conflicts before applying", path=path or "/tmp/repoctl-upgrade-plan.json")
+            add("Inspect plan conflicts before applying", path=path)
         elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
             add("Apply the declared benchmark corpus before running this gate", path="tests/fixtures/context-benchmark/corpus.json")
         elif code in {"context_graph_unavailable", "context_evidence_index_unavailable"}:
@@ -755,9 +757,12 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 if cause_code == "graph_snapshot_missing"
                 else NextActionKind.GRAPH_REBUILD
             )
-            add_context_graph_recovery(recovery_kind, source="problems_or_warnings[].cause_code")
+            action = _recovery_action(recovery_kind, repo_id=_selected_repo_id(data), source="problems_or_warnings[].cause_code")
+            if action:
+                add(**action)
+                context_resume_requested = True
         elif code == "graph_snapshot_missing":
-            repo_id = selected_repo_id()
+            repo_id = _selected_repo_id(data)
             add(
                 "Build the materialized Graph and evidence index",
                 command=f"./scripts/repoctl graph build --repo-id {repo_id} --json",
@@ -765,13 +770,14 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 source="problems[].code",
             )
         elif code == "context_graph_stale":
-            add_context_graph_recovery(
-                NextActionKind.GRAPH_REFRESH,
-                source="problems[].code",
-            )
+            action = _recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="problems[].code")
+            if action:
+                add(**action)
+                context_resume_requested = True
         elif code == "context_graph_seed_identity_unavailable":
-            request_context_resume()
-            bundle, repo_id = context_bundle_and_repo()
+            context_resume_requested = True
+            bundle = _mapping_at(data, "bundle")
+            repo_id = _selected_repo_id(data)
             identity_coverage = _mapping_at(bundle, "completeness", "graph_anchor", "identity_coverage")
             selectors = identity_coverage.get("recovery_selectors") if isinstance(identity_coverage.get("recovery_selectors"), list) else []
             for selector in selectors:
@@ -794,10 +800,10 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                     source="data.bundle.completeness.graph_anchor.identity_coverage.recovery_selectors",
                 )
         elif code == "graph_snapshot_stale":
-            add_context_graph_recovery(
-                NextActionKind.GRAPH_REFRESH,
-                source="warnings[].code",
-            )
+            action = _recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="warnings[].code")
+            if action:
+                add(**action)
+                context_resume_requested = True
         elif code in {
             "graph_materialization_incomplete",
             "graph_materialization_invalid",
@@ -811,36 +817,46 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             "evidence_index_input_mismatch",
             "evidence_index_snapshot_mismatch",
         }:
-            add_context_graph_recovery(
-                NextActionKind.GRAPH_REBUILD,
-                source="problems_or_warnings[].code",
-            )
+            action = _recovery_action(NextActionKind.GRAPH_REBUILD, repo_id=_selected_repo_id(data), source="problems_or_warnings[].code")
+            if action:
+                add(**action)
+                context_resume_requested = True
         elif code == "knowledge_candidate_receipt_invalid":
             add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
-            add("Rebuild the candidate after fixing receipt provenance", command=f"./scripts/repoctl knowledge candidate build --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+            add("Rebuild the candidate after choosing its repository, kind, and explicit claim", kind=NextActionKind.KNOWLEDGE_REVIEW)
         elif code == "knowledge_candidate_claim_required":
-            add("State the reusable decision, invariant, or failure mode explicitly", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --kind <kind> --claim '<reusable claim>' --json")
+            add("State the reusable decision, invariant, or failure mode explicitly", kind=NextActionKind.KNOWLEDGE_REVIEW)
         elif code == "knowledge_records_empty":
-            add("Build a reviewable candidate from a source document", command="./scripts/repoctl knowledge candidate build --source docs/contracts/<source>.md --repo-id <id> --kind <kind> --claim '<reusable claim>' --json")
-            add("Preview task-derived candidate without approving it", command=f"./scripts/repoctl knowledge candidate build --from-task {task_id} --repo-id <id> --kind <kind> --claim '<reusable claim>' --dry-run --json")
+            add("Choose a source and explicit reusable claim for a review candidate", kind=NextActionKind.KNOWLEDGE_REVIEW)
     bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
     completeness = bundle.get("completeness") if isinstance(bundle.get("completeness"), dict) else {}
     prior_outcome = completeness.get("prior_task_outcome") if isinstance(completeness.get("prior_task_outcome"), dict) else {}
     if str(prior_outcome.get("reason") or "") in COMPLETION_CATALOGUE_UNAVAILABLE_CODES:
-        add_completion_catalogue_recovery(
-            source="data.bundle.completeness.prior_task_outcome.reason"
-        )
+        action = _recovery_action(NextActionKind.COMPLETION_CATALOGUE_REBUILD, repo_id=_selected_repo_id(data), source="data.bundle.completeness.prior_task_outcome.reason")
+        if action:
+            add(**action)
+            context_resume_requested = True
     freshness = completeness.get("graph_freshness") if isinstance(completeness.get("graph_freshness"), dict) else {}
     if str(freshness.get("status") or "") == "stale":
-        add_context_graph_recovery(
-            NextActionKind.GRAPH_REFRESH,
-            source="data.bundle.completeness.graph_freshness.status",
-        )
+        action = _recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="data.bundle.completeness.graph_freshness.status")
+        if action:
+            add(**action)
+            context_resume_requested = True
     if context_resume_requested:
-        add_context_resume(
-            label="Rerun the same Context query after prerequisites are ready",
-            source="data.bundle.query",
-        )
+        replay = _context_replay_action(data)
+        if replay is not None:
+            add(**replay)
+        recovery_kinds = {
+            NextActionKind.GRAPH_BUILD: 0,
+            NextActionKind.GRAPH_REBUILD: 0,
+            NextActionKind.GRAPH_REFRESH: 0,
+            NextActionKind.COMPLETION_CATALOGUE_REBUILD: 1,
+            NextActionKind.KNOWLEDGE_REBUILD: 2,
+            NextActionKind.CONTEXT_RESUME: 3,
+        }
+        recovery = [action for action in actions if action.get("kind") in recovery_kinds]
+        other = [action for action in actions if action.get("kind") not in recovery_kinds]
+        actions = [*other, *sorted(recovery, key=lambda action: recovery_kinds[action["kind"]])]
     return actions
 
 
@@ -1727,20 +1743,13 @@ def _repo_scoped_frontmatter(task: Any) -> bool:
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
 
 
-def _discovery_guidance_actions(task_id: str, *, repo_id: str = "main", repo_path: str = "repos") -> list[dict[str, str]]:
-    candidate = f"{repo_path.rstrip('/')}/<path>"
+def _discovery_guidance_actions(task_id: str, *, repo_id: str = "main", repo_path: str = "repos") -> list[dict[str, Any]]:
     return [
         {
-            "label": "Record the candidate query",
-            "command": f"./scripts/repoctl task discovery add {task_id} --query '<query>' --json",
-        },
-        {
-            "label": "Find likely product files",
-            "command": f"./scripts/repoctl context query '<query>' --repo-id {repo_id} --json",
-        },
-        {
-            "label": "Record inspected and chosen files",
-            "command": f"./scripts/repoctl task discovery add {task_id} --reviewed {candidate} --chosen {candidate} --json",
+            "label": "Choose a concrete discovery query and reviewed/chosen product paths",
+            "kind": NextActionKind.DISCOVERY_INPUT,
+            "source": f"docs/tasks/{task_id}.md#Discovery",
+            "path": f"docs/tasks/{task_id}.md",
         },
     ]
 
@@ -1816,7 +1825,7 @@ def _repo_target_from_args(root: Path, args: argparse.Namespace) -> RepoTarget |
     return default_repo_target(root)
 
 
-def _error_data(args: argparse.Namespace) -> dict[str, Any]:
+def _error_data(args: argparse.Namespace, error: RepoctlError | None = None) -> dict[str, Any]:
     data: dict[str, Any] = {}
     task_id = str(getattr(args, "task_id", "") or getattr(args, "task", "") or "")
     repo_id = str(getattr(args, "repo_id", "") or "")
@@ -1831,6 +1840,14 @@ def _error_data(args: argparse.Namespace) -> dict[str, Any]:
                 data["repo_id"] = str(task.frontmatter.get("repo_id") or "")
     if repo_id:
         data["repo_id"] = repo_id
+    if error is not None and error.code in {"repository_identity_unbound", "repository_selector_required"}:
+        try:
+            layout = repo_layout(_workspace_root_or_cwd())
+        except (OSError, RepoctlError):
+            pass
+        else:
+            candidates = layout.candidates if error.code == "repository_identity_unbound" else layout.targets
+            data["repository_candidates"] = [candidate.to_dict() for candidate in candidates]
     return data
 
 
@@ -4745,6 +4762,50 @@ def _compact_graph_materialization(materialization: Any) -> dict[str, Any]:
     }
 
 
+def _graph_candidate_actions(result: dict[str, Any] | None, *, repo_id: str) -> list[dict[str, str]]:
+    if not isinstance(result, dict) or result.get("query_status") != "ambiguous":
+        return []
+    query = result.get("query") if isinstance(result.get("query"), dict) else {}
+    query_type = str(query.get("type") or "")
+    flag = {
+        "file": "--file",
+        "impact_file": "--impact-file",
+        "symbol": "--symbol",
+        "callers": "--callers-of",
+        "callees": "--callees-of",
+        "impact_symbol": "--impact-symbol",
+    }.get(query_type)
+    if not flag:
+        return []
+    actions: list[dict[str, str]] = []
+    candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
+    for candidate in candidates:
+        path = str(candidate.get("path") or "") if isinstance(candidate, dict) else ""
+        if not path:
+            continue
+        workspace_path = str(candidate.get("workspace_path") or path)
+        actions.append(
+            {
+                "label": f"Inspect Graph candidate {workspace_path}",
+                "path": workspace_path,
+            }
+        )
+    if actions:
+        return actions
+    for match in (result.get("matches") if isinstance(result.get("matches"), list) else []):
+        if not isinstance(match, dict):
+            continue
+        selector = str(match.get("qualified_name") or match.get("name") or "")
+        path = str(match.get("path") or "")
+        if not selector:
+            continue
+        command = f"./scripts/repoctl graph query --repo-id {shlex.quote(repo_id)} {flag} {shlex.quote(selector)}"
+        if path:
+            command += f" --in-file {shlex.quote(path)}"
+        actions.append({"label": f"Replay Graph query for {selector}", "command": f"{command} --json"})
+    return actions
+
+
 def cmd_graph_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
@@ -4856,6 +4917,10 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             }
         ],
     }
+    payload["next_actions"] = [
+        *_graph_candidate_actions(result, repo_id=target.id),
+        *_next_actions_for_problems([*payload["problems"], *payload["warnings"]], data=payload["data"]),
+    ]
     if args.json:
         _json(payload, compact=not args.full)
     else:
@@ -5945,7 +6010,7 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def _knowledge_candidate_next_actions(data: dict[str, Any], *, repo_id: str, dry_run: bool) -> list[dict[str, str]]:
+def _knowledge_candidate_next_actions(data: dict[str, Any], *, repo_id: str, dry_run: bool) -> list[dict[str, Any]]:
     candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else {}
     candidate_id = str(candidate.get("id") or "")
     if not candidate_id or dry_run:
@@ -5961,7 +6026,13 @@ def _knowledge_candidate_next_actions(data: dict[str, Any], *, repo_id: str, dry
         },
         {
             "label": "Approve only after reviewing the claim and sources",
-            "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {repo_id} --reviewed-by <label> --note-file <review-note.md> --json",
+            "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {repo_id} --json",
+        },
+        {
+            "label": "Reject after supplying a concrete reason file",
+            "kind": NextActionKind.KNOWLEDGE_REVIEW,
+            "source": "data.candidate.id",
+            "choices": [KnowledgeReviewDecision.REJECT],
         },
     ]
 
@@ -6155,11 +6226,13 @@ def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
         review_actions = [
             {
                 "label": "Approve after reviewing the claim and sources",
-                "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {args.repo_id} --reviewed-by <label> --note-file <review-note.md> --json",
+                "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {args.repo_id} --json",
             },
             {
-                "label": "Reject if the claim is not reusable or source-grounded",
-                "command": f"./scripts/repoctl knowledge reject {candidate_id} --repo-id {args.repo_id} --reason-file <reason.md> --json",
+                "label": "Reject after supplying a concrete reason file",
+                "kind": NextActionKind.KNOWLEDGE_REVIEW,
+                "source": "data.candidate.id",
+                "choices": [KnowledgeReviewDecision.REJECT],
             },
         ]
     payload = {
@@ -6257,11 +6330,11 @@ def _render_knowledge_candidate_review_markdown(data: dict[str, Any], check_data
     lines.extend(
         [
             "",
-            "## Next Commands",
+            "## Next Actions",
             "",
-            f"- Approve: `./scripts/repoctl knowledge approve {candidate.get('id', '')} --repo-id {repo_id} --reviewed-by <label> --note-file /tmp/review-note.md --json`",
-            f"- Reject: `./scripts/repoctl knowledge reject {candidate.get('id', '')} --repo-id {repo_id} --reason-file /tmp/reject-reason.md --json`",
-            f"- Supersede: `./scripts/repoctl knowledge approve {candidate.get('id', '')} --repo-id {repo_id} --supersedes K-... --reviewed-by <label> --note-file /tmp/review-note.md --json`",
+            f"- Approve: `./scripts/repoctl knowledge approve {candidate.get('id', '')} --repo-id {repo_id} --json`",
+            "- Reject: provide a concrete reason file to `knowledge reject` after review.",
+            "- Supersede: choose the exact current record ID before approving.",
         ]
     )
     return "\n".join(lines)
@@ -6677,7 +6750,7 @@ def cmd_upgrade_status(args: argparse.Namespace) -> int:
     data = {
         **_version_data(root),
         **status_data,
-        "next_command": "./scripts/repoctl upgrade plan --from /path/to/agent-handoff-template --json",
+        "next_command": "./scripts/repoctl upgrade plan --help",
     }
     payload = {
         "ok": not problems,
@@ -7839,7 +7912,7 @@ def main(argv: list[str] | None = None) -> int:
                 problem["path"] = error.path
             if error.cause_code:
                 problem["cause_code"] = error.cause_code
-            error_data = _error_data(args)
+            error_data = _error_data(args, error)
             error_data.update(getattr(error, "data", {}))
             _json({"ok": False, "command": args.command_id, "data": error_data, "problems": [problem], "warnings": []})
         else:

@@ -56,6 +56,10 @@ def test_unconfigured_collection_blocks_meta_init_index_and_product_task_without
     assert main(["meta", "init", "--json"]) == 2
     meta_payload = json.loads(capsys.readouterr().out)
     assert meta_payload["problems"][0]["code"] == "repository_identity_unbound"
+    assert [action["command"] for action in meta_payload["next_actions"]] == [
+        "./scripts/repoctl repo adopt repos/api --id api --json",
+        "./scripts/repoctl repo adopt repos/web --id web --json",
+    ]
     assert not (tmp_path / "repos/.repometa").exists()
 
     assert main(["index", "code", "--json"]) == 2
