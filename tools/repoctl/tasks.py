@@ -46,7 +46,7 @@ COMPLETION_RECEIPT_SCHEMA_VERSION = 4
 TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION = 2
 RESUME_BINDING_SCHEMA_VERSION = 4
-LEGACY_RESUME_BINDING_SCHEMA_VERSION = 3
+LEGACY_RESUME_BINDING_SCHEMA_VERSIONS = {1, 2, 3}
 ARCHIVE_LOCATOR_SCHEMA_VERSION = 1
 HANDOFF_GENERATED_MARKER = "<!-- repoctl: generated-handoff -->"
 
@@ -1893,10 +1893,7 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
     if (
         data.get("schema") != "repoctl.task.resume_binding"
         or type(schema_version) is not int
-        or schema_version not in {
-            LEGACY_RESUME_BINDING_SCHEMA_VERSION,
-            RESUME_BINDING_SCHEMA_VERSION,
-        }
+        or schema_version not in LEGACY_RESUME_BINDING_SCHEMA_VERSIONS | {RESUME_BINDING_SCHEMA_VERSION}
     ):
         raise RepoctlError("task resume binding has invalid schema", code="task_resume_binding_invalid", path=rel)
     if str(data.get("task_id") or "") != task_id:
@@ -1905,7 +1902,7 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
         raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
     input_digests = data.get("input_digests")
     expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository"}
-    if schema_version in {LEGACY_RESUME_BINDING_SCHEMA_VERSION, RESUME_BINDING_SCHEMA_VERSION}:
+    if schema_version != 1:
         expected_input_keys.add("direct_children")
     if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
         raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)

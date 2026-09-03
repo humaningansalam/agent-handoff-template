@@ -3392,15 +3392,19 @@ def test_handoff_command_text_is_inert_across_resume_lifecycle(
     assert not marker.exists()
 
 
-def test_legacy_v3_handoff_binding_is_inactive_until_v4_rebind(
+@pytest.mark.parametrize("legacy_version", (1, 2, 3))
+def test_legacy_handoff_binding_is_inactive_until_v4_rebind(
     tmp_path: Path,
     monkeypatch,
     capsys,
+    legacy_version: int,
 ) -> None:
     task_path, _repo, receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
     _bind_handoff(capsys)
     binding = json.loads(receipt.read_text(encoding="utf-8"))
-    binding["schema_version"] = 3
+    binding["schema_version"] = legacy_version
+    if legacy_version == 1:
+        del binding["input_digests"]["direct_children"]
     receipt.write_text(json.dumps(binding, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     guidance = _show_resume_guidance(capsys)
