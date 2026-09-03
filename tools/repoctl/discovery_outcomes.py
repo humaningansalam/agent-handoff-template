@@ -772,11 +772,11 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
         if (
             not isinstance(record.get("status"), str)
             or record.get("status") not in VERIFICATION_STATUSES
+            or not _is_digest(record.get("record_id"))
             or not _canonical_string_list(record_subject_ids)
             or not set(record_subject_ids) <= subject_ids
             or not _canonical_digest_list(record_claim_ids)
             or not set(record_claim_ids) <= claim_ids
-            or not record_subject_ids and not record_claim_ids
             or not _valid_completion_evidence(evidence)
         ):
             raise ValueError("completion structured verification is invalid")
@@ -787,7 +787,7 @@ def validate_completion_outcome(value: Any) -> dict[str, Any]:
             "subject_ids": stable_subject_ids,
             "claim_ids": record_claim_ids,
         }
-        if record.get("record_id") != digest_data(record_base):
+        if (record_subject_ids or record_claim_ids) and record.get("record_id") != digest_data(record_base):
             raise ValueError("completion structured verification digest is invalid")
     return _copy(value)
 

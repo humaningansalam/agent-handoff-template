@@ -622,6 +622,34 @@ def test_completion_outcome_retains_verified_chosen_subject_after_scope_replacem
     assert validate_completion_outcome(receipt["discovery_outcome"]) == receipt["discovery_outcome"]
 
 
+def test_completion_outcome_accepts_legacy_task_level_verification() -> None:
+    evidence_digest = digest_data({"legacy": "task-level verification"})
+    evidence = {"kind": "digest", "ref": evidence_digest, "digest": evidence_digest}
+    record_base = {
+        "status": "passed",
+        "evidence": evidence,
+        "subject_ids": [],
+        "claim_ids": [],
+    }
+    basis = {
+        "schema": "repoctl.task.discovery-completion-outcome",
+        "schema_version": 1,
+        "repository": None,
+        "subjects": [],
+        "active_chosen": [],
+        "episodes": [],
+        "verification_records": [
+            {
+                "record_id": digest_data({"legacy": "unavailable verification subject"}),
+                **record_base,
+            }
+        ],
+    }
+    outcome = {**basis, "outcome_digest": digest_data(basis)}
+
+    assert validate_completion_outcome(outcome) == outcome
+
+
 def test_completion_outcome_preserves_each_exact_verified_file_version(
     tmp_path: Path,
     monkeypatch,

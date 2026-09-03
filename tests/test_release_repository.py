@@ -265,11 +265,11 @@ def test_v090_release_upgrade_and_fresh_postflight(tmp_path: Path) -> None:
         "--output",
         str(plan_file),
     )
-    assert plan["data"]["source_version"] == "0.10.2"
+    assert plan["data"]["source_version"] == "0.10.3"
     assert plan["data"]["operations"]
     repoctl(release_root, "upgrade", "apply", "--workspace-root", str(target), "--plan-file", str(plan_file))
     version = repoctl(target, "version")
-    assert version["data"]["pyproject_version"] == version["data"]["manifest_version"] == "0.10.2"
+    assert version["data"]["pyproject_version"] == version["data"]["manifest_version"] == "0.10.3"
     assert repoctl(target, "upgrade", "postflight")["ok"] is True
     assert not list((target / "tests").rglob("*.py"))
     assert repoctl(release_root, "upgrade", "plan", "--workspace-root", str(release_root), "--from", str(release_root))["data"]["operations"] == []
