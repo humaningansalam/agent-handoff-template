@@ -155,6 +155,27 @@ def test_upgrade_same_version_plan_treats_current_archive_locator_as_noop(tmp_pa
     assert plan["migrations"] == []
 
 
+def test_upgrade_plan_accepts_terminal_predecessor_retained_in_task_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    write_workspace(workspace)
+    write_source(source)
+    archive, _locator = add_legacy_follow_up(workspace)
+    retained = workspace / "docs/tasks/T-20260608120000Z--done.md"
+    retained.write_text(
+        archive.read_text(encoding="utf-8").replace("status: done", "status: canceled"),
+        encoding="utf-8",
+    )
+    archive.unlink()
+
+    plan = plan_upgrade(workspace, source=source)
+
+    assert plan["conflicts"] == []
+    assert plan["migrations"] == []
+
+
 def test_upgrade_apply_uses_plan_and_preserves_project_state(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     source = tmp_path / "source"

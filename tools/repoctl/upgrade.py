@@ -496,6 +496,28 @@ def _plan_archive_locator_migration(root: Path) -> tuple[list[dict[str, Any]], l
         receipt, receipt_problems = completion_receipt_artifact_for_task(root, task_id=task_id)
         if receipt is not None and not receipt_problems:
             continue
+        retained = sorted(task_directory.glob(f"{task_id}--*.md"))
+        if retained:
+            if len(retained) != 1:
+                conflicts.append(
+                    _migration_conflict(
+                        "archive_locator_migration_unresolved",
+                        f"live follow-up predecessor must resolve to exactly one retained task, found {len(retained)}",
+                        f"docs/tasks/{task_id}--*.md",
+                    )
+                )
+                continue
+            try:
+                _valid_archive_authority(retained[0], root, task_id)
+            except RepoctlError as exc:
+                conflicts.append(
+                    _migration_conflict(
+                        exc.code,
+                        str(exc),
+                        exc.path or retained[0].relative_to(root).as_posix(),
+                    )
+                )
+            continue
         matches = sorted(archive_directory.glob(f"{task_id}--*.md"))
         if len(matches) != 1:
             conflicts.append(
