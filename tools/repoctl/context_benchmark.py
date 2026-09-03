@@ -3,8 +3,6 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
-import re
-from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -12,34 +10,14 @@ from urllib.parse import unquote
 
 from .context import build_context_bundle, compact_context_bundle
 from .context_model import ContextBundle
-from .discovery_outcomes import result_member_capsules, validate_completion_outcome
 from .graph_model import GraphSnapshot
 from .graph_model import digest_data
 from .graph_store import materialize_graph
-from .knowledge_candidates import (
-    KnowledgeSourceRefKind,
-    KnowledgeSourceResolutionStatus,
-    _knowledge_approval_binding,
-    _knowledge_record_contract_problems,
-    knowledge_source_ref_resolutions,
-)
-from .knowledge_projection import rebuild_knowledge_projection
 from .language_profiles import default_indexing_excludes
-from .repositories import RepoTarget, RepositoryIdentitySource, require_repo_target
-from .result_receipts import (
-    ContextResultRequest,
-    ResultAuthority,
-    ResultProducer,
-    ResultSelection,
-    context_result_citations,
-    context_result_receipt_projection,
-    write_result_receipt,
-)
+from .repositories import require_repo_target
 from .tasks import Problem
 
 IGNORED_SOURCE_PATTERNS = tuple(default_indexing_excludes())
-KNOWLEDGE_RECORD_ID_RE = re.compile(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*")
-KNOWLEDGE_EVENT_ID_RE = re.compile(r"E-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def run_context_benchmark(
@@ -49,6 +27,7 @@ def run_context_benchmark(
     repo_id: str = "",
     min_recall_at_5: float | None = None,
     min_precision_at_5: float | None = None,
+    min_visible_recall: float | None = None,
     min_knowledge_recall_at_5: float | None = None,
     min_category_recall_at_5: dict[str, float] | None = None,
     min_category_knowledge_recall_at_5: dict[str, float] | None = None,
@@ -59,7 +38,7 @@ def run_context_benchmark(
     require_no_forbidden: bool = False,
     require_no_cross_repo: bool = False,
     require_fixture_corpus: bool = False,
-    include_attribution: bool = False,
+    max_output_estimated_tokens: int | None = None,
 ) -> tuple[dict[str, Any], list[Problem]]:
     questions_path = fixture / "questions.jsonl"
     expected_path = fixture / "expected-sources.json"
@@ -75,7 +54,6 @@ def run_context_benchmark(
     if require_fixture_corpus:
         problems.extend(corpus_problems)
     results: list[dict[str, Any]] = []
-    attribution_inputs: dict[str, tuple[ContextBundle, dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = {}
     with TemporaryDirectory(prefix="repoctl-context-benchmark-") as temporary_state:
         graph_state_root = Path(temporary_state)
         graph_cache: dict[str, tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]] = {}
@@ -101,28 +79,6 @@ def run_context_benchmark(
             problems.extend(graph_problems)
             spec = expected.get(question_id, {}) if isinstance(expected, dict) else {}
             results.append(_score_question(question, spec, bundle, [*bundle_problems, *graph_problems]))
-            if include_attribution:
-                full_bundle = bundle.to_dict()
-                request = ContextResultRequest(
-                    query=str(question.get("question") or ""),
-                    mode=str(bundle.query.get("mode") or "auto"),
-                )
-                receipt = write_result_receipt(
-                    graph_state_root,
-                    target=target,
-                    producer=ResultProducer.CONTEXT,
-                    result_id=str(full_bundle["bundle_digest"]),
-                    request=request,
-                    selections=context_result_citations(full_bundle),
-                )
-                compact_bundle = compact_context_bundle(bundle)
-                projection = context_result_receipt_projection(receipt, compact_bundle=compact_bundle, full=True)
-                attribution_inputs[question_id] = (
-                    bundle,
-                    projection,
-                    receipt,
-                    result_member_capsules(root, target=target, receipt=receipt),
-                )
 
     summary = _summarize(results)
     problems.extend(
@@ -130,6 +86,7 @@ def run_context_benchmark(
             summary,
             min_recall_at_5=min_recall_at_5,
             min_precision_at_5=min_precision_at_5,
+            min_visible_recall=min_visible_recall,
             min_knowledge_recall_at_5=min_knowledge_recall_at_5,
             min_category_recall_at_5=min_category_recall_at_5 or {},
             min_category_knowledge_recall_at_5=min_category_knowledge_recall_at_5 or {},
@@ -140,6 +97,7 @@ def run_context_benchmark(
             require_no_forbidden=require_no_forbidden,
             require_no_cross_repo=require_no_cross_repo,
             require_fixture_corpus=require_fixture_corpus,
+            max_output_estimated_tokens=max_output_estimated_tokens,
         )
     )
     data = {
@@ -150,6 +108,7 @@ def run_context_benchmark(
         "gates": {
             "min_recall_at_5": min_recall_at_5,
             "min_precision_at_5": min_precision_at_5,
+            "min_visible_recall": min_visible_recall,
             "min_knowledge_recall_at_5": min_knowledge_recall_at_5,
             "min_category_recall_at_5": dict(sorted((min_category_recall_at_5 or {}).items())),
             "min_category_knowledge_recall_at_5": dict(sorted((min_category_knowledge_recall_at_5 or {}).items())),
@@ -160,657 +119,12 @@ def run_context_benchmark(
             "require_no_forbidden": require_no_forbidden,
             "require_no_cross_repo": require_no_cross_repo,
             "require_fixture_corpus": require_fixture_corpus,
+            "max_output_estimated_tokens": max_output_estimated_tokens,
         },
         "fixture_corpus": corpus_status,
     }
-    if include_attribution:
-        attribution, attribution_problems = _attribution_capsule(root, fixture, attribution_inputs=attribution_inputs)
-        problems.extend(attribution_problems)
-        if attribution:
-            data["attribution"] = attribution
     data["benchmark_digest"] = digest_data(data)
     return data, problems
-
-
-def compare_context_benchmarks(
-    *,
-    root: Path | None = None,
-    baseline_path: Path,
-    candidate_path: Path,
-    max_recall_at_5_drop: float | None = None,
-    max_precision_at_5_drop: float | None = None,
-    max_knowledge_recall_at_5_drop: float | None = None,
-    max_question_recall_at_5_drop: float | None = None,
-    require_current_sources: bool = False,
-) -> tuple[dict[str, Any], list[Problem]]:
-    problems: list[Problem] = []
-    baseline = _read_benchmark_artifact(baseline_path, problems, label="baseline")
-    candidate = _read_benchmark_artifact(candidate_path, problems, label="candidate")
-    if not baseline or not candidate:
-        return {}, problems
-    source_drift: list[Problem] = []
-    if require_current_sources:
-        if root is None:
-            source_drift.append(Problem("error", "context_benchmark_current_source_root_missing", "current source gate requires a workspace root"))
-        else:
-            source_drift.extend(_source_drift_problems(root, baseline, label="baseline"))
-            source_drift.extend(_source_drift_problems(root, candidate, label="candidate"))
-    problems.extend(source_drift)
-    baseline_summary = baseline.get("summary") if isinstance(baseline.get("summary"), dict) else {}
-    candidate_summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
-    metric_deltas = {
-        "mean_recall_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_recall_at_5"),
-        "mean_precision_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_precision_at_5"),
-        "mean_knowledge_recall_at_5": _metric_delta(baseline_summary, candidate_summary, "mean_knowledge_recall_at_5"),
-    }
-    question_deltas = _question_deltas(baseline, candidate)
-    regressions = _compare_regressions(
-        baseline_summary,
-        candidate_summary,
-        metric_deltas,
-        question_deltas,
-        max_recall_at_5_drop=max_recall_at_5_drop,
-        max_precision_at_5_drop=max_precision_at_5_drop,
-        max_knowledge_recall_at_5_drop=max_knowledge_recall_at_5_drop,
-        max_question_recall_at_5_drop=max_question_recall_at_5_drop,
-    )
-    problems.extend(regressions)
-    result = {
-        "schema": "repoctl.context.benchmark.compare",
-        "schema_version": 1,
-        "baseline": _artifact_identity(baseline_path, baseline),
-        "candidate": _artifact_identity(candidate_path, candidate),
-        "metric_deltas": metric_deltas,
-        "question_deltas": question_deltas,
-        "summary_regressions": [problem.to_dict() for problem in regressions],
-        "source_drift": [problem.to_dict() for problem in source_drift],
-        "gates": {
-            "max_recall_at_5_drop": max_recall_at_5_drop,
-            "max_precision_at_5_drop": max_precision_at_5_drop,
-            "max_knowledge_recall_at_5_drop": max_knowledge_recall_at_5_drop,
-            "max_question_recall_at_5_drop": max_question_recall_at_5_drop,
-            "require_current_sources": require_current_sources,
-        },
-    }
-    return result, problems
-
-
-def _attribution_capsule(
-    root: Path,
-    fixture: Path,
-    *,
-    attribution_inputs: dict[str, tuple[ContextBundle, dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
-) -> tuple[dict[str, Any], list[Problem]]:
-    path = fixture / "attribution-cases.json"
-    if not path.is_file():
-        return {}, [Problem("error", "context_benchmark_attribution_missing", "attribution mode requires attribution-cases.json", path.as_posix())]
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return _project_attribution_cases(root, value, attribution_inputs=attribution_inputs), []
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return {}, [Problem("error", "context_benchmark_attribution_invalid", f"context benchmark attribution fixture is invalid: {exc}", path.as_posix())]
-
-
-def _project_attribution_cases(
-    root: Path,
-    value: Any,
-    *,
-    attribution_inputs: dict[str, tuple[ContextBundle, dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
-) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {"schema", "schema_version", "question_id", "cases", "trace"}:
-        raise ValueError("attribution fixture schema is invalid")
-    if value.get("schema") != "repoctl.context.benchmark.attribution-cases" or value.get("schema_version") != 2:
-        raise ValueError("attribution fixture version is invalid")
-    question_id = str(value.get("question_id") or "")
-    inputs = attribution_inputs.get(question_id)
-    if inputs is None:
-        raise ValueError("attribution fixture question is not a benchmark question")
-    bundle, projection, receipt, members = inputs
-    raw_cases = value.get("cases")
-    trace = value.get("trace")
-    if not isinstance(raw_cases, list) or not isinstance(trace, dict):
-        raise ValueError("attribution cases and trace are required")
-
-    member_by_selection = {(str(item["authority"]), str(item["ref"])): item for item in members}
-    cases: dict[str, dict[str, Any]] = {}
-    for raw in raw_cases:
-        if not isinstance(raw, dict) or set(raw) != {"authority", "case_id", "ref"}:
-            raise ValueError("attribution case is invalid")
-        case_id = str(raw.get("case_id") or "")
-        authority = str(raw.get("authority") or "")
-        ref = str(raw.get("ref") or "")
-        member = member_by_selection.get((authority, ref))
-        if not case_id or case_id in cases:
-            raise ValueError("attribution case identity is invalid")
-        if member is None:
-            raise ValueError(f"attribution case {case_id} is not a selectable receipt member")
-        subject = member["subject"]
-        identity = {
-            "authority": authority,
-            "ref": ref,
-            "subject_key": subject["key"],
-            "version_digest": subject["version_digest"],
-        }
-        cases[case_id] = {
-            "authority": authority,
-            "ref": ref,
-            "member": member,
-            "candidate_id": digest_data(identity),
-        }
-
-    compact_capture = str(trace.get("compact_capture") or "")
-    if compact_capture not in {"captured", "missing"}:
-        raise ValueError("compact projection capture is invalid")
-
-    completion_capture = trace.get("completion")
-    completion_outcome: dict[str, Any] | None = None
-    completed_at: datetime | None = None
-    if completion_capture is not None:
-        if not isinstance(completion_capture, dict) or set(completion_capture) != {"completed_at", "roles"}:
-            raise ValueError("completion capture is invalid")
-        completed_at = _timestamp(completion_capture.get("completed_at"), label="completion outcome")
-        completion_outcome = _build_completion_outcome(receipt, members, completion_capture.get("roles"))
-
-    selected, reviewed, chosen, verified = _completion_stage_sets(completion_outcome, receipt=receipt, members=members)
-    reused = _later_reused_subjects(
-        trace.get("later_results"),
-        completed_at=completed_at,
-        receipt=receipt,
-        members=members,
-    )
-
-    full = bundle.to_dict()
-    knowledge_reused = _knowledge_reused_subjects(
-        trace.get("knowledge_results"),
-        root=root,
-        completed_at=completed_at,
-        bundle=full,
-        receipt=receipt,
-        members=members,
-    )
-    retrieval_by_selection = _retrieval_evidence(full)
-    compact_visible = {
-        (str(entry["primary_citation"]["authority"]), str(entry["primary_citation"]["ref"]))
-        for entry in projection["compact"]["representative_citations"]
-    }
-
-    projected: list[dict[str, Any]] = []
-    for case_id, case in sorted(cases.items(), key=lambda item: item[1]["candidate_id"]):
-        member = case["member"]
-        subject_id = str(member["subject"]["subject_id"])
-        selection = (case["authority"], case["ref"])
-        retrieval = retrieval_by_selection.get(selection)
-        visible: bool | str = "unknown" if compact_capture == "missing" else selection in compact_visible
-        projected.append(
-            {
-                "case_id": case_id,
-                "candidate_id": case["candidate_id"],
-                "authority": case["authority"],
-                "ref": case["ref"],
-                "member_id": member["member_id"],
-                "subject_key": member["subject"]["key"],
-                "version_digest": member["subject"]["version_digest"],
-                "stages": {
-                    "available": True,
-                    "retrieved": retrieval is not None,
-                    "compact_visible": visible,
-                    "selected": "unknown" if completion_outcome is None else subject_id in selected,
-                    "reviewed": "unknown" if completion_outcome is None else subject_id in reviewed,
-                    "chosen": "unknown" if completion_outcome is None else subject_id in chosen,
-                    "verified": "unknown" if completion_outcome is None else subject_id in verified,
-                    "later_reused": _reuse_stage(subject_id, direct=reused, knowledge=knowledge_reused),
-                },
-                "retrieval": retrieval,
-            }
-        )
-    return {
-        "schema": "repoctl.context.benchmark.attribution",
-        "schema_version": 1,
-        "claim_scope": "correlation_only",
-        "non_gating": True,
-        "captured_at": str(trace.get("captured_at") or ""),
-        "source_artifacts": {
-            "question_id": question_id,
-            "producer": receipt["producer"],
-            "result_id": receipt["result_id"],
-            "receipt_digest": receipt["receipt_digest"],
-            "projection_digest": digest_data(projection) if compact_capture == "captured" else "",
-            "completion_outcome_digest": completion_outcome.get("outcome_digest") if completion_outcome else "",
-        },
-        "candidates": projected,
-    }
-
-
-def _selection_set(value: Any, *, label: str) -> set[tuple[str, str]]:
-    if not isinstance(value, list):
-        raise ValueError(f"{label} is missing")
-    result: set[tuple[str, str]] = set()
-    for item in value:
-        if not isinstance(item, dict) or set(item) != {"authority", "ref"}:
-            raise ValueError(f"{label} selection is invalid")
-        selection = (str(item.get("authority") or ""), str(item.get("ref") or ""))
-        if selection[0] not in {authority.value for authority in ResultAuthority} or not selection[1] or selection in result:
-            raise ValueError(f"{label} selection is invalid")
-        result.add(selection)
-    return result
-
-
-def _build_completion_outcome(
-    receipt: dict[str, Any],
-    members: list[dict[str, Any]],
-    roles: Any,
-) -> dict[str, Any]:
-    expected = {"chosen", "reviewed", "selected", "verification", "version_overrides"}
-    if not isinstance(roles, dict) or set(roles) != expected:
-        raise ValueError("completion roles are invalid")
-    member_by_selection = {(str(item["authority"]), str(item["ref"])): item for item in members}
-    selected = _selection_set(roles["selected"], label="selected")
-    reviewed = _selection_set(roles["reviewed"], label="reviewed")
-    chosen = _selection_set(roles["chosen"], label="chosen")
-    raw_verification = roles["verification"]
-    if not isinstance(raw_verification, list):
-        raise ValueError("completion verification is invalid")
-    verification_selections: set[tuple[str, str]] = set()
-    for record in raw_verification:
-        if not isinstance(record, dict) or set(record) != {"refs", "status"} or str(record.get("status") or "") not in {"passed", "failed", "mixed", "blocked"}:
-            raise ValueError("completion verification is invalid")
-        verification_selections.update(_selection_set(record["refs"], label="verification"))
-    overrides: dict[tuple[str, str], str] = {}
-    if not isinstance(roles["version_overrides"], list):
-        raise ValueError("completion version overrides are invalid")
-    for item in roles["version_overrides"]:
-        if not isinstance(item, dict) or set(item) != {"authority", "ref", "version_digest"}:
-            raise ValueError("completion version override is invalid")
-        key = (str(item.get("authority") or ""), str(item.get("ref") or ""))
-        version = str(item.get("version_digest") or "")
-        if key in overrides or key not in member_by_selection or not _sha256(version):
-            raise ValueError("completion version override is invalid")
-        overrides[key] = version
-    referenced = selected | reviewed | chosen | verification_selections
-    if not referenced <= set(member_by_selection):
-        raise ValueError("completion role references a non-member")
-
-    subject_by_selection: dict[tuple[str, str], dict[str, Any]] = {}
-    for key in referenced:
-        subject = json.loads(json.dumps(member_by_selection[key]["subject"]))
-        if key in overrides:
-            subject["version_digest"] = overrides[key]
-            subject["subject_id"] = digest_data({
-                "kind": subject["kind"],
-                "identity": subject["identity"],
-                "version_digest": subject["version_digest"],
-            })
-        subject_by_selection[key] = subject
-    ordered_subjects = sorted(
-        {str(item["subject_id"]): item for item in subject_by_selection.values()}.values(),
-        key=lambda item: (str(item["kind"]), json.dumps(item["identity"], sort_keys=True, separators=(",", ":")), str(item["version_digest"])),
-    )
-    local_by_stable = {str(item["subject_id"]): f"s{index}" for index, item in enumerate(ordered_subjects, start=1)}
-    subject_table = [
-        {
-            "id": local_by_stable[str(item["subject_id"])],
-            "kind": item["kind"],
-            "identity": item["identity"],
-            "key": item["key"],
-            "version_digest": item["version_digest"],
-        }
-        for item in ordered_subjects
-    ]
-    query = str(receipt["request"]["query"])
-    episode_id = digest_data({"kind": "task_discovery_query", "query": query})
-    request_digest = digest_data(receipt["request"])
-    citations = []
-    for key in selected:
-        member = member_by_selection[key]
-        subject = subject_by_selection[key]
-        citations.append({
-            "producer": receipt["producer"],
-            "result_id": receipt["result_id"],
-            "episode_id": episode_id,
-            "canonical_request_digest": request_digest,
-            "member_id": member["member_id"],
-            "source_receipt_digest": receipt["receipt_digest"],
-            "subject_id": local_by_stable[str(subject["subject_id"])],
-            "claims": member["claims"],
-        })
-    citations.sort(key=lambda item: item["member_id"])
-    seed_result = None
-    if citations:
-        seed_result = {
-            "producer": receipt["producer"],
-            "result_id": receipt["result_id"],
-            "source_receipt_digest": receipt["receipt_digest"],
-            "canonical_request_digest": request_digest,
-            "candidate_member_set_digest": digest_data(sorted(str(item["subject"]["subject_id"]) for item in members)),
-        }
-    verification_records = []
-    for index, raw in enumerate(raw_verification, start=1):
-        refs = _selection_set(raw["refs"], label="verification")
-        stable_ids = sorted(str(subject_by_selection[key]["subject_id"]) for key in refs)
-        evidence_digest = digest_data({"fixture": "context-attribution", "record": index})
-        base = {
-            "status": raw["status"],
-            "evidence": {"ref": evidence_digest, "digest": evidence_digest, "kind": "digest"},
-            "subject_ids": stable_ids,
-            "claim_ids": [],
-        }
-        verification_records.append({
-            "record_id": digest_data(base),
-            **base,
-            "subject_ids": sorted(local_by_stable[stable_id] for stable_id in stable_ids),
-        })
-    verification_records.sort(key=lambda item: item["record_id"])
-    base = {
-        "schema": "repoctl.task.discovery-completion-outcome",
-        "schema_version": 1,
-        "repository": receipt["repository"],
-        "subjects": subject_table,
-        "active_chosen": sorted(local_by_stable[str(subject_by_selection[key]["subject_id"])] for key in chosen),
-        "episodes": [{
-            "episode_id": episode_id,
-            "query_digest": digest_data({"query": query}),
-            "seed_result": seed_result,
-            "citations": citations,
-            "reviewed": sorted(local_by_stable[str(subject_by_selection[key]["subject_id"])] for key in reviewed),
-            "excluded": [],
-            "outside_candidate_set": [],
-        }],
-        "verification_records": verification_records,
-    }
-    return validate_completion_outcome({**base, "outcome_digest": digest_data(base)})
-
-
-def _completion_stage_sets(
-    outcome: dict[str, Any] | None,
-    *,
-    receipt: dict[str, Any],
-    members: list[dict[str, Any]],
-) -> tuple[set[str], set[str], set[str], set[str]]:
-    if outcome is None:
-        return set(), set(), set(), set()
-    stable_by_local = {
-        str(item["id"]): digest_data({
-            "kind": item["kind"],
-            "identity": item["identity"],
-            "version_digest": item["version_digest"],
-        })
-        for item in outcome["subjects"]
-    }
-    member_by_id = {str(item["member_id"]): item for item in members}
-    selected: set[str] = set()
-    claim_to_subject: dict[str, str] = {}
-    for episode in outcome["episodes"]:
-        for citation in episode["citations"]:
-            member = member_by_id.get(str(citation["member_id"]))
-            stable_id = stable_by_local.get(str(citation["subject_id"]))
-            if (
-                member is None
-                or stable_id != str(member["subject"]["subject_id"])
-                or citation["producer"] != receipt["producer"]
-                or citation["result_id"] != receipt["result_id"]
-                or citation["source_receipt_digest"] != receipt["receipt_digest"]
-                or citation["claims"] != member["claims"]
-            ):
-                continue
-            selected.add(stable_id)
-            claim_to_subject.update((str(claim["evidence_digest"]), stable_id) for claim in citation["claims"])
-    reviewed = {
-        stable_by_local[local_id]
-        for episode in outcome["episodes"]
-        for local_id in episode["reviewed"]
-    }
-    chosen = {stable_by_local[local_id] for local_id in outcome["active_chosen"]}
-    verified: set[str] = set()
-    for record in outcome["verification_records"]:
-        if record["status"] != "passed":
-            continue
-        verified.update(stable_by_local[local_id] for local_id in record["subject_ids"])
-        verified.update(claim_to_subject[claim_id] for claim_id in record["claim_ids"] if claim_id in claim_to_subject)
-    return selected, reviewed, chosen, verified
-
-
-def _later_reused_subjects(
-    value: Any,
-    *,
-    completed_at: datetime | None,
-    receipt: dict[str, Any],
-    members: list[dict[str, Any]],
-) -> set[str] | None:
-    if value is None or completed_at is None:
-        return None
-    if not isinstance(value, list):
-        raise ValueError("later result capture is invalid")
-    reused: set[str] = set()
-    for item in value:
-        if not isinstance(item, dict) or set(item) != {"captured_at", "roles"}:
-            raise ValueError("later result capture is invalid")
-        if _timestamp(item["captured_at"], label="later result") <= completed_at:
-            continue
-        outcome = _build_completion_outcome(receipt, members, item["roles"])
-        selected, _reviewed, _chosen, _verified = _completion_stage_sets(outcome, receipt=receipt, members=members)
-        reused.update(selected)
-    return reused
-
-
-def _reuse_stage(
-    subject_id: str,
-    *,
-    direct: set[str] | None,
-    knowledge: set[str] | None,
-) -> bool | str:
-    if (direct is not None and subject_id in direct) or (knowledge is not None and subject_id in knowledge):
-        return True
-    if direct is not None and knowledge is not None:
-        return False
-    return "unknown"
-
-
-def _knowledge_reused_subjects(
-    value: Any,
-    *,
-    root: Path,
-    completed_at: datetime | None,
-    bundle: dict[str, Any],
-    receipt: dict[str, Any],
-    members: list[dict[str, Any]],
-) -> set[str] | None:
-    if value is None or completed_at is None:
-        return None
-    if not isinstance(value, list):
-        raise ValueError("later Knowledge capture is invalid")
-    source_versions = {
-        str(item["source_ref"]["path"]): str(item["source_ref"].get("content_sha256") or "")
-        for item in bundle.get("evidence", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("source_ref"), dict)
-        and isinstance(item["source_ref"].get("path"), str)
-    }
-    source_members = {
-        str(item["ref"]): item
-        for item in members
-        if item.get("authority") == ResultAuthority.SOURCE.value
-    }
-    reused: set[str] = set()
-    for item in value:
-        expected = {"captured_at", "event", "query", "record"}
-        if not isinstance(item, dict) or set(item) != expected:
-            raise ValueError("later Knowledge capture is invalid")
-        captured_at = _timestamp(item["captured_at"], label="later Knowledge result")
-        if captured_at <= completed_at:
-            continue
-        record = item.get("record")
-        event = item.get("event")
-        if not isinstance(record, dict) or not isinstance(event, dict):
-            raise ValueError("later Knowledge artifacts are invalid")
-        record_id = str(record.get("id") or "")
-        event_id = str(event.get("id") or "")
-        if KNOWLEDGE_RECORD_ID_RE.fullmatch(record_id) is None or KNOWLEDGE_EVENT_ID_RE.fullmatch(event_id) is None:
-            raise ValueError("later Knowledge artifact identity is invalid")
-        review = record.get("review") if isinstance(record.get("review"), dict) else {}
-        if (
-            _timestamp(review.get("reviewed_at"), label="Knowledge review") > captured_at
-            or _timestamp(event.get("approved_at"), label="Knowledge approval") > captured_at
-        ):
-            raise ValueError("later Knowledge approval occurs after its result")
-        source_refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
-        valid_source_kinds = {kind.value for kind in KnowledgeSourceRefKind}
-        if any(
-            not isinstance(source_ref, dict)
-            or str(source_ref.get("kind") or "") not in valid_source_kinds
-            for source_ref in source_refs
-        ):
-            raise ValueError("later Knowledge source ref kind is invalid")
-        source_resolutions = knowledge_source_ref_resolutions(root, record)
-        if len(source_resolutions) != len(source_refs) or any(
-            resolution.status not in {
-                KnowledgeSourceResolutionStatus.CURRENT,
-                KnowledgeSourceResolutionStatus.RELOCATED,
-            }
-            for resolution in source_resolutions
-        ):
-            raise ValueError("later Knowledge source refs are invalid")
-        contract_problems = [
-            *_knowledge_record_contract_problems(
-                record,
-                record_id=record_id,
-                repo_id=str(receipt["repository"]["id"]),
-            ),
-            *_knowledge_approval_binding(record, [event]).problems,
-        ]
-        if any(problem.severity == "error" for problem in contract_problems):
-            codes = ",".join(sorted({problem.code for problem in contract_problems if problem.severity == "error"}))
-            raise ValueError(f"later Knowledge artifacts violate the canonical contract: {codes}")
-        with TemporaryDirectory(prefix="repoctl-context-attribution-knowledge-") as temporary:
-            knowledge_root = Path(temporary)
-            records_dir = knowledge_root / "docs/knowledge/records"
-            events_dir = knowledge_root / "docs/knowledge/events"
-            record_path = (records_dir / f"{record_id}.json").resolve()
-            event_path = (events_dir / f"{event_id}.json").resolve()
-            if record_path.parent != records_dir.resolve() or event_path.parent != events_dir.resolve():
-                raise ValueError("later Knowledge artifact path escapes temporary state")
-            records_dir.mkdir(parents=True, exist_ok=True)
-            events_dir.mkdir(parents=True, exist_ok=True)
-            record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            event_path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            projection, problems = rebuild_knowledge_projection(knowledge_root, repo_id=str(receipt["repository"]["id"]))
-            if problems or record_id not in {
-                str(head.get("record", {}).get("id") or "")
-                for head in projection.get("heads", [])
-                if isinstance(head, dict)
-            }:
-                raise ValueError("later Knowledge record is not an approved current head")
-            target = RepoTarget(
-                id=str(receipt["repository"]["id"]),
-                root_path=knowledge_root / str(receipt["repository"]["path"]),
-                display_path=str(receipt["repository"]["path"]),
-                identity_source=RepositoryIdentitySource(str(receipt["repository"]["identity_source"])),
-            )
-            target.root_path.mkdir(parents=True, exist_ok=True)
-            request = ContextResultRequest(query=str(item.get("query") or ""), mode="past_decision")
-            result_id = digest_data({"captured_at": item["captured_at"], "query": request.query, "record_id": record_id})
-            later_receipt = write_result_receipt(
-                knowledge_root,
-                target=target,
-                producer=ResultProducer.CONTEXT,
-                result_id=result_id,
-                request=request,
-                selections=[ResultSelection(ResultAuthority.KNOWLEDGE, record_id)],
-            )
-            later_members = result_member_capsules(knowledge_root, target=target, receipt=later_receipt)
-            knowledge_selection = [{"authority": "knowledge", "ref": record_id}]
-            later_outcome = _build_completion_outcome(
-                later_receipt,
-                later_members,
-                {
-                    "selected": knowledge_selection,
-                    "reviewed": knowledge_selection,
-                    "chosen": knowledge_selection,
-                    "verification": [],
-                    "version_overrides": [],
-                },
-            )
-            selected, _reviewed, _chosen, _verified = _completion_stage_sets(
-                later_outcome,
-                receipt=later_receipt,
-                members=later_members,
-            )
-            if not selected:
-                raise ValueError("later Knowledge result has no exact selected citation")
-        for source_ref, resolution in zip(source_refs, source_resolutions, strict=True):
-            if not isinstance(source_ref, dict):
-                continue
-            path = str(source_ref.get("path") or "")
-            member = source_members.get(path)
-            if (
-                source_ref.get("kind") != KnowledgeSourceRefKind.CURRENT_SOURCE.value
-                or resolution.status is not KnowledgeSourceResolutionStatus.CURRENT
-                or member is None
-                or str(source_ref.get("content_sha256") or "") != resolution.actual_sha256
-                or resolution.actual_sha256 != source_versions.get(path)
-            ):
-                continue
-            reused.add(str(member["subject"]["subject_id"]))
-    return reused
-
-
-def _retrieval_evidence(bundle: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
-    groups = bundle.get("groups") if isinstance(bundle.get("groups"), dict) else {}
-    lane_by_ref: dict[tuple[str, str], str] = {}
-    for lane, items in groups.items():
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            source_ref = item.get("source_ref") if isinstance(item, dict) and isinstance(item.get("source_ref"), dict) else {}
-            path = str(source_ref.get("path") or "")
-            kind = str(source_ref.get("kind") or "")
-            authority = "document" if kind == "document" else "source"
-            if path:
-                lane_by_ref.setdefault((authority, path), str(lane))
-    result: dict[tuple[str, str], dict[str, Any]] = {}
-    evidence = bundle.get("evidence") if isinstance(bundle.get("evidence"), list) else []
-    for rank, item in enumerate(evidence, start=1):
-        if not isinstance(item, dict):
-            continue
-        source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
-        ref = str(source_ref.get("path") or "")
-        kind = str(source_ref.get("kind") or "")
-        authority = "document" if kind == "document" else "source"
-        if not ref:
-            continue
-        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
-        key = (authority, ref)
-        contributions = {
-            "graph": bool(item.get("graph_path") or float(breakdown.get("graph") or 0.0)),
-            "knowledge": bool(item.get("related_record_ids") or float(breakdown.get("knowledge_path") or 0.0)),
-        }
-        if key in result:
-            for contribution, observed in contributions.items():
-                result[key]["typed_contributions"][contribution] |= observed
-            continue
-        result[key] = {
-            "rank": rank,
-            "lane": lane_by_ref.get(key, kind or authority),
-            "score": item.get("score"),
-            "score_breakdown": dict(sorted(breakdown.items())),
-            "typed_contributions": contributions,
-        }
-    return result
-
-
-def _timestamp(value: Any, *, label: str) -> datetime:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{label} timestamp is invalid")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"{label} timestamp is invalid") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError(f"{label} timestamp is invalid")
-    return parsed.astimezone(UTC)
-
-
-def _sha256(value: Any) -> bool:
-    return isinstance(value, str) and len(value) == 71 and value.startswith("sha256:") and all(char in "0123456789abcdef" for char in value[7:])
 
 
 def _read_questions(path: Path) -> list[dict[str, Any]]:
@@ -951,170 +265,6 @@ def _text_digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _read_benchmark_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
-    if not path.is_file():
-        problems.append(Problem("error", "context_benchmark_artifact_missing", f"{label} context benchmark artifact is missing", path.as_posix()))
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        problems.append(Problem("error", "context_benchmark_artifact_invalid_json", f"{label} context benchmark artifact is not valid JSON", path.as_posix()))
-        return {}
-    if not isinstance(payload, dict):
-        problems.append(Problem("error", "context_benchmark_artifact_invalid", f"{label} context benchmark artifact must be an object", path.as_posix()))
-        return {}
-    if str(payload.get("command") or "") == "context.benchmark" and payload.get("ok") is False:
-        problems.append(Problem("error", "context_benchmark_artifact_failed", f"{label} context benchmark artifact was produced by a failed command", path.as_posix()))
-        return {}
-    data = payload.get("data") if str(payload.get("command") or "") == "context.benchmark" else payload
-    if not isinstance(data, dict):
-        problems.append(Problem("error", "context_benchmark_artifact_missing_data", f"{label} context benchmark artifact is missing data", path.as_posix()))
-        return {}
-    summary = data.get("summary")
-    results = data.get("results")
-    if not isinstance(summary, dict) or not isinstance(results, list):
-        problems.append(Problem("error", "context_benchmark_artifact_invalid_data", f"{label} context benchmark artifact is missing benchmark summary/results", path.as_posix()))
-        return {}
-    expected_digest = str(data.get("benchmark_digest") or "")
-    digest_basis = {key: value for key, value in data.items() if key not in {"benchmark_digest", "artifact"}}
-    actual_digest = digest_data(digest_basis)
-    if expected_digest != actual_digest:
-        problems.append(Problem("error", "context_benchmark_artifact_digest_mismatch", f"{label} context benchmark artifact digest does not match its content", path.as_posix()))
-        return {}
-    return data
-
-
-def _artifact_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "path": path.as_posix(),
-        "benchmark_digest": str(data.get("benchmark_digest") or ""),
-        "question_count": int(data.get("question_count") or 0),
-    }
-
-
-def _source_drift_problems(root: Path, data: dict[str, Any], *, label: str) -> list[Problem]:
-    problems: list[Problem] = []
-    seen: set[tuple[str, str]] = set()
-    for ref in _artifact_refs(data):
-        rel = str(ref.get("path") or "")
-        expected = str(ref.get("content_sha256") or "")
-        if not rel or rel.startswith("<") or not expected.startswith("sha256:"):
-            continue
-        key = (rel, expected)
-        if key in seen:
-            continue
-        seen.add(key)
-        path = root / rel
-        if not path.is_file():
-            problems.append(Problem("error", "context_benchmark_artifact_source_missing", f"{label} benchmark source ref no longer exists", rel))
-            continue
-        actual = "sha256:" + hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
-        if actual != expected:
-            problems.append(Problem("error", "context_benchmark_artifact_source_digest_drift", f"{label} benchmark source ref digest no longer matches current source", rel))
-    return problems
-
-
-def _artifact_refs(data: dict[str, Any]) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
-    results = data.get("results") if isinstance(data.get("results"), list) else []
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        for key in ("top_refs", "top_knowledge_refs", "required_found_at_5", "required_found_at_10"):
-            values = result.get(key)
-            if isinstance(values, list):
-                refs.extend(ref for ref in values if isinstance(ref, dict))
-    return refs
-
-
-def _metric_delta(baseline_summary: dict[str, Any], candidate_summary: dict[str, Any], key: str) -> dict[str, float]:
-    baseline = float(baseline_summary.get(key) or 0.0)
-    candidate = float(candidate_summary.get(key) or 0.0)
-    return {
-        "baseline": round(baseline, 6),
-        "candidate": round(candidate, 6),
-        "delta": round(candidate - baseline, 6),
-    }
-
-
-def _question_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    baseline_by_id = _results_by_id(baseline.get("results"))
-    candidate_by_id = _results_by_id(candidate.get("results"))
-    deltas: list[dict[str, Any]] = []
-    for question_id in sorted(set(baseline_by_id) | set(candidate_by_id)):
-        baseline_result = baseline_by_id.get(question_id, {})
-        candidate_result = candidate_by_id.get(question_id, {})
-        baseline_metrics = baseline_result.get("metrics") if isinstance(baseline_result.get("metrics"), dict) else {}
-        candidate_metrics = candidate_result.get("metrics") if isinstance(candidate_result.get("metrics"), dict) else {}
-        deltas.append(
-            {
-                "id": question_id,
-                "category": str(candidate_result.get("category") or baseline_result.get("category") or ""),
-                "present_in_baseline": bool(baseline_result),
-                "present_in_candidate": bool(candidate_result),
-                "metrics": {
-                    "recall_at_5": _metric_delta(baseline_metrics, candidate_metrics, "recall_at_5"),
-                    "precision_at_5": _metric_delta(baseline_metrics, candidate_metrics, "precision_at_5"),
-                    "knowledge_recall_at_5": _metric_delta(baseline_metrics, candidate_metrics, "knowledge_recall_at_5"),
-                },
-            }
-        )
-    return deltas
-
-
-def _results_by_id(value: Any) -> dict[str, dict[str, Any]]:
-    results: dict[str, dict[str, Any]] = {}
-    if not isinstance(value, list):
-        return results
-    for item in value:
-        if isinstance(item, dict):
-            question_id = str(item.get("id") or "")
-            if question_id:
-                results[question_id] = item
-    return results
-
-
-def _compare_regressions(
-    baseline_summary: dict[str, Any],
-    candidate_summary: dict[str, Any],
-    metric_deltas: dict[str, dict[str, float]],
-    question_deltas: list[dict[str, Any]],
-    *,
-    max_recall_at_5_drop: float | None,
-    max_precision_at_5_drop: float | None,
-    max_knowledge_recall_at_5_drop: float | None,
-    max_question_recall_at_5_drop: float | None,
-) -> list[Problem]:
-    problems: list[Problem] = []
-    _append_drop_regression(problems, metric_deltas, "mean_recall_at_5", max_recall_at_5_drop, "context_benchmark_recall_regressed")
-    _append_drop_regression(problems, metric_deltas, "mean_precision_at_5", max_precision_at_5_drop, "context_benchmark_precision_regressed")
-    _append_drop_regression(problems, metric_deltas, "mean_knowledge_recall_at_5", max_knowledge_recall_at_5_drop, "context_benchmark_knowledge_recall_regressed")
-    if max_question_recall_at_5_drop is not None:
-        for item in question_deltas:
-            delta = float(item.get("metrics", {}).get("recall_at_5", {}).get("delta") or 0.0)
-            if delta < -abs(max_question_recall_at_5_drop):
-                problems.append(Problem("error", "context_benchmark_question_recall_regressed", "context benchmark question Recall@5 dropped more than allowed", str(item.get("id") or "")))
-    for item in question_deltas:
-        if bool(item.get("present_in_baseline")) and not bool(item.get("present_in_candidate")):
-            problems.append(Problem("error", "context_benchmark_question_missing", "candidate context benchmark artifact is missing a baseline question", str(item.get("id") or "")))
-    for key, code in {
-        "source_ref_integrity": "context_benchmark_source_integrity_regressed",
-        "knowledge_source_ref_integrity": "context_benchmark_knowledge_integrity_regressed",
-        "knowledge_source_status_current": "context_benchmark_knowledge_source_status_regressed",
-    }.items():
-        if bool(baseline_summary.get(key)) and not bool(candidate_summary.get(key)):
-            problems.append(Problem("error", code, f"context benchmark {key} regressed"))
-    return problems
-
-
-def _append_drop_regression(problems: list[Problem], metric_deltas: dict[str, dict[str, float]], key: str, max_drop: float | None, code: str) -> None:
-    if max_drop is None:
-        return
-    delta = float(metric_deltas.get(key, {}).get("delta") or 0.0)
-    if delta < -abs(max_drop):
-        problems.append(Problem("error", code, f"context benchmark {key} dropped more than allowed"))
-
-
 def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem]) -> dict[str, Any]:
     labels = _source_labels(spec)
     required = labels["must_find"]
@@ -1145,7 +295,16 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     required_edges_found = [edge for edge in required_edges if _contains_edge(graph_edges, edge)]
     selected_forbidden = [ref for ref in forbidden if _contains_ref(visible_refs, ref)]
     cross_repo_refs = _cross_repo_refs([*visible_refs, *knowledge_refs], expected_repo_id=str(question.get("repo_id") or ""))
-    precision_top5 = [ref for ref in top5 if not _matches_any_expected(ref, supporting)]
+    supporting_only = [
+        ref
+        for ref in supporting
+        if not _matches_any_expected(ref, [*required, *optional])
+    ]
+    precision_top5 = [
+        ref
+        for ref in _precision_source_refs(compact_payload)[:5]
+        if not _matches_any_expected(ref, supporting_only)
+    ]
     relevant_top5 = sum(1 for ref in precision_top5 if _matches_any_expected(ref, [*required, *optional]))
     supporting_top5 = [ref for ref in top5 if _matches_any_expected(ref, supporting)]
     first_correct_rank = next((index for index, ref in enumerate(evidence_refs, start=1) if _matches_any_expected(ref, required)), 0)
@@ -1312,7 +471,40 @@ def _compact_source_refs(payload: dict[str, Any]) -> list[dict[str, Any]]:
             ref = item.get("source_ref") if isinstance(item, dict) and isinstance(item.get("source_ref"), dict) else None
             if ref is not None:
                 refs.append(ref)
+                if ref.get("kind") == "document":
+                    for section in item.get("sections", []):
+                        if isinstance(section, dict) and section.get("section"):
+                            refs.append({**ref, "section": section["section"]})
     return _dedupe_refs(refs)
+
+
+def _precision_source_refs(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = payload.get("groups") if isinstance(payload.get("groups"), dict) else {}
+
+    def refs(group_names: tuple[str, ...]) -> list[dict[str, Any]]:
+        return _dedupe_refs(
+            [
+                item["source_ref"]
+                for group in group_names
+                for item in groups.get(group, [])
+                if isinstance(item, dict)
+                and isinstance(item.get("source_ref"), dict)
+                and item["source_ref"].get("kind") != "graph_relation"
+            ]
+        )
+
+    query = payload.get("query")
+    mode = str(query.get("mode") or "") if isinstance(query, dict) else ""
+    if mode in {
+        "authority_or_contract",
+        "failure_mode",
+        "invariant",
+        "past_decision",
+        "startup_reading",
+    }:
+        return refs(("must_read",))
+    actionable = refs(("likely_change_surface", "tests_and_verification"))
+    return actionable or refs(("must_read",))
 
 
 def _knowledge_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
@@ -1549,6 +741,7 @@ def _gate_problems(
     *,
     min_recall_at_5: float | None,
     min_precision_at_5: float | None,
+    min_visible_recall: float | None,
     min_knowledge_recall_at_5: float | None,
     min_category_recall_at_5: dict[str, float],
     min_category_knowledge_recall_at_5: dict[str, float],
@@ -1559,12 +752,15 @@ def _gate_problems(
     require_no_forbidden: bool,
     require_no_cross_repo: bool,
     require_fixture_corpus: bool,
+    max_output_estimated_tokens: int | None,
 ) -> list[Problem]:
     problems: list[Problem] = []
     if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:
         problems.append(Problem("error", "context_benchmark_recall_gate_failed", "context benchmark mean Recall@5 is below gate"))
     if min_precision_at_5 is not None and float(summary.get("mean_precision_at_5") or 0.0) < min_precision_at_5:
         problems.append(Problem("error", "context_benchmark_precision_gate_failed", "context benchmark mean Precision@5 is below gate"))
+    if min_visible_recall is not None and float(summary.get("mean_visible_recall") or 0.0) < min_visible_recall:
+        problems.append(Problem("error", "context_benchmark_visible_recall_gate_failed", "context benchmark mean visible recall is below gate"))
     if min_knowledge_recall_at_5 is not None and float(summary.get("mean_knowledge_recall_at_5") or 0.0) < min_knowledge_recall_at_5:
         problems.append(Problem("error", "context_benchmark_knowledge_gate_failed", "context benchmark mean knowledge Recall@5 is below gate"))
     by_category = summary.get("by_category") if isinstance(summary.get("by_category"), dict) else {}
@@ -1598,4 +794,6 @@ def _gate_problems(
         problems.append(Problem("error", "context_benchmark_forbidden_selected", "context benchmark selected forbidden source refs"))
     if require_no_cross_repo and int(summary.get("cross_repo_ref_count") or 0) > 0:
         problems.append(Problem("error", "context_benchmark_cross_repo_leakage", "context benchmark selected source refs from another repository"))
+    if max_output_estimated_tokens is not None and int(summary.get("max_output_estimated_tokens") or 0) > max_output_estimated_tokens:
+        problems.append(Problem("error", "context_benchmark_token_ceiling_exceeded", "context benchmark output token ceiling exceeded"))
     return problems

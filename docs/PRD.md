@@ -42,7 +42,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 ### Repository-Understanding Loop
 
 - Bind a discovery query, its citable evidence, explicit review decisions, and verification into one completion-bound outcome.
-- Join only independently retrieved, current subjects to fresh applicable outcomes while keeping the first result a hypothesis, not authority or edit scope.
+- Keep completion outcomes in explicit history and exact task/artifact queries; ordinary Context ranks only independently retrieved current evidence.
 - Project declared component membership and crossings onto existing typed subjects and relations so an agent can traverse between relevant areas without a second graph.
 - Keep the loop bounded as it is reused: hot state, ordinary query work, incremental refresh work, and agent-facing payload must converge instead of growing with task history.
 
@@ -133,6 +133,8 @@ Accept the repository-understanding loop only when repeated field scenarios demo
 - equivalent repetition leaves hot state, ordinary query work, incremental refresh work, and agent-facing payload stable rather than proportional to completed-task count
 
 Reject or revisit the model when those field outcomes do not improve. Investigate retrieval, tokenization, and continuation presentation before adding more schema or fixture-specific ranking rules.
+
+The 0.10.0 field replay rejected automatic completion-outcome reuse: explicit immediate-follow-up reuse did not improve the Termroom or Areum working sets and increased stored query state. Ordinary Context therefore does not consume completion outcomes. Completion evidence remains available through explicit history and exact Graph task/artifact queries; automatic reuse requires new field evidence that passes the criteria above.
 
 ## Adoption Rule
 

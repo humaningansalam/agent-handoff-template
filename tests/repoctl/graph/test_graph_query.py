@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from tests.repoctl.graph.test_graph_build import _materialize
@@ -51,9 +52,18 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
         assert ambiguous_path["problems"][0]["code"] == "graph_query_ambiguous_path"
         assert [item["path"] for item in ambiguous_result["candidates"]] == ["repos/src/app.py", "src/app.py"]
         assert ambiguous_path["next_actions"] == [
-            {"label": "Inspect Graph candidate repos/repos/src/app.py", "path": "repos/repos/src/app.py"},
-            {"label": "Inspect Graph candidate repos/src/app.py", "path": "repos/src/app.py"},
+            {
+                "label": "Replay Graph query for repos/repos/src/app.py",
+                "command": "./scripts/repoctl graph query --repo-id main --file repos/repos/src/app.py --json",
+            },
+            {
+                "label": "Replay Graph query for repos/src/app.py",
+                "command": "./scripts/repoctl graph query --repo-id main --file src/app.py --json",
+            },
         ]
+        for action in ambiguous_path["next_actions"]:
+            assert main(shlex.split(action["command"])[1:]) == 0
+            assert json.loads(capsys.readouterr().out)["data"]["query_status"] == "found"
         assert main(["graph", "query", "--file", "repos/only.py", "--json"]) == 0
         exact_repo_path = json.loads(capsys.readouterr().out)["data"]["result"]
         assert exact_repo_path["query"] == {"type": "file", "path": "repos/only.py"}

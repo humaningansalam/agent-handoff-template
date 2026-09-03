@@ -51,6 +51,7 @@ STOPWORDS = {
     "impacted",
     "is",
     "of",
+    "or",
     "the",
     "to",
     "what",

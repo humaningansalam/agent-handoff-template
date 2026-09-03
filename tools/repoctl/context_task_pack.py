@@ -987,51 +987,6 @@ def _truncate_text(value: str, limit: int) -> str:
     return compact[: max(0, limit - 3)].rstrip() + "..."
 
 
-def compare_task_context_packs(
-    *,
-    baseline_path: Path,
-    candidate_path: Path,
-    max_must_read_drop: int | None = None,
-    require_warning_stability: bool = False,
-) -> tuple[dict[str, Any], list[Problem]]:
-    problems: list[Problem] = []
-    baseline = _read_pack_artifact(baseline_path, problems, label="baseline")
-    candidate = _read_pack_artifact(candidate_path, problems, label="candidate")
-    if not baseline or not candidate:
-        return {}, problems
-    count_deltas = {
-        "must_read": _group_count_delta(baseline, candidate, "must_read"),
-        "maybe_relevant": _group_count_delta(baseline, candidate, "maybe_relevant"),
-        "verification_hints": _group_count_delta(baseline, candidate, "verification_hints"),
-    }
-    metric_deltas = _metric_deltas(baseline, candidate)
-    missing_refs = _missing_group_refs(baseline, candidate, "must_read")
-    warning_deltas = _warning_deltas(baseline, candidate)
-    regressions = _pack_regressions(
-        count_deltas,
-        missing_refs,
-        warning_deltas,
-        max_must_read_drop=max_must_read_drop,
-        require_warning_stability=require_warning_stability,
-    )
-    problems.extend(regressions)
-    return {
-        "schema": "repoctl.context.task_pack.compare",
-        "schema_version": 1,
-        "baseline": _pack_identity(baseline_path, baseline),
-        "candidate": _pack_identity(candidate_path, candidate),
-        "count_deltas": count_deltas,
-        "metric_deltas": metric_deltas,
-        "warning_deltas": warning_deltas,
-        "missing_must_read_refs": missing_refs,
-        "regressions": [problem.to_dict() for problem in regressions],
-        "gates": {
-            "max_must_read_drop": max_must_read_drop,
-            "require_warning_stability": require_warning_stability,
-        },
-    }, problems
-
-
 def run_task_context_pack_benchmark(
     root: Path,
     *,
@@ -1081,43 +1036,6 @@ def run_task_context_pack_benchmark(
     }
     payload["benchmark_digest"] = digest_data(payload)
     return payload, problems
-
-
-def compare_task_context_pack_benchmarks(
-    *,
-    baseline_path: Path,
-    candidate_path: Path,
-    max_mean_must_read_recall_drop: float | None = None,
-) -> tuple[dict[str, Any], list[Problem]]:
-    problems: list[Problem] = []
-    baseline = _read_pack_benchmark_artifact(baseline_path, problems, label="baseline")
-    candidate = _read_pack_benchmark_artifact(candidate_path, problems, label="candidate")
-    if not baseline or not candidate:
-        return {}, problems
-    baseline_summary = baseline.get("summary") if isinstance(baseline.get("summary"), dict) else {}
-    candidate_summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
-    metric_deltas = {
-        "mean_must_read_recall": _float_metric_delta(baseline_summary, candidate_summary, "mean_must_read_recall"),
-        "required_must_read_count": _int_metric_delta(baseline_summary, candidate_summary, "required_must_read_count"),
-        "warning_count": _int_metric_delta(baseline_summary, candidate_summary, "warning_count"),
-    }
-    case_deltas = _pack_benchmark_case_deltas(baseline, candidate)
-    regressions = _pack_benchmark_regressions(
-        metric_deltas,
-        case_deltas,
-        max_mean_must_read_recall_drop=max_mean_must_read_recall_drop,
-    )
-    problems.extend(regressions)
-    return {
-        "schema": "repoctl.context.task_pack.benchmark.compare",
-        "schema_version": 1,
-        "baseline": _pack_benchmark_identity(baseline_path, baseline),
-        "candidate": _pack_benchmark_identity(candidate_path, candidate),
-        "metric_deltas": metric_deltas,
-        "case_deltas": case_deltas,
-        "regressions": [problem.to_dict() for problem in regressions],
-        "gates": {"max_mean_must_read_recall_drop": max_mean_must_read_recall_drop},
-    }, problems
 
 
 def _task_seed_query(task: Task) -> str:
@@ -1909,45 +1827,6 @@ def prepare_task_context_pack_binding(
     return binding, []
 
 
-def _read_pack_benchmark_artifact(path: Path, problems: list[Problem], *, label: str) -> dict[str, Any]:
-    if not path.is_file():
-        problems.append(Problem("error", "context_pack_benchmark_artifact_missing", f"{label} context pack benchmark artifact is missing", path.as_posix()))
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        problems.append(Problem("error", "context_pack_benchmark_artifact_invalid_json", f"{label} context pack benchmark artifact is not valid JSON", path.as_posix()))
-        return {}
-    if not isinstance(payload, dict):
-        problems.append(Problem("error", "context_pack_benchmark_artifact_invalid", f"{label} context pack benchmark artifact must be an object", path.as_posix()))
-        return {}
-    if str(payload.get("command") or "") == "context.pack-benchmark" and payload.get("ok") is False:
-        problems.append(Problem("error", "context_pack_benchmark_artifact_failed", f"{label} context pack benchmark artifact was produced by a failed command", path.as_posix()))
-        return {}
-    data = payload.get("data") if str(payload.get("command") or "") == "context.pack-benchmark" else payload
-    if not isinstance(data, dict):
-        problems.append(Problem("error", "context_pack_benchmark_artifact_missing_data", f"{label} context pack benchmark artifact is missing data", path.as_posix()))
-        return {}
-    if str(data.get("schema") or "") != "repoctl.context.task_pack.benchmark":
-        problems.append(Problem("error", "context_pack_benchmark_artifact_wrong_schema", f"{label} artifact is not a context pack benchmark", path.as_posix()))
-        return {}
-    expected_digest = str(data.get("benchmark_digest") or "")
-    digest_basis = {key: value for key, value in data.items() if key not in {"benchmark_digest", "artifact"}}
-    actual_digest = digest_data(digest_basis)
-    if expected_digest != actual_digest:
-        problems.append(Problem("error", "context_pack_benchmark_artifact_digest_mismatch", f"{label} context pack benchmark artifact digest does not match its content", path.as_posix()))
-        return {}
-    return data
-
-
-def _pack_benchmark_identity(path: Path, data: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "path": path.as_posix(),
-        "benchmark_digest": str(data.get("benchmark_digest") or ""),
-        "case_count": int(data.get("case_count") or 0),
-    }
-
-
 def _score_pack_case(case: dict[str, Any], pack: dict[str, Any], problems: list[Problem]) -> dict[str, Any]:
     required = _expected_refs(case.get("required_must_read_refs"))
     must_read_refs = _group_refs(pack, "must_read")
@@ -2015,120 +1894,6 @@ def _mean(values: Any) -> float:
     return round(sum(float(item) for item in items) / len(items), 6)
 
 
-def _float_metric_delta(baseline: dict[str, Any], candidate: dict[str, Any], key: str) -> dict[str, float]:
-    baseline_value = float(baseline.get(key) or 0.0)
-    candidate_value = float(candidate.get(key) or 0.0)
-    return {
-        "baseline": round(baseline_value, 6),
-        "candidate": round(candidate_value, 6),
-        "delta": round(candidate_value - baseline_value, 6),
-    }
-
-
-def _int_metric_delta(baseline: dict[str, Any], candidate: dict[str, Any], key: str) -> dict[str, int]:
-    baseline_value = int(baseline.get(key) or 0)
-    candidate_value = int(candidate.get(key) or 0)
-    return {
-        "baseline": baseline_value,
-        "candidate": candidate_value,
-        "delta": candidate_value - baseline_value,
-    }
-
-
-def _pack_benchmark_case_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    baseline_cases = _pack_benchmark_cases_by_id(baseline)
-    candidate_cases = _pack_benchmark_cases_by_id(candidate)
-    deltas: list[dict[str, Any]] = []
-    for case_id in sorted(set(baseline_cases) | set(candidate_cases)):
-        baseline_case = baseline_cases.get(case_id, {})
-        candidate_case = candidate_cases.get(case_id, {})
-        baseline_metrics = baseline_case.get("metrics") if isinstance(baseline_case.get("metrics"), dict) else {}
-        candidate_metrics = candidate_case.get("metrics") if isinstance(candidate_case.get("metrics"), dict) else {}
-        deltas.append(
-            {
-                "id": case_id,
-                "present_in_baseline": bool(baseline_case),
-                "present_in_candidate": bool(candidate_case),
-                "task_id": str(candidate_case.get("task_id") or baseline_case.get("task_id") or ""),
-                "must_read_recall": _float_metric_delta(baseline_metrics, candidate_metrics, "must_read_recall"),
-                "required_must_read_count": _int_metric_delta(baseline_metrics, candidate_metrics, "required_must_read_count"),
-                "warning_count": _int_metric_delta(baseline_metrics, candidate_metrics, "warning_count"),
-            }
-        )
-    return deltas
-
-
-def _pack_benchmark_cases_by_id(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    results = data.get("results")
-    if not isinstance(results, list):
-        return {}
-    cases: dict[str, dict[str, Any]] = {}
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        case_id = str(item.get("id") or "")
-        if case_id:
-            cases[case_id] = item
-    return cases
-
-
-def _pack_benchmark_regressions(
-    metric_deltas: dict[str, dict[str, Any]],
-    case_deltas: list[dict[str, Any]],
-    *,
-    max_mean_must_read_recall_drop: float | None,
-) -> list[Problem]:
-    problems: list[Problem] = []
-    if max_mean_must_read_recall_drop is not None and float(metric_deltas["mean_must_read_recall"]["delta"]) < -abs(max_mean_must_read_recall_drop):
-        problems.append(Problem("error", "context_pack_benchmark_must_read_recall_regressed", "context pack benchmark mean must_read recall dropped more than allowed"))
-    for item in case_deltas:
-        if bool(item["present_in_baseline"]) and not bool(item["present_in_candidate"]):
-            problems.append(Problem("error", "context_pack_benchmark_case_missing", "candidate context pack benchmark artifact is missing a baseline case", str(item["id"])))
-    return problems
-
-
-def _group_count_delta(baseline: dict[str, Any], candidate: dict[str, Any], group: str) -> dict[str, int]:
-    baseline_count = _group_count(baseline, group)
-    candidate_count = _group_count(candidate, group)
-    return {
-        "baseline": baseline_count,
-        "candidate": candidate_count,
-        "delta": candidate_count - baseline_count,
-    }
-
-
-def _group_count(data: dict[str, Any], group: str) -> int:
-    groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-    values = groups.get(group)
-    return len(values) if isinstance(values, list) else 0
-
-
-def _metric_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, dict[str, int]]:
-    keys = (
-        "unique_must_read_source_count",
-        "unique_verification_source_count",
-        "evidence_context_count",
-        "requested_tokens",
-        "estimated_tokens",
-    )
-    baseline_metrics = baseline.get("metrics") if isinstance(baseline.get("metrics"), dict) else {}
-    candidate_metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
-    return {
-        key: {
-            "baseline": int(baseline_metrics.get(key) or 0),
-            "candidate": int(candidate_metrics.get(key) or 0),
-            "delta": int(candidate_metrics.get(key) or 0) - int(baseline_metrics.get(key) or 0),
-        }
-        for key in keys
-    }
-
-
-def _missing_group_refs(baseline: dict[str, Any], candidate: dict[str, Any], group: str) -> list[dict[str, str]]:
-    candidate_refs = {_ref_key(ref) for ref in _group_refs(candidate, group)}
-    missing = [ref for ref in _group_refs(baseline, group) if _ref_key(ref) not in candidate_refs]
-    return sorted(missing, key=lambda item: (item.get("path", ""), item.get("section", ""), item.get("kind", "")))
-
-
 def _group_refs(data: dict[str, Any], group: str) -> list[dict[str, str]]:
     groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
     values = groups.get(group)
@@ -2147,65 +1912,6 @@ def _group_refs(data: dict[str, Any], group: str) -> list[dict[str, str]]:
             }
         )
     return refs
-
-
-def _ref_key(ref: dict[str, str]) -> tuple[str, str, str]:
-    return (str(ref.get("kind") or ""), str(ref.get("path") or ""), str(ref.get("section") or ""))
-
-
-def _warning_deltas(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
-    baseline_codes = _warning_codes(baseline)
-    candidate_codes = _warning_codes(candidate)
-    all_codes = sorted(set(baseline_codes) | set(candidate_codes))
-    return {
-        "baseline_codes": sorted(baseline_codes),
-        "candidate_codes": sorted(candidate_codes),
-        "missing_codes": sorted(code for code in baseline_codes if code not in candidate_codes),
-        "added_codes": sorted(code for code in candidate_codes if code not in baseline_codes),
-        "counts": {
-            code: {
-                "baseline": baseline_codes.count(code),
-                "candidate": candidate_codes.count(code),
-                "delta": candidate_codes.count(code) - baseline_codes.count(code),
-            }
-            for code in all_codes
-        },
-    }
-
-
-def _warning_codes(data: dict[str, Any]) -> list[str]:
-    warnings = data.get("warnings")
-    if not isinstance(warnings, list):
-        return []
-    codes: list[str] = []
-    for warning in warnings:
-        if not isinstance(warning, dict):
-            continue
-        code = str(warning.get("code") or "")
-        if code:
-            codes.append(code)
-    return codes
-
-
-def _pack_regressions(
-    count_deltas: dict[str, dict[str, int]],
-    missing_must_read_refs: list[dict[str, str]],
-    warning_deltas: dict[str, Any],
-    *,
-    max_must_read_drop: int | None,
-    require_warning_stability: bool,
-) -> list[Problem]:
-    problems: list[Problem] = []
-    if max_must_read_drop is not None and int(count_deltas["must_read"]["delta"]) < -abs(max_must_read_drop):
-        problems.append(Problem("error", "context_pack_must_read_regressed", "context pack must_read count dropped more than allowed"))
-    for ref in missing_must_read_refs:
-        problems.append(Problem("error", "context_pack_must_read_ref_missing", "candidate context pack is missing a baseline must_read source ref", f"{ref.get('path', '')}#{ref.get('section', '')}"))
-    if require_warning_stability:
-        for code in warning_deltas.get("missing_codes", []):
-            problems.append(Problem("error", "context_pack_warning_missing", "candidate context pack is missing a baseline warning code", str(code)))
-        for code in warning_deltas.get("added_codes", []):
-            problems.append(Problem("error", "context_pack_warning_added", "candidate context pack added a warning code", str(code)))
-    return problems
 
 
 def _used_sections(task: Task) -> list[str]:

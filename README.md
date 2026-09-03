@@ -40,9 +40,9 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - Python 3.11 or newer
 - Node.js when TypeScript/JavaScript semantic Graph analysis or the complete integration suite is required; without it, repoctl reports that optional provider as unavailable and continues with the remaining evidence
 
-## Upgrading from v0.9.0
+## Upgrading from v0.9.0 or v0.10.0
 
-v0.10.0 publishes the post-v0.9.0 command and contract changes as a distinct release. Upgrade planning rejects managed-content drift when the adopter already reports v0.10.0; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
+v0.10.1 publishes the post-v0.10.0 history, diagnostic, and metadata hardening as a distinct release. Upgrade planning rejects managed-content drift when the adopter already reports v0.10.1; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
 
 ## Fresh adoption
 
@@ -57,7 +57,7 @@ Run these commands from the workspace root. For one product repository, clone it
    ```bash
    ./scripts/repoctl meta init --repo-id main --json
    ```
-3. Review `repos/.repometa/policy.json` and the generated shards. Apply deliberate project-specific policy changes as described in the metadata workflow, use `repoctl meta` for annotations and exclusions, then validate and commit the store in the product repository:
+3. Review `repos/.repometa/policy.json`. Apply deliberate project-specific policy changes as described in the metadata workflow, use `repoctl meta` for annotations and exclusions (which create shards on demand), then validate and commit the store in the product repository:
    ```bash
    ./scripts/repoctl meta check --repo-id main --json
    cd repos

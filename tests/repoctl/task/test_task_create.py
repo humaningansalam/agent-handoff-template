@@ -358,6 +358,8 @@ def test_repo_scoped_task_create_reports_structured_discovery_next_action(tmp_pa
     payload = json.loads(capsys.readouterr().out)
     assert payload["next_actions"][-1]["kind"] == "discovery_input"
     assert "command" not in payload["next_actions"][-1]
+    assert payload["next_actions"][-1]["path"] == payload["data"]["path"]
+    assert payload["next_actions"][-1]["source"] == f"{payload['data']['path']}#Discovery"
 
 
 def test_task_create_rejects_invalid_parent_id(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -2314,7 +2314,12 @@ def _validate_source(root: Path, rel: str) -> Problem | None:
     if parts & EXCLUDED_SOURCE_PARTS:
         return Problem("error", "knowledge_candidate_source_excluded", "candidate source is excluded from knowledge ingestion", rel)
     if not rel.startswith(ALLOWED_SOURCE_PREFIXES):
-        return Problem("error", "knowledge_candidate_source_not_allowed", "candidate source must be an ADR, contract, or allowed workflow doc", rel)
+        return Problem(
+            "error",
+            "knowledge_candidate_source_not_allowed",
+            f"candidate source must be under one of: {', '.join(ALLOWED_SOURCE_PREFIXES)}",
+            rel,
+        )
     path = root / rel
     try:
         root_resolved = root.resolve()

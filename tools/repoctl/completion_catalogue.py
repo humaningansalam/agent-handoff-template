@@ -11,10 +11,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .io import RepoctlError, atomic_write
+from .markdown import find_section, parse_frontmatter
 
 
 CATALOGUE_SCHEMA_VERSION = 1
-CATALOGUE_PROJECTOR_VERSION = 5
+CATALOGUE_PROJECTOR_VERSION = 6
 CATALOGUE_POLICY_VERSION = 2
 PREFIX_WINDOW_BYTES = 4096
 EMPTY_PREFIX_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
@@ -25,8 +26,9 @@ _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _SUBJECT_KIND_RE = re.compile(r"[a-z][a-z0-9_-]*")
 _SEARCH_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]+|[가-힣]+")
 _IDENTIFIER_PART_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z]|\b)|[A-Z]?[a-z]+|[0-9]+|[가-힣]+")
-MAX_HISTORY_SEARCH_TERMS = 512
+MAX_HISTORY_SEARCH_TERMS = 128
 MAX_HISTORY_SEARCH_TERM_BYTES = 256
+_TIMESTAMP_TOKEN_RE = re.compile(r"(?:[0-9]{8}T[0-9]{6}Z|[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9:.+-]+Z?)?)", re.IGNORECASE)
 
 
 class CompletionCatalogueUnavailableReason(StrEnum):
@@ -540,7 +542,6 @@ def ingest_completion_catalogue_tail(
         _unavailable(CompletionCatalogueUnavailableReason.GAP, "completion catalogue head is missing for non-empty history", root=root, path=paths.head)
 
     if pending:
-        _append_catalogue_events(paths, pending, expected_size=paths.catalogue.stat().st_size if paths.catalogue.is_file() else 0)
         for event in pending:
             task_id = str(event["task_id"])
             if task_id in seen_tail_tasks:
@@ -550,6 +551,7 @@ def ingest_completion_catalogue_tail(
             sequence = int(event["sequence"])
             event_id = str(event["event_id"])
             prefix_digest = _event_prefix_digest(event)
+        _append_catalogue_events(paths, pending, expected_size=paths.catalogue.stat().st_size if paths.catalogue.is_file() else 0)
 
     recovered_count = len(cold_tail)
     ingested_count = recovered_count + len(pending)
@@ -826,6 +828,39 @@ def completion_graph_inputs(
     return tuple(records)
 
 
+def _load_completion_history(
+    root: Path,
+    repo_id: str,
+    *,
+    policy: CompletionCataloguePolicy,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Admit a valid pending tail, then validate the explicit cold-history view."""
+
+    status = completion_catalogue_status(root, repo_id, policy=policy)
+    if status.tail_pending:
+        ingest_completion_catalogue_tail(root, repo_id, policy=policy)
+    paths = completion_catalogue_paths(root, repo_id)
+    checkpoint, projection = _load_committed_projection(
+        paths,
+        repo_id=repo_id,
+        policy=policy,
+        allow_empty=False,
+    )
+    assert checkpoint is not None and projection is not None
+    events = _scan_catalogue(paths, repo_id=repo_id, policy=policy)
+    _validate_scan_against_state(
+        root,
+        paths,
+        checkpoint,
+        projection,
+        events,
+        repo_id=repo_id,
+        policy=policy,
+        verify_sidecars=False,
+    )
+    return checkpoint, events
+
+
 def lookup_completion_exact(
     root: Path,
     repo_id: str,
@@ -839,11 +874,7 @@ def lookup_completion_exact(
         raise ValueError("completion catalogue task_id is invalid")
     root = Path(root)
     repo_id = _normalize_repo_id(repo_id)
-    paths = completion_catalogue_paths(root, repo_id)
-    checkpoint, projection = _load_committed_projection(paths, repo_id=repo_id, policy=policy, allow_empty=False)
-    assert checkpoint is not None and projection is not None
-    events = _scan_catalogue(paths, repo_id=repo_id, policy=policy)
-    _validate_scan_against_state(root, paths, checkpoint, projection, events, repo_id=repo_id, policy=policy, verify_sidecars=False)
+    _checkpoint, events = _load_completion_history(root, repo_id, policy=policy)
     match = next((event for event in events if event["task_id"] == task_id), None)
     if match is None:
         return None
@@ -923,25 +954,7 @@ def search_completion_history(
     if not normalized_terms and not normalized_task_ids:
         raise ValueError("completion history search requires query terms or task IDs")
 
-    paths = completion_catalogue_paths(root, repo_id)
-    checkpoint, projection = _load_committed_projection(
-        paths,
-        repo_id=repo_id,
-        policy=policy,
-        allow_empty=False,
-    )
-    assert checkpoint is not None and projection is not None
-    events = _scan_catalogue(paths, repo_id=repo_id, policy=policy)
-    _validate_scan_against_state(
-        root,
-        paths,
-        checkpoint,
-        projection,
-        events,
-        repo_id=repo_id,
-        policy=policy,
-        verify_sidecars=False,
-    )
+    checkpoint, events = _load_completion_history(root, repo_id, policy=policy)
 
     ranked: list[tuple[int, int, int, str, dict[str, Any], tuple[str, ...]]] = []
     for event in events:
@@ -1043,29 +1056,44 @@ def audit_completion_catalogue(
     root = Path(root)
     repo_id = _normalize_repo_id(repo_id)
     paths = completion_catalogue_paths(root, repo_id)
-    checkpoint, projection = _load_committed_projection(paths, repo_id=repo_id, policy=policy, allow_empty=False)
-    assert checkpoint is not None and projection is not None
-    events = _scan_catalogue(paths, repo_id=repo_id, policy=policy)
-    _validate_scan_against_state(
-        root,
+    checkpoint, projection = _load_committed_projection(
         paths,
-        checkpoint,
-        projection,
-        events,
         repo_id=repo_id,
         policy=policy,
-        verify_sidecars=True,
-        verify_head=False,
+        allow_empty=True,
     )
+    events: list[dict[str, Any]] = []
+    if checkpoint is not None and projection is not None:
+        events = _scan_catalogue(paths, repo_id=repo_id, policy=policy)
+        _validate_scan_against_state(
+            root,
+            paths,
+            checkpoint,
+            projection,
+            events,
+            repo_id=repo_id,
+            policy=policy,
+            verify_sidecars=True,
+            verify_head=False,
+        )
     head = _load_head(paths, repo_id=repo_id, policy=policy, required=bool(events))
+    if checkpoint is None and head is None:
+        _unavailable(
+            CompletionCatalogueUnavailableReason.MISSING,
+            "completion catalogue has not been materialized",
+            root=root,
+            path=paths.checkpoint,
+        )
     pending = _pending_sidecar_events(
         paths,
         head=head,
         repo_id=repo_id,
         policy=policy,
-        anchor_sequence=int(checkpoint["last_sequence"]),
-        anchor_event_id=str(checkpoint["last_event_id"]),
-        anchor_prefix_digest=str(checkpoint["prefix_digest"]),
+        anchor_sequence=int(checkpoint["last_sequence"]) if checkpoint else 0,
+        anchor_event_id=str(checkpoint["last_event_id"]) if checkpoint else "",
+        anchor_prefix_digest=str(checkpoint["prefix_digest"])
+        if checkpoint
+        else EMPTY_PREFIX_DIGEST,
     )
     events = [*events, *pending]
     seen_tasks: set[str] = set()
@@ -1405,23 +1433,51 @@ def _event_search_terms(
 ) -> tuple[list[str], bool]:
     """Project a bounded lexical vocabulary during trusted catalogue ingress."""
 
-    searchable = "\n".join(
-        (
-            str(receipt.get("task_id") or ""),
-            str(receipt.get("task_path_at_completion") or ""),
-            _canonical_json(receipt),
-            artifact_text,
-        )
-    )
     terms: set[str] = set()
-    for token in _SEARCH_TOKEN_RE.findall(searchable):
-        raw = token.casefold().strip("`'\"")
-        if len(raw) >= 2 and len(raw.encode("utf-8")) <= MAX_HISTORY_SEARCH_TERM_BYTES:
-            terms.add(raw)
-        for part in _IDENTIFIER_PART_RE.findall(token):
-            value = part.casefold()
-            if len(value) >= 2 and len(value.encode("utf-8")) <= MAX_HISTORY_SEARCH_TERM_BYTES:
-                terms.add(value)
+
+    def add_text(value: str, *, human_authored: bool = False) -> None:
+        for token in _SEARCH_TOKEN_RE.findall(value):
+            raw = token.casefold().strip("`'\"")
+            candidates = (raw, *(part.casefold() for part in _IDENTIFIER_PART_RE.findall(token)))
+            for candidate in candidates:
+                if (
+                    len(candidate) < 2
+                    or len(candidate.encode("utf-8")) > MAX_HISTORY_SEARCH_TERM_BYTES
+                    or (
+                        not human_authored
+                        and (
+                            candidate.isdigit()
+                            or _DIGEST_RE.fullmatch(candidate)
+                            or _TIMESTAMP_TOKEN_RE.fullmatch(candidate)
+                        )
+                    )
+                ):
+                    continue
+                terms.add(candidate)
+
+    add_text(str(receipt.get("task_id") or ""))
+    add_text(str(receipt.get("task_path_at_completion") or ""))
+    for entry in receipt.get("changed_entries", []):
+        if not isinstance(entry, Mapping):
+            continue
+        for field in ("path", "old_path"):
+            if isinstance(entry.get(field), str):
+                add_text(str(entry[field]))
+
+    if artifact_text:
+        frontmatter, body = parse_frontmatter(artifact_text)
+        add_text(str(frontmatter.get("title") or ""), human_authored=True)
+        first_line = next((line[2:] for line in body.splitlines() if line.startswith("# ")), "")
+        first_line = _TASK_ID_RE.sub("", first_line, count=1).removeprefix(" - ")
+        add_text(first_line, human_authored=True)
+        for heading in ("Discovery", "Verification", "Failure", "Failures"):
+            try:
+                section = find_section(body, heading)
+            except RepoctlError as exc:
+                if exc.code != "missing_section":
+                    raise
+            else:
+                add_text(body[section.body_start : section.end], human_authored=True)
     ordered = sorted(terms)
     return ordered[:MAX_HISTORY_SEARCH_TERMS], len(ordered) > MAX_HISTORY_SEARCH_TERMS
 

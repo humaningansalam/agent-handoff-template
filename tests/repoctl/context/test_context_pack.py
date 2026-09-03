@@ -950,7 +950,12 @@ def test_context_pack_binding_rejects_missing_tampered_wrong_task_and_legacy_mar
         encoding="utf-8",
     )
     assert main(["task", "handoff", "bind", task_id, "--context-pack", envelope_tampered.as_posix(), "--json"]) == 2
-    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "context_pack_stale"
+    stale_payload = json.loads(capsys.readouterr().out)
+    assert stale_payload["problems"][0]["code"] == "context_pack_stale"
+    assert [action["kind"] for action in stale_payload["next_actions"]] == ["context_pack_refresh", "task_handoff_bind"]
+    assert stale_payload["next_actions"][0]["command"].endswith(
+        "--format markdown --output .repoctl-state/context-pack/envelope-tampered.md"
+    )
 
 
 def test_context_pack_binding_uses_canonical_candidate_digests_for_scoped_fallback_and_verification(

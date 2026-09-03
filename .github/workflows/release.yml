@@ -42,6 +42,7 @@ jobs:
         run: |
           ./scripts/repoctl check --json
           ./scripts/repoctl meta check --json
+          ./scripts/repoctl field-gate run repoctl-release --full --json
 
       - name: Build release artifact
         run: uv run python -m tools.repoctl.release dist

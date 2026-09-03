@@ -3,6 +3,8 @@ from tests.repoctl.repository.test_repositories import init_repo
 
 import json
 from pathlib import Path
+import shlex
+import subprocess
 
 from tools.repoctl.cli import main
 from tests.repoctl.context_test_helpers import _write_completion_receipt
@@ -43,6 +45,29 @@ def test_unconfigured_collection_repo_check_reports_unbound_identity(tmp_path: P
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_identity_unbound"
     assert payload["data"]["candidates"][0]["suggested_id"] == "Web App"
+
+
+def test_configured_multi_repo_git_loss_keeps_repository_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    init_repo(tmp_path / "repos/web")
+    (tmp_path / "docs/repoctl.json").write_text(
+        json.dumps({"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["repo", "check", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    problem = next(item for item in payload["problems"] if item["code"] == "repository_git_unavailable")
+    assert problem["repo_id"] == "api"
+    assert problem["path"] == "repos/api"
+    assert problem["reason"] == problem["message"]
+    action = next(item for item in payload["next_actions"] if item.get("command", "").startswith("git init"))
+    assert action["command"] == "git init repos/api"
+    subprocess.run(shlex.split(action["command"]), cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    assert (tmp_path / "repos/api/.git").is_dir()
+    assert not (tmp_path / "repos/.git").exists()
 
 
 
@@ -86,6 +111,8 @@ def test_repo_adopt_all_pins_collection_targets(tmp_path: Path, monkeypatch, cap
         {"id": "api", "path": "repos/api", "identity_source": "pinned"},
         {"id": "web", "path": "repos/web", "identity_source": "pinned"},
     ]
+    assert all((tmp_path / path / ".repometa/policy.json").is_file() for path in ("repos/api", "repos/web"))
+    assert all(not (tmp_path / path / ".repometa/annotations").exists() for path in ("repos/api", "repos/web"))
 
 
 def test_historical_completion_receipts_do_not_bind_current_repository_identity(tmp_path: Path, monkeypatch, capsys) -> None:

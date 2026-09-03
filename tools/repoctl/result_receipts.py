@@ -32,8 +32,6 @@ RESULT_CACHE_MAX_ENTRIES = 256
 RESULT_CACHE_MAX_BYTES = 8 * 1024 * 1024
 RESULT_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-
-
 class ResultProducer(StrEnum):
     CONTEXT = "context"
     GRAPH = "graph"
@@ -53,7 +51,7 @@ class ContextResultRequest:
     mode: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.query, str) or not isinstance(self.mode, str):
+        if not all(isinstance(value, str) for value in (self.query, self.mode)):
             raise ValueError("context result request fields must be strings")
         if not self.query.strip() or self.query != self.query.strip():
             raise ValueError("context result request query must be a canonical non-empty value")
@@ -881,7 +879,7 @@ def _result_request_from_dict(producer: ResultProducer, value: Any) -> ResultReq
     if producer == ResultProducer.CONTEXT:
         if set(value) != {"kind", "query", "mode"} or value.get("kind") != "context_query":
             raise ValueError("context result request has an invalid schema")
-        if not isinstance(value.get("query"), str) or not isinstance(value.get("mode"), str):
+        if not all(isinstance(value.get(key), str) for key in ("query", "mode")):
             raise ValueError("context result request fields must be strings")
         return ContextResultRequest(query=value["query"], mode=value["mode"])
     if set(value) != {"kind", "selector"} or value.get("kind") != "graph_query":

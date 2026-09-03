@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -135,7 +135,6 @@
     "examples/tasks/T-20260403093000Z--launch-handoff-template-v1-example.md",
     "tests/conftest.py",
     "tests/fixtures/context-benchmark-multirepo/mutation-cases.json",
-    "tests/fixtures/context-benchmark/attribution-cases.json",
     "tests/fixtures/context-benchmark/mutation-cases.json",
     "tests/repoctl/__init__.py",
     "tests/repoctl/context/__init__.py",

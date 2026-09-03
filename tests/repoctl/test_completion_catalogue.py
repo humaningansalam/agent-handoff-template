@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shlex
+import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -32,6 +36,7 @@ from tools.repoctl.discovery_outcomes import (
 )
 from tools.repoctl.graph_model import digest_data
 from tools.repoctl.repositories import RepoTarget
+from tools.repoctl.release import build_release_archive
 from tools.repoctl.result_receipts import (
     ContextResultRequest,
     ResultAuthority,
@@ -321,7 +326,6 @@ def test_full_audit_rejects_pending_tail_tamper_without_mutation(
     paths = completion_catalogue_paths(tmp_path, "main")
     head = json.loads(paths.head.read_text(encoding="utf-8"))
     event_path = paths.events_directory / f"{str(head['last_event_id']).removeprefix('sha256:')}.json"
-    event = json.loads(event_path.read_text(encoding="utf-8"))
 
     if mutation == "payload":
         event_path.write_text("{\n", encoding="utf-8")
@@ -522,6 +526,173 @@ def _public_finish_fixture(
     verification = root / "verification.md"
     verification.write_text("- Ran focused catalogue integration check\n- Result: pass\n", encoding="utf-8")
     return task_id, task_path, verification
+
+
+def _run_release_repoctl(root: Path, *args: str, expected: int = 0) -> dict[str, object]:
+    result = subprocess.run(
+        ["./scripts/repoctl", *args, "--json"],
+        cwd=root,
+        env={**os.environ, "UV_CACHE_DIR": str(root.parent / "uv-cache")},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == expected, result.stderr or result.stdout
+    return json.loads(result.stdout)
+
+
+def test_release_archive_closes_first_and_later_completion_tails_and_recovers(
+    tmp_path: Path,
+) -> None:
+    source_root = next(
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "scripts/repoctl").is_file()
+    )
+    archive_path = build_release_archive(source_root, tmp_path / "dist")
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(tmp_path / "release")
+    root = next((tmp_path / "release").iterdir())
+    (root / "docs/BOARD.md").write_text(
+        "# BOARD\n\n## Board\n\n## Backlog\n",
+        encoding="utf-8",
+    )
+    repo = root / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+
+    _run_release_repoctl(root, "graph", "build", "--repo-id", "main")
+    finished: list[dict[str, object]] = []
+    for index in (1, 2):
+        created = _run_release_repoctl(
+            root,
+            "task",
+            "create",
+            "--area",
+            "repo",
+            "--start",
+            "--slug",
+            f"catalogue-release-{index}",
+            f"Catalogue release decision {index}",
+        )
+        task_id = str(created["data"]["task_id"])
+        (repo / "app.py").write_text(f"value = {index + 1}\n", encoding="utf-8")
+        _run_release_repoctl(
+            root,
+            "task",
+            "discovery",
+            "add",
+            task_id,
+            "--query",
+            f"catalogue release decision {index}",
+            "--reviewed",
+            "repos/app.py",
+            "--chosen",
+            "repos/app.py",
+        )
+        verification = root / f"verification-{index}.md"
+        verification.write_text("- Runtime journey passed\n", encoding="utf-8")
+        if index == 2:
+            _run_release_repoctl(root, "graph", "build", "--repo-id", "main")
+        result = _run_release_repoctl(
+            root,
+            "task",
+            "finish",
+            task_id,
+            "--verification-file",
+            verification.as_posix(),
+        )
+        finished.append(result)
+
+        audit = _run_release_repoctl(root, "check", "--audit-history")
+        catalogue = next(
+            item
+            for item in audit["data"]["completion_history"]["catalogues"]
+            if item["repo_id"] == "main"
+        )
+        assert catalogue["head_sequence"] == index
+        assert _run_release_repoctl(
+            root,
+            "graph",
+            "query",
+            "--repo-id",
+            "main",
+            "--task",
+            task_id,
+        )["data"]["query_status"] == "found"
+        assert _run_release_repoctl(
+            root,
+            "graph",
+            "query",
+            "--repo-id",
+            "main",
+            "--artifact",
+            str(result["data"]["new_path"]),
+        )["data"]["query_status"] == "found"
+        history = _run_release_repoctl(
+            root,
+            "context",
+            "query",
+            f"catalogue release decision {index}",
+            "--mode",
+            "past-decision",
+            "--repo-id",
+            "main",
+            "--full",
+        )
+        assert history["data"]["bundle"]["completeness"]["explicit_task_history"]["selected_record_count"] >= 1
+        if index == 1:
+            subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "user.name=Test",
+                    "commit",
+                    "-m",
+                    "finish first task",
+                ],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+    paths = completion_catalogue_paths(root, "main")
+    paths.catalogue.write_text(
+        paths.catalogue.read_text(encoding="utf-8").replace("app.py", "bad.py", 1),
+        encoding="utf-8",
+    )
+    receipts = [
+        (root / str(item["data"]["completion_receipt"])).read_bytes()
+        for item in finished
+    ]
+    archives = [(root / str(item["data"]["new_path"])).read_bytes() for item in finished]
+
+    failed = _run_release_repoctl(root, "check", "--audit-history", expected=1)
+    recovery = next(
+        action
+        for action in failed["next_actions"]
+        if action.get("kind") == "completion_catalogue_rebuild"
+    )
+    assert recovery["command"] == "./scripts/repoctl history rebuild --repo-id main --json"
+    repaired = subprocess.run(
+        shlex.split(str(recovery["command"])),
+        cwd=root,
+        env={**os.environ, "UV_CACHE_DIR": str(root.parent / "uv-cache")},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert repaired.returncode == 0, repaired.stderr or repaired.stdout
+    assert _run_release_repoctl(root, "check", "--audit-history")["ok"] is True
+    assert receipts == [
+        (root / str(item["data"]["completion_receipt"])).read_bytes()
+        for item in finished
+    ]
+    assert archives == [(root / str(item["data"]["new_path"])).read_bytes() for item in finished]
 
 
 def test_public_task_finish_publishes_catalogue_ingress_and_hot_frontier(
@@ -806,40 +977,67 @@ def test_prepared_sidecars_and_tail_ingest_are_incremental_without_receipt_glob(
     assert [record["task_id"] for record in lookup.records] == [second.receipt["task_id"], first.receipt["task_id"]]
 
 
-def test_hot_lookup_never_opens_cold_catalogue_and_exact_lookup_is_explicit(
+def test_explicit_cold_reads_admit_first_and_later_pending_tails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    item = _receipt_input(tmp_path, "T-20260813010201Z")
-    _publish_receipt_authority(tmp_path, item)
-    _prepare_and_publish(tmp_path, item)
-    ingest_completion_catalogue_tail(tmp_path, "main")
+    first = _receipt_input(tmp_path, "T-20260813010201Z")
+    _publish_receipt_authority(tmp_path, first)
+    _prepare_and_publish(tmp_path, first)
     paths = completion_catalogue_paths(tmp_path, "main")
+
+    exact = lookup_completion_exact(tmp_path, "main", first.receipt["task_id"])
+    assert exact is not None
+    assert exact.receipt == first.receipt
+    assert completion_catalogue_status(tmp_path, "main").checkpoint_sequence == 1
+
     with reject_directory_enumeration(
         monkeypatch,
         paths.catalogue.parent,
         allow_reads=lambda path: path != paths.catalogue.resolve(),
     ):
         hot = current_completion_frontier(tmp_path, "main", "file:src/app.py")
-        assert hot.records[0]["task_id"] == item.receipt["task_id"]
+        assert hot.records[0]["task_id"] == first.receipt["task_id"]
 
-    exact = lookup_completion_exact(tmp_path, "main", item.receipt["task_id"])
-    assert exact is not None
-    assert exact.receipt == item.receipt
-    assert lookup_completion_exact(tmp_path, "main", "T-20260813010202Z") is None
+    second = _receipt_input(
+        tmp_path,
+        "T-20260813010202Z",
+        artifact_text="# Later migration\n\n## Verification\n\nSecond completion decision.\n",
+    )
+    _publish_receipt_authority(tmp_path, second)
+    _prepare_and_publish(tmp_path, second)
+    result = search_completion_history(
+        tmp_path,
+        "main",
+        query_terms=["later", "migration"],
+    )
+    assert [match.record.task_id for match in result.records] == [second.receipt["task_id"]]
+    assert result.checkpoint_sequence == 2
+    before = paths.catalogue.read_bytes()
+    assert lookup_completion_exact(tmp_path, "main", second.receipt["task_id"]) is not None
+    assert paths.catalogue.read_bytes() == before
+    assert lookup_completion_exact(tmp_path, "main", "T-20260813010203Z") is None
 
 
 def test_explicit_history_search_matches_natural_language_terms(tmp_path: Path) -> None:
     migration = _receipt_input(
         tmp_path,
         "T-20260813010210Z",
-        artifact_text="# Cache migration\n\nRollback-safe migration completed.\n",
+        artifact_text=(
+            "---\n"
+            'title: "Cache migration"\n'
+            "---\n\n"
+            "# T-20260813010210Z - Cache migration\n\n"
+            "## Discovery\n\nRollback-safe cache migration uses app.py.\n\n"
+            "## Scope\n\ncontent_sha256 schema_version 20260813010210 should stay private.\n\n"
+            "## Verification\n\nMigration behavior passed.\n"
+        ),
     )
     unrelated = _receipt_input(
         tmp_path,
         "T-20260813010211Z",
         changed_paths=("src/other.py",),
-        artifact_text="# Other change\n\nUpdated request routing.\n",
+        artifact_text="# Other change\n\n## Verification\n\nUpdated request routing.\n",
     )
     for item in (migration, unrelated):
         _publish_receipt_authority(tmp_path, item)
@@ -858,6 +1056,18 @@ def test_explicit_history_search_matches_natural_language_terms(tmp_path: Path) 
     assert result.matched_event_count == 1
     assert result.truncated is False
 
+    event = json.loads(completion_catalogue_paths(tmp_path, "main").catalogue.read_text(encoding="utf-8").splitlines()[0])
+    assert len(event["search_terms"]) <= 128
+    assert event["search_terms_truncated"] is False
+    assert {"cache", "migration", "rollback", "src/app.py"} <= set(event["search_terms"])
+    for machine_term in ("sha256", "content_sha256", "schema_version", "20260813010210"):
+        assert machine_term not in event["search_terms"]
+        assert search_completion_history(
+            tmp_path,
+            "main",
+            query_terms=[machine_term],
+        ).records == ()
+
 
 def test_explicit_history_search_bounds_results_and_reports_truncation(tmp_path: Path) -> None:
     items = [
@@ -865,7 +1075,7 @@ def test_explicit_history_search_bounds_results_and_reports_truncation(tmp_path:
             tmp_path,
             f"T-2026081301023{index}Z",
             changed_paths=(f"src/{index}.py",),
-            artifact_text=f"# Shared migration {index}\n\nMigration completed.\n",
+            artifact_text=f"# Shared migration {index}\n\n## Verification\n\nMigration completed.\n",
         )
         for index in range(3)
     ]
@@ -893,12 +1103,12 @@ def test_explicit_history_search_validates_only_selected_authorities(tmp_path: P
     selected = _receipt_input(
         tmp_path,
         "T-20260813010240Z",
-        artifact_text="# Selected task\n\nShared migration decision.\n",
+        artifact_text="# Selected task\n\n## Verification\n\nShared migration decision.\n",
     )
     unselected = _receipt_input(
         tmp_path,
         "T-20260813010241Z",
-        artifact_text="# Newer task\n\nShared migration follow-up.\n",
+        artifact_text="# Newer task\n\n## Verification\n\nShared migration follow-up.\n",
     )
     for item in (selected, unselected):
         _publish_receipt_authority(tmp_path, item)
@@ -922,7 +1132,7 @@ def test_explicit_history_search_reports_typed_source_mismatch(tmp_path: Path) -
     item = _receipt_input(
         tmp_path,
         "T-20260813010250Z",
-        artifact_text="# Original migration\n\nOriginal decision.\n",
+        artifact_text="# Original migration\n\n## Verification\n\nOriginal decision.\n",
     )
     _publish_receipt_authority(tmp_path, item)
     rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[item])
@@ -1126,7 +1336,11 @@ def test_tail_ingest_fails_closed_with_typed_unavailable(
 
 
 def test_prefix_tamper_is_typed_unavailable_and_explicit_rebuild_recovers(tmp_path: Path) -> None:
-    first = _receipt_input(tmp_path, "T-20260813010501Z")
+    first = _receipt_input(
+        tmp_path,
+        "T-20260813010501Z",
+        changed_paths=("src/app.py", *(f"src/history/{index:03d}/application-module.py" for index in range(128))),
+    )
     second = _receipt_input(tmp_path, "T-20260813010502Z", changed_paths=("src/other.py",))
     refresh = rebuild_completion_catalogue(tmp_path, "main", receipt_artifacts=[first, second])
     assert refresh.mode == "rebuild"

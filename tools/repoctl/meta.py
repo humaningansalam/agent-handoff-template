@@ -298,9 +298,7 @@ def _reject_repometa_symlink_chain(
 
 
 def _ensure_store(repo: Path, *, root: Path | None = None) -> None:
-    annotations = _annotations_dir(repo)
-    _reject_repometa_symlink_chain(repo, annotations, root=root)
-    annotations.mkdir(parents=True, exist_ok=True)
+    _reject_repometa_symlink_chain(repo, _annotations_dir(repo), root=root)
     policy = _policy_path(repo)
     _reject_repometa_symlink_chain(repo, policy, root=root)
     if not policy.exists():
@@ -329,20 +327,12 @@ def init_store(root: Path, *, target: RepoTarget | None = None) -> dict[str, Any
         raise RepoctlError("product repository directory is required before initializing .repometa")
     prefix = _repo_prefix(root, repo)
     created: list[str] = []
-    annotations = _annotations_dir(repo)
-    _reject_repometa_symlink_chain(repo, annotations, root=root)
-    annotations.mkdir(parents=True, exist_ok=True)
+    _reject_repometa_symlink_chain(repo, _annotations_dir(repo), root=root)
     policy = _policy_path(repo)
     _reject_repometa_symlink_chain(repo, policy, root=root)
     if not policy.exists():
         atomic_write(policy, _json_dumps(DEFAULT_POLICY))
         created.append(f"{prefix}/.repometa/policy.json")
-    for shard in SHARDS:
-        path = _shard_path(repo, shard)
-        _reject_repometa_symlink_chain(repo, path, root=root)
-        if not path.exists():
-            atomic_write(path, _json_dumps(_empty_shard()))
-            created.append(f"{prefix}/.repometa/annotations/{shard}.json")
     return {"created": created, "created_count": len(created), "policy": f"{prefix}/.repometa/policy.json", "annotations_dir": f"{prefix}/.repometa/annotations"}
 
 

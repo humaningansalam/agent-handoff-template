@@ -6,7 +6,7 @@ tags:
   - repo
   - graph
 expected_output:
-  - valid <product-repo>/.repometa JSON policy and annotation shards
+  - valid <product-repo>/.repometa JSON policy and any populated annotation shards
 ---
 
 # Product Repo Metadata Operations (.repometa)
@@ -46,12 +46,8 @@ The store is not an inventory. General files can exist without annotations unles
 ```text
 repos/.repometa/
   policy.json
-  annotations/
-    0.json
-    1.json
-    2.json
-    ...
-    f.json
+  annotations/            # created on the first annotation or exclusion
+    <hex>.json             # created on demand; existing empty shards are preserved
 ```
 
 Annotation shard routing is deterministic:
@@ -224,9 +220,9 @@ Discovery commands are read-only helpers for task planning:
 - `repoctl meta suggest` returns non-authoritative candidate files from path, filename, policy defaults, and sparse annotation text. It preserves Unicode query tokens, but it is lexical search, not translation or semantic parsing.
 - Suggestions must be inspected before task creation or implementation. They do not define task scope, do not parse Backlog raw text, and do not replace repos/code reading.
 
-Use `repoctl meta init` to create the default `.repometa` policy and shard skeleton for a selected product repo. It does not overwrite an existing policy or shard.
+Use `repoctl meta init` to create the default `.repometa` policy for a selected product repo. It does not overwrite an existing policy. The first annotation or exclusion creates its deterministic shard; bootstrap does not materialize empty shards.
 
-After initialization, review the generated policy and shards. Apply any project-specific policy changes described above, use `repoctl meta` for annotations and exclusions, and run `repoctl meta check --repo-id <id> --json`. The store is durable product-repo state, so commit it in that product repository before starting product changes. For the direct `main` layout:
+After initialization, review the generated policy. Apply any project-specific policy changes described above, use `repoctl meta` for annotations and exclusions, and run `repoctl meta check --repo-id <id> --json`. The store is durable product-repo state, so commit it in that product repository before starting product changes. For the direct `main` layout:
 
 ```bash
 cd repos

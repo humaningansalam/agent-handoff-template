@@ -229,7 +229,6 @@ class ContextEvidenceProjection:
     visible_source_paths: tuple[str, ...] = ()
     ranked_test_paths: tuple[str, ...] = ()
     visible_test_paths: tuple[str, ...] = ()
-    prior_outcome_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -237,7 +236,6 @@ class ContextEvidenceProjection:
             "visible_source_paths": list(self.visible_source_paths),
             "ranked_test_paths": list(self.ranked_test_paths),
             "visible_test_paths": list(self.visible_test_paths),
-            "prior_outcome_paths": list(self.prior_outcome_paths),
         }
 
 

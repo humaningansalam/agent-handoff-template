@@ -2674,6 +2674,28 @@ def collect_completion_receipt_collection(
     return CompletionReceiptCollection(tuple(artifacts), tuple(problems), tuple(resolutions))
 
 
+def completion_receipt_authority_exists(
+    root: Path,
+    *,
+    repo_id: str | None = None,
+) -> bool:
+    """Check fixed receipt authority without resolving archived task artifacts."""
+
+    directory = _state_dir(root) / "completions"
+    if not directory.is_dir():
+        return False
+    for path in directory.glob("T-*.json"):
+        if repo_id is None:
+            return True
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and _completion_receipt_repo_id(path, root, data) == repo_id:
+                return True
+        except (OSError, json.JSONDecodeError, RepoctlError):
+            return True
+    return False
+
+
 def collect_completion_receipt_artifacts(
     root: Path,
     *,
@@ -5575,8 +5597,6 @@ def create_task_file(
         )
         if follow_up_of:
             text = append_section_entry(text, "Work Area", f"- Follow-up of: `{follow_up_of}`")
-        frontmatter, body = parse_frontmatter(text)
-        task = Task(path=path, rel_path=rel_path.as_posix(), frontmatter=frontmatter, body=body)
         atomic_write(path, text)
         return load_task(path, root)
     raise RepoctlError("failed to reserve unique task id after 20 retries")

@@ -52,13 +52,13 @@ Context and Graph are independent entry points; neither is a mandatory precursor
 
 - Use top-level `graph_seed_refs` as ranked, source-bound continuation inputs after inspecting their source.
 - Use `completeness.graph_anchor.seed_anchors` only to interpret coverage and provenance.
-- `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are explicit anchors; `lexical_file` is a ranked hypothesis.
+- `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are source-bound anchors; `lexical_file` is a ranked hypothesis.
 - `resolved` proves that a typed Graph path exists; it does not prove ownership, authority, or edit scope.
 - Follow typed imports, calls, tests, task/document relations, or impact paths only when they answer the current question.
 - Do not restart a coherent Context result with another broad repository search. Use narrow confirmation, a refined query, or an explicit Graph refresh when evidence is ambiguous, missing, or stale.
 - Do not require tool-choice logs or justification for skipped discovery features.
 
-When selecting evidence from a result receipt, record the exact producer, result ID, authority, and member citation. For a Context member omitted from the compact projection, rerun the same query with `--full` and select an exact manifest member. Prior task outcomes are corroboration only; they never create current candidates, ownership, authority, Chosen scope, or a substitute for current evidence.
+When selecting evidence from a result receipt, record the exact producer, result ID, authority, and member citation. For a Context member omitted from the compact projection, rerun the same query with `--full` and select an exact manifest member. Prior task outcomes never create current candidates, ownership, authority, Chosen scope, or a substitute for current evidence. Inspect history explicitly through `past_decision`/`failure_mode` Context queries or exact Graph task/artifact selectors.
 
 `graph query` reads the last materialized snapshot and never rebuilds automatically. Build or rebuild explicitly when required. With a valid snapshot, Context uses the persistent evidence index and overlays changed or stale paths rather than rescanning unchanged source. Without a valid Graph, Context may return lexical source, document, task, and Knowledge evidence while marking Graph relations unavailable.
 
@@ -122,7 +122,7 @@ Prefer finishing before committing product changes. If product changes were comm
 - no task-new working-tree changes remain; and
 - `task doctor T-... --use-committed-diff --json` passes the same committed-range preflight.
 
-A committed range is observed Git evidence, not proof that every commit or path belongs to the task. Repoctl does not own commit, push, PR, deploy, or delivery. `task doctor` reports current Chosen-versus-diff drift as an advisory; `task finish` is the hard closure gate for unchosen changes.
+A committed range is observed Git evidence, not proof that every commit or path belongs to the task. Repoctl does not own commit, push, PR, deploy, or delivery. `task doctor` and `task finish` share the same hard closure preflight for changes outside Chosen scope.
 
 Standalone done or canceled tasks archive immediately and leave Board. Completed children may remain live-path files until the parent closes. A parent archives only after every child is done, canceled, or re-parented. Completed tasks and completion receipts are immutable.
 

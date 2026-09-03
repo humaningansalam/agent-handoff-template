@@ -595,7 +595,10 @@ def test_explicit_history_rejects_ambiguous_receipt_artifact_authority(tmp_path:
     archive_path = tmp_path / archive_rel
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     history_token = "receipt_identity_history_sentinel"
-    artifact_text = task_text(task_id, status="done") + f"\n{history_token}\n"
+    artifact_text = task_text(task_id, status="done").replace(
+        "## Verification\n\n- pending",
+        f"## Verification\n\n- {history_token}",
+    )
     archive_path.write_text(artifact_text, encoding="utf-8")
     receipt_dir = tmp_path / "docs/tasks/.repoctl-state/completions"
     receipt_dir.mkdir(parents=True)

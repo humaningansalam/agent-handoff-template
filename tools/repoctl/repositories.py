@@ -228,7 +228,7 @@ def _revision(layout_data: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _target(root: Path, repo_id: str, rel: str, *, identity_source: str) -> RepoTarget:
+def _target(root: Path, repo_id: str, rel: str, *, identity_source: str, require_git: bool = True) -> RepoTarget:
     if not REPO_ID_RE.match(repo_id):
         raise RepoctlError(f"invalid repository id: {repo_id}")
     rel = _safe_rel(rel)
@@ -242,7 +242,7 @@ def _target(root: Path, repo_id: str, rel: str, *, identity_source: str) -> Repo
         resolved.relative_to(root_resolved)
     except (OSError, ValueError):
         raise RepoctlError(f"repository path must stay inside workspace: {rel}")
-    if not is_git_repo_root(path):
+    if require_git and not is_git_repo_root(path):
         raise RepoctlError(f"repository path is not a git top-level: {rel}")
     return RepoTarget(repo_id, path, rel, identity_source)
 
@@ -275,7 +275,7 @@ def _configured_targets(root: Path, settings: dict[str, Any], *, allow_unconfigu
         if rel in paths:
             raise RepoctlError(f"duplicate repository path: {rel}")
         paths.add(rel)
-        target = _target(root, repo_id.strip(), rel, identity_source="pinned")
+        target = _target(root, repo_id.strip(), rel, identity_source="pinned", require_git=False)
         resolved_root = target.root_path.resolve().as_posix()
         if resolved_root in resolved_roots:
             raise RepoctlError(f"duplicate repository real path: {rel}", code="repository_topology_invalid", path=rel)
@@ -426,7 +426,16 @@ def default_repo_target(root: Path, *, layout: RepoLayout | None = None) -> Repo
         return None
     if len(layout.targets) > 1:
         raise RepoctlError("multiple product repositories configured; pass --repo-id", code="repository_selector_required")
-    return layout.targets[0]
+    return _require_git_target(root, layout.targets[0])
+
+
+def _require_git_target(root: Path, target: RepoTarget) -> RepoTarget:
+    from .git import repo_git_state
+
+    state = repo_git_state(root, target)
+    if not state.available:
+        raise RepoctlError(state.reason, code="repository_git_unavailable", path=state.repo_path or target.display_path)
+    return target
 
 
 def require_repo_target(root: Path, repo_id: str | None = None, *, layout: RepoLayout | None = None) -> RepoTarget:
@@ -438,13 +447,13 @@ def require_repo_target(root: Path, repo_id: str | None = None, *, layout: RepoL
     if repo_id:
         for target in layout.targets:
             if target.id == repo_id:
-                return target
+                return _require_git_target(root, target)
         if repo_id == "main" and not layout.targets:
             return RepoTarget("main", root / "repos", "repos", "reserved")
         raise RepoctlError(f"repository not found: {repo_id}", code="repository_not_found")
     if len(layout.targets) > 1:
         raise RepoctlError("multiple product repositories configured; pass --repo-id", code="repository_selector_required")
-    return layout.targets[0]
+    return _require_git_target(root, layout.targets[0])
 
 
 def resolve_task_repo_target(
@@ -474,16 +483,21 @@ def resolve_task_repo_target(
         ) from exc
 
 
-def repo_check_problems(layout: RepoLayout) -> list[dict[str, str]]:
+def repo_check_problems(root: Path, layout: RepoLayout) -> list[dict[str, str]]:
+    from .git import repo_git_state
+
     problems: list[dict[str, str]] = list(layout.problems)
     for target in layout.targets:
-        if not is_git_repo_root(target.root_path):
+        state = repo_git_state(root, target)
+        if not state.available:
             problems.append(
                 {
                     "severity": "error",
                     "code": "repository_git_unavailable",
-                    "message": f"repository path is not a git top-level: {target.display_path}",
-                    "path": target.display_path,
+                    "message": state.reason,
+                    "repo_id": state.repo_id or target.id,
+                    "path": state.repo_path or target.display_path,
+                    "reason": state.reason,
                 }
             )
     if layout.candidates:

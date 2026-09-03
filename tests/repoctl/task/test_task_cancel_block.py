@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -8,7 +9,9 @@ from tools.repoctl.cli import main
 from tools.repoctl.markdown import find_section, replace_section
 from tests.repoctl.task_lifecycle_helpers import (
     add_task,
+    init_committed_product_repo,
     task_text,
+    write_json,
     write_repometa,
     write_workspace,
 )
@@ -50,14 +53,17 @@ def test_task_cancel_preserves_verification_and_archives_reason(tmp_path: Path, 
 
 def test_task_cancel_blocks_task_scoped_repo_changes_by_default(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    add_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    task = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "api"')
+    add_task(tmp_path, "T-20260609184046Z--alpha.md", task)
     (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n- docs/tasks/T-20260609184046Z--alpha.md\n\n## Backlog\n", encoding="utf-8")
-    repo = tmp_path / "repos"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
-    write_repometa(repo)
-    subprocess.run(["git", "add", ".repometa"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    (tmp_path / "repos").mkdir()
+    repo = tmp_path / "repos/api"
+    init_committed_product_repo(repo)
+    init_committed_product_repo(tmp_path / "repos/web")
+    write_json(
+        tmp_path / "docs/repoctl.json",
+        {"repositories": [{"id": "api", "path": "repos/api"}, {"id": "web", "path": "repos/web"}]},
+    )
     (repo / "leftover.py").write_text("print('leftover')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
@@ -66,9 +72,18 @@ def test_task_cancel_blocks_task_scoped_repo_changes_by_default(tmp_path: Path, 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["task_id"] == "T-20260609184046Z"
     assert payload["problems"][0]["code"] == "repo_changes_on_cancel"
-    assert payload["data"]["cancel_gate"]["residue_paths"] == ["repos/leftover.py"]
-    assert payload["data"]["action_inputs"]["cancel_residue_paths"] == ["repos/leftover.py"]
-    assert payload["next_actions"] == [{"label": "Revert or finish repos/ changes before canceling", "command": "git -C repos status --short"}]
+    assert payload["problems"][0]["path"] == "docs/tasks/T-20260609184046Z--alpha.md"
+    assert payload["data"]["cancel_gate"]["residue_paths"] == ["leftover.py"]
+    assert payload["data"]["action_inputs"]["cancel_residue_paths"] == ["leftover.py"]
+    assert payload["next_actions"] == [{"label": "Revert or finish repos/api changes before canceling", "command": "git -C repos/api status --short"}]
+    status = subprocess.run(
+        shlex.split(payload["next_actions"][0]["command"]),
+        cwd=tmp_path,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    assert "leftover.py" in status
     assert (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").exists()
     assert not (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").exists()
 

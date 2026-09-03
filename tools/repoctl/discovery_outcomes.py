@@ -158,7 +158,7 @@ def update_outcome_state(
             )
         active["citations"] = _dedupe_dicts([*active["citations"], *citations], key="member_id")
         if active["seed_result"] is None:
-            candidate_keys = sorted({_subject_identity_key(item["subject"]) for item in capsules})
+            candidate_keys = sorted({_subject_membership_key(item["subject"]) for item in capsules})
             active["seed_result"] = {
                 "producer": str(result_receipt["producer"]),
                 "result_id": str(result_receipt["result_id"]),
@@ -168,15 +168,16 @@ def update_outcome_state(
                 "candidate_subject_keys": candidate_keys,
             }
 
-    candidate_keys = set((active.get("seed_result") or {}).get("candidate_subject_keys") or [])
+    candidate_keys = _candidate_membership_keys(active)
     active["outside_candidate_set"] = sorted(
         {
             *active["outside_candidate_set"],
             *(
-                _subject_identity_key(subject)
+                str(subject["subject_id"])
                 for subject in active["reviewed"]
                 if active.get("seed_result") is not None
-                and _subject_identity_key(subject) not in candidate_keys
+                and _subject_membership_key(subject) not in candidate_keys
+                and str(subject["subject_id"]) not in candidate_keys
             ),
         }
     )
@@ -1225,6 +1226,50 @@ def _subjects_by_identity(subjects: Iterable[Mapping[str, Any]]) -> list[dict[st
 
 def _subject_identity_key(subject: Mapping[str, Any]) -> str:
     return str(subject["subject_id"])
+
+
+def _subject_membership_key(subject: Mapping[str, Any]) -> str:
+    return _canonical_json({"kind": subject["kind"], "identity": subject["identity"]})
+
+
+def _candidate_membership_keys(episode: Mapping[str, Any]) -> set[str]:
+    seed = episode.get("seed_result")
+    if not isinstance(seed, Mapping):
+        return set()
+    stored_keys = set(seed.get("candidate_subject_keys") or [])
+    if stored_keys and all(_is_subject_membership_key(key) for key in stored_keys):
+        return stored_keys
+    keys = {
+        _subject_membership_key(citation["member"]["subject"])
+        for citation in episode.get("citations", [])
+        if isinstance(citation, Mapping)
+        and isinstance(citation.get("member"), Mapping)
+        and isinstance(citation["member"].get("subject"), Mapping)
+        and all(
+            citation.get(field) == seed.get(field)
+            for field in (
+                "producer",
+                "result_id",
+                "source_receipt_digest",
+                "canonical_request_digest",
+            )
+        )
+    }
+    return keys | stored_keys
+
+
+def _is_subject_membership_key(value: Any) -> bool:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(parsed, dict)
+        and set(parsed) == {"identity", "kind"}
+        and isinstance(parsed["identity"], dict)
+        and isinstance(parsed["kind"], str)
+        and _canonical_json(parsed) == value
+    )
 
 
 def _dedupe_dicts(values: Iterable[Mapping[str, Any]], *, key: str) -> list[dict[str, Any]]:

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.discovery_outcomes import result_member_capsules
 from tools.repoctl.graph_model import digest_data
 from tools.repoctl.markdown import replace_section
 from tools.repoctl.meta import shard_for_path
+from tools.repoctl.repositories import require_repo_target
+from tools.repoctl.result_receipts import (
+    ContextResultRequest,
+    ResultAuthority,
+    ResultProducer,
+    ResultSelection,
+    write_result_receipt,
+)
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
     commit_all,
@@ -351,6 +361,7 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
     assert doctor["problems"][0]["code"] == "workspace_baseline_conflict"
     assert doctor["data"]["action_inputs"]["baseline_conflicts"] == ["repos/tracked.txt"]
     assert not any("task baseline resolve" in action.get("command", "") for action in doctor["next_actions"])
+    assert doctor["next_actions"][0]["choices"] == ["restore_task_start", "move_to_repo_child"]
 
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
     finish = json.loads(capsys.readouterr().out)
@@ -360,6 +371,7 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
     assert main(["task", "cancel", "T-20260609184046Z", "--reason", "baseline ownership cannot be proven", "--json"]) == 2
     canceled = json.loads(capsys.readouterr().out)
     assert canceled["problems"][0]["code"] == "workspace_baseline_conflict"
+    assert canceled["problems"][0]["path"] == "docs/tasks/T-20260609184046Z--alpha.md"
 
     assert main(
         [
@@ -864,6 +876,88 @@ def test_task_finish_blocks_when_repo_head_changed_after_start_with_clean_worktr
     assert any(action["command"].startswith("./scripts/repoctl task finish T-20260609184046Z --use-committed-diff") for action in payload["next_actions"])
 
 
+def test_discovery_candidate_membership_survives_a_selected_file_version_change(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(
+        repo,
+        {"app.py": "value = 1\n", "peer.py": "value = 2\n"},
+    )
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path,
+        f"{task_id}--alpha.md",
+        task_text(task_id, status="todo")
+        .replace('area: ""', 'area: "repo"')
+        .replace('repo_id: ""', 'repo_id: "main"'),
+    )
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    target = require_repo_target(tmp_path, repo_id="main")
+    result_id = digest_data({"context": "app candidate"})
+    receipt = write_result_receipt(
+        tmp_path,
+        target=target,
+        producer=ResultProducer.CONTEXT,
+        result_id=result_id,
+        request=ContextResultRequest(query="change app", mode="auto"),
+        selections=[
+            ResultSelection(ResultAuthority.SOURCE, "repos/app.py"),
+            ResultSelection(ResultAuthority.SOURCE, "repos/peer.py"),
+        ],
+    )
+
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "task", "discovery", "add", task_id,
+            "--query", "change app",
+            "--reviewed", "repos/app.py",
+            "--chosen", "repos/app.py",
+            "--result-producer", "context",
+            "--result-id", result_id,
+            "--result-authority", "source",
+            "--result-ref", "repos/app.py",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    state_path = tmp_path / f"docs/tasks/.repoctl-state/discovery-outcomes/{task_id}.json"
+    legacy_state = json.loads(state_path.read_text(encoding="utf-8"))
+    legacy_candidate_keys = sorted(
+        capsule["subject"]["subject_id"]
+        for capsule in result_member_capsules(tmp_path, target=target, receipt=receipt)
+    )
+    legacy_state["active_episode"]["seed_result"]["candidate_subject_keys"] = legacy_candidate_keys
+    legacy_state["active_episode"]["seed_result"]["candidate_member_set_digest"] = digest_data(legacy_candidate_keys)
+    basis = {key: value for key, value in legacy_state.items() if key != "state_digest"}
+    legacy_state["state_digest"] = digest_data(basis)
+    state_path.write_text(json.dumps(legacy_state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    (repo / "extra.py").write_text("value = 1\n", encoding="utf-8")
+    assert main(
+        [
+            "task", "discovery", "add", task_id,
+            "--reviewed", "repos/app.py",
+            "--reviewed", "repos/peer.py",
+            "--reviewed", "repos/extra.py",
+            "--json",
+        ]
+    ) == 0
+
+    state = json.loads(
+        state_path.read_text(encoding="utf-8")
+    )
+    reviewed = {item["identity"]["path"]: item["subject_id"] for item in state["active_episode"]["reviewed"]}
+    assert reviewed["app.py"] not in state["active_episode"]["outside_candidate_set"]
+    assert reviewed["peer.py"] not in state["active_episode"]["outside_candidate_set"]
+    assert reviewed["extra.py"] in state["active_episode"]["outside_candidate_set"]
+
+
 def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
@@ -1055,9 +1149,15 @@ def test_task_baseline_resolve_preserves_exact_repo_relative_prefix_collision(tm
 
 def test_task_finish_committed_diff_blocks_non_ancestor_observed_head(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    repo = tmp_path / "repos"
+    (tmp_path / "repos").mkdir()
+    repo = tmp_path / "repos/api"
     init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
-    task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    init_committed_product_repo(tmp_path / "repos/web", {"web.py": "value = 1\n"})
+    write_json(
+        tmp_path / "docs/repoctl.json",
+        {"repositories": [{"id": "api", "path": "repos/api"}, {"id": "web", "path": "repos/web"}]},
+    )
+    task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "api"')
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task)
     verification = tmp_path / "verification.md"
     verification.write_text("verified\n", encoding="utf-8")
@@ -1072,6 +1172,9 @@ def test_task_finish_committed_diff_blocks_non_ancestor_observed_head(tmp_path: 
     assert main(["task", "doctor", "T-20260609184046Z", "--use-committed-diff", "--json"]) == 1
     doctor_payload = json.loads(capsys.readouterr().out)
     assert doctor_payload["problems"][0]["code"] == "repo_history_rewritten"
+    command = doctor_payload["next_actions"][0]["command"]
+    assert command == "git -C repos/api log --oneline --decorate -20"
+    subprocess.run(shlex.split(command), cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
 
     assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--verification-file", str(verification), "--json"]) == 2
 

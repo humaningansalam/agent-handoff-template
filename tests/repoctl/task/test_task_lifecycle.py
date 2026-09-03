@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -92,6 +91,10 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
         "resume_guidance": None,
         "candidates": [],
     }
+    assert payload["next_actions"] == [
+        {"label": "Review deferred backlog", "command": "./scripts/repoctl backlog list --json"},
+        {"label": "Open the Board", "path": "docs/BOARD.md"},
+    ]
 
     first = "T-20260609184046Z"
     add_board_task(tmp_path, f"{first}--alpha.md", task_text(first, status="doing"))
@@ -3018,6 +3021,8 @@ def test_repo_scoped_task_start_reports_structured_discovery_next_action(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     discovery = next(action for action in payload["next_actions"] if action.get("kind") == "discovery_input")
     assert "command" not in discovery
+    assert discovery["path"] == "docs/tasks/T-20260609184046Z--alpha.md"
+    assert discovery["source"] == "docs/tasks/T-20260609184046Z--alpha.md#Discovery"
 
 
 def test_task_start_blocks_repo_scoped_task_without_repo_git(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -3296,6 +3301,10 @@ def test_repoctl_generated_handoff_is_readable_but_cannot_be_bound(
     assert main(["task", "start", task_id, "--json"]) == 0
     started = json.loads(capsys.readouterr().out)
     assert any(warning["code"] == "task_handoff_generated_template" for warning in started["warnings"])
+    assert not any(
+        str(action.get("command") or "").startswith("./scripts/repoctl task handoff bind")
+        for action in started["next_actions"]
+    )
     assert task_path.read_text(encoding="utf-8").count("<!-- repoctl: generated-handoff -->") == 1
 
     assert main(["task", "handoff", "bind", task_id, "--json"]) == 2

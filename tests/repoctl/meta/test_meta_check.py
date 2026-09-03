@@ -219,20 +219,30 @@ def test_meta_status_warns_when_discovery_coverage_is_empty(tmp_path: Path, monk
     assert payload["warnings"][0]["code"] == "metadata_coverage_empty"
     assert payload["data"]["summary"]["indexed_only"] == 1
 
-def test_meta_init_creates_default_policy_and_shards_without_overwriting(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_meta_init_creates_policy_then_first_annotation_creates_one_shard(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
     repo.mkdir()
     init_repo(repo)
+    (repo / "app.py").write_text("print('app')\n", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["meta", "init", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["data"]["created_count"] == 17
+    assert payload["data"]["created_count"] == 1
     assert (repo / ".repometa/policy.json").is_file()
-    assert all((repo / ".repometa/annotations" / f"{shard}.json").is_file() for shard in "0123456789abcdef")
+    assert not (repo / ".repometa/annotations").exists()
+
+    assert main(["meta", "check", "--json"]) == 0
+    capsys.readouterr()
+
+    assert main(["meta", "set", "app.py", "--role", "service", "--purpose", "Run the application.", "--topic", "app", "--json"]) == 0
+    annotation = json.loads(capsys.readouterr().out)
+    shard = shard_for_path("app.py")
+    assert annotation["data"]["shard"] == shard
+    assert [path.name for path in (repo / ".repometa/annotations").glob("*.json")] == [f"{shard}.json"]
 
     policy = json.loads((repo / ".repometa/policy.json").read_text(encoding="utf-8"))
     policy["coverage"] = {"require_annotations": ["src/**"]}

@@ -19,8 +19,8 @@ from .board import append_backlog_item, backlog_warnings, parse_board, read_back
 from .code_index import build_code_index
 from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCatalogueUnavailableReason, audit_completion_catalogue, completion_catalogue_namespaces, completion_catalogue_status, rebuild_completion_catalogue
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
-from .context_benchmark import compare_context_benchmarks, materialize_context_benchmark_corpus, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compact_task_context_pack, compare_task_context_pack_benchmarks, compare_task_context_packs, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
+from .context_task_pack import build_task_context_pack, compact_task_context_pack, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .discovery_outcomes import structured_verification_coverage
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
@@ -28,7 +28,7 @@ from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph, materialize_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import KnowledgeArtifactErrorCode, approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, prepare_knowledge_candidate_from_completion, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_candidates import ALLOWED_SOURCE_PREFIXES, KnowledgeArtifactErrorCode, approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, prepare_knowledge_candidate_from_completion, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
 from .knowledge_projection import (
     initialize_empty_knowledge_projection,
     knowledge_projection_path,
@@ -222,7 +222,8 @@ class RepoctlArgumentParser(argparse.ArgumentParser):
 
     def parse_args(self, args: list[str] | None = None, namespace: argparse.Namespace | None = None) -> argparse.Namespace:
         parsed, extras = self.parse_known_args(args, namespace)
-        if extras: raise RepoctlArgparseError(f"unrecognized arguments: {' '.join(extras)}", command=parsed.command_id)
+        if extras:
+            raise RepoctlArgparseError(f"unrecognized arguments: {' '.join(extras)}", command=parsed.command_id)
         return parsed
 
     def _check_value(self, action: argparse.Action, value: Any) -> None:
@@ -408,24 +409,6 @@ def _selected_repo_id(data: dict[str, Any] | None) -> str:
     return str(payload.get("repo_id") or "")
 
 
-def _context_replay_action(data: dict[str, Any] | None) -> dict[str, Any] | None:
-    bundle = _mapping_at(data, "bundle")
-    query = _mapping_at(bundle, "query")
-    query_text = str(query.get("text") or "")
-    repo_id = _selected_repo_id(data)
-    if not query_text or not repo_id:
-        return None
-    mode = str(query.get("mode") or "auto")
-    mode_arg = f" --mode {shlex.quote(mode.replace('_', '-'))}" if mode != "auto" else ""
-    explain_arg = " --explain" if bool(query.get("explain")) else ""
-    return {
-        "label": "Rerun the same Context query after prerequisites are ready",
-        "command": f"./scripts/repoctl context query {shlex.quote(query_text)} --repo-id {repo_id}{mode_arg}{explain_arg} --json",
-        "kind": NextActionKind.CONTEXT_RESUME,
-        "source": "data.bundle.query",
-    }
-
-
 def _recovery_action(kind: NextActionKind, *, repo_id: str, source: str) -> dict[str, Any] | None:
     if kind is NextActionKind.COMPLETION_CATALOGUE_REBUILD:
         selector = f" --repo-id {repo_id}" if repo_id else " --workspace"
@@ -455,326 +438,74 @@ def _recovery_action(kind: NextActionKind, *, repo_id: str, source: str) -> dict
 def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     seen: set[str] = set()
-    task_id = str((data or {}).get("task_id") or "")
-    resume_handoff = _mapping_at(data, "resume_guidance", "handoff")
-    generated_resume_handoff = resume_handoff.get("generated_template") is True
-    task_path = str(_mapping_at(data, "task").get("path") or (f"docs/tasks/{task_id}.md" if task_id else "docs/tasks/"))
     context_resume_requested = False
 
-    def add(
-        label: str,
-        *,
-        command: str = "",
-        path: str = "",
-        kind: NextActionKind | None = None,
-        source: str = "",
-        choices: list[StrEnum] | None = None,
-        target_ref: str = "",
-    ) -> None:
-        action: dict[str, Any] = {"label": label}
-        if command:
-            action["command"] = command
-        if path:
-            action["path"] = path
-        if kind is not None:
-            action["kind"] = kind
-        if source:
-            action["source"] = source
-        if choices:
-            action["choices"] = list(choices)
-        if target_ref:
-            action["target_ref"] = target_ref
-        key = f"command:{command}" if command else json.dumps(action, ensure_ascii=False, sort_keys=True)
+    def add(action: dict[str, Any] | None) -> None:
+        if action is None:
+            return
+        key = str(action.get("command") or json.dumps(action, ensure_ascii=False, sort_keys=True))
         if key not in seen:
             seen.add(key)
             actions.append(action)
 
-    if generated_resume_handoff:
-        add(
-            "Replace the generated Handoff with task-specific restart instructions",
-            path=task_path,
-        )
-
+    graph_recoveries = {
+        "graph_snapshot_missing": NextActionKind.GRAPH_BUILD,
+        "graph_snapshot_stale": NextActionKind.GRAPH_REFRESH,
+        "graph_materialization_incomplete": NextActionKind.GRAPH_REBUILD,
+        "graph_materialization_invalid": NextActionKind.GRAPH_REBUILD,
+        "graph_materialization_repository_mismatch": NextActionKind.GRAPH_REBUILD,
+        "graph_materialization_schema_mismatch": NextActionKind.GRAPH_REBUILD,
+        "graph_materialization_unavailable": NextActionKind.GRAPH_REBUILD,
+        "evidence_index_missing": NextActionKind.GRAPH_REBUILD,
+        "evidence_index_unavailable": NextActionKind.GRAPH_REBUILD,
+        "evidence_index_schema_invalid": NextActionKind.GRAPH_REBUILD,
+        "evidence_index_query_failed": NextActionKind.GRAPH_REBUILD,
+        "evidence_index_input_mismatch": NextActionKind.GRAPH_REBUILD,
+        "evidence_index_snapshot_mismatch": NextActionKind.GRAPH_REBUILD,
+    }
+    knowledge_codes = {
+        "knowledge_projection_unavailable",
+        "knowledge_projection_schema_mismatch",
+        "knowledge_projection_digest_mismatch",
+        "knowledge_projection_tail_gap",
+        "knowledge_projection_tail_digest_mismatch",
+    }
     for problem in problems:
         code = _problem_code(problem)
+        cause = _problem_cause_code(problem)
         path = _problem_path(problem)
-        cause_code = _problem_cause_code(problem)
-        catalogue_reason = (
-            code
-            if code in COMPLETION_CATALOGUE_UNAVAILABLE_CODES
-            else cause_code if cause_code in COMPLETION_CATALOGUE_UNAVAILABLE_CODES else ""
-        )
+        source = "problems_or_warnings[].code"
+        catalogue_reason = code if code in COMPLETION_CATALOGUE_UNAVAILABLE_CODES else cause if cause in COMPLETION_CATALOGUE_UNAVAILABLE_CODES else ""
         if catalogue_reason:
             history = _mapping_at(data, "completion_history")
-            entries = [
-                entry
-                for key in ("catalogues", "audited_catalogues")
-                for entry in history.get(key, [])
-                if isinstance(entry, dict)
-                and str(entry.get("problem_code") or "") == catalogue_reason
-            ]
-            if entries:
+            matched_entries = False
+            for key in ("catalogues", "audited_catalogues"):
+                entries = history.get(key, []) if isinstance(history.get(key), list) else []
                 for entry in entries:
-                    action = _recovery_action(
-                        NextActionKind.COMPLETION_CATALOGUE_REBUILD,
-                        source=f"data.completion_history.{('catalogues' if entry in history.get('catalogues', []) else 'audited_catalogues')}[].problem_code",
-                        repo_id=str(entry.get("repo_id") or ""),
-                    )
-                    if action: add(**action)
-            else:
-                action = _recovery_action(NextActionKind.COMPLETION_CATALOGUE_REBUILD, repo_id=_selected_repo_id(data), source="problems_or_warnings[].code" if code == catalogue_reason else "problems_or_warnings[].cause_code")
-                if action: add(**action)
+                    if isinstance(entry, dict) and str(entry.get("problem_code") or "") == catalogue_reason:
+                        matched_entries = True
+                        add(
+                            _recovery_action(
+                                NextActionKind.COMPLETION_CATALOGUE_REBUILD,
+                                repo_id=str(entry.get("repo_id") or ""),
+                                source=f"data.completion_history.{key}[].problem_code",
+                            )
+                        )
+            if not matched_entries:
+                source = "problems_or_warnings[].code" if code == catalogue_reason else "problems_or_warnings[].cause_code"
+                add(_recovery_action(NextActionKind.COMPLETION_CATALOGUE_REBUILD, repo_id=_selected_repo_id(data), source=source))
             context_resume_requested = True
-        knowledge_projection_problem_codes = {
-            "knowledge_projection_unavailable",
-            "knowledge_projection_schema_mismatch",
-            "knowledge_projection_digest_mismatch",
-            "knowledge_projection_tail_gap",
-            "knowledge_projection_tail_digest_mismatch",
-        }
-        if code in knowledge_projection_problem_codes or cause_code in knowledge_projection_problem_codes:
-            action = _recovery_action(NextActionKind.KNOWLEDGE_REBUILD, repo_id=_selected_repo_id(data), source="problems_or_warnings[].code" if code in knowledge_projection_problem_codes else "problems_or_warnings[].cause_code")
-            if action:
-                add(**action)
-                context_resume_requested = True
-        if code == "missing_verification_file":
-            add("Complete task Verification", path=path or f"docs/tasks/{task_id}.md")
-        elif code == "verification_file_inside_repo":
-            add("Move verification evidence to an existing workspace file outside repos/", path=path)
-        elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
-            add("Record task discovery evidence", path=path or f"docs/tasks/{task_id}.md", kind=NextActionKind.DISCOVERY_INPUT)
-        elif code in {"task_structured_verification_missing", "task_structured_verification_nonpassing"}:
-            action_inputs = _mapping_at(data, "action_inputs")
-            input_key = (
-                "missing_structured_verification_subjects"
-                if code.endswith("missing")
-                else "nonpassing_structured_verification_subjects"
-            )
-            subjects = _string_list(action_inputs.get(input_key))
-            if subjects:
-                add(
-                    "Record an evidence-backed result for each unverified current changed Chosen subject",
-                    kind=NextActionKind.TASK_VERIFICATION_ADD,
-                    source=f"data.action_inputs.{input_key}",
-                    target_ref=f"data.action_inputs.{input_key}",
-                )
-        elif code == "task_handoff_generated_template":
-            add(
-                "Replace the generated Handoff with task-specific restart instructions",
-                path=path or f"docs/tasks/{task_id}.md",
-            )
-        elif code == "task_decomposition_recommended":
-            add(
-                "Review whether the next independently verifiable milestone belongs in a new task",
-                path=path or f"docs/tasks/{task_id}.md",
-            )
-        elif code in {
-            "discovery_task_chosen_invalid",
-            "discovery_outcome_chosen_mismatch",
-            "discovery_outcome_chosen_invalid",
-        }:
-            alignment = _mapping_at(data, "discovery_outcome_alignment")
-            target_key = next(
-                (key for key in ("task_chosen_paths", "outcome_chosen_paths", "invalid_task_chosen_values", "invalid_outcome_subject_ids") if _string_list(alignment.get(key))),
-                "",
-            )
-            if target_key:
-                add(
-                    "Reconcile the approved Chosen scope through the repoctl Discovery boundary",
-                    kind=NextActionKind.TASK_SCOPE_REVIEW,
-                    source="data.discovery_outcome_alignment",
-                    choices=[TaskScopeResolution.ADD_TO_CHOSEN, TaskScopeResolution.REVERT_CHANGE, TaskScopeResolution.MOVE_TO_FOLLOW_UP],
-                    target_ref=f"data.discovery_outcome_alignment.{target_key}",
-                )
-            add("Open the Task Discovery section", path=path or f"docs/tasks/{task_id}.md")
-        elif code == "discovery_outcome_repository_mismatch":
-            add(
-                "Inspect the Task repository identity and immutable Discovery outcome before continuing",
-                path=path or f"docs/tasks/{task_id}.md",
-            )
-        elif code in {"actual_changes_outside_chosen", "task_chosen_scope_drift"}:
-            action_inputs = _mapping_at(data, "action_inputs")
-            unchosen = _string_list(action_inputs.get("unchosen_actual_paths"))
-            if unchosen:
-                add(
-                    "Review repository changes outside the active Chosen scope",
-                    kind=NextActionKind.TASK_SCOPE_REVIEW,
-                    source="data.action_inputs.unchosen_actual_paths",
-                    choices=[
-                        TaskScopeResolution.ADD_TO_CHOSEN,
-                        TaskScopeResolution.REVERT_CHANGE,
-                        TaskScopeResolution.MOVE_TO_FOLLOW_UP,
-                    ],
-                    target_ref="data.action_inputs.unchosen_actual_paths",
-                )
-            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
-            add("Initialize repos/ as an independent git repository", command="git -C repos init")
-        elif code == "repo_head_changed_since_start":
-            add("Preflight committed range", command=f"./scripts/repoctl task doctor {task_id} --use-committed-diff --json")
-            add("Finish using recorded start-to-HEAD diff", command=f"./scripts/repoctl task finish {task_id} --use-committed-diff --json")
-        elif code == "baseline_conflict":
-            action_inputs = _mapping_at(data, "action_inputs")
-            conflicts = _string_list(action_inputs.get("baseline_conflicts"))
-            if conflicts:
-                add(
-                    "Preview baseline ownership resolutions",
-                    kind=NextActionKind.BASELINE_OWNERSHIP_RESOLUTION,
-                    source="data.action_inputs.baseline_conflicts",
-                    choices=[BaselineOwnership.TASK, BaselineOwnership.PREEXISTING],
-                    target_ref="data.action_inputs.baseline_conflicts",
-                )
-            add("Inspect task repo changes", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code == "workspace_baseline_conflict":
-            action_inputs = _mapping_at(data, "action_inputs")
-            conflicts = _string_list(action_inputs.get("baseline_conflicts"))
-            if conflicts:
-                add(
-                    "Restore task-start product state or move ownership to a repo-scoped child task",
-                    kind=NextActionKind.TASK_SCOPE_REVIEW,
-                    source="data.action_inputs.baseline_conflicts",
-                    choices=[WorkspaceBaselineResolution.RESTORE_TASK_START, WorkspaceBaselineResolution.MOVE_TO_REPO_CHILD],
-                    target_ref="data.action_inputs.baseline_conflicts",
-                )
-            add("Inspect workspace task repository state", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code == "repo_history_rewritten":
-            add("Inspect repository history", command="git -C repos log --oneline --decorate -20")
-            add("Create a new task with a fresh baseline after choosing its title and slug", path="docs/tasks/")
-        elif code == "repo_changes_on_cancel":
-            add("Revert or finish repos/ changes before canceling", command="git -C repos status --short")
-        elif code == "annotation_required":
-            repository = _mapping_at(data, "repository")
-            repo_path = str(repository.get("path") or "").rstrip("/")
-            repo_id = str(repository.get("id") or "")
-            rel = path[len(repo_path) + 1 :] if repo_path and path.startswith(f"{repo_path}/") else path
-            add(
-                "Add required metadata annotation",
-                command=f"./scripts/repoctl meta show {shlex.quote(rel)} --repo-id {shlex.quote(repo_id)} --json" if rel and repo_id else "",
-                path=path,
-                kind=NextActionKind.METADATA_INPUT,
-                source="problems[].path",
-            )
-        elif code == "move_candidate":
-            add("Review the reported metadata move candidate", path=path, kind=NextActionKind.METADATA_INPUT)
-        elif code == "inline_meta_residue":
-            add("Choose equivalent sparse metadata for this source file", path=path, kind=NextActionKind.METADATA_INPUT)
-            add("Remove inline @meta/frontmatter metadata from the source file", path=path)
-        elif code in {"invalid_frontmatter", "missing_frontmatter", "invalid_status"}:
-            add("Open and fix task frontmatter", path=path or f"docs/tasks/{task_id}.md")
-        elif code == "task_not_found":
-            add("List live tasks", command="./scripts/repoctl task list --json")
-            add("Open Board task registry", path="docs/BOARD.md")
-        elif code == "task_not_live":
-            add("Inspect the terminal or archived task", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code == "task_already_blocked":
-            add("Inspect the existing blocker before resuming or canceling", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_resume_binding_invalid"}:
-            if not generated_resume_handoff:
-                add(
-                    "Bind the reviewed Handoff to the current task and repository inputs",
-                    command=f"./scripts/repoctl task handoff bind {task_id} --json",
-                    kind=NextActionKind.TASK_HANDOFF_BIND,
-                    source="data.resume_guidance.handoff.status",
-                )
-        elif code == "task_resume_observation_unavailable":
-            add("Inspect current task and repository state", command=f"./scripts/repoctl task show {task_id} --summary --json")
-        elif code in {"context_pack_stale", "context_pack_missing", "context_pack_invalid", "context_pack_unknown"}:
-            resume = _mapping_at(data, "resume_guidance")
-            context_pack = _mapping_at(resume, "context_pack")
-            pack_path = str(context_pack.get("path") or "")
-            task_data = _mapping_at(data, "task")
-            repo_id = str(task_data.get("repo_id") or "main")
-            if not task_id or not pack_path:
-                add("Review the optional Context Pack binding", path=task_path)
-                continue
-            if pack_path.endswith(".md"):
-                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --format markdown --output {shlex.quote(pack_path)}"
-            else:
-                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --output {shlex.quote(pack_path)} --json"
-            add(
-                "Regenerate the optional bound Context Pack after reviewing current scope",
-                command=command,
-                kind=NextActionKind.CONTEXT_PACK_REFRESH,
-                source="data.resume_guidance.context_pack.status",
-            )
-            if not generated_resume_handoff:
-                add(
-                    "Bind the reviewed Handoff and regenerated Context Pack",
-                    command=f"./scripts/repoctl task handoff bind {task_id} --context-pack {shlex.quote(pack_path)} --json",
-                    kind=NextActionKind.TASK_HANDOFF_BIND,
-                    source="data.resume_guidance.context_pack.path",
-                )
-        elif code == "repository_not_found":
-            add("Inspect configured repositories", command="./scripts/repoctl repo list --json")
-            add("Adopt detected product repositories", command="./scripts/repoctl repo adopt --all --json")
-        elif code in {"repository_selector_required", "repository_identity_unbound"}:
-            candidates = (data or {}).get("repository_candidates")
-            for candidate in candidates if isinstance(candidates, list) else []:
-                if not isinstance(candidate, dict):
-                    continue
-                repo_id = str(candidate.get("suggested_id") or candidate.get("id") or "")
-                candidate_path = str(candidate.get("path") or "")
-                if code == "repository_identity_unbound" and repo_id and candidate_path:
-                    add(f"Adopt repository {repo_id}", command=f"./scripts/repoctl repo adopt {shlex.quote(candidate_path)} --id {shlex.quote(repo_id)} --json")
-                elif repo_id:
-                    add(f"Inspect repository {repo_id}", command=f"./scripts/repoctl repo show {shlex.quote(repo_id)} --json")
-            if not candidates:
-                add("Inspect repository identities", command="./scripts/repoctl repo list --json")
-        elif code in {"invalid_task_id", "invalid_task_id_format"}:
-            add("Use task id format T-YYYYMMDDHHMMSSZ", command="./scripts/repoctl task list --json")
-        elif code == "invalid_area":
-            add("Choose one of the area values shown by task create --help", command="./scripts/repoctl task create --help")
-        elif code == "invalid_repo_ref":
-            add("Inspect stable repository identities before creating the task", command="./scripts/repoctl repo list --json")
-        elif code == "repo_ref_non_repo_area":
-            add("Review task create repository and area inputs", command="./scripts/repoctl task create --help")
-        elif code == "missing_repometa_policy":
-            repo_id = _selected_repo_id(data)
-            add(
-                "Initialize repository metadata",
-                command=f"./scripts/repoctl meta init --repo-id {repo_id} --json",
-            )
-            add("Review repository metadata setup", path="docs/workflows/repo-metadata.md")
-        elif code == "metadata_coverage_empty":
-            add("Choose the first sparse metadata path and values", path="docs/workflows/repo-metadata.md", kind=NextActionKind.METADATA_INPUT)
-        elif code == "board_missing_live_task":
-            add("Repair Board registry", command="./scripts/repoctl check --fix-board --json")
-        elif code == "stale_lock":
-            add("Inspect repoctl lock before removing it", path=path or "docs/tasks/.repoctl.lock.d")
-        elif code in {"missing_upgrade_manifest", "invalid_upgrade_source"}:
-            add("Choose an existing repoctl release checkout or extracted artifact", command="./scripts/repoctl upgrade plan --help")
-        elif code == "missing_upgrade_plan":
-            add("Create an upgrade plan from an existing release checkout", command="./scripts/repoctl upgrade plan --help")
-        elif code in {"upgrade_plan_stale", "upgrade_plan_workspace_mismatch"}:
-            add("Regenerate the upgrade plan from its selected release checkout", command="./scripts/repoctl upgrade plan --help")
-        elif code == "upgrade_plan_has_conflicts":
-            add("Inspect plan conflicts before applying", path=path)
-        elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
-            add("Apply the declared benchmark corpus before running this gate", path="tests/fixtures/context-benchmark/corpus.json")
-        elif code in {"context_graph_unavailable", "context_evidence_index_unavailable"}:
-            recovery_kind = (
-                NextActionKind.GRAPH_BUILD
-                if cause_code == "graph_snapshot_missing"
-                else NextActionKind.GRAPH_REBUILD
-            )
-            action = _recovery_action(recovery_kind, repo_id=_selected_repo_id(data), source="problems_or_warnings[].cause_code")
-            if action:
-                add(**action)
-                context_resume_requested = True
-        elif code == "graph_snapshot_missing":
-            repo_id = _selected_repo_id(data)
-            add(
-                "Build the materialized Graph and evidence index",
-                command=f"./scripts/repoctl graph build --repo-id {repo_id} --json",
-                kind=NextActionKind.GRAPH_BUILD,
-                source="problems[].code",
-            )
-        elif code == "context_graph_stale":
-            action = _recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="problems[].code")
-            if action:
-                add(**action)
-                context_resume_requested = True
-        elif code == "context_graph_seed_identity_unavailable":
+        if code in knowledge_codes or cause in knowledge_codes:
+            knowledge_source = source if code in knowledge_codes else "problems_or_warnings[].cause_code"
+            add(_recovery_action(NextActionKind.KNOWLEDGE_REBUILD, repo_id=_selected_repo_id(data), source=knowledge_source))
+        recovery = graph_recoveries.get(code)
+        recovery_source = source
+        if recovery is None:
+            recovery = graph_recoveries.get(cause)
+            recovery_source = "problems_or_warnings[].cause_code"
+        if recovery is not None:
+            add(_recovery_action(recovery, repo_id=_selected_repo_id(data), source=recovery_source))
+        if code == "context_graph_seed_identity_unavailable":
             context_resume_requested = True
             bundle = _mapping_at(data, "bundle")
             repo_id = _selected_repo_id(data)
@@ -795,130 +526,265 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                 else:
                     continue
                 add(
-                    "Continue from the unresolved typed Graph seed",
-                    command=command,
-                    source="data.bundle.completeness.graph_anchor.identity_coverage.recovery_selectors",
+                    {
+                        "label": "Continue from the unresolved typed Graph seed",
+                        "command": command,
+                        "source": "data.bundle.completeness.graph_anchor.identity_coverage.recovery_selectors",
+                    }
                 )
-        elif code == "graph_snapshot_stale":
-            action = _recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="warnings[].code")
-            if action:
-                add(**action)
-                context_resume_requested = True
-        elif code in {
-            "graph_materialization_incomplete",
-            "graph_materialization_invalid",
-            "graph_materialization_repository_mismatch",
-            "graph_materialization_schema_mismatch",
-            "graph_materialization_unavailable",
-            "evidence_index_missing",
-            "evidence_index_unavailable",
-            "evidence_index_schema_invalid",
-            "evidence_index_query_failed",
-            "evidence_index_input_mismatch",
-            "evidence_index_snapshot_mismatch",
-        }:
-            action = _recovery_action(NextActionKind.GRAPH_REBUILD, repo_id=_selected_repo_id(data), source="problems_or_warnings[].code")
-            if action:
-                add(**action)
-                context_resume_requested = True
-        elif code == "knowledge_candidate_receipt_invalid":
-            add("Inspect the completion receipt", path=path or f"docs/tasks/.repoctl-state/completions/{task_id}.json")
-            add("Rebuild the candidate after choosing its repository, kind, and explicit claim", kind=NextActionKind.KNOWLEDGE_REVIEW)
-        elif code == "knowledge_candidate_claim_required":
-            add("State the reusable decision, invariant, or failure mode explicitly", kind=NextActionKind.KNOWLEDGE_REVIEW)
-        elif code == "knowledge_records_empty":
-            add("Choose a source and explicit reusable claim for a review candidate", kind=NextActionKind.KNOWLEDGE_REVIEW)
-    bundle = (data or {}).get("bundle") if isinstance((data or {}).get("bundle"), dict) else {}
-    completeness = bundle.get("completeness") if isinstance(bundle.get("completeness"), dict) else {}
-    prior_outcome = completeness.get("prior_task_outcome") if isinstance(completeness.get("prior_task_outcome"), dict) else {}
-    if str(prior_outcome.get("reason") or "") in COMPLETION_CATALOGUE_UNAVAILABLE_CODES:
-        action = _recovery_action(NextActionKind.COMPLETION_CATALOGUE_REBUILD, repo_id=_selected_repo_id(data), source="data.bundle.completeness.prior_task_outcome.reason")
-        if action:
-            add(**action)
-            context_resume_requested = True
-    freshness = completeness.get("graph_freshness") if isinstance(completeness.get("graph_freshness"), dict) else {}
-    if str(freshness.get("status") or "") == "stale":
-        action = _recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="data.bundle.completeness.graph_freshness.status")
-        if action:
-            add(**action)
-            context_resume_requested = True
-    if context_resume_requested:
-        replay = _context_replay_action(data)
-        if replay is not None:
-            add(**replay)
-        recovery_kinds = {
-            NextActionKind.GRAPH_BUILD: 0,
-            NextActionKind.GRAPH_REBUILD: 0,
-            NextActionKind.GRAPH_REFRESH: 0,
-            NextActionKind.COMPLETION_CATALOGUE_REBUILD: 1,
-            NextActionKind.KNOWLEDGE_REBUILD: 2,
-            NextActionKind.CONTEXT_RESUME: 3,
-        }
-        recovery = [action for action in actions if action.get("kind") in recovery_kinds]
-        other = [action for action in actions if action.get("kind") not in recovery_kinds]
-        actions = [*other, *sorted(recovery, key=lambda action: recovery_kinds[action["kind"]])]
+        if code == "task_not_found":
+            add({"label": "List live tasks", "command": "./scripts/repoctl task list --json"})
+            add({"label": "Open Board task registry", "path": "docs/BOARD.md"})
+        elif code == "repository_not_found":
+            add({"label": "Inspect configured repositories", "command": "./scripts/repoctl repo list --json"})
+            add({"label": "Adopt detected product repositories", "command": "./scripts/repoctl repo adopt --all --json"})
+        elif code in {"repository_selector_required", "repository_identity_unbound"}:
+            candidates = (data or {}).get("repository_candidates")
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    repo_id = str(candidate.get("suggested_id") or candidate.get("id") or "")
+                    candidate_path = str(candidate.get("path") or "")
+                    if code == "repository_identity_unbound" and repo_id and candidate_path:
+                        add({"label": f"Adopt repository {repo_id}", "command": f"./scripts/repoctl repo adopt {shlex.quote(candidate_path)} --id {shlex.quote(repo_id)} --json"})
+                    elif repo_id:
+                        add({"label": f"Inspect repository {repo_id}", "command": f"./scripts/repoctl repo show {shlex.quote(repo_id)} --json"})
+            if not candidates:
+                add({"label": "Inspect repository identities", "command": "./scripts/repoctl repo list --json"})
+        elif code in {"repo_git_unavailable", "repository_git_unavailable"}:
+            repo_path = path or str(_mapping_at(data, "repository").get("path") or "repos")
+            add({"label": f"Initialize {repo_path} as an independent git repository", "command": f"git init {shlex.quote(repo_path)}"})
+        elif code == "stale_lock":
+            add({"label": "Inspect repoctl lock before removing it", "path": _problem_path(problem) or "docs/tasks/.repoctl.lock.d"})
+        elif code == "missing_repometa_policy":
+            repo_id = _selected_repo_id(data)
+            add({"label": "Initialize repository metadata", "command": f"./scripts/repoctl meta init --repo-id {shlex.quote(repo_id)} --json"})
+        elif code == "annotation_required":
+            repository = _mapping_at(data, "repository")
+            repo_path = str(repository.get("path") or "").rstrip("/")
+            repo_id = str(repository.get("id") or "")
+            rel = path[len(repo_path) + 1 :] if repo_path and path.startswith(f"{repo_path}/") else path
+            add(
+                {
+                    "label": "Add required metadata annotation",
+                    "command": f"./scripts/repoctl meta show {shlex.quote(rel)} --repo-id {shlex.quote(repo_id)} --json",
+                    "path": path,
+                    "kind": NextActionKind.METADATA_INPUT,
+                    "source": "problems[].path",
+                }
+            )
+        elif code == "move_candidate":
+            add({"label": "Review the reported metadata move candidate", "path": path, "kind": NextActionKind.METADATA_INPUT})
+        elif code == "inline_meta_residue":
+            add({"label": "Choose equivalent sparse metadata for this source file", "path": path, "kind": NextActionKind.METADATA_INPUT})
+            add({"label": "Remove inline @meta/frontmatter metadata from the source file", "path": path})
+        elif code in {"invalid_frontmatter", "missing_frontmatter", "invalid_status"}:
+            task_id = str((data or {}).get("task_id") or "")
+            add({"label": "Open and fix task frontmatter", "path": path or (f"docs/tasks/{task_id}.md" if task_id else "docs/tasks/")})
+        elif code in {"invalid_task_id", "invalid_task_id_format"}:
+            add({"label": "Use task id format T-YYYYMMDDHHMMSSZ", "command": "./scripts/repoctl task list --json"})
+        elif code == "invalid_area":
+            add({"label": "Choose one of the area values shown by task create --help", "command": "./scripts/repoctl task create --help"})
+        elif code == "invalid_repo_ref":
+            add({"label": "Inspect stable repository identities before creating the task", "command": "./scripts/repoctl repo list --json"})
+        elif code == "repo_ref_non_repo_area":
+            add({"label": "Review task create repository and area inputs", "command": "./scripts/repoctl task create --help"})
+        elif code == "metadata_coverage_empty":
+            add({"label": "Choose the first sparse metadata path and values", "path": "docs/workflows/repo-metadata.md", "kind": NextActionKind.METADATA_INPUT})
+        elif code == "board_missing_live_task":
+            add({"label": "Repair Board registry", "command": "./scripts/repoctl check --fix-board --json"})
+        elif code in {"missing_upgrade_manifest", "invalid_upgrade_source", "missing_upgrade_plan", "upgrade_plan_stale", "upgrade_plan_workspace_mismatch"}:
+            add({"label": "Review or regenerate the upgrade plan from an existing release checkout", "command": "./scripts/repoctl upgrade plan --help"})
+        elif code == "upgrade_plan_has_conflicts":
+            add({"label": "Inspect plan conflicts before applying", "path": path})
+        elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
+            add({"label": "Apply the declared benchmark corpus before running this gate", "path": "tests/fixtures/context-benchmark/corpus.json"})
+
+    bundle = _mapping_at(data, "bundle")
+    completeness = _mapping_at(bundle, "completeness")
+    if str(_mapping_at(completeness, "graph_freshness").get("status") or "") == "stale":
+        add(_recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="data.bundle.completeness.graph_freshness.status"))
+    recovery_kinds = {
+        NextActionKind.COMPLETION_CATALOGUE_REBUILD,
+        NextActionKind.KNOWLEDGE_REBUILD,
+        NextActionKind.GRAPH_BUILD,
+        NextActionKind.GRAPH_REBUILD,
+        NextActionKind.GRAPH_REFRESH,
+    }
+    query_data = _mapping_at(bundle, "query")
+    query = str(query_data.get("text") or "").strip()
+    repo_id = _selected_repo_id(data)
+    if query and repo_id and (context_resume_requested or any(action.get("kind") in recovery_kinds for action in actions)):
+        command = f"./scripts/repoctl context query {shlex.quote(query)}"
+        mode = str(query_data.get("mode") or "")
+        if mode and mode != "auto":
+            command += f" --mode {shlex.quote(mode.replace('_', '-'))}"
+        command += f" --repo-id {shlex.quote(repo_id)}"
+        if query_data.get("explain"):
+            command += " --explain"
+        add(
+            {
+                "label": "Resume the same Context query after recovery",
+                "command": f"{command} --json",
+                "kind": NextActionKind.CONTEXT_RESUME,
+                "source": "data.bundle.query",
+            }
+        )
     return actions
 
+
+def _task_next_actions(problems: list[Any], data: dict[str, Any]) -> list[dict[str, Any]]:
+    task_id = str(data.get("task_id") or "")
+    task = _mapping_at(data, "task")
+    task_path = str(task.get("path") or "")
+    generated_handoff = _mapping_at(data, "resume_guidance", "handoff").get("generated_template") is True
+    repository_path = str(_mapping_at(data, "repository").get("path") or "")
+    actions: list[dict[str, Any]] = []
+
+    def add(action: dict[str, Any]) -> None:
+        if action not in actions:
+            actions.append(action)
+
+    for problem in problems:
+        code = _problem_code(problem)
+        path = _problem_path(problem) or task_path
+        inputs = _mapping_at(data, "action_inputs")
+        if code == "missing_verification_file":
+            add({"label": "Complete task Verification", "path": path})
+        elif code == "verification_file_inside_repo":
+            add({"label": "Move verification evidence to an existing workspace file outside repos/", "path": path})
+        elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
+            add({"label": "Record task discovery evidence", "path": path, "kind": NextActionKind.DISCOVERY_INPUT})
+        elif code in {"task_structured_verification_missing", "task_structured_verification_nonpassing"}:
+            key = "missing_structured_verification_subjects" if code.endswith("missing") else "nonpassing_structured_verification_subjects"
+            if _string_list(inputs.get(key)):
+                add({"label": "Record an evidence-backed result for each unverified current changed Chosen subject", "kind": NextActionKind.TASK_VERIFICATION_ADD, "source": f"data.action_inputs.{key}", "target_ref": f"data.action_inputs.{key}"})
+        elif code in {"actual_changes_outside_chosen", "task_chosen_scope_drift"}:
+            if _string_list(inputs.get("unchosen_actual_paths")):
+                add({"label": "Review repository changes outside the active Chosen scope", "kind": NextActionKind.TASK_SCOPE_REVIEW, "source": "data.action_inputs.unchosen_actual_paths", "choices": [TaskScopeResolution.ADD_TO_CHOSEN, TaskScopeResolution.REVERT_CHANGE, TaskScopeResolution.MOVE_TO_FOLLOW_UP], "target_ref": "data.action_inputs.unchosen_actual_paths"})
+            add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
+        elif code in {"discovery_task_chosen_invalid", "discovery_outcome_chosen_mismatch", "discovery_outcome_chosen_invalid"}:
+            alignment = _mapping_at(data, "discovery_outcome_alignment")
+            target_key = next((key for key in ("task_chosen_paths", "outcome_chosen_paths", "invalid_task_chosen_values", "invalid_outcome_subject_ids") if _string_list(alignment.get(key))), "")
+            if target_key:
+                add({"label": "Reconcile the approved Chosen scope through the repoctl Discovery boundary", "kind": NextActionKind.TASK_SCOPE_REVIEW, "source": "data.discovery_outcome_alignment", "choices": [TaskScopeResolution.ADD_TO_CHOSEN, TaskScopeResolution.REVERT_CHANGE, TaskScopeResolution.MOVE_TO_FOLLOW_UP], "target_ref": f"data.discovery_outcome_alignment.{target_key}"})
+            add({"label": "Open the Task Discovery section", "path": path})
+        elif code == "discovery_outcome_repository_mismatch":
+            add({"label": "Inspect the task repository identity and immutable Discovery outcome", "path": path})
+        elif code == "baseline_conflict":
+            if _string_list(inputs.get("baseline_conflicts")):
+                add({"label": "Preview baseline ownership resolutions", "kind": NextActionKind.BASELINE_OWNERSHIP_RESOLUTION, "source": "data.action_inputs.baseline_conflicts", "choices": [BaselineOwnership.TASK, BaselineOwnership.PREEXISTING], "target_ref": "data.action_inputs.baseline_conflicts"})
+            add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
+        elif code == "workspace_baseline_conflict":
+            if _string_list(inputs.get("baseline_conflicts")):
+                add({"label": "Restore task-start product state or move ownership to a repo-scoped child task", "kind": NextActionKind.TASK_SCOPE_REVIEW, "source": "data.action_inputs.baseline_conflicts", "choices": [WorkspaceBaselineResolution.RESTORE_TASK_START, WorkspaceBaselineResolution.MOVE_TO_REPO_CHILD], "target_ref": "data.action_inputs.baseline_conflicts"})
+            add({"label": "Inspect workspace task repository state", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
+        elif code == "repo_history_rewritten":
+            repo_path = repository_path or (path if path == "repos" or path.startswith("repos/") else "repos")
+            add({"label": "Inspect repository history before creating a fresh task baseline", "command": f"git -C {shlex.quote(repo_path)} log --oneline --decorate -20"})
+        elif code in {"task_handoff_unbound", "task_handoff_stale", "task_resume_binding_invalid"}:
+            if not generated_handoff:
+                add({"label": "Bind the reviewed Handoff to the current task and repository inputs", "command": f"./scripts/repoctl task handoff bind {task_id} --json", "kind": NextActionKind.TASK_HANDOFF_BIND, "source": "data.resume_guidance.handoff.status"})
+        elif code == "task_handoff_generated_template":
+            add({"label": "Replace the generated Handoff with task-specific restart instructions", "path": path})
+        elif code in {"context_pack_stale", "context_pack_missing", "context_pack_invalid", "context_pack_unknown"}:
+            context_pack = _mapping_at(data, "resume_guidance", "context_pack")
+            pack_path = str(context_pack.get("path") or "")
+            if not task_id or not pack_path:
+                add({"label": "Review the optional Context Pack binding", "path": path})
+                continue
+            repo_id = str(task.get("repo_id") or "main")
+            if pack_path.endswith(".md"):
+                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --format markdown --output {shlex.quote(pack_path)}"
+            else:
+                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --output {shlex.quote(pack_path)} --json"
+            add({"label": "Regenerate the optional bound Context Pack after reviewing current scope", "command": command, "kind": NextActionKind.CONTEXT_PACK_REFRESH, "source": "data.resume_guidance.context_pack.status"})
+            if not generated_handoff:
+                add({"label": "Bind the reviewed Handoff and regenerated Context Pack", "command": f"./scripts/repoctl task handoff bind {task_id} --context-pack {shlex.quote(pack_path)} --json", "kind": NextActionKind.TASK_HANDOFF_BIND, "source": "data.resume_guidance.context_pack.path"})
+        elif code == "task_decomposition_recommended":
+            add({"label": "Review whether the next independently verifiable milestone belongs in a new task", "path": path})
+        elif code == "repo_head_changed_since_start":
+            add({"label": "Preflight committed range", "command": f"./scripts/repoctl task doctor {task_id} --use-committed-diff --json"})
+            add({"label": "Finish using recorded start-to-HEAD diff", "command": f"./scripts/repoctl task finish {task_id} --use-committed-diff --json"})
+        elif code == "repo_changes_on_cancel":
+            repo_path = repository_path or "repos"
+            add({"label": f"Revert or finish {repo_path} changes before canceling", "command": f"git -C {shlex.quote(repo_path)} status --short"})
+        elif code == "task_resume_observation_unavailable":
+            add({"label": "Inspect current task and repository state", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
+        elif code == "task_already_blocked":
+            add({"label": "Inspect the existing blocker before resuming or canceling", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
+        elif code == "task_not_live":
+            add({"label": "Inspect the terminal or archived task", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
+    return actions
 
 def _repoctl_release_field_gates(root: Path, *, repo_id: str = "main") -> list[dict[str, Any]]:
     gates: list[dict[str, Any]] = []
 
-    def add(label: str, *, command: str, mutates_workspace: bool, requires: list[str] | None = None) -> None:
+    def add(name: str, label: str, *, command: str, requires: list[str] | None = None) -> None:
         gates.append(
             {
+                "name": name,
                 "label": label,
                 "command": command,
-                "mutates_workspace": mutates_workspace,
+                "mutates_workspace": False,
                 "requires": requires or [],
             }
         )
 
-    if _repo_target_available(root, repo_id) and _fixture_has_repository(root / "tests/fixtures/context-benchmark", repo_id):
+    add("workspace_check", "Check workspace lifecycle", command="./scripts/repoctl check --json")
+    add("repository_check", "Check repository registry", command="./scripts/repoctl repo check --json")
+    add(
+        "reviewed_knowledge_check",
+        "Check reviewed Knowledge",
+        command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --include-candidates --json",
+    )
+    if _fixture_has_repository(root / "tests/fixtures/context-benchmark", repo_id):
         add(
+            "context_benchmark_materialize",
             "Materialize context benchmark corpus",
             command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
-            mutates_workspace=True,
             requires=["tests/fixtures/context-benchmark/corpus.json"],
         )
         add(
+            "context_benchmark",
             "Run context benchmark gate",
-            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-visible-recall anchor-coherence=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --min-category-graph-edge-recall anchor-coherence=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
-            mutates_workspace=False,
+            command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-precision-at-5 0.50 --min-visible-recall 0.90 --min-category-visible-recall authority=1.0 --min-category-visible-recall contract=1.0 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-visible-recall anchor-coherence=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --min-category-graph-edge-recall anchor-coherence=1.0 --max-output-estimated-tokens 3000 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
             requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
         )
-    if _repo_target_available(root, repo_id) and (root / "tests/fixtures/context-pack-benchmark/cases.json").exists():
+    if (root / "tests/fixtures/context-pack-benchmark/cases.json").exists():
         if (root / "tests/fixtures/context-pack-benchmark/tasks.json").exists():
             add(
+                "context_pack_benchmark_materialize",
                 "Materialize context pack benchmark tasks",
                 command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
-                mutates_workspace=True,
                 requires=["tests/fixtures/context-pack-benchmark/tasks.json"],
             )
         add(
+            "context_pack_benchmark",
             "Run context pack benchmark gate",
             command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
-            mutates_workspace=False,
             requires=["tests/fixtures/context-pack-benchmark/cases.json"],
         )
     if _has_configured_repositories(root, {"web", "api"}) and (root / "tests/fixtures/context-benchmark-multirepo/corpus.json").exists():
         add(
+            "context_benchmark_multirepo_materialize",
             "Materialize multi-repo context benchmark corpus",
             command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
-            mutates_workspace=True,
             requires=["tests/fixtures/context-benchmark-multirepo/corpus.json"],
         )
         add(
+            "context_benchmark_multirepo_isolation",
             "Run multi-repo isolation benchmark gate",
             command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
-            mutates_workspace=False,
             requires=["tests/fixtures/context-benchmark-multirepo/questions.jsonl", "tests/fixtures/context-benchmark-multirepo/expected-sources.json"],
         )
     knowledge_records = root / "docs/knowledge/records"
     if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
         add(
+            "knowledge_render_check",
             "Check rendered knowledge pages",
             command=f"./scripts/repoctl knowledge render --repo-id {repo_id} --check --json",
-            mutates_workspace=False,
             requires=["docs/knowledge/records"],
         )
     return gates
@@ -933,14 +799,6 @@ def _has_configured_repositories(root: Path, repo_ids: set[str]) -> bool:
         return False
     configured = {target.id for target in layout.targets}
     return repo_ids.issubset(configured)
-
-
-def _repo_target_available(root: Path, repo_id: str) -> bool:
-    try:
-        require_repo_target(root, repo_id=repo_id)
-    except (OSError, RepoctlError):
-        return False
-    return True
 
 
 def _fixture_has_repository(fixture: Path, repo_id: str) -> bool:
@@ -1234,8 +1092,13 @@ def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirecto
         if path.exists():
             shutil.rmtree(path)
         path.mkdir(parents=True, exist_ok=True)
-    for target in repo_layout(root).targets:
-        repo = isolated / target.display_path
+    source_targets = {target.id: target for target in repo_layout(root).targets}
+    benchmark_repos = (
+        [isolated / target.display_path for target in source_targets.values()]
+        if source_targets
+        else [isolated / "repos"]
+    )
+    for repo in benchmark_repos:
         repo.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(["git", "init", "-q"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if result.returncode != 0:
@@ -1243,10 +1106,23 @@ def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirecto
             raise RepoctlError(
                 f"cannot initialize isolated benchmark repository: {result.stderr.strip()}",
                 code="field_gate_benchmark_workspace_unavailable",
-                path=target.display_path,
+                path=repo.relative_to(isolated).as_posix(),
             )
-        source_metadata = target.root_path / ".repometa"
-        if (source_metadata / "policy.json").is_file():
+    for target in repo_layout(isolated).targets:
+        repo = isolated / target.display_path
+        repo.mkdir(parents=True, exist_ok=True)
+        if not (repo / ".git").is_dir():
+            result = subprocess.run(["git", "init", "-q"], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if result.returncode != 0:
+                temporary.cleanup()
+                raise RepoctlError(
+                    f"cannot initialize isolated benchmark repository: {result.stderr.strip()}",
+                    code="field_gate_benchmark_workspace_unavailable",
+                    path=target.display_path,
+                )
+        source_target = source_targets.get(target.id)
+        source_metadata = source_target.root_path / ".repometa" if source_target is not None else None
+        if source_metadata is not None and (source_metadata / "policy.json").is_file():
             shutil.copytree(source_metadata, repo / ".repometa", dirs_exist_ok=True)
         _projection, projection_problems = initialize_empty_knowledge_projection(
             isolated,
@@ -1264,12 +1140,23 @@ def _isolated_benchmark_workspace(root: Path) -> tuple[tempfile.TemporaryDirecto
 
 def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, Any]:
     gates: list[dict[str, Any]] = []
+    release_gate_specs = {
+        gate["name"]: gate
+        for gate in _repoctl_release_field_gates(root, repo_id=repo_id)
+    }
+
+    def gate_identity(name: str) -> dict[str, Any]:
+        spec = release_gate_specs[name]
+        return {
+            "name": name,
+            "command": spec["command"],
+            "mutates_workspace": spec["mutates_workspace"],
+        }
+
     check_payload, check_problems, _live_paths = _check_payload(root)
     gates.append(
         _repoctl_release_gate_result(
-            name="workspace_check",
-            command="./scripts/repoctl check --json",
-            mutates_workspace=False,
+            **gate_identity("workspace_check"),
             data=check_payload,
             problems=check_problems,
             warnings=check_payload.get("warnings", []) if isinstance(check_payload.get("warnings"), list) else [],
@@ -1281,16 +1168,14 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
 
     try:
         layout = repo_layout(root)
-        repo_problems = _problems_from_dicts(repo_check_problems(layout))
+        repo_problems = _problems_from_dicts(repo_check_problems(root, layout))
         repo_data = layout.to_dict()
     except RepoctlError as exc:
         repo_problems = [Problem("error", exc.code, str(exc), exc.path)]
         repo_data = {}
     gates.append(
         _repoctl_release_gate_result(
-            name="repository_check",
-            command="./scripts/repoctl repo check --json",
-            mutates_workspace=False,
+            **gate_identity("repository_check"),
             data=repo_data,
             problems=repo_problems,
             summary={
@@ -1313,9 +1198,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
     knowledge_gate_warnings = [problem for problem in candidate_problems if problem.severity == "warning"]
     gates.append(
         _repoctl_release_gate_result(
-            name="reviewed_knowledge_check",
-            command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --include-candidates --json",
-            mutates_workspace=False,
+            **gate_identity("reviewed_knowledge_check"),
             data=knowledge_data,
             problems=knowledge_gate_problems,
             warnings=_problem_dicts(knowledge_gate_warnings),
@@ -1336,9 +1219,9 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
 
     benchmark_temporary, benchmark_root = _isolated_benchmark_workspace(root)
     context_fixture = benchmark_root / "tests/fixtures/context-benchmark"
-    context_enabled = _repo_target_available(benchmark_root, repo_id) and _fixture_has_repository(context_fixture, repo_id)
+    context_enabled = "context_benchmark" in release_gate_specs
     pack_fixture = benchmark_root / "tests/fixtures/context-pack-benchmark"
-    pack_enabled = _repo_target_available(benchmark_root, repo_id) and (pack_fixture / "cases.json").exists()
+    pack_enabled = "context_pack_benchmark" in release_gate_specs
     benchmark_metadata, benchmark_metadata_entries = _temporary_benchmark_metadata(
         benchmark_root,
         repo_id=repo_id,
@@ -1368,11 +1251,15 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
                         fixture=context_fixture,
                         repo_id=repo_id,
                         min_recall_at_5=0.85,
+                        min_precision_at_5=0.50,
+                        min_visible_recall=0.90,
                         min_category_graph_edge_recall={
                             "anchor-coherence": 1.0,
                             "multi-owner-impact": 1.0,
                         },
                         min_category_visible_recall={
+                            "authority": 1.0,
+                            "contract": 1.0,
                             "anchor-coherence": 1.0,
                             "area-isolation": 1.0,
                             "integrated-owner-test": 1.0,
@@ -1383,15 +1270,14 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
                         require_source_integrity=True,
                         require_fixture_corpus=True,
                         require_no_forbidden=True,
+                        max_output_estimated_tokens=3000,
                     )
             finally:
                 context_cleanup, context_cleanup_problems = _cleanup_materialized_entries(benchmark_root, context_cleanup_entries)
                 context_materialize_problems.extend(context_cleanup_problems)
             gates.append(
                 _repoctl_release_gate_result(
-                    name="context_benchmark_materialize",
-                    command=f"./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
-                    mutates_workspace=False,
+                    **gate_identity("context_benchmark_materialize"),
                     data=context_materialize,
                     problems=context_materialize_problems,
                     warnings=[{"code": "context_benchmark_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
@@ -1401,9 +1287,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
             if not _has_errors(context_materialize_problems):
                 gates.append(
                     _repoctl_release_gate_result(
-                        name="context_benchmark",
-                        command=f"./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-visible-recall anchor-coherence=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --min-category-graph-edge-recall anchor-coherence=1.0 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
-                        mutates_workspace=False,
+                        **gate_identity("context_benchmark"),
                         data=context_benchmark,
                         problems=context_benchmark_problems,
                         warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
@@ -1434,9 +1318,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
                     pack_materialize_problems.extend(pack_cleanup_problems)
                 gates.append(
                     _repoctl_release_gate_result(
-                        name="context_pack_benchmark_materialize",
-                        command="./scripts/repoctl context pack-benchmark-materialize --fixture tests/fixtures/context-pack-benchmark --json",
-                        mutates_workspace=False,
+                        **gate_identity("context_pack_benchmark_materialize"),
                         data=pack_materialize,
                         problems=pack_materialize_problems,
                         warnings=[{"code": "context_pack_benchmark_isolated_workspace", "message": "benchmark tasks were materialized only inside an isolated temporary workspace"}],
@@ -1450,9 +1332,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
             if not _has_errors(pack_materialize_problems):
                 gates.append(
                     _repoctl_release_gate_result(
-                        name="context_pack_benchmark",
-                        command=f"./scripts/repoctl context pack-benchmark --fixture tests/fixtures/context-pack-benchmark --repo-id {repo_id} --min-must-read-recall 1.0 --json",
-                        mutates_workspace=False,
+                        **gate_identity("context_pack_benchmark"),
                         data=pack_benchmark,
                         problems=pack_benchmark_problems,
                         warnings=[{"code": "context_pack_benchmark_retrieval_only", "message": "context pack benchmark measures source pack recall only; it does not validate generated answers or task scope"}],
@@ -1484,7 +1364,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
                 materialize_gate["ok"] = False
 
     multi_fixture = benchmark_root / "tests/fixtures/context-benchmark-multirepo"
-    if _has_configured_repositories(benchmark_root, {"web", "api"}) and (multi_fixture / "corpus.json").exists():
+    if "context_benchmark_multirepo_isolation" in release_gate_specs:
         multi_materialize, multi_materialize_problems = materialize_context_benchmark_corpus(benchmark_root, fixture=multi_fixture, repo_id="", force=False)
         multi_cleanup_entries = _context_materialize_cleanup_entries(benchmark_root, multi_materialize)
         multi_cleanup: dict[str, Any] = {}
@@ -1505,9 +1385,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
             multi_materialize_problems.extend(multi_cleanup_problems)
         gates.append(
             _repoctl_release_gate_result(
-                name="context_benchmark_multirepo_materialize",
-                command="./scripts/repoctl context benchmark-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
-                mutates_workspace=False,
+                **gate_identity("context_benchmark_multirepo_materialize"),
                 data=multi_materialize,
                 problems=multi_materialize_problems,
                 warnings=[{"code": "context_benchmark_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
@@ -1517,9 +1395,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
         if not _has_errors(multi_materialize_problems):
             gates.append(
                 _repoctl_release_gate_result(
-                    name="context_benchmark_multirepo_isolation",
-                    command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
-                    mutates_workspace=False,
+                    **gate_identity("context_benchmark_multirepo_isolation"),
                     data=multi_benchmark,
                     problems=multi_benchmark_problems,
                     warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
@@ -1532,15 +1408,12 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
 
     benchmark_temporary.cleanup()
 
-    knowledge_records = root / "docs/knowledge/records"
-    if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
+    if "knowledge_render_check" in release_gate_specs:
         render_output = Path("docs/knowledge/generated")
         render_data, render_problems = render_knowledge(root, repo_id=repo_id, output=render_output, check=True)
         gates.append(
             _repoctl_release_gate_result(
-                name="knowledge_render_check",
-                command=f"./scripts/repoctl knowledge render --repo-id {repo_id} --check --json",
-                mutates_workspace=False,
+                **gate_identity("knowledge_render_check"),
                 data=render_data,
                 problems=render_problems,
                 warnings=[{"code": "knowledge_render_not_authoritative", "message": "rendered knowledge pages are generated views and must not be ingested as source authority"}],
@@ -1738,18 +1611,20 @@ def _flatten_numeric_summary(value: Any, *, prefix: str = "") -> dict[str, float
     return results
 
 
+
+
 def _repo_scoped_frontmatter(task: Any) -> bool:
     area = str(task.frontmatter.get("area") or "")
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
 
 
-def _discovery_guidance_actions(task_id: str, *, repo_id: str = "main", repo_path: str = "repos") -> list[dict[str, Any]]:
+def _discovery_guidance_actions(task_path: str) -> list[dict[str, Any]]:
     return [
         {
             "label": "Choose a concrete discovery query and reviewed/chosen product paths",
             "kind": NextActionKind.DISCOVERY_INPUT,
-            "source": f"docs/tasks/{task_id}.md#Discovery",
-            "path": f"docs/tasks/{task_id}.md",
+            "source": f"{task_path}#Discovery",
+            "path": task_path,
         },
     ]
 
@@ -1837,9 +1712,27 @@ def _error_data(args: argparse.Namespace, error: RepoctlError | None = None) -> 
             except (OSError, RepoctlError):
                 pass
             else:
+                data["task"] = task.to_list_dict()
                 data["repo_id"] = str(task.frontmatter.get("repo_id") or "")
+                try:
+                    target = _repo_target_for_task_command(_workspace_root_or_cwd(), task)
+                except (OSError, RepoctlError):
+                    pass
+                else:
+                    if target is not None:
+                        data["repository"] = target.to_dict()
     if repo_id:
         data["repo_id"] = repo_id
+    context_pack = str(getattr(args, "context_pack", "") or "")
+    if task_id and context_pack:
+        pack_path = Path(context_pack)
+        if pack_path.is_absolute():
+            try:
+                context_pack = pack_path.relative_to(_workspace_root_or_cwd()).as_posix()
+            except ValueError:
+                context_pack = ""
+        if context_pack:
+            data["resume_guidance"] = {"context_pack": {"status": error.code if error is not None else "unknown", "path": context_pack}}
     if error is not None and error.code in {"repository_identity_unbound", "repository_selector_required"}:
         try:
             layout = repo_layout(_workspace_root_or_cwd())
@@ -1962,6 +1855,13 @@ def _full_completion_history_audit(
                 receipt_artifacts=artifacts,
             )
         except CompletionCatalogueUnavailable as exc:
+            audited.append(
+                {
+                    "repo_id": repo_id,
+                    "status": "unavailable",
+                    "problem_code": exc.code,
+                }
+            )
             problems.append(_completion_catalogue_problem(repo_id, exc))
             continue
         audited.append(
@@ -2198,7 +2098,7 @@ def cmd_repo_show(args: argparse.Namespace) -> int:
 def cmd_repo_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     layout = repo_layout(root)
-    problems = repo_check_problems(layout)
+    problems = repo_check_problems(root, layout)
     payload = {"ok": not problems, "command": "repo.check", "data": layout.to_dict(), "problems": problems, "warnings": []}
     if args.json:
         _json(payload)
@@ -2317,7 +2217,10 @@ def build_task_resume_projection(
             "data": data,
             "problems": [],
             "warnings": [],
-            "next_actions": [],
+            "next_actions": [
+                {"label": "Review deferred backlog", "command": "./scripts/repoctl backlog list --json"},
+                {"label": "Open the Board", "path": "docs/BOARD.md"},
+            ],
         }
     if selected_task is None and selection.status is TaskResumeSelectionStatus.AMBIGUOUS:
         problem = Problem(
@@ -2399,10 +2302,12 @@ def build_task_resume_projection(
         "problems": [problem.to_dict() for problem in problems],
         "warnings": warnings,
     }
-    payload["next_actions"] = _next_actions_for_problems(
-        [*payload["problems"], *payload["warnings"]],
-        data={**data, "task_id": task.id},
-    )
+    task_data = {**data, "task_id": task.id}
+    task_problems = [*payload["problems"], *payload["warnings"]]
+    payload["next_actions"] = [
+        *_task_next_actions(task_problems, task_data),
+        *_next_actions_for_problems(task_problems, data=task_data),
+    ]
     return payload
 
 
@@ -2731,10 +2636,12 @@ def cmd_task_show(args: argparse.Namespace) -> int:
             "problems": [problem.to_dict() for problem in show_problems],
             "warnings": warnings,
         }
-    payload["next_actions"] = _next_actions_for_problems(
-        [*[problem.to_dict() for problem in show_problems], *warnings],
-        data={**summary, "task_id": task.id},
-    )
+    task_data = {**summary, "task_id": task.id}
+    task_problems = [*[problem.to_dict() for problem in show_problems], *warnings]
+    payload["next_actions"] = [
+        *_task_next_actions(task_problems, task_data),
+        *_next_actions_for_problems(task_problems, data=task_data),
+    ]
     if args.json:
         _json(payload)
     elif args.section:
@@ -3264,10 +3171,11 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         "problems": [problem.to_dict() for problem in combined if problem.severity == "error"],
         "warnings": [problem.to_dict() for problem in combined if problem.severity == "warning"],
     }
-    payload["next_actions"] = _next_actions_for_problems(
-        [*payload["problems"], *payload["warnings"]],
-        data=data,
-    )
+    task_problems = [*payload["problems"], *payload["warnings"]]
+    payload["next_actions"] = [
+        *_task_next_actions(task_problems, data),
+        *_next_actions_for_problems(task_problems, data=data),
+    ]
     return payload
 
 
@@ -3455,19 +3363,15 @@ def cmd_task_create(args: argparse.Namespace) -> int:
             raise
     status = "doing" if start_result else task.status
     next_actions: list[dict[str, str]] = []
-    target: RepoTarget | None = None
     if _repo_scoped_frontmatter(task):
-        repo_path = "repos"
-        repo_id = str(task.frontmatter.get("repo_id") or "main")
+        next_actions = _discovery_guidance_actions(task.rel_path)
+    started_task = resolve_task(root, task.id) if start_result else task
+    target: RepoTarget | None = None
+    if start_result:
         try:
-            target = _repo_target_for_task_command(root, task)
-            if target is not None:
-                repo_path = target.display_path
-                repo_id = target.id
+            target = _repo_target_for_task_command(root, started_task)
         except RepoctlError:
             pass
-        next_actions = _discovery_guidance_actions(task.id, repo_id=repo_id, repo_path=repo_path)
-    started_task = resolve_task(root, task.id) if start_result else task
     generated_handoff = task_handoff_is_generated_template(started_task)
     if start_result and generated_handoff:
         next_actions = _with_task_safety_prerequisite(
@@ -3627,16 +3531,7 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     }
     next_actions: list[dict[str, str]] = []
     if _repo_scoped_frontmatter(started_task):
-        repo_path = "repos"
-        repo_id = str(started_task.frontmatter.get("repo_id") or "main")
-        try:
-            target = _repo_target_for_task_command(root, started_task)
-            if target is not None:
-                repo_path = target.display_path
-                repo_id = target.id
-        except RepoctlError:
-            pass
-        next_actions = _discovery_guidance_actions(task_id, repo_id=repo_id, repo_path=repo_path)
+        next_actions = _discovery_guidance_actions(started_task.rel_path)
     resume_guidance, resume_warnings, resume_problems = _task_resume_guidance(root, started_task, target=target)
     data["resume_guidance"] = resume_guidance
     if resume_guidance["handoff"].get("generated_template") is True:
@@ -4068,7 +3963,7 @@ def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) ->
                 else f"task-start dirty paths no longer match their baseline: {', '.join(conflicts)}; resolve ownership or cancel with explicit dirty-state evidence"
             ),
             code="workspace_baseline_conflict" if workspace_task else "baseline_conflict",
-            path=conflicts[0],
+            path=task.rel_path,
             input_name="baseline_conflicts",
             paths=conflicts,
         )
@@ -4076,7 +3971,7 @@ def _cancel_dirty_gate(root: Path, task_id: str, *, allow_dirty_cancel: bool) ->
         reject(
             f"task cancel would leave repos/ changes outside a finished metadata gate: {', '.join(residue_paths)}; revert them, finish the task, or pass --allow-dirty-cancel with a reason",
             code="repo_changes_on_cancel",
-            path=f"docs/tasks/{task_id}.md",
+            path=task.rel_path,
             input_name="cancel_residue_paths",
             paths=residue_paths,
         )
@@ -4777,17 +4672,35 @@ def _graph_candidate_actions(result: dict[str, Any] | None, *, repo_id: str) -> 
     }.get(query_type)
     if not flag:
         return []
-    actions: list[dict[str, str]] = []
     candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
+    candidate_paths = {
+        str(candidate.get("path") or "")
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    }
+    actions: list[dict[str, str]] = []
     for candidate in candidates:
         path = str(candidate.get("path") or "") if isinstance(candidate, dict) else ""
         if not path:
             continue
         workspace_path = str(candidate.get("workspace_path") or path)
+        repository_path = workspace_path[: -len(path)].rstrip("/") if workspace_path.endswith(path) else ""
+        selector = workspace_path if repository_path and path.startswith(f"{repository_path}/") and path[len(repository_path) + 1 :] in candidate_paths else path
+        if query_type in {"file", "impact_file"}:
+            command = f"./scripts/repoctl graph query --repo-id {shlex.quote(repo_id)} {flag} {shlex.quote(selector)}"
+            if query_type == "impact_file" and query.get("depth"):
+                command += f" --depth {shlex.quote(str(query['depth']))}"
+        else:
+            symbol = str(query.get("symbol") or "")
+            if not symbol:
+                continue
+            command = f"./scripts/repoctl graph query --repo-id {shlex.quote(repo_id)} {flag} {shlex.quote(symbol)} --in-file {shlex.quote(selector)}"
+            if query_type == "impact_symbol" and query.get("depth"):
+                command += f" --depth {shlex.quote(str(query['depth']))}"
         actions.append(
             {
-                "label": f"Inspect Graph candidate {workspace_path}",
-                "path": workspace_path,
+                "label": f"Replay Graph query for {workspace_path}",
+                "command": f"{command} --json",
             }
         )
     if actions:
@@ -5517,7 +5430,13 @@ def _compact_graph_query_warnings(completeness: Any) -> list[dict[str, str]]:
 def cmd_context_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    bundle, problems, meta = build_context_bundle(root, target=target, query=args.query, explain=args.explain, mode=args.mode or "")
+    bundle, problems, meta = build_context_bundle(
+        root,
+        target=target,
+        query=args.query,
+        explain=args.explain,
+        mode=args.mode or "",
+    )
     bundle_data = None
     result_receipt: dict[str, Any] | None = None
     if bundle is not None:
@@ -5600,6 +5519,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         repo_id=args.repo_id or "",
         min_recall_at_5=args.min_recall_at_5,
         min_precision_at_5=args.min_precision_at_5,
+        min_visible_recall=args.min_visible_recall,
         min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
         min_category_recall_at_5=category_gates,
         min_category_knowledge_recall_at_5=knowledge_category_gates,
@@ -5610,7 +5530,7 @@ def cmd_context_benchmark(args: argparse.Namespace) -> int:
         require_no_forbidden=args.require_no_forbidden,
         require_no_cross_repo=args.require_no_cross_repo,
         require_fixture_corpus=args.require_fixture_corpus,
-        include_attribution=args.attribution,
+        max_output_estimated_tokens=args.max_output_estimated_tokens,
     )
     problems = [*category_gate_problems, *knowledge_category_gate_problems, *edge_category_gate_problems, *visible_category_gate_problems, *problems]
     payload = {
@@ -5699,43 +5619,6 @@ def _parse_category_recall_gates(values: list[str]) -> tuple[dict[str, float], l
     return gates, problems
 
 
-def cmd_context_benchmark_compare(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    baseline = Path(args.baseline)
-    candidate = Path(args.candidate)
-    if not baseline.is_absolute():
-        baseline = root / baseline
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    data, problems = compare_context_benchmarks(
-        root=root,
-        baseline_path=baseline,
-        candidate_path=candidate,
-        max_recall_at_5_drop=args.max_recall_at_5_drop,
-        max_precision_at_5_drop=args.max_precision_at_5_drop,
-        max_knowledge_recall_at_5_drop=args.max_knowledge_recall_at_5_drop,
-        max_question_recall_at_5_drop=args.max_question_recall_at_5_drop,
-        require_current_sources=args.require_current_sources,
-    )
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "context.benchmark-compare",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        deltas = data.get("metric_deltas", {}) if data else {}
-        recall = deltas.get("mean_recall_at_5", {}).get("delta", 0)
-        precision = deltas.get("mean_precision_at_5", {}).get("delta", 0)
-        print(f"context benchmark compare recall@5_delta={recall} precision@5_delta={precision}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
 def cmd_context_pack(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     output: Path | None = None
@@ -5785,38 +5668,6 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     else:
         groups = data.get("groups", {})
         print(f"context pack task={data.get('task', {}).get('id', args.task)} must_read={len(groups.get('must_read', []))} likely_change={len(groups.get('likely_change', []))} impact={len(groups.get('impact', []))} verification={len(groups.get('verification', []))}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def cmd_context_pack_compare(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    baseline = Path(args.baseline)
-    candidate = Path(args.candidate)
-    if not baseline.is_absolute():
-        baseline = root / baseline
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    data, problems = compare_task_context_packs(
-        baseline_path=baseline,
-        candidate_path=candidate,
-        max_must_read_drop=args.max_must_read_drop,
-        require_warning_stability=args.require_warning_stability,
-    )
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "context.pack-compare",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        deltas = data.get("count_deltas", {}) if data else {}
-        must_read = deltas.get("must_read", {}).get("delta", 0)
-        print(f"context pack compare must_read_delta={must_read}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -5902,32 +5753,6 @@ def cmd_context_pack_benchmark_materialize(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def cmd_context_pack_benchmark_compare(args: argparse.Namespace) -> int:
-    baseline = Path(args.baseline)
-    candidate = Path(args.candidate)
-    data, problems = compare_task_context_pack_benchmarks(
-        baseline_path=baseline,
-        candidate_path=candidate,
-        max_mean_must_read_recall_drop=args.max_mean_must_read_recall_drop,
-    )
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "context.pack-benchmark-compare",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        deltas = data.get("metric_deltas", {}) if data else {}
-        recall = deltas.get("mean_must_read_recall", {}).get("delta", 0)
-        print(f"context pack benchmark compare mean_must_read_recall_delta={recall}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
 def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -5979,6 +5804,13 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
                     claim=claim,
                     applies_to=list(getattr(args, "applies_to", []) or []),
                 )
+    failure_actions = _next_actions_for_problems(problems, data={"task_id": from_task or args.from_receipt or "T-..."})
+    if _has_errors(problems):
+        codes = {_problem_code(problem) for problem in problems}
+        if "knowledge_candidate_receipt_invalid" in codes:
+            failure_actions.append({"label": "Rebuild the candidate after choosing its repository, kind, and explicit claim", "kind": NextActionKind.KNOWLEDGE_REVIEW})
+        if "knowledge_candidate_claim_required" in codes:
+            failure_actions.append({"label": "State the reusable decision, invariant, or failure mode explicitly", "kind": NextActionKind.KNOWLEDGE_REVIEW})
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge.candidate.build",
@@ -5997,7 +5829,7 @@ def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
                 dry_run=bool(getattr(args, "dry_run", False)),
             )
             if not _has_errors(problems)
-            else _next_actions_for_problems(problems, data={"task_id": from_task or args.from_receipt or "T-..."})
+            else failure_actions
         ),
     }
     if args.json:
@@ -6908,7 +6740,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
         root,
         _check_backup_contents=False,
     )
-    layout_problem_dicts = repo_check_problems(layout)
+    layout_problem_dicts = repo_check_problems(root, layout)
     repository_runtime_uninitialized = (
         not layout.targets
         and not namespaces
@@ -7347,6 +7179,7 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = RepoctlArgumentParser(prog="repoctl", description="Workspace task, repository, discovery, and upgrade control plane.")
+    parser.add_argument("--version", action="version", version=_version_data(_workspace_root_or_cwd())["version"], help="show repoctl version and exit")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=RepoctlArgumentParser, metavar="COMMAND")
 
     version = sub.add_parser("version", help="Show the repoctl release version.", description="Show repoctl and manifest version information.")
@@ -7680,6 +7513,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--repo-id")
     context_benchmark.add_argument("--min-recall-at-5", type=float)
     context_benchmark.add_argument("--min-precision-at-5", type=float)
+    context_benchmark.add_argument("--min-visible-recall", type=float)
     context_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
     context_benchmark.add_argument("--min-category-recall-at-5", action="append", default=[])
     context_benchmark.add_argument("--min-category-knowledge-recall-at-5", action="append", default=[])
@@ -7690,7 +7524,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark.add_argument("--require-no-forbidden", action="store_true")
     context_benchmark.add_argument("--require-no-cross-repo", action="store_true")
     context_benchmark.add_argument("--require-fixture-corpus", action="store_true")
-    context_benchmark.add_argument("--attribution", action="store_true", help="include the non-authoritative fixture attribution capsule")
+    context_benchmark.add_argument("--max-output-estimated-tokens", type=int)
     context_benchmark.add_argument("--output")
     context_benchmark.add_argument("--json", action="store_true")
     context_benchmark.set_defaults(func=cmd_context_benchmark)
@@ -7700,16 +7534,6 @@ def build_parser() -> argparse.ArgumentParser:
     context_benchmark_materialize.add_argument("--force", action="store_true")
     context_benchmark_materialize.add_argument("--json", action="store_true")
     context_benchmark_materialize.set_defaults(func=cmd_context_benchmark_materialize)
-    context_benchmark_compare = context_sub.add_parser("benchmark-compare", internal=True)
-    context_benchmark_compare.add_argument("--baseline", required=True)
-    context_benchmark_compare.add_argument("--candidate", required=True)
-    context_benchmark_compare.add_argument("--max-recall-at-5-drop", type=float)
-    context_benchmark_compare.add_argument("--max-precision-at-5-drop", type=float)
-    context_benchmark_compare.add_argument("--max-knowledge-recall-at-5-drop", type=float)
-    context_benchmark_compare.add_argument("--max-question-recall-at-5-drop", type=float)
-    context_benchmark_compare.add_argument("--require-current-sources", action="store_true")
-    context_benchmark_compare.add_argument("--json", action="store_true")
-    context_benchmark_compare.set_defaults(func=cmd_context_benchmark_compare)
     context_pack = context_sub.add_parser("pack", help="Build a bounded task Context Pack.")
     context_pack.add_argument("--task", required=True)
     context_pack.add_argument("--repo-id", required=True)
@@ -7720,13 +7544,6 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack.add_argument("--full", action="store_true", help="include raw bundle/candidates in JSON output")
     context_pack.add_argument("--json", action="store_true")
     context_pack.set_defaults(func=cmd_context_pack)
-    context_pack_compare = context_sub.add_parser("pack-compare", internal=True)
-    context_pack_compare.add_argument("--baseline", required=True)
-    context_pack_compare.add_argument("--candidate", required=True)
-    context_pack_compare.add_argument("--max-must-read-drop", type=int)
-    context_pack_compare.add_argument("--require-warning-stability", action="store_true")
-    context_pack_compare.add_argument("--json", action="store_true")
-    context_pack_compare.set_defaults(func=cmd_context_pack_compare)
     context_pack_benchmark = context_sub.add_parser("pack-benchmark", internal=True)
     context_pack_benchmark.add_argument("--fixture", default="tests/fixtures/context-pack-benchmark")
     context_pack_benchmark.add_argument("--repo-id", required=True)
@@ -7741,19 +7558,13 @@ def build_parser() -> argparse.ArgumentParser:
     context_pack_benchmark_materialize.add_argument("--force", action="store_true")
     context_pack_benchmark_materialize.add_argument("--json", action="store_true")
     context_pack_benchmark_materialize.set_defaults(func=cmd_context_pack_benchmark_materialize)
-    context_pack_benchmark_compare = context_sub.add_parser("pack-benchmark-compare", internal=True)
-    context_pack_benchmark_compare.add_argument("--baseline", required=True)
-    context_pack_benchmark_compare.add_argument("--candidate", required=True)
-    context_pack_benchmark_compare.add_argument("--max-mean-must-read-recall-drop", type=float)
-    context_pack_benchmark_compare.add_argument("--json", action="store_true")
-    context_pack_benchmark_compare.set_defaults(func=cmd_context_pack_benchmark_compare)
 
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_candidate = knowledge_sub.add_parser("candidate", help="Manage Knowledge candidates.")
     knowledge_candidate_sub = knowledge_candidate.add_subparsers(dest="knowledge_candidate_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_candidate_build = knowledge_candidate_sub.add_parser("build")
-    knowledge_candidate_build.add_argument("--source")
+    knowledge_candidate_build.add_argument("--source", help=f"authority document under one of: {', '.join(ALLOWED_SOURCE_PREFIXES)}")
     knowledge_candidate_build.add_argument("--from-receipt")
     knowledge_candidate_build.add_argument("--from-pack")
     knowledge_candidate_build.add_argument("--from-task", dest="from_task")
@@ -7914,7 +7725,13 @@ def main(argv: list[str] | None = None) -> int:
                 problem["cause_code"] = error.cause_code
             error_data = _error_data(args, error)
             error_data.update(getattr(error, "data", {}))
-            _json({"ok": False, "command": args.command_id, "data": error_data, "problems": [problem], "warnings": []})
+            payload = {"ok": False, "command": args.command_id, "data": error_data, "problems": [problem], "warnings": []}
+            if str(args.command_id).startswith("task."):
+                payload["next_actions"] = [
+                    *_task_next_actions([problem], error_data),
+                    *_next_actions_for_problems([problem], data=error_data),
+                ]
+            _json(payload)
         else:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2
