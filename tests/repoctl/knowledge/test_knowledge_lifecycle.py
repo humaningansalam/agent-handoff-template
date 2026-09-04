@@ -671,6 +671,31 @@ def test_knowledge_reject_candidate_writes_event_only(tmp_path: Path, monkeypatc
     assert event_payload["data"]["events"][0]["candidate_id"] == candidate_id
 
 
+def test_knowledge_reject_preserves_events_when_timestamps_collide(tmp_path: Path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
+    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
+
+    class FixedDatetime(knowledge_candidates.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 4, tzinfo=tz)
+
+    monkeypatch.setattr(knowledge_candidates, "datetime", FixedDatetime)
+    reason = tmp_path / "reject.md"
+    paths = []
+    for text in ("First review reason.", "Second review reason."):
+        reason.write_text(text + "\n", encoding="utf-8")
+        assert main(["knowledge", "reject", candidate_id, "--repo-id", "main", "--reason-file", reason.as_posix(), "--json"]) == 0
+        paths.append(tmp_path / json.loads(capsys.readouterr().out)["data"]["event_path"])
+
+    assert paths[0] != paths[1]
+    assert [json.loads(path.read_text(encoding="utf-8"))["reason"] for path in paths] == [
+        "First review reason.",
+        "Second review reason.",
+    ]
+
+
 def test_knowledge_deprecate_record_writes_event_only(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
 

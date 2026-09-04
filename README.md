@@ -40,9 +40,9 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - Python 3.11 or newer
 - Node.js when TypeScript/JavaScript semantic Graph analysis or the complete integration suite is required; without it, repoctl reports that optional provider as unavailable and continues with the remaining evidence
 
-## Upgrading from v0.9.0 through v0.10.4
+## Upgrading from v0.9.0 through v0.11.0
 
-v0.11.0 adds an opt-in local debug mode for measuring repoctl feature use while retaining the v0.10.4 lifecycle and compatibility fixes. Upgrade planning rejects managed-content drift when the adopter already reports v0.11.0; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
+v0.11.1 retains the v0.11.0 opt-in debug diagnostics and preserves every append-only Knowledge rejection event when repeated reviews occur in the same second. Upgrade planning rejects managed-content drift when the adopter already reports v0.11.1; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
 
 ## Debug mode
 

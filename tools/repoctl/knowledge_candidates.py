@@ -1579,7 +1579,7 @@ def reject_knowledge_candidate(root: Path, *, repo_id: str, candidate_id: str, r
     event = {
         "schema": "repoctl.knowledge.event",
         "schema_version": 1,
-        "id": _event_id("rejected-candidate", candidate_id),
+        "id": _unique_event_id(root, "rejected-candidate", candidate_id),
         "type": "rejected_candidate",
         "repo_id": repo_id,
         "candidate_id": candidate_id,
