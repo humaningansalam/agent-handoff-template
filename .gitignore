@@ -7,6 +7,15 @@ docs/tasks/.repoctl.lock.d/
 docs/tasks/.repoctl-state/
 .repoctl-state/
 docs/**/.*.tmp
+/docs/reviews/
+/docs/knowledge/generated/
+.browser-agent/
+/playwright-report/
+/test-results/
+/playwright/.auth/
+web-ai-context-package-*.zip
+code-artifact-*.zip
+code-artifacts-*/
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,jetbrains,macos,windows,linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,visualstudiocode,jetbrains,macos,windows,linux
@@ -296,12 +305,25 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local credentials and private keys
+credentials.json
+secrets.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # Spyder project settings
 .spyderproject

@@ -275,7 +275,7 @@ def test_v090_release_upgrade_and_fresh_postflight(tmp_path: Path) -> None:
     assert repoctl(release_root, "upgrade", "plan", "--workspace-root", str(release_root), "--from", str(release_root))["data"]["operations"] == []
 
 
-def test_generated_knowledge_views_are_not_ignored_and_records_are_not_ignored() -> None:
+def test_generated_knowledge_views_are_ignored_and_records_are_not_ignored() -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     generated = subprocess.run(
         ["git", "check-ignore", "--stdin"],
@@ -286,7 +286,8 @@ def test_generated_knowledge_views_are_not_ignored_and_records_are_not_ignored()
         stderr=subprocess.PIPE,
         check=False,
     )
-    assert generated.returncode == 1, generated.stdout
+    assert generated.returncode == 0, generated.stdout
+    assert generated.stdout.strip() == "docs/knowledge/generated/INDEX.md"
 
     records = subprocess.run(
         ["git", "check-ignore", "--stdin"],
