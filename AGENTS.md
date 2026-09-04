@@ -58,6 +58,8 @@ Context and Graph are independent entry points; neither is a mandatory precursor
 - Do not restart a coherent Context result with another broad repository search. Use narrow confirmation, a refined query, or an explicit Graph refresh when evidence is ambiguous, missing, or stale.
 - Do not require tool-choice logs or justification for skipped discovery features.
 
+When `docs/repoctl.json` sets `debug_mode` to `true`, use repoctl normally: it preserves command behavior and output while recording bounded feature events under `docs/tasks/.repoctl-state/debug/events.jsonl`. This ignored journal is non-authoritative evidence and never changes or substitutes for Task, Discovery, Chosen scope, Handoff, Verification, Board, Graph, Knowledge, or metadata state.
+
 When selecting evidence from a result receipt, record the exact producer, result ID, authority, and member citation. For a Context member omitted from the compact projection, rerun the same query with `--full` and select an exact manifest member. Prior task outcomes never create current candidates, ownership, authority, Chosen scope, or a substitute for current evidence. Inspect history explicitly through `past_decision`/`failure_mode` Context queries or exact Graph task/artifact selectors.
 
 `graph query` reads the last materialized snapshot and never rebuilds automatically. Build or rebuild explicitly when required. With a valid snapshot, Context uses the persistent evidence index and overlays changed or stale paths rather than rescanning unchanged source. Without a valid Graph, Context may return lexical source, document, task, and Knowledge evidence while marking Graph relations unavailable.

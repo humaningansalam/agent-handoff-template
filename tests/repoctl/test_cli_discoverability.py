@@ -102,7 +102,7 @@ def test_registered_command_help_executes_and_visible_commands_describe_required
             elif action.required or (not action.option_strings and action.dest != "help"):
                 assert action.help, f"missing help for {current.prog} {action.dest}"
 
-    assert len(commands) == 85
+    assert len(commands) == 87
     source_root = Path(__file__).resolve().parents[2]
     for command in commands:
         result = subprocess.run(

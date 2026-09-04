@@ -7,7 +7,7 @@ Root `docs/**` contains the workspace task/control ledger, repoctl contracts/wor
 - `BOARD.md` - live task registry only; task frontmatter remains authoritative.
 - `tasks/` - live task files plus creation templates; completed tasks are immutable.
 - `archive/tasks/` - non-live task originals after completion or cancellation.
-- `contracts/` - machine-facing repoctl JSON, Graph, Context, and module-boundary contracts.
+- `contracts/` - machine-facing repoctl JSON, Graph, Context, debug, and module-boundary contracts.
 - `adr/` - empty adopter ADR slot; the template ships only `.gitkeep`.
 - `workflows/` - reusable workspace operating procedures.
 - `knowledge/records/` - approved Reviewed Knowledge records owned by the adopter workspace.
@@ -38,6 +38,8 @@ Root docs are adopter-owned private workspace docs. Keep reusable workspace cont
 - Create follow-up work: `./scripts/repoctl task create --follow-up-of T-old --slug follow-up "Follow-up title" --json`
 - Show version: `./scripts/repoctl version` or `./scripts/repoctl version --json`
 - Check workspace: `./scripts/repoctl check --json`
+- Enable local repoctl diagnostics: set `"debug_mode": true` in `docs/repoctl.json`; events append to `docs/tasks/.repoctl-state/debug/events.jsonl`.
+- Summarize feature use and task selection evidence: `./scripts/repoctl debug summary --json`
 - Audit every completion receipt, task artifact, and derived catalogue: `./scripts/repoctl check --audit-history --json`
 - Rebuild workspace-scoped completion history: `./scripts/repoctl history rebuild --workspace --json`
 - Check metadata: `./scripts/repoctl meta check --json`
@@ -61,7 +63,7 @@ Run any listed leaf with `--help` for its inputs. Context benchmark/materializat
 
 | Surface | Visible command leaves |
 |---|---|
-| Root | `version`, `check` |
+| Root | `version`, `check`, `debug summary` |
 | Field gates | `field-gate run`, `field-gate compare` |
 | Repositories | `repo list`, `repo show`, `repo check`, `repo adopt` |
 | Tasks | `task create`, `task list`, `task resume`, `task show`, `task doctor`, `task log append`, `task handoff bind`, `task discovery add`, `task verification add`, `task baseline resolve`, `task start`, `task finish`, `task block`, `task cancel` |
@@ -76,4 +78,5 @@ Run any listed leaf with `--help` for its inputs. Context benchmark/materializat
 - `repos/` is the product repository boundary and is ignored by the root repo.
 - Root `docs/**` controls workspace operations and may hold the adopter-owned private root PRD/context.
 - Graph, Context / Task Pack, Reviewed Knowledge, and llmwiki are shipped repoctl capabilities.
+- Debug mode records bounded repoctl feature activity automatically but remains ignored, non-authoritative state.
 - Generated llmwiki pages must not be re-ingested as factual authority. Use records/events and original source refs instead.

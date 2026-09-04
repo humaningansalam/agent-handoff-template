@@ -37,6 +37,7 @@ Make a copied workspace immediately usable as a private agent workbench where hu
 - keep exploring caller, callee, import, test, task, document, and Knowledge relationships through typed Graph continuations without a mandatory Context -> Graph -> `rg` sequence
 - use narrow exact search and direct reads to confirm a known identity instead of repeating broad discovery that the working set already answered
 - promote only explicitly reviewed, source-linked knowledge into durable records
+- optionally capture bounded local diagnostics that distinguish direct calls, Context-mediated exposure, explicit Discovery selection, failure, and later same-shape success without changing normal command output or authority state
 - render llmwiki pages as disposable views, not authority
 
 ### Repository-Understanding Loop

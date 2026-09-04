@@ -15,10 +15,12 @@ These boundaries keep repoctl stable across task lifecycle, repository metadata,
 - `meta` owns `.repometa` policy, annotations, exclusions, move repair, and metadata validation.
 - `index` owns read-only technical facts such as language, imports, symbols, calls, syntax-resolved structured file dependencies, and observed effect hints.
 - `cli` owns argparse, JSON envelopes, human presentation, and command wiring only.
+- `debug diagnostics` owns opt-in, sanitized, bounded observations of repoctl invocations under ignored task state. It does not own task or product state.
 
 ## Derived layer rules
 
 - MCP, if added, must call stable repoctl command handlers or consume the JSON contract; it must not parse human stdout.
+- Debug events may describe direct commands and Context-mediated evidence, but never create authority, scope, Handoff freshness, Verification, or a claim that exposed evidence affected a decision.
 - Graph derives relation data from index facts, task evidence, and `.repometa`; it must not store graph fields inside `.repometa` annotations.
 - The component-crossing surface is an additive Graph projection over provider-recognized manifest identity and existing typed relations. It is not `.repometa` ownership, directory-derived authority, or a second graph.
 - CLI may compose Task Handoff and optional Pack observations into resume guidance, but it must not infer prose meaning, auto-bind on start/show, regenerate stale artifacts, or duplicate the input projection owned by Context / Task Pack.

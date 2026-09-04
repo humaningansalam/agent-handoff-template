@@ -33,6 +33,20 @@ def document_language(root: Path) -> str:
     return language
 
 
+def debug_mode(root: Path) -> bool:
+    try:
+        value = load_repoctl_settings(root).get("debug_mode", False)
+    except (OSError, RepoctlError):
+        return False
+    if not isinstance(value, bool):
+        raise RepoctlError(
+            "docs/repoctl.json debug_mode must be a boolean",
+            code="invalid_debug_mode",
+            path="docs/repoctl.json",
+        )
+    return value
+
+
 def validate_document_language(language: str, *, source: str = "document_language") -> None:
     if language not in SUPPORTED_DOCUMENT_LANGUAGES:
         supported = ", ".join(sorted(SUPPORTED_DOCUMENT_LANGUAGES))

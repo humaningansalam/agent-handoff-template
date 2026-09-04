@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -21,6 +22,7 @@ from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCata
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .debug import begin_debug, bind_debug_command, debug_summary, finish_debug, observe_context, observe_discovery_selections, observe_envelope, observe_problem, observe_result
 from .discovery_outcomes import structured_verification_coverage
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
@@ -40,6 +42,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query
 from .markdown import find_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, context_result_receipt_projection, graph_result_selections, write_result_receipt
+from .settings import debug_mode
 from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
@@ -242,6 +245,7 @@ class RepoctlArgumentParser(argparse.ArgumentParser):
 
 def _json(data: Any, *, compact: bool = False) -> None:
     _complete_json_envelope(data)
+    observe_envelope(data)
     if compact:
         print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     else:
@@ -2317,6 +2321,8 @@ def cmd_task_resume(args: argparse.Namespace) -> int:
         full=bool(args.full),
         task_id=args.task_id,
     )
+    if not args.json:
+        observe_envelope(payload)
     if args.json:
         _json(payload)
     else:
@@ -2796,6 +2802,10 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         "warnings": [],
         "next_actions": next_actions,
     }
+    observe_discovery_selections(
+        result["update"]["selected_result_evidence"]["added"],
+        repo_id=target.id if target is not None else "",
+    )
     if args.json:
         _json(payload)
     else:
@@ -4731,6 +4741,8 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             "problems": [problem.to_dict() for problem in build_problems],
             "warnings": [],
         }
+        if not args.json:
+            observe_envelope(payload)
         if args.json:
             _json(payload, compact=not args.full)
         else:
@@ -4775,6 +4787,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             request=GraphResultRequest.from_query(result.get("query")),
             selections=graph_result_selections(compact_result),
         )
+        observe_result(target.id, result_receipt)
     completeness = result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness
     result_warnings = result.get("warnings", []) if isinstance(result, dict) and isinstance(result.get("warnings"), list) else []
     freshness_data = freshness if args.full else compact_graph_freshness(freshness)
@@ -4834,6 +4847,8 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
         *_graph_candidate_actions(result, repo_id=target.id),
         *_next_actions_for_problems([*payload["problems"], *payload["warnings"]], data=payload["data"]),
     ]
+    if not args.json:
+        observe_envelope(payload)
     if args.json:
         _json(payload, compact=not args.full)
     else:
@@ -5440,8 +5455,9 @@ def cmd_context_query(args: argparse.Namespace) -> int:
     bundle_data = None
     result_receipt: dict[str, Any] | None = None
     if bundle is not None:
+        full_bundle_data = bundle.to_dict()
         compact_bundle_data = compact_context_bundle(bundle)
-        bundle_data = bundle.to_dict() if args.full else compact_bundle_data
+        bundle_data = full_bundle_data if args.full else compact_bundle_data
         if not _has_errors(problems):
             result_receipt = write_result_receipt(
                 root,
@@ -5452,8 +5468,14 @@ def cmd_context_query(args: argparse.Namespace) -> int:
                     query=str(bundle.query.get("text") or "").strip(),
                     mode=str(bundle.query.get("mode") or ""),
                 ),
-                selections=context_result_citations(bundle.to_dict()),
+                selections=context_result_citations(full_bundle_data),
             )
+        observe_context(
+            target.id,
+            bundle_data,
+            result_receipt,
+            source_completeness=full_bundle_data.get("completeness"),
+        )
     data = {
         "bundle": bundle_data,
         "repository": target.to_dict(),
@@ -5488,6 +5510,8 @@ def cmd_context_query(args: argparse.Namespace) -> int:
             *[problem.to_dict() for problem in optional_absence_warnings],
         ],
     }
+    if not args.json:
+        observe_envelope(payload)
     output_format = "json" if args.json else args.format
     if output_format == "json":
         _json(payload, compact=not args.full and not args.explain)
@@ -6489,6 +6513,8 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [problem.to_dict() for problem in warnings],
     }
+    if not args.json:
+        observe_envelope(payload)
     if args.json:
         _json(payload, compact=not args.full and not args.explain)
     else:
@@ -7177,6 +7203,27 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_debug_summary(args: argparse.Namespace) -> int:
+    data = debug_summary(find_workspace_root())
+    warnings: list[dict[str, str]] = []
+    if data["capture"]["invalid_event_count"]:
+        warnings.append({"code": "debug_events_invalid", "message": "one or more debug events were ignored because they were invalid"})
+    if data["capture"]["incomplete"]:
+        warnings.append({"code": "debug_capture_incomplete", "message": "the bounded debug journal omitted earlier events"})
+    payload = {"ok": True, "command": "debug.summary", "data": data, "problems": [], "warnings": warnings}
+    if args.json:
+        _json(payload)
+    else:
+        graph = data["context_sources"]["graph"]
+        knowledge = data["context_sources"]["knowledge"]
+        print(
+            f"debug summary events={data['capture']['event_count']} failed={data['outcomes']['failed']} "
+            f"graph_relations={graph['relations_exposed']} "
+            f"knowledge_results={knowledge['returned']}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = RepoctlArgumentParser(prog="repoctl", description="Workspace task, repository, discovery, and upgrade control plane.")
     parser.add_argument("--version", action="version", version=_version_data(_workspace_root_or_cwd())["version"], help="show repoctl version and exit")
@@ -7185,6 +7232,12 @@ def build_parser() -> argparse.ArgumentParser:
     version = sub.add_parser("version", help="Show the repoctl release version.", description="Show repoctl and manifest version information.")
     version.add_argument("--json", action="store_true", help="emit the canonical JSON envelope")
     version.set_defaults(func=cmd_version)
+
+    debug = sub.add_parser("debug", help="Inspect opt-in local repoctl diagnostics.")
+    debug_sub = debug.add_subparsers(dest="debug_command", required=True, parser_class=RepoctlArgumentParser)
+    debug_summary_parser = debug_sub.add_parser("summary", help="Summarize captured feature use and task selections.")
+    debug_summary_parser.add_argument("--json", action="store_true")
+    debug_summary_parser.set_defaults(func=cmd_debug_summary)
 
     check = sub.add_parser("check", help="Validate workspace lifecycle and control-plane state.")
     check.add_argument("--fix-board", action="store_true")
@@ -7700,13 +7753,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+def _run_cli(parser: argparse.ArgumentParser, raw_argv: list[str]) -> int:
     json_requested = "--json" in raw_argv
     try:
         args = parser.parse_args(raw_argv)
     except RepoctlArgparseError as error:
+        bind_debug_command(error.command)
+        observe_problem("argparse_error")
         if json_requested:
             command = error.command
             help_command = "./scripts/repoctl" + (f" {command.replace('.', ' ')}" if command != "repoctl" else "") + " --help"
@@ -7714,9 +7767,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2
+    bind_debug_command(str(args.command_id), args, raw_argv=raw_argv)
     try:
         return args.func(args)
     except RepoctlError as error:
+        observe_problem(error.code)
         if getattr(args, "json", False):
             problem = {"severity": "error", "code": error.code, "message": str(error)}
             if error.path:
@@ -7736,12 +7791,57 @@ def main(argv: list[str] | None = None) -> int:
             print(f"repoctl: {error}", file=sys.stderr)
         return 2
     except OSError as error:
+        observe_problem("io_error")
         message = str(error)
         if getattr(args, "json", False):
             _json({"ok": False, "command": args.command_id, "data": {}, "problems": [{"severity": "error", "code": "io_error", "message": message}], "warnings": []})
         else:
             print(f"repoctl: {message}", file=sys.stderr)
         return 2
+
+
+def _debug_setting_error(error: RepoctlError, *, json_requested: bool) -> int:
+    if json_requested:
+        problem: dict[str, Any] = {"severity": "error", "code": error.code, "message": str(error)}
+        if error.path:
+            problem["path"] = error.path
+        _json({"ok": False, "command": "repoctl", "data": {}, "problems": [problem], "warnings": []})
+    else:
+        print(f"repoctl: {error}", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    root = _workspace_root_or_cwd()
+    try:
+        enabled = debug_mode(root)
+    except RepoctlError as error:
+        return _debug_setting_error(error, json_requested="--json" in raw_argv)
+    if not enabled:
+        return _run_cli(parser, raw_argv)
+
+    token = begin_debug(raw_argv)
+    exit_code = 1
+    started = time.perf_counter()
+    try:
+        exit_code = _run_cli(parser, raw_argv)
+        return exit_code
+    except SystemExit as error:
+        if isinstance(error.code, int):
+            exit_code = error.code
+        raise
+    finally:
+        try:
+            finish_debug(
+                root,
+                token,
+                exit_code=exit_code,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

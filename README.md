@@ -14,7 +14,7 @@ This workspace separates:
 - shared operating rules in `AGENTS.md`
 - sparse file-level metadata in `<product-repo>/.repometa`
 
-Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, verification gates, Graph/Context evidence, Reviewed Knowledge records/events, and non-authoritative llmwiki rendering. Root `docs/**` contains private workspace task/control state, contracts, workflows, and adopter-owned PRD/context. `docs/PRD.md` ships as a template seed that adopters may delete, replace, or split under root `docs/prd/`.
+Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, verification gates, Graph/Context evidence, Reviewed Knowledge records/events, optional local debug diagnostics, and non-authoritative llmwiki rendering. Root `docs/**` contains private workspace task/control state, contracts, workflows, and adopter-owned PRD/context. `docs/PRD.md` ships as a template seed that adopters may delete, replace, or split under root `docs/prd/`.
 
 ## Compared with adjacent tools
 
@@ -40,9 +40,13 @@ Agents do the reasoning and implementation. `repoctl` owns deterministic state t
 - Python 3.11 or newer
 - Node.js when TypeScript/JavaScript semantic Graph analysis or the complete integration suite is required; without it, repoctl reports that optional provider as unavailable and continues with the remaining evidence
 
-## Upgrading from v0.9.0 through v0.10.3
+## Upgrading from v0.9.0 through v0.10.4
 
-v0.10.4 includes the v0.10.1 history, diagnostic, and metadata hardening, accepts terminal child tasks retained under `docs/tasks/`, and preserves compatibility with v0.9.0 task-level verification receipts and legacy Handoff bindings. Upgrade planning rejects managed-content drift when the adopter already reports v0.10.4; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
+v0.11.0 adds an opt-in local debug mode for measuring repoctl feature use while retaining the v0.10.4 lifecycle and compatibility fixes. Upgrade planning rejects managed-content drift when the adopter already reports v0.11.0; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
+
+## Debug mode
+
+Set `"debug_mode": true` in `docs/repoctl.json` before development. Repoctl then appends bounded events to `docs/tasks/.repoctl-state/debug/events.jsonl` without changing command options, output, Task Markdown, product repositories, Handoff freshness, or authority state. `./scripts/repoctl debug summary --json` distinguishes commands, Context-mediated Graph/Knowledge/task-history exposure, successful Discovery selections, failures, and later same-shape successes. Selection is evidence of use, not proof of usefulness; compare it with Task outcomes and the PRD when writing final feedback. Set the value to `false` or remove it to disable capture.
 
 ## Fresh adoption
 
