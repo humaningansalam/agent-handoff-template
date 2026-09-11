@@ -19,7 +19,7 @@ def _write_knowledge_docs(root: Path) -> None:
     (root / "docs/contracts").mkdir(parents=True, exist_ok=True)
     (root / ".repoctl-state/knowledge").mkdir(parents=True, exist_ok=True)
     (root / "docs/contracts/repoctl-context-contract.md").write_text(
-        "# repoctl Context contract\n\n## Decision\n\nContext returns source bundles but does not create authoritative knowledge.\n\n## Authority Rules\n\nReviewed knowledge requires explicit human approval.\n",
+        "# repoctl Context contract\n\n## Decision\n\nContext returns source bundles but does not create authoritative knowledge.\n\n## Authority Rules\n\nSaved Knowledge requires an explicit claim, reason, and source.\n",
         encoding="utf-8",
     )
     (root / ".repoctl-state/knowledge/private-plan.md").write_text("# Private Plan\n\nDo not ingest this.\n", encoding="utf-8")
@@ -49,35 +49,35 @@ def _setup_knowledge_multirepo_workspace(root: Path, monkeypatch) -> None:
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: root)
 
 
-def _read_event(root: Path, event_id: str) -> dict:
-    return json.loads((root / "docs/knowledge/events" / f"{event_id}.json").read_text(encoding="utf-8"))
-
-
-def _write_event(root: Path, event: dict) -> None:
-    (root / "docs/knowledge/events" / f"{event['id']}.json").write_text(
-        json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _approve_knowledge_source(
+def _add_knowledge_source(
     capsys,
     *,
     source: str = "docs/contracts/repoctl-context-contract.md",
     repo_id: str = "main",
     claim: str = "Context returns source bundles but does not create authoritative knowledge.",
-    build_args: list[str] | None = None,
-    approve_args: list[str] | None = None,
+    kind: str = "decision",
+    applies_to: list[str] | None = None,
+    replaces: list[str] | None = None,
 ) -> dict:
-    build = ["knowledge", "candidate", "build", "--source", source, "--repo-id", repo_id, "--claim", claim, "--json"]
-    if build_args:
-        build[-1:-1] = build_args
-    assert main(build) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    args = ["knowledge", "approve", candidate_id, "--repo-id", repo_id, "--json"]
-    if approve_args:
-        args[-1:-1] = approve_args
+    args = [
+        "knowledge",
+        "add",
+        "--source",
+        source,
+        "--repo-id",
+        repo_id,
+        "--kind",
+        kind,
+        "--claim",
+        claim,
+        "--reason",
+        "This reusable rule explains later work.",
+    ]
+    for path in applies_to or []:
+        args.extend(["--applies-to", path])
+    for record_id in replaces or []:
+        args.extend(["--replaces", record_id])
+    args.append("--json")
     assert main(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    payload["candidate_id"] = candidate_id
     return payload

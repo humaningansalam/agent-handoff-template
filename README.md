@@ -1,147 +1,188 @@
 # Agent Workspace Control Plane
 
-A repo-aware control substrate for Claude Code, Codex, Cursor, and other coding agents.
+A repo-aware workspace substrate for Claude Code, Codex, Cursor, and other coding agents.
 
-This is not an autonomous agent runtime. It provides deterministic task state, repo boundaries, handoff continuity, and metadata gates for external agents.
+It is not an autonomous agent runtime. It keeps current work, repository boundaries, restart instructions, and reusable project context stable while external agents do the reasoning and implementation.
 
-## What this is
+## Core model
 
-This workspace separates:
+- **Task** holds the current job and its explicit Chosen file set.
+- **Handoff** says exactly how to continue after a pause or transfer.
+- **Context** finds source-linked material worth reading.
+- **Knowledge** stores a reusable conclusion and why it matters.
 
-- workspace operations in the root repo
-- actual product code repositories under `repos/`
-- workspace task/control state in root `docs/**`
-- shared operating rules in `AGENTS.md`
-- sparse file-level metadata in `<product-repo>/.repometa`
+The workspace root owns private control state and documentation. Product Git repositories live under `repos/`. Sparse file metadata lives inside each product repository under `.repometa/`. Graph and the persistent evidence index are derived navigation layers.
 
-Agents do the reasoning and implementation. `repoctl` owns deterministic state transitions, mutation boundaries, verification gates, Graph/Context evidence, Reviewed Knowledge records/events, optional local debug diagnostics, and non-authoritative llmwiki rendering. Root `docs/**` contains private workspace task/control state, contracts, workflows, and adopter-owned PRD/context. `docs/PRD.md` ships as a template seed that adopters may delete, replace, or split under root `docs/prd/`.
+Repoctl deliberately does not create proof that tests ran. `## Verification` is an optional Task note. Context and Graph queries do not create selection receipts, Context Packs do not bind to Handoffs, and saving Knowledge does not start an approval lifecycle.
 
 ## Compared with adjacent tools
 
-| Tool type | Focus | This project differs by |
+| Tool type | Focus | This project adds |
 |---|---|---|
-| Markdown task managers | Tasks and Kanban | Adds repo separation, finish gates, and `.repometa` checks |
-| Spec-driven tools | Spec -> plan -> tasks | Starts after task intent exists; preserves execution state and verification |
-| Claude/Codex agents | Autonomous coding loop | Provides the workspace/state substrate they operate against |
-| Knowledge/memory systems | Long-term agent knowledge | Reviewed Knowledge and llmwiki keep durable records separate from generated views |
+| Markdown task managers | Tasks and Kanban | Product-repository boundaries, start baselines, safe finish checks, and restartable Handoffs |
+| Spec-driven tools | Spec -> plan -> tasks | Execution state after task intent already exists |
+| Coding agents | Autonomous coding loop | A shared workspace contract that survives model and session changes |
+| Code search and memory tools | Retrieval or long-term notes | Source-linked Context, typed Graph navigation, and optional reusable decisions in one repository-aware workspace |
 
 ## Use this when
 
-- handoff quality matters more than chat/session history
-- you want task files to be the execution unit
-- you need a private workspace repo and a separate product code repo
-- multiple agent tools may operate in the same workspace
-- you want Graph, Context / Task Pack, Reviewed Knowledge, or llmwiki capabilities on a stable workspace contract
+- handoff quality matters more than chat history
+- task files should be the unit of current work
+- private workspace state and product code need separate Git boundaries
+- several coding tools may work in the same workspace over time
+- a large repository benefits from bounded Context and typed Graph navigation
+- reusable decisions should remain linked to their sources
 
 ## Prerequisites
 
 - Bash
 - Git
 - Python 3.11 or newer
-- Node.js when TypeScript/JavaScript semantic Graph analysis or the complete integration suite is required; without it, repoctl reports that optional provider as unavailable and continues with the remaining evidence
-
-## Upgrading from v0.9.0 through v0.11.0
-
-v0.11.1 retains the v0.11.0 opt-in debug diagnostics and preserves every append-only Knowledge rejection event when repeated reviews occur in the same second. Upgrade planning rejects managed-content drift when the adopter already reports v0.11.1; use a newer release instead of forcing a same-version replacement. Context consumers migrating directly from v0.8.0 must also follow the [v0.9.0 receipt migration](docs/contracts/repoctl-json-contract.md#v090-context-receipt-migration).
-
-## Debug mode
-
-Set `"debug_mode": true` in `docs/repoctl.json` before development. Repoctl then appends bounded events to `docs/tasks/.repoctl-state/debug/events.jsonl` without changing command options, output, Task Markdown, product repositories, Handoff freshness, or authority state. `./scripts/repoctl debug summary --json` distinguishes commands, Context-mediated Graph/Knowledge/task-history exposure, successful Discovery selections, failures, and later same-shape successes. Selection is evidence of use, not proof of usefulness; compare it with Task outcomes and the PRD when writing final feedback. Set the value to `false` or remove it to disable capture.
+- Node.js only for TypeScript/JavaScript semantic Graph analysis and the complete integration suite; other capabilities continue when that optional provider is unavailable
 
 ## Fresh adoption
 
-Run these commands from the workspace root. For one product repository, clone it directly into `repos/`; `repos/` itself is the product Git root and receives the reserved repo ID `main`.
+For one product repository, clone it directly into `repos/`. Repoctl assigns that Git root the reserved ID `main`.
 
-1. Clone the product repository and confirm its identity:
-   ```bash
-   git clone <product-repo-url> repos
-   ./scripts/repoctl repo list --json
-   ```
-2. Initialize the repo-local metadata store:
-   ```bash
-   ./scripts/repoctl meta init --repo-id main --json
-   ```
-3. Review `repos/.repometa/policy.json`. Apply deliberate project-specific policy changes as described in the metadata workflow, use `repoctl meta` for annotations and exclusions (which create shards on demand), then validate and commit the store in the product repository:
-   ```bash
-   ./scripts/repoctl meta check --repo-id main --json
-   cd repos
-   git add .repometa
-   git diff --cached -- .repometa
-   git commit -m "Initialize repoctl metadata"
-   cd ..
-   ```
-4. Initialize the empty Reviewed Knowledge projection:
-   ```bash
-   ./scripts/repoctl knowledge rebuild --repo-id main --json
-   ```
-5. Materialize the initial Graph:
-   ```bash
-   ./scripts/repoctl graph build --repo-id main --json
-   ```
-6. Create and start the first product task. A single configured repository is selected automatically:
-   ```bash
-   ./scripts/repoctl task create --start --json "First product change"
-   ```
+```bash
+git clone <product-repo-url> repos
+./scripts/repoctl repo list --json
+./scripts/repoctl meta init --repo-id main --json
+./scripts/repoctl meta check --repo-id main --json
+./scripts/repoctl task create --start --json "First product change"
+```
 
-For a collection layout, place each product Git root at `repos/<name>/`, run `./scripts/repoctl repo adopt --all --json`, and replace `main` with the pinned repo ID in later commands.
+Review and commit `repos/.repometa/` inside the product repository. For a collection layout, place Git roots under `repos/<name>/`, run `./scripts/repoctl repo adopt --all --json`, and use the returned stable repo IDs.
 
-## Resume an existing workspace
+Build Graph only when typed code navigation would help:
 
-1. Read `AGENTS.md`
-2. Run `./scripts/repoctl task resume --json`
-3. Open the selected live task and `docs/BOARD.md` when inspection is needed
-4. Continue only from a non-null `executable_handoff`; otherwise inspect the typed selection or drift before acting
+```bash
+./scripts/repoctl graph build --repo-id main --json
+```
 
-`resume_guidance.status` answers whether the bound Handoff is current. `resume_guidance.health` separately reports whether repository lifecycle evidence is healthy; a current Handoff can coexist with unhealthy lifecycle state. In that case `readable_handoff` remains available for inspection, `blocked_by_health` is true, and `executable_handoff` is null.
+`docs/PRD.md` is an adopter-owned seed. Replace it, delete it, or keep it as an index to private documents under `docs/prd/`.
 
-When the result is `ambiguous`, select a returned live candidate with `./scripts/repoctl task resume <TASK_ID> --json`. Selection is read-only and does not create a persistent current-task pointer.
+## Daily work
 
-Repoctl-generated Handoffs carry one explicit marker and remain non-executable until their four fields are replaced, the marker is removed, and the Handoff is explicitly bound. Legacy unmarked Handoffs likewise require one fresh bind; legacy v3 receipts remain readable but inactive until replaced by a v4 binding. Repository configuration failures still preserve the selected `single_live` task and appear as typed unhealthy lifecycle evidence.
+At session start:
 
-## Minimal structure
+```bash
+./scripts/repoctl task resume --json
+```
+
+`no_live` means there is no current task. `single_live` selects the only live task. `ambiguous` returns candidates; select one without writing state:
+
+```bash
+./scripts/repoctl task resume T-... --json
+```
+
+Only a current non-null `executable_handoff` is an execution instruction. `readable_handoff`, Board rows, and archived task history are inspection material.
+
+For a normal product change:
+
+```bash
+./scripts/repoctl task create --start --json "Change title"
+./scripts/repoctl task discovery add T-... --chosen repos/path/to/file --json
+# edit and run the checks useful for the change
+./scripts/repoctl task finish T-... --json
+```
+
+Use repeated `--chosen` arguments for one coherent multi-file scope. Add `--note` only for a scope decision or source reference worth retaining. Replace scope explicitly with `--replace-chosen ... --reason ...`.
+
+Task finish checks repository identity, the start baseline, pre-existing dirty files, actual changes against Chosen, and changed-file `.repometa` requirements. It preserves optional `## Verification` text without interpreting it. If changes were committed after start, inspect with `task doctor --use-committed-diff` and finish with the same flag.
+
+Before a real pause or transfer, write the four Handoff fields, remove the generated marker, and bind the reviewed restart state:
+
+```bash
+./scripts/repoctl task handoff bind T-... --json
+```
+
+A later task, Chosen, log, Verification note, child, Handoff, or repository change makes the binding inactive. Repoctl never executes the stored command or infers a replacement instruction.
+
+## Finding code and context
+
+Use direct reads, `rg`, or Graph when the identity is already known. For ambiguous work, ask Context for a bounded source-linked working set:
+
+```bash
+./scripts/repoctl context query "where is invoice retry decided" --repo-id main --json
+./scripts/repoctl graph query --repo-id main --callers-of retry_invoice --in-file billing/retry.py --json
+```
+
+Context can combine current source, project authority, procedures, task history, Knowledge, and materialized Graph relations. It marks missing or stale derived data and never turns a ranked result into edit scope. Graph queries read the last materialized snapshot; refresh explicitly with `graph build` after relevant source changes.
+
+A Task Context Pack is an optional one-time view or export:
+
+```bash
+./scripts/repoctl context pack --task T-... --repo-id main --format markdown
+./scripts/repoctl context pack --task T-... --repo-id main --output /tmp/T-context.md --format markdown
+```
+
+The Pack is reference material. It does not become Task state, a Handoff binding, or a finish requirement.
+
+## Reusing decisions
+
+Most work needs only its archived Task. Save Knowledge when a decision, invariant, or failure mode is likely to matter across tasks:
+
+```bash
+./scripts/repoctl knowledge add \
+  --repo-id main \
+  --kind decision \
+  --claim "Retries stop after the provider marks the request permanent." \
+  --reason "Further retries duplicate charges and cannot recover." \
+  --source docs/adr/retry-policy.md \
+  --applies-to billing/retry.py \
+  --json
+```
+
+Saving the record completes the action. `knowledge query` and Context can use it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files and reports them for one-time agent migration; current queries use current records only.
+
+When the reusable conclusion is ready during closeout, the corresponding `task finish --knowledge-kind --knowledge-claim --knowledge-reason` options save it atomically with task completion.
+
+## Layout
 
 ```text
 .
 |-- AGENTS.md
 |-- README.md
-|-- scripts/
 |-- docs/
-|   |-- README.md
 |   |-- BOARD.md
+|   |-- PRD.md
 |   |-- tasks/
-|   |-- workflows/
+|   |-- archive/tasks/
 |   |-- contracts/
-|   |-- adr/
-|   |-- knowledge/
-|   `-- archive/
-`-- repos/
+|   |-- workflows/
+|   `-- knowledge/records/
+|-- repos/                  # ignored by root Git; product Git root(s)
+|-- scripts/repoctl
+|-- tools/repoctl/
+`-- tests/repoctl/
 ```
 
-## Document map
+Key contracts:
 
-- **Operating contract**: `AGENTS.md`
-- **Task system guide**: `docs/README.md`
-- **JSON output contract**: `docs/contracts/repoctl-json-contract.md`
-- **repoctl module boundaries**: `docs/contracts/repoctl-module-boundaries.md`
-- **Context query contract**: `docs/contracts/repoctl-context-contract.md`
-- **Discovery outcome contract**: `docs/contracts/repoctl-discovery-outcome-contract.md`
-- **Graph snapshot and traversal contract**: `docs/contracts/repoctl-graph-contract.md`
-- **Repo metadata rules**: `docs/workflows/repo-metadata.md`
-- **Root template PRD / adopter workspace context**: `docs/PRD.md`
-- **Optional repo map**: `docs/REPOS.md`
-- **Reviewed Knowledge state**: `docs/knowledge/records/`, `docs/knowledge/events/`
+- [JSON output](docs/contracts/repoctl-json-contract.md)
+- [Context and Task Packs](docs/contracts/repoctl-context-contract.md)
+- [Graph](docs/contracts/repoctl-graph-contract.md)
+- [Task Chosen scope](docs/contracts/repoctl-task-scope-contract.md)
+- [Module boundaries](docs/contracts/repoctl-module-boundaries.md)
+- [Debug mode](docs/contracts/repoctl-debug-contract.md)
 
-## Notes
+## Durable boundaries
 
-- `repos/` is the product code repository boundary.
-- `docs/BOARD.md` is a live-task registry, not a status dashboard.
-- Task state lives in task frontmatter, not in the board.
-- Backlog items are raw planning blocks; agents read them and pass explicit task fields rather than relying on repoctl to parse intent.
-- `.repometa` provides file-level discovery and changed-file metadata gates; `repoctl index code` extracts read-only technical facts, and neither is a generated graph.
-- `repoctl graph build` materializes a deterministic snapshot plus a persistent source/symbol/document evidence index; later builds reuse unchanged Code Index and provider results and update only changed semantic units.
-- `repoctl graph query` reads that snapshot without rebuilding, reports exact freshness, and supports file/topic/import/symbol/call/impact traversal. Explicit task and completion-artifact selectors validate one cold catalogue record and build a query-local projection. Query-visible files and confirmed relations carry set-aware component membership and crossings only when registered manifest providers find valid project declarations.
-- `repoctl context query` is the integrated discovery view for ambiguous repository work. It returns a bounded evidence hypothesis with typed follow-up actions; an explicit current-diff review starts from Git's changed set, while narrow `rg`, explicit Graph queries, and direct reads remain available for known identities. Its `project_knowledge` summary reports documents, task history, and reviewed reusable records as separate lanes; zero reviewed records never means the document knowledge base is empty. Explicit `past_decision` and `failure_mode` modes isolate bounded cold-history matches in `related_history`; those matches cannot affect the already determined current working set or Graph seeds.
-- Discovery records explicit Reviewed, Excluded, Chosen, result-member, and structured verification evidence; root-only tasks may also bind checks to existing non-product workspace artifacts without inventing product Discovery or Chosen scope. A `todo` task may record Discovery before start, but `doing`/`blocked` outcome mutations and every verification record require a current immutable start scope. When outcome state exists, repoctl requires its `active_chosen` identities to match every canonical explicit value in the Task's structured Chosen projection; invalid explicit values are errors, not absent data. Task finish freezes the result into the completion receipt and publishes bounded catalogue ingress. Ordinary Context joins independently retrieved current candidates to that freshness-checked hot frontier, while ordinary Graph build and freshness checks use the catalogue head/checkpoint and committed hot projection instead of scanning the completion archive or retained event sidecars. Cold history and workspace artifacts never define current candidates, ranking, Graph seeds, relations, component membership, or task scope.
-- Live task views expose a decomposition advisory only when large Chosen projection, repeated Discovery episodes, and multiple structured verification records coincide. It asks the agent to review the next milestone boundary without inferring semantics or mutating the task.
-- Generated llmwiki pages are non-authoritative views; records/events and original source refs remain the authority.
-- MCP, if ever added, should be transport over repoctl contracts, not a second mutation path.
+- Task frontmatter is status authority; `docs/BOARD.md` is the live registry.
+- Product mutation starts from a recorded repository baseline. Existing dirty files stay outside task ownership unless explicitly resolved.
+- The Task's Chosen set is the only current edit-scope record. Context, Graph, history, Backlog, and retired outcome state do not create scope.
+- Standalone completed tasks archive under `docs/archive/tasks/`. Completion receipts preserve lifecycle and repository-change history; their content hashes identify the archived record and make no test claim.
+- `.repometa` provides sparse human metadata and changed-file gates. Graph and the code index remain derived.
+- Context, Graph, and Knowledge preserve source identity and repository namespace. They provide evidence and navigation rather than authority.
+- Upgrade postflight reports stale derived Graph or Knowledge projections as maintenance with exit status 0 when durable state is otherwise valid. An unused missing Graph and empty Knowledge need no initialization.
+
+## Debug mode
+
+Set `"debug_mode": true` in `docs/repoctl.json` to append sanitized, bounded command diagnostics to the ignored file `docs/tasks/.repoctl-state/debug/events.jsonl`. Debug capture does not change arguments, output, exit status, Task state, Handoff freshness, product files, or authority. Inspect it with:
+
+```bash
+./scripts/repoctl debug summary --json
+```
+
+The journal helps locate costly or failing command shapes. It does not prove that an output was used or that work was correct.

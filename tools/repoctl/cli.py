@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -21,29 +20,34 @@ from .code_index import build_code_index
 from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCatalogueUnavailableReason, audit_completion_catalogue, completion_catalogue_namespaces, completion_catalogue_status, rebuild_completion_catalogue
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
-from .context_task_pack import build_task_context_pack, compact_task_context_pack, inspect_task_context_pack_binding, materialize_task_context_pack_benchmark_tasks, prepare_task_context_pack_binding, render_task_context_pack_markdown, run_task_context_pack_benchmark
-from .debug import begin_debug, bind_debug_command, debug_summary, finish_debug, observe_context, observe_discovery_selections, observe_envelope, observe_problem, observe_result
-from .discovery_outcomes import structured_verification_coverage
+from .context_task_pack import build_task_context_pack, compact_task_context_pack, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
+from .debug import begin_debug, bind_debug_command, debug_summary, finish_debug, observe_context, observe_envelope, observe_problem
 from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
 from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph, materialize_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError, atomic_write, find_workspace_root, repoctl_lock
-from .knowledge_candidates import ALLOWED_SOURCE_PREFIXES, KnowledgeArtifactErrorCode, approve_knowledge_candidate, build_knowledge_candidate, build_knowledge_candidate_from_pack, build_knowledge_candidate_from_receipt, check_all_knowledge_candidates, check_knowledge_candidate, check_knowledge_records, deprecate_knowledge_record, knowledge_status, list_knowledge_candidates, list_knowledge_events, prepare_knowledge_candidate_from_completion, query_knowledge_records, refresh_knowledge_candidate, refresh_knowledge_record_candidate, refresh_stale_knowledge_candidates, reject_knowledge_candidate, show_knowledge_candidate, show_knowledge_event, show_knowledge_record
+from .knowledge_records import (
+    KnowledgeArtifactErrorCode,
+    add_knowledge_record,
+    check_knowledge_records,
+    knowledge_status,
+    prepare_knowledge_record,
+    query_knowledge_records,
+    show_knowledge_record,
+)
 from .knowledge_projection import (
     initialize_empty_knowledge_projection,
     knowledge_projection_path,
     load_knowledge_projection,
     rebuild_knowledge_projection,
 )
-from .knowledge_render import render_knowledge
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
-from .result_receipts import ContextResultRequest, GraphResultRequest, ResultProducer, context_result_citations, context_result_receipt_projection, graph_result_selections, write_result_receipt
 from .settings import debug_mode
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, VerificationInput, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, record_task_verification_outcome, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_decomposition_evidence, task_discovery_outcome_alignment, task_discovery_outcome_alignment_problem, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_verification_file, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -97,6 +101,7 @@ class ProductReadiness(StrEnum):
 
 class UpgradePostflightStatus(StrEnum):
     READY = "ready"
+    READY_WITH_MAINTENANCE = "ready_with_maintenance"
     RECOVERY_REQUIRED = "recovery_required"
 
 
@@ -110,10 +115,7 @@ class NextActionKind(StrEnum):
     KNOWLEDGE_REBUILD = "knowledge_rebuild"
     CONTEXT_RESUME = "context_resume"
     TASK_HANDOFF_BIND = "task_handoff_bind"
-    TASK_VERIFICATION_ADD = "task_verification_add"
-    CONTEXT_PACK_REFRESH = "context_pack_refresh"
     DISCOVERY_INPUT = "discovery_input"
-    KNOWLEDGE_REVIEW = "knowledge_review"
     METADATA_INPUT = "metadata_input"
 
 
@@ -131,11 +133,6 @@ class TaskScopeResolution(StrEnum):
 class WorkspaceBaselineResolution(StrEnum):
     RESTORE_TASK_START = "restore_task_start"
     MOVE_TO_REPO_CHILD = "move_to_repo_child"
-
-
-class KnowledgeReviewDecision(StrEnum):
-    APPROVE = "approve"
-    REJECT = "reject"
 
 
 COMPACT_PATH_LIMIT = 20
@@ -250,18 +247,6 @@ def _json(data: Any, *, compact: bool = False) -> None:
         print(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
     else:
         print(json.dumps(data, ensure_ascii=False, indent=2))
-
-
-def _public_result_receipt(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
-    if receipt is None:
-        return None
-    return {
-        "producer": receipt["producer"],
-        "result_id": receipt["result_id"],
-        "receipt_digest": receipt["receipt_digest"],
-        "request": receipt["request"],
-        "selectable": receipt["selectable"],
-    }
 
 
 def _complete_json_envelope(data: Any) -> None:
@@ -425,7 +410,7 @@ def _recovery_action(kind: NextActionKind, *, repo_id: str, source: str) -> dict
     if not repo_id:
         return None
     label, leaf = {
-        NextActionKind.KNOWLEDGE_REBUILD: ("Rebuild Reviewed Knowledge from validated records and events", "knowledge rebuild"),
+        NextActionKind.KNOWLEDGE_REBUILD: ("Rebuild the derived Knowledge projection from saved records", "knowledge rebuild"),
         NextActionKind.GRAPH_BUILD: ("Build the materialized Graph and evidence index", "graph build"),
         NextActionKind.GRAPH_REBUILD: ("Rebuild the materialized Graph and evidence index", "graph build"),
         NextActionKind.GRAPH_REFRESH: ("Refresh the materialized Graph and evidence index", "graph build"),
@@ -471,8 +456,6 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         "knowledge_projection_unavailable",
         "knowledge_projection_schema_mismatch",
         "knowledge_projection_digest_mismatch",
-        "knowledge_projection_tail_gap",
-        "knowledge_projection_tail_digest_mismatch",
     }
     for problem in problems:
         code = _problem_code(problem)
@@ -654,28 +637,12 @@ def _task_next_actions(problems: list[Any], data: dict[str, Any]) -> list[dict[s
         code = _problem_code(problem)
         path = _problem_path(problem) or task_path
         inputs = _mapping_at(data, "action_inputs")
-        if code == "missing_verification_file":
-            add({"label": "Complete task Verification", "path": path})
-        elif code == "verification_file_inside_repo":
-            add({"label": "Move verification evidence to an existing workspace file outside repos/", "path": path})
-        elif code in {"missing_discovery_evidence", "placeholder_discovery"}:
-            add({"label": "Record task discovery evidence", "path": path, "kind": NextActionKind.DISCOVERY_INPUT})
-        elif code in {"task_structured_verification_missing", "task_structured_verification_nonpassing"}:
-            key = "missing_structured_verification_subjects" if code.endswith("missing") else "nonpassing_structured_verification_subjects"
-            if _string_list(inputs.get(key)):
-                add({"label": "Record an evidence-backed result for each unverified current changed Chosen subject", "kind": NextActionKind.TASK_VERIFICATION_ADD, "source": f"data.action_inputs.{key}", "target_ref": f"data.action_inputs.{key}"})
+        if code in {"missing_discovery_evidence", "placeholder_discovery"}:
+            add({"label": "Record the task's Chosen scope", "path": path, "kind": NextActionKind.DISCOVERY_INPUT})
         elif code in {"actual_changes_outside_chosen", "task_chosen_scope_drift"}:
             if _string_list(inputs.get("unchosen_actual_paths")):
                 add({"label": "Review repository changes outside the active Chosen scope", "kind": NextActionKind.TASK_SCOPE_REVIEW, "source": "data.action_inputs.unchosen_actual_paths", "choices": [TaskScopeResolution.ADD_TO_CHOSEN, TaskScopeResolution.REVERT_CHANGE, TaskScopeResolution.MOVE_TO_FOLLOW_UP], "target_ref": "data.action_inputs.unchosen_actual_paths"})
             add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
-        elif code in {"discovery_task_chosen_invalid", "discovery_outcome_chosen_mismatch", "discovery_outcome_chosen_invalid"}:
-            alignment = _mapping_at(data, "discovery_outcome_alignment")
-            target_key = next((key for key in ("task_chosen_paths", "outcome_chosen_paths", "invalid_task_chosen_values", "invalid_outcome_subject_ids") if _string_list(alignment.get(key))), "")
-            if target_key:
-                add({"label": "Reconcile the approved Chosen scope through the repoctl Discovery boundary", "kind": NextActionKind.TASK_SCOPE_REVIEW, "source": "data.discovery_outcome_alignment", "choices": [TaskScopeResolution.ADD_TO_CHOSEN, TaskScopeResolution.REVERT_CHANGE, TaskScopeResolution.MOVE_TO_FOLLOW_UP], "target_ref": f"data.discovery_outcome_alignment.{target_key}"})
-            add({"label": "Open the Task Discovery section", "path": path})
-        elif code == "discovery_outcome_repository_mismatch":
-            add({"label": "Inspect the task repository identity and immutable Discovery outcome", "path": path})
         elif code == "baseline_conflict":
             if _string_list(inputs.get("baseline_conflicts")):
                 add({"label": "Preview baseline ownership resolutions", "kind": NextActionKind.BASELINE_OWNERSHIP_RESOLUTION, "source": "data.action_inputs.baseline_conflicts", "choices": [BaselineOwnership.TASK, BaselineOwnership.PREEXISTING], "target_ref": "data.action_inputs.baseline_conflicts"})
@@ -692,22 +659,6 @@ def _task_next_actions(problems: list[Any], data: dict[str, Any]) -> list[dict[s
                 add({"label": "Bind the reviewed Handoff to the current task and repository inputs", "command": f"./scripts/repoctl task handoff bind {task_id} --json", "kind": NextActionKind.TASK_HANDOFF_BIND, "source": "data.resume_guidance.handoff.status"})
         elif code == "task_handoff_generated_template":
             add({"label": "Replace the generated Handoff with task-specific restart instructions", "path": path})
-        elif code in {"context_pack_stale", "context_pack_missing", "context_pack_invalid", "context_pack_unknown"}:
-            context_pack = _mapping_at(data, "resume_guidance", "context_pack")
-            pack_path = str(context_pack.get("path") or "")
-            if not task_id or not pack_path:
-                add({"label": "Review the optional Context Pack binding", "path": path})
-                continue
-            repo_id = str(task.get("repo_id") or "main")
-            if pack_path.endswith(".md"):
-                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --format markdown --output {shlex.quote(pack_path)}"
-            else:
-                command = f"./scripts/repoctl context pack --task {task_id} --repo-id {repo_id} --output {shlex.quote(pack_path)} --json"
-            add({"label": "Regenerate the optional bound Context Pack after reviewing current scope", "command": command, "kind": NextActionKind.CONTEXT_PACK_REFRESH, "source": "data.resume_guidance.context_pack.status"})
-            if not generated_handoff:
-                add({"label": "Bind the reviewed Handoff and regenerated Context Pack", "command": f"./scripts/repoctl task handoff bind {task_id} --context-pack {shlex.quote(pack_path)} --json", "kind": NextActionKind.TASK_HANDOFF_BIND, "source": "data.resume_guidance.context_pack.path"})
-        elif code == "task_decomposition_recommended":
-            add({"label": "Review whether the next independently verifiable milestone belongs in a new task", "path": path})
         elif code == "repo_head_changed_since_start":
             add({"label": "Preflight committed range", "command": f"./scripts/repoctl task doctor {task_id} --use-committed-diff --json"})
             add({"label": "Finish using recorded start-to-HEAD diff", "command": f"./scripts/repoctl task finish {task_id} --use-committed-diff --json"})
@@ -740,8 +691,8 @@ def _repoctl_release_field_gates(root: Path, *, repo_id: str = "main") -> list[d
     add("repository_check", "Check repository registry", command="./scripts/repoctl repo check --json")
     add(
         "reviewed_knowledge_check",
-        "Check reviewed Knowledge",
-        command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --include-candidates --json",
+        "Check Knowledge",
+        command=f"./scripts/repoctl knowledge check --repo-id {repo_id} --json",
     )
     if _fixture_has_repository(root / "tests/fixtures/context-benchmark", repo_id):
         add(
@@ -782,14 +733,6 @@ def _repoctl_release_field_gates(root: Path, *, repo_id: str = "main") -> list[d
             "Run multi-repo isolation benchmark gate",
             command="./scripts/repoctl context benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
             requires=["tests/fixtures/context-benchmark-multirepo/questions.jsonl", "tests/fixtures/context-benchmark-multirepo/expected-sources.json"],
-        )
-    knowledge_records = root / "docs/knowledge/records"
-    if knowledge_records.exists() and any(knowledge_records.glob("K-*.json")):
-        add(
-            "knowledge_render_check",
-            "Check rendered knowledge pages",
-            command=f"./scripts/repoctl knowledge render --repo-id {repo_id} --check --json",
-            requires=["docs/knowledge/records"],
         )
     return gates
 
@@ -1004,7 +947,6 @@ def _compact_field_gate_summary(summary: Any) -> dict[str, Any]:
 
 
 _REVIEWED_KNOWLEDGE_BENCHMARK_SUMMARY_FIELDS = {
-    "knowledge_deprecated_record_excluded",
     "knowledge_expected_questions",
     "knowledge_result_questions",
     "knowledge_score_breakdown_integrity",
@@ -1193,30 +1135,16 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
         return _repoctl_release_payload(repo_id=repo_id, gates=gates)
 
     knowledge_data, knowledge_problems = check_knowledge_records(root, repo_id=repo_id)
-    candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=repo_id, pending_only=True)
-    knowledge_data["candidate_checks"] = candidate_data
-    knowledge_gate_problems = [
-        *knowledge_problems,
-        *[problem for problem in candidate_problems if problem.severity == "error"],
-    ]
-    knowledge_gate_warnings = [problem for problem in candidate_problems if problem.severity == "warning"]
     gates.append(
         _repoctl_release_gate_result(
             **gate_identity("reviewed_knowledge_check"),
             data=knowledge_data,
-            problems=knowledge_gate_problems,
-            warnings=_problem_dicts(knowledge_gate_warnings),
+            problems=knowledge_problems,
             summary={
-                "reviewed_record_count": int(knowledge_data.get("record_count") or 0),
-                "reviewed_event_count": int(knowledge_data.get("event_count") or 0),
-                "reviewed_record_error_count": len([problem for problem in knowledge_problems if problem.severity == "error"]),
-                "reviewed_record_problem_codes": _problem_code_counts([problem for problem in knowledge_problems if problem.severity == "error"]),
-                "candidate_total_count": int(candidate_data.get("candidate_total_count") or 0) if isinstance(candidate_data, dict) else 0,
-                "candidate_checked_count": len(candidate_data.get("results", [])) if isinstance(candidate_data.get("results"), list) else 0,
-                "candidate_error_count": len([problem for problem in candidate_problems if problem.severity == "error"]),
-                "candidate_warning_count": len([problem for problem in candidate_problems if problem.severity == "warning"]),
-                "candidate_problem_codes": _problem_code_counts([problem for problem in candidate_problems if problem.severity == "error"]),
-                "candidate_warning_codes": _problem_code_counts([problem for problem in candidate_problems if problem.severity == "warning"]),
+                "record_count": int(knowledge_data.get("record_count") or 0),
+                "migration_required_count": int(knowledge_data.get("legacy_record_count") or 0),
+                "record_error_count": len([problem for problem in knowledge_problems if problem.severity == "error"]),
+                "record_problem_codes": _problem_code_counts([problem for problem in knowledge_problems if problem.severity == "error"]),
             },
         )
     )
@@ -1412,19 +1340,6 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
 
     benchmark_temporary.cleanup()
 
-    if "knowledge_render_check" in release_gate_specs:
-        render_output = Path("docs/knowledge/generated")
-        render_data, render_problems = render_knowledge(root, repo_id=repo_id, output=render_output, check=True)
-        gates.append(
-            _repoctl_release_gate_result(
-                **gate_identity("knowledge_render_check"),
-                data=render_data,
-                problems=render_problems,
-                warnings=[{"code": "knowledge_render_not_authoritative", "message": "rendered knowledge pages are generated views and must not be ingested as source authority"}],
-                summary=render_data.get("check", {}) if isinstance(render_data.get("check"), dict) else {},
-            )
-        )
-
     return _repoctl_release_payload(repo_id=repo_id, gates=gates)
 
 
@@ -1615,8 +1530,6 @@ def _flatten_numeric_summary(value: Any, *, prefix: str = "") -> dict[str, float
     return results
 
 
-
-
 def _repo_scoped_frontmatter(task: Any) -> bool:
     area = str(task.frontmatter.get("area") or "")
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in REPO_REQUIRED_AREAS
@@ -1625,7 +1538,7 @@ def _repo_scoped_frontmatter(task: Any) -> bool:
 def _discovery_guidance_actions(task_path: str) -> list[dict[str, Any]]:
     return [
         {
-            "label": "Choose a concrete discovery query and reviewed/chosen product paths",
+            "label": "Choose the canonical product paths in scope",
             "kind": NextActionKind.DISCOVERY_INPUT,
             "source": f"{task_path}#Discovery",
             "path": task_path,
@@ -1727,16 +1640,6 @@ def _error_data(args: argparse.Namespace, error: RepoctlError | None = None) -> 
                         data["repository"] = target.to_dict()
     if repo_id:
         data["repo_id"] = repo_id
-    context_pack = str(getattr(args, "context_pack", "") or "")
-    if task_id and context_pack:
-        pack_path = Path(context_pack)
-        if pack_path.is_absolute():
-            try:
-                context_pack = pack_path.relative_to(_workspace_root_or_cwd()).as_posix()
-            except ValueError:
-                context_pack = ""
-        if context_pack:
-            data["resume_guidance"] = {"context_pack": {"status": error.code if error is not None else "unknown", "path": context_pack}}
     if error is not None and error.code in {"repository_identity_unbound", "repository_selector_required"}:
         try:
             layout = repo_layout(_workspace_root_or_cwd())
@@ -2378,13 +2281,9 @@ def _task_lifecycle_observation(
     try:
         target = _repo_target_for_task_command(root, task, layout=layout)
         delta = repo_changes_since_task_start(root, task.id, layout=layout)
-        alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
     except RepoctlError as exc:
         return None, None, _task_health(root, task, observation_error=exc)
-    health = _task_health(root, task, delta=delta)
-    if alignment_problem is not None:
-        health = TaskHealth("unhealthy", tuple([*health.problems, alignment_problem]))
-    return target, delta, health
+    return target, delta, _task_health(root, task, delta=delta)
 
 
 def _task_baseline_conflict_warning(task: Any, delta: dict[str, Any]) -> dict[str, Any] | None:
@@ -2476,50 +2375,33 @@ def _task_resume_guidance(
                     task.rel_path,
                 )
             )
-    context_pack_binding = binding.get("context_pack") if isinstance(binding, dict) else None
-    if handoff["status"] == "historical":
-        context_pack = {"status": "not_bound", "active": False, "path": "", "reason_codes": []}
-        overall_status = "historical"
-    elif context_pack_binding is None:
-        context_pack = {"status": "not_bound", "active": False, "path": "", "reason_codes": []}
-        overall_status = handoff["status"]
-    elif target is None:
-        context_pack = {
-            "status": "unknown",
-            "active": False,
-            "path": str(context_pack_binding.get("path") or ""),
-            "reason_codes": ["pack_repository_unavailable"],
-        }
-        overall_status = "inactive" if handoff["status"] == "current" else handoff["status"]
-    else:
-        context_pack = inspect_task_context_pack_binding(
-            root,
-            target=target,
-            task_id=task.id,
-            binding=context_pack_binding,
-        )
-        overall_status = handoff["status"]
-        if handoff["status"] == "current" and context_pack["status"] != "current":
-            overall_status = "inactive"
+    overall_status = str(handoff["status"])
     handoff["active"] = overall_status == "current"
-    context_pack["active"] = overall_status == "current" and context_pack.get("status") == "current"
-
     handoff_reasons = set(handoff.get("reason_codes") or [])
     if overall_status == "inactive" and "handoff_unbound" in handoff_reasons:
         warnings.append(
             {
-                "severity": "warning",
+                               "severity": "warning",
                 "code": "task_handoff_unbound",
-                "message": "Handoff is readable but is not bound to the current task and repository inputs",
+                "message": (
+                    "Handoff is readable but is not bound to the current Task "
+                    "and repository inputs"
+                ),
                 "path": task.rel_path,
             }
         )
-    elif overall_status == "inactive" and handoff_reasons - {"resume_observation_unavailable"}:
+    elif (
+        overall_status == "inactive"
+        and handoff_reasons - {"resume_observation_unavailable"}
+    ):
         warnings.append(
             {
                 "severity": "warning",
                 "code": "task_handoff_stale",
-                "message": "Handoff binding no longer matches the current task, repository, or bound Context Pack inputs",
+                "message": (
+                    "Handoff binding no longer matches the current Task or "
+                    "repository inputs"
+                ),
                 "path": task.rel_path,
             }
         )
@@ -2528,7 +2410,10 @@ def _task_resume_guidance(
             {
                 "severity": "warning",
                 "code": "task_resume_observation_unavailable",
-                "message": "repoctl cannot verify whether the current Handoff binding is still current",
+                "message": (
+                    "repoctl cannot determine whether the current Handoff "
+                    "binding is still current"
+                ),
                 "path": task.rel_path,
             }
         )
@@ -2537,31 +2422,26 @@ def _task_resume_guidance(
             {
                 "severity": "warning",
                 "code": "task_handoff_generated_template",
-                "message": "replace the repoctl-generated Handoff with reviewed task-specific restart instructions before binding",
+                "message": (
+                    "replace the repoctl-generated Handoff with reviewed "
+                    "task-specific restart instructions before binding"
+                ),
                 "path": task.rel_path,
             }
         )
-    pack_status = str(context_pack.get("status") or "not_bound")
-    if pack_status in {"stale", "missing", "invalid", "unknown"}:
-        warnings.append(
-            {
-                "severity": "warning",
-                "code": f"context_pack_{pack_status}",
-                "message": "the explicitly bound Context Pack is not current active resume evidence",
-                "path": str(context_pack.get("path") or task.rel_path),
-            }
-        )
 
-    changed_inputs = list(handoff.get("changed_inputs") or [])
-    if pack_status in {"stale", "missing", "invalid", "unknown"} and "context_pack" not in changed_inputs:
-        changed_inputs.append("context_pack")
     guidance = {
         "status": overall_status,
         "current_revision": str(handoff.get("current_revision") or ""),
-        "changed_inputs": changed_inputs,
+        "changed_inputs": list(handoff.get("changed_inputs") or []),
         "handoff": handoff,
-        "context_pack": context_pack,
     }
+    legacy_pack = binding.get("context_pack") if isinstance(binding, dict) else None
+    if isinstance(legacy_pack, dict) and str(legacy_pack.get("path") or ""):
+        guidance["context_pack_reference"] = {
+            "status": "reference_only",
+            "path": str(legacy_pack["path"]),
+        }
     return guidance, warnings, problems
 
 
@@ -2600,17 +2480,6 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         "health": health.to_dict(),
         "resume_guidance": resume_guidance,
     }
-    decomposition = _task_decomposition_advisory(root, task)
-    if decomposition is not None:
-        summary["decomposition_advisory"] = decomposition
-        warnings.append(
-            {
-                "severity": "warning",
-                "code": "task_decomposition_recommended",
-                "message": "the active task has repeated Discovery and verification cycles across a Chosen scope larger than the compact path window; consider moving the next independently verifiable milestone to a new task",
-                "path": task.rel_path,
-            }
-        )
     if delta:
         action_inputs = _task_action_inputs(delta)
         if action_inputs:
@@ -2690,29 +2559,11 @@ def cmd_task_handoff_bind(args: argparse.Namespace) -> int:
             target = _repo_target_for_task_command(root, task)
         except RepoctlError:
             target = None
-        context_pack_binding: dict[str, str] | None = None
-        if args.context_pack:
-            if target is None:
-                raise RepoctlError(
-                    "binding a Context Pack requires a repo-scoped task",
-                    code="context_pack_binding_repository_required",
-                    path=task.rel_path,
-                )
-            requested = Path(args.context_pack)
-            pack_path = requested if requested.is_absolute() else root / requested
-            context_pack_binding, problems = prepare_task_context_pack_binding(
-                root,
-                target=target,
-                task_id=task.id,
-                path=pack_path,
-            )
-            errors = [problem for problem in problems if problem.severity == "error"]
-            if errors:
-                problem = errors[0]
-                raise RepoctlError(problem.message, code=problem.code, path=problem.path)
-        result = bind_task_handoff(root, task.id, context_pack=context_pack_binding)
+        result = bind_task_handoff(root, task.id)
     task = resolve_task(root, task.id)
-    guidance, warnings, guidance_problems = _task_resume_guidance(root, task, target=target)
+    guidance, warnings, guidance_problems = _task_resume_guidance(
+        root, task, target=target
+    )
     data = {**result, "resume_guidance": guidance}
     payload = {
         "ok": not _has_errors(guidance_problems),
@@ -2735,52 +2586,15 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         result = update_task_discovery(
             root,
             args.task_id,
-            query=args.query or "",
-            reviewed=args.reviewed or [],
-            excluded=args.excluded or [],
             chosen=args.chosen or [],
             replace_chosen=args.replace_chosen or [],
             reason=args.reason or "",
             note=args.note or "",
-            result_producer=args.result_producer or "",
-            result_id=args.result_id or "",
-            result_authority=args.result_authority or "",
-            result_refs=args.result_ref or [],
         )
-        task_path = result["task"].path
-        original_task_text = task_path.read_text(encoding="utf-8")
-        state_writes = result.get("state_writes") or []
-        original_state = {
-            state_path: state_path.read_text(encoding="utf-8") if state_path.is_file() else None
-            for state_path, _state_text in state_writes
-        }
-        try:
-            for state_path, state_text in state_writes:
-                atomic_write(state_path, state_text)
-            atomic_write(task_path, result["text"])
-        except Exception:
-            for state_path, original_text in original_state.items():
-                if original_text is None:
-                    if state_path.is_file():
-                        state_path.unlink()
-                else:
-                    atomic_write(state_path, original_text)
-            atomic_write(task_path, original_task_text)
-            raise
+        atomic_write(result["task"].path, result["text"])
     next_actions: list[dict[str, str]] = []
     task_id = result["task"].id
     chosen_files = result["discovery"]["chosen_files"]
-    try:
-        target = _repo_target_for_task_command(root, result["task"])
-    except RepoctlError:
-        target = None
-    if args.query and target is not None and not chosen_files:
-        next_actions.append(
-            {
-                "label": "Find likely product files",
-                "command": f"./scripts/repoctl context query {shlex.quote(args.query)} --repo-id {target.id} --json",
-            }
-        )
     if chosen_files:
         next_actions.append(
             {
@@ -2802,182 +2616,11 @@ def cmd_task_discovery_add(args: argparse.Namespace) -> int:
         "warnings": [],
         "next_actions": next_actions,
     }
-    observe_discovery_selections(
-        result["update"]["selected_result_evidence"]["added"],
-        repo_id=target.id if target is not None else "",
-    )
     if args.json:
         _json(payload)
     else:
         print(f"Updated Discovery: {task_id}")
     return 0
-
-
-def cmd_task_verification_add(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    with repoctl_lock(root):
-        result = record_task_verification_outcome(
-            root,
-            args.task_id,
-            status=args.status,
-            evidence_ref=args.evidence_ref,
-            subject_refs=args.subject or [],
-            claim_ids=args.claim_id or [],
-            artifact_refs=args.artifact or [],
-        )
-        for state_path, state_text in result["state_writes"]:
-            atomic_write(state_path, state_text)
-    payload = {
-        "ok": True,
-        "command": "task.verification.add",
-        "data": {
-            "task_id": result["task"].id,
-            "record": result["state"]["verification_records"][-1],
-            "record_count": len(result["state"]["verification_records"]),
-        },
-        "problems": [],
-        "warnings": [],
-        "next_actions": [{"label": "Check finish readiness", "command": f"./scripts/repoctl task doctor {result['task'].id} --json"}],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        print(f"Recorded verification outcome: {result['task'].id}")
-    return 0
-
-
-def _changed_chosen_structured_verification(
-    root: Path,
-    task: Any,
-    *,
-    target: RepoTarget | None,
-    delta: Mapping[str, Any],
-) -> dict[str, Any]:
-    coverage: dict[str, Any] = {
-        "status": "not_applicable",
-        "required_subjects": [],
-        "passed_subjects": [],
-        "missing_subjects": [],
-        "nonpassing_subjects": [],
-    }
-    alignment = task_discovery_outcome_alignment(root, task, target=target)
-    if target is None:
-        if alignment["status"] != "mismatch":
-            return coverage
-        return {
-            "status": "scope_mismatch",
-            "required_subjects": [],
-            "passed_subjects": [],
-            "missing_subjects": [],
-            "nonpassing_subjects": [],
-        }
-    scope = delta.get("scope") if isinstance(delta.get("scope"), dict) else {}
-    if not scope:
-        if alignment["status"] != "mismatch":
-            return coverage
-        return {
-            "status": "scope_mismatch",
-            "required_subjects": [],
-            "passed_subjects": [],
-            "missing_subjects": [],
-            "nonpassing_subjects": [],
-        }
-    changed_chosen = sorted(
-        (set(_string_list(scope.get("actual_paths"))) | set(_string_list(scope.get("observed_committed_paths"))))
-        & set(_string_list(scope.get("chosen_paths")))
-    )
-    if alignment["status"] == "mismatch":
-        return {
-            "status": "scope_mismatch",
-            "required_subjects": changed_chosen,
-            "passed_subjects": [],
-            "missing_subjects": [],
-            "nonpassing_subjects": [],
-        }
-    return structured_verification_coverage(
-        root,
-        task_id=task.id,
-        target=target,
-        subject_refs=changed_chosen,
-    )
-
-
-def _task_decomposition_advisory(root: Path, task: Any) -> dict[str, Any] | None:
-    if task.archived or task.status not in {"todo", "doing", "blocked"}:
-        return None
-    evidence = task_decomposition_evidence(root, task.id)
-    if (
-        evidence["chosen_subject_count"] <= COMPACT_PATH_LIMIT
-        or evidence["prior_discovery_episode_count"] < 2
-        or evidence["structured_verification_record_count"] < 2
-    ):
-        return None
-    return {
-        "status": "recommended",
-        "reason_codes": [
-            "chosen_scope_exceeds_compact_window",
-            "repeated_discovery_episodes",
-            "multiple_structured_verification_records",
-        ],
-        **evidence,
-        "compact_path_limit": COMPACT_PATH_LIMIT,
-    }
-
-
-def _structured_verification_warnings(
-    coverage: Mapping[str, Any],
-    *,
-    path: str,
-) -> list[Problem]:
-    warnings: list[Problem] = []
-    missing_subjects = _string_list(coverage.get("missing_subjects"))
-    nonpassing_subjects = _string_list(coverage.get("nonpassing_subjects"))
-    if missing_subjects:
-        warnings.append(
-            Problem(
-                "warning",
-                "task_structured_verification_missing",
-                f"{len(missing_subjects)} current changed Chosen subject(s) have no structured verification record",
-                path,
-            )
-        )
-    if nonpassing_subjects:
-        warnings.append(
-            Problem(
-                "error",
-                "task_structured_verification_nonpassing",
-                f"{len(nonpassing_subjects)} current changed Chosen subject(s) have a nonpassing latest structured verification record",
-                path,
-            )
-        )
-    return warnings
-
-
-def _structured_verification_summary(
-    coverage: Mapping[str, Any],
-    *,
-    include_unverified_subjects: bool = False,
-) -> dict[str, Any]:
-    missing_subjects = _string_list(coverage.get("missing_subjects"))
-    nonpassing_subjects = _string_list(coverage.get("nonpassing_subjects"))
-    summary = {
-        "status": str(coverage["status"]),
-        "required_subject_count": len(_string_list(coverage.get("required_subjects"))),
-        "passed_subject_count": len(_string_list(coverage.get("passed_subjects"))),
-        "missing_subject_count": len(missing_subjects),
-        "nonpassing_subject_count": len(nonpassing_subjects),
-    }
-    if include_unverified_subjects:
-        unverified = sorted({*missing_subjects, *nonpassing_subjects})
-        visible, count, truncated = _project_string_collection(unverified, compact=True)
-        summary.update(
-            {
-                "unverified_subjects": visible,
-                "unverified_subject_count": count,
-                "unverified_subjects_truncated": truncated,
-            }
-        )
-    return summary
 
 
 def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
@@ -3022,47 +2665,37 @@ def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool = False) -> dict[str, Any]:
+def _task_doctor_payload(
+    root: Path,
+    task_id: str,
+    *,
+    use_committed_diff: bool = False,
+) -> dict[str, Any]:
     task = resolve_task(root, task_id)
     related_tasks = load_tasks(root, include_archived=False)
     if task.archived:
         related_tasks.append(task)
     task_problems = [
         problem
-        for problem in validate_tasks(related_tasks, include_archived_warnings=True)
+        for problem in validate_tasks(
+            related_tasks, include_archived_warnings=True
+        )
         if problem.path == task.rel_path
     ]
     doctor_problems: list[Problem] = []
-    verification: VerificationInput | None = None
-    verification_ready = True
-    try:
-        verification = _task_verification_input(root, task_id)
-    except RepoctlError as exc:
-        verification_ready = False
-        doctor_problems.append(Problem("warning", exc.code or "missing_verification_file", str(exc), exc.path or task.rel_path))
     target: RepoTarget | None = None
     repository: dict[str, Any] = {}
-    alignment_problem: Problem | None = None
-    discovery_outcome_alignment: dict[str, Any] = {
-        "status": "observation_unavailable",
-        "reason_codes": [],
-        "task_chosen_paths": [],
-        "outcome_chosen_paths": [],
-        "task_only_paths": [],
-        "outcome_only_paths": [],
-        "invalid_task_chosen_values": [],
-        "invalid_outcome_subject_ids": [],
-    }
     delta_observation_error: RepoctlError | None = None
     try:
         target = _repo_target_for_task_command(root, task)
         repository = target.to_dict() if target is not None else {}
-        discovery_outcome_alignment = task_discovery_outcome_alignment(root, task, target=target)
-        alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
-        if alignment_problem is not None:
-            doctor_problems.append(alignment_problem)
         delta = (
-            _task_finish_repo_delta(root, task, target, use_committed_diff=use_committed_diff)
+            _task_finish_repo_delta(
+                root,
+                task,
+                target,
+                use_committed_diff=use_committed_diff,
+            )
             if target is not None
             else repo_changes_since_task_start(root, task.id)
         )
@@ -3073,118 +2706,104 @@ def _task_doctor_payload(root: Path, task_id: str, *, use_committed_diff: bool =
         )
     except RepoctlError as exc:
         delta_observation_error = exc
-        doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
+        doctor_problems.append(
+            Problem(
+                "error",
+                exc.code or "repoctl_error",
+                str(exc),
+                exc.path or task.rel_path,
+            )
+        )
         delta = {
             "changes": [],
             "baseline_available": False,
             "preexisting_count": 0,
             "baseline_conflicts": [],
         }
+
     if delta_observation_error is None:
         _task_scope_drift_warning(root, task, delta)
         try:
-            if verification is None:
-                _meta_gate, delta = _finish_meta_gate(
-                    root,
-                    task.id,
-                    use_committed_diff=use_committed_diff,
-                    prepared_delta=delta,
-                )
-            else:
-                _meta_gate, delta, _result = _prepare_task_finish(
-                    root,
-                    task.id,
-                    verification=verification,
-                    use_committed_diff=use_committed_diff,
-                    prepared_delta=delta,
-                )
+            _meta_gate, delta, _result = _prepare_task_finish(
+                root,
+                task.id,
+                use_committed_diff=use_committed_diff,
+                prepared_delta=delta,
+            )
         except RepoctlError as exc:
-            discovery_is_already_advisory = verification is None and exc.code == "placeholder_discovery" and any(
-                problem.code == "missing_discovery_evidence" for problem in task_problems
+            discovery_is_already_advisory = (
+                exc.code == "placeholder_discovery"
+                and any(
+                    problem.code == "missing_discovery_evidence"
+                    for problem in task_problems
+                )
             )
             if not discovery_is_already_advisory:
-                doctor_problems.append(Problem("error", exc.code or "repoctl_error", str(exc), exc.path or task.rel_path))
-    structured_coverage = _changed_chosen_structured_verification(
-        root,
-        task,
-        target=target,
-        delta=delta,
-    )
-    doctor_problems.extend(
-        _structured_verification_warnings(
-            structured_coverage,
-            path=task.rel_path,
-        )
-    )
-    decomposition = _task_decomposition_advisory(root, task)
-    if decomposition is not None:
-        doctor_problems.append(
-            Problem(
-                "warning",
-                "task_decomposition_recommended",
-                "the active task has repeated Discovery and verification cycles across a Chosen scope larger than the compact path window; consider moving the next independently verifiable milestone to a new task",
-                task.rel_path,
-            )
-        )
+                doctor_problems.append(
+                    Problem(
+                        "error",
+                        exc.code or "repoctl_error",
+                        str(exc),
+                        exc.path or task.rel_path,
+                    )
+                )
+
     health = _task_health(
         root,
         task,
         delta=None if delta_observation_error is not None else delta,
         observation_error=delta_observation_error,
     )
-    if alignment_problem is not None:
-        health = TaskHealth("unhealthy", tuple([*health.problems, alignment_problem]))
-    combined = _dedupe_problems([*task_problems, *doctor_problems, *health.problems])
-    blockers = [problem.code for problem in combined if problem.severity == "error"]
+    combined = _dedupe_problems(
+        [*task_problems, *doctor_problems, *health.problems]
+    )
+    blockers = [
+        problem.code for problem in combined if problem.severity == "error"
+    ]
     data = {
         "task_id": task.id,
         "status": task.status,
         "path": task.rel_path,
         "health": health.to_dict(),
-        "finish_ready": task.status in {"doing", "todo", "blocked"} and verification_ready and not blockers,
+        "finish_ready": (
+            task.status in {"doing", "todo", "blocked"}
+            and not blockers
+        ),
         "blocked_by": blockers,
-        "advisory": [problem.code for problem in combined if problem.severity == "warning"],
+        "advisory": [
+            problem.code for problem in combined if problem.severity == "warning"
+        ],
         "repo_changes": _repo_change_summary(
             delta,
             observation=_task_repo_observation(root, task, target, delta),
         ),
         "repository": repository,
-        "evidence_mode": "committed_range" if use_committed_diff else "working_tree_diff",
-        "verification": {
-            "default_source": "task_section",
-            "task_section_complete": verification_ready,
-        },
-        "structured_verification": _structured_verification_summary(structured_coverage),
-        "discovery_outcome_alignment": discovery_outcome_alignment,
+        "evidence_mode": (
+            "committed_range" if use_committed_diff else "working_tree_diff"
+        ),
     }
-    if decomposition is not None:
-        data["decomposition_advisory"] = decomposition
     action_inputs = _task_action_inputs(delta)
-    unverified_subjects = sorted({
-        *_string_list(structured_coverage.get("missing_subjects")),
-        *_string_list(structured_coverage.get("nonpassing_subjects")),
-    })
-    if unverified_subjects:
-        action_inputs["unverified_chosen_subjects"] = unverified_subjects
-    missing_subjects = _string_list(structured_coverage.get("missing_subjects"))
-    if missing_subjects:
-        action_inputs["missing_structured_verification_subjects"] = missing_subjects
-    nonpassing_subjects = _string_list(structured_coverage.get("nonpassing_subjects"))
-    if nonpassing_subjects:
-        action_inputs["nonpassing_structured_verification_subjects"] = nonpassing_subjects
     if action_inputs:
         data["action_inputs"] = action_inputs
     payload = {
         "ok": not blockers,
         "command": "task.doctor",
         "data": data,
-        "problems": [problem.to_dict() for problem in combined if problem.severity == "error"],
-        "warnings": [problem.to_dict() for problem in combined if problem.severity == "warning"],
+        "problems": [
+            problem.to_dict()
+            for problem in combined
+            if problem.severity == "error"
+        ],
+        "warnings": [
+            problem.to_dict()
+            for problem in combined
+            if problem.severity == "warning"
+        ],
     }
-    task_problems = [*payload["problems"], *payload["warnings"]]
+    task_problem_data = [*payload["problems"], *payload["warnings"]]
     payload["next_actions"] = [
-        *_task_next_actions(task_problems, data),
-        *_next_actions_for_problems(task_problems, data=data),
+        *_task_next_actions(task_problem_data, data),
+        *_next_actions_for_problems(task_problem_data, data=data),
     ]
     return payload
 
@@ -3580,49 +3199,6 @@ def cmd_task_start(args: argparse.Namespace) -> int:
     return 1 if _has_errors(resume_problems) else 0
 
 
-def _task_verification_input(root: Path, task_id: str) -> VerificationInput:
-    task = resolve_task(root, task_id)
-    text = task.path.read_text(encoding="utf-8")
-    section = find_section(text, "Verification")
-    body = text[section.body_start : section.end].strip()
-    normalized = body.casefold().strip()
-    placeholders = {"- pending", "- pending.", "- 대기 중", "- 대기 중.", "pending", "pending.", "대기 중", "대기 중."}
-    if not body or normalized in placeholders:
-        raise RepoctlError("task Verification section is incomplete; record commands, evidence, and results or use --verification-file", code="missing_verification_file", path=task.rel_path)
-    source_text = body + "\n"
-    return VerificationInput(
-        source="task_section",
-        text=source_text,
-        source_sha256="sha256:" + hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
-        source_path=task.rel_path,
-    )
-
-
-def _verification_input_arg(root: Path, task_id: str, *, verification_file: str | None) -> VerificationInput:
-    if verification_file:
-        path = Path(verification_file)
-        validate_verification_file(root, path)
-        try:
-            source_bytes = path.read_bytes()
-            source_text = source_bytes.decode("utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise RepoctlError(f"verification file cannot be read as UTF-8: {path}", code="missing_verification_file", path=path.as_posix()) from exc
-        return VerificationInput(
-            source="external_file",
-            text=source_text,
-            source_sha256="sha256:" + hashlib.sha256(source_bytes).hexdigest(),
-            source_path=path.as_posix(),
-        )
-    try:
-        return _task_verification_input(root, task_id)
-    except RepoctlError:
-        raise RepoctlError(
-            "task finish requires --verification-file or a completed ## Verification section",
-            code="missing_verification_file",
-            path=resolve_task(root, task_id).rel_path,
-        )
-
-
 def _transition_reason_arg(args: argparse.Namespace) -> tuple[str, str]:
     source = "file" if args.reason_file else "argument"
     try:
@@ -3803,7 +3379,7 @@ def _finish_meta_gate(
     task_changes = delta["changes"]
     if task_changes and _repo_scoped_frontmatter(task):
         if not discovery_recorded(task, target):
-            raise RepoctlError("repo task must record candidate discovery before finish", code="placeholder_discovery", path=task.rel_path)
+            raise RepoctlError("repo task must record Chosen files before finish", code="placeholder_discovery", path=task.rel_path)
         scope_delta = discovery_scope_delta(
             task,
             target,
@@ -3883,7 +3459,6 @@ def _prepare_task_finish(
     root: Path,
     task_id: str,
     *,
-    verification: VerificationInput,
     use_committed_diff: bool = False,
     prepared_delta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -3896,7 +3471,6 @@ def _prepare_task_finish(
     result = finish_task(
         root,
         task_id,
-        verification=verification,
         meta_gate=meta_gate,
         repo_delta=delta,
         allow_head_changed=use_committed_diff,
@@ -4116,8 +3690,12 @@ def _task_finish_knowledge_request(root: Path, args: argparse.Namespace) -> dict
     kind = str(getattr(args, "knowledge_kind", "") or "")
     raw_claim = str(getattr(args, "knowledge_claim", "") or "")
     claim_file = str(getattr(args, "knowledge_claim_file", "") or "")
+    raw_reason = str(getattr(args, "knowledge_reason", "") or "")
+    reason_file = str(getattr(args, "knowledge_reason_file", "") or "")
     applies_to = [str(value) for value in (getattr(args, "knowledge_applies_to", []) or []) if str(value)]
-    requested = bool(kind or raw_claim or claim_file or applies_to)
+    replaces = [str(value) for value in (getattr(args, "knowledge_replaces", []) or []) if str(value)]
+    author = str(getattr(args, "knowledge_author", "") or "")
+    requested = bool(kind or raw_claim or claim_file or raw_reason or reason_file or applies_to or replaces or author)
     if not requested:
         return None
     if not kind:
@@ -4140,22 +3718,41 @@ def _task_finish_knowledge_request(root: Path, args: argparse.Namespace) -> dict
             "knowledge closeout requires --knowledge-claim or --knowledge-claim-file",
             code="knowledge_closeout_claim_required",
         )
-    return {"kind": kind, "claim": claim, "applies_to": applies_to}
+    reason, reason_problems = _explicit_claim_input(
+        root,
+        claim=raw_reason,
+        claim_file=reason_file,
+        code_prefix="knowledge_closeout_reason",
+        label="knowledge closeout reason",
+    )
+    if reason_problems:
+        problem = reason_problems[0]
+        raise RepoctlError(problem.message, code=problem.code, path=problem.path)
+    if not reason:
+        raise RepoctlError(
+            "knowledge closeout requires --knowledge-reason or --knowledge-reason-file",
+            code="knowledge_closeout_reason_required",
+        )
+    return {
+        "kind": kind,
+        "claim": claim,
+        "reason": reason,
+        "applies_to": applies_to,
+        "replaces": replaces,
+        "author": author,
+    }
 
 
 def cmd_task_finish(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     task_id = resolve_task(root, args.task_id).id
-    verification = _verification_input_arg(root, task_id, verification_file=args.verification_file)
     knowledge_request = _task_finish_knowledge_request(root, args)
-    prepared_candidate = None
-    finish_structured_coverage: dict[str, Any]
-    finish_structured_warnings: list[Problem]
+    prepared_record = None
+    knowledge_projection_problems: list[Problem] = []
     with repoctl_lock(root):
         meta_gate, delta, result = _prepare_task_finish(
             root,
             task_id,
-            verification=verification,
             use_committed_diff=args.use_committed_diff,
         )
         receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
@@ -4167,36 +3764,29 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
                     code="knowledge_closeout_repo_required",
                     path=result.get("old_path", ""),
                 )
-            prepared_candidate, candidate_problems = prepare_knowledge_candidate_from_completion(
+            completion_receipt_path = result["receipt_path"].relative_to(root).as_posix()
+            prepared_record, record_problems = prepare_knowledge_record(
                 root,
-                receipt=receipt,
-                receipt_rel=result["receipt_path"].relative_to(root).as_posix(),
-                receipt_text=str(result.get("receipt_text") or ""),
-                artifact_rel=str(result.get("new_path") or ""),
-                artifact_text=str(result.get("text") or ""),
                 repo_id=repo_id,
                 kind=str(knowledge_request["kind"]),
                 claim=str(knowledge_request["claim"]),
+                reason=str(knowledge_request["reason"]),
+                sources=[str(result.get("new_path") or ""), completion_receipt_path],
                 applies_to=list(knowledge_request["applies_to"]),
+                replaces=list(knowledge_request["replaces"]),
+                author=str(knowledge_request["author"]),
+                allow_pending_sources=True,
             )
-            if candidate_problems or prepared_candidate is None:
-                problem = candidate_problems[0] if candidate_problems else Problem("error", "knowledge_closeout_failed", "knowledge closeout candidate could not be prepared")
+            if record_problems or prepared_record is None:
+                problem = record_problems[0] if record_problems else Problem("error", "knowledge_closeout_failed", "knowledge closeout record could not be prepared")
                 raise RepoctlError(problem.message, code=problem.code, path=problem.path)
-            result["additional_state_writes"] = [(prepared_candidate.path, prepared_candidate.text)]
-        finish_target = _repo_target_for_task_command(root, result["task"])
-        finish_structured_coverage = _changed_chosen_structured_verification(
-            root,
-            result["task"],
-            target=finish_target,
-            delta=delta,
-        )
-        if finish_structured_coverage["status"] == "nonpassing":
-            raise RepoctlError("current changed Chosen subjects have nonpassing structured verification", code="task_structured_verification_nonpassing", path=str(result["old_path"]))
-        finish_structured_warnings = _structured_verification_warnings(
-            finish_structured_coverage,
-            path=str(result["new_path"]),
-        )
+            result["additional_state_writes"] = [(prepared_record.path, prepared_record.text)]
         _write_task_result(root, result)
+        if prepared_record is not None:
+            _projection, knowledge_projection_problems = rebuild_knowledge_projection(
+                root,
+                repo_id=repo_id,
+            )
     finish_summary = _finish_summary(meta_gate, delta)
     data = {
         "task_id": task_id,
@@ -4206,29 +3796,47 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "old_path": result["old_path"],
         "new_path": result["new_path"],
         "archived": result["archived"],
-        "truncated": result["truncated"],
         "meta_gate": meta_gate,
         "finish_summary": finish_summary,
-        "structured_verification": _structured_verification_summary(
-            finish_structured_coverage,
-            include_unverified_subjects=True,
-        ),
         "completion_receipt": result["receipt_path"].relative_to(root).as_posix(),
     }
     receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
     repo_id = str(receipt.get("repo_id") or "")
-    if prepared_candidate is not None:
+    warnings: list[dict[str, Any]] = []
+    if prepared_record is not None:
+        graph_sync, graph_problems = _sync_graph_after_knowledge_change(
+            root,
+            target=require_repo_target(root, repo_id=repo_id),
+        )
         data["knowledge_closeout"] = {
-            "status": "candidate_created",
-            "candidate_id": prepared_candidate.data["candidate"]["id"],
-            "candidate_path": prepared_candidate.data["path"],
-            "kind": prepared_candidate.data["candidate"]["kind"],
-            "applies_to": prepared_candidate.data["candidate"].get("applies_to", {"paths": []}),
+            "status": "saved",
+            "record_id": prepared_record.data["id"],
+            "record_path": prepared_record.path.relative_to(root).as_posix(),
+            "kind": prepared_record.data["kind"],
+            "applies_to": prepared_record.data.get("applies_to", {"paths": []}),
+            "projection_status": "stale" if knowledge_projection_problems else "synced",
+            "graph_sync": graph_sync,
         }
-        next_actions = _knowledge_candidate_next_actions(
-            prepared_candidate.data,
-            repo_id=repo_id,
-            dry_run=False,
+        next_actions = []
+        warnings.extend(
+            {
+                "severity": "warning",
+                "code": "knowledge_projection_sync_failed",
+                "message": "Knowledge was saved; refresh the derived projection when needed",
+                "path": problem.path,
+                "cause_code": problem.code,
+            }
+            for problem in knowledge_projection_problems
+        )
+        warnings.extend(
+            {
+                **problem.to_dict(),
+                "severity": "warning",
+                "code": "knowledge_graph_sync_failed",
+                "message": "Knowledge was saved; refresh Graph when needed",
+                "cause_code": problem.code,
+            }
+            for problem in graph_problems
         )
     else:
         data["knowledge_closeout"] = {"status": "not_requested"}
@@ -4238,7 +3846,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "command": "task.finish",
         "data": data,
         "problems": [],
-        "warnings": [problem.to_dict() for problem in finish_structured_warnings],
+        "warnings": warnings,
         "next_actions": next_actions,
     }
     if args.json:
@@ -4777,17 +4385,6 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
     outcome_ok = query_status in {"found", "not_found"}
     compact_result = _compact_graph_query_result(result, freshness=freshness) if result is not None else None
     result_data = result if args.full or result is None else compact_result
-    result_receipt: dict[str, Any] | None = None
-    if result is not None and compact_result is not None and outcome_ok and not _has_errors(query_problems):
-        result_receipt = write_result_receipt(
-            root,
-            target=target,
-            producer=ResultProducer.GRAPH,
-            result_id=str(result.get("result_digest") or ""),
-            request=GraphResultRequest.from_query(result.get("query")),
-            selections=graph_result_selections(compact_result),
-        )
-        observe_result(target.id, result_receipt)
     completeness = result.get("completeness", snapshot.completeness) if result is not None else snapshot.completeness
     result_warnings = result.get("warnings", []) if isinstance(result, dict) and isinstance(result.get("warnings"), list) else []
     freshness_data = freshness if args.full else compact_graph_freshness(freshness)
@@ -4812,7 +4409,6 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             "repository": target.to_dict(),
             "snapshot_digest": snapshot.snapshot_digest,
             "freshness": freshness_data,
-            "result_receipt": _public_result_receipt(result_receipt),
         },
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
@@ -4990,7 +4586,6 @@ _GRAPH_RELATION_ORDER = {
         "TASK_CHANGED_FILE",
         "TASK_VERIFIED_BY",
         "KNOWLEDGE_SOURCED_FROM",
-        "KNOWLEDGE_DERIVED_FROM_TASK",
         "CALLS",
         "TASK_RECORDED_CHANGE",
         "CHANGE_AFFECTED_FILE",
@@ -5008,7 +4603,6 @@ _GRAPH_RELATION_ORDER = {
         "TASK_CHANGED_FILE",
         "TASK_VERIFIED_BY",
         "KNOWLEDGE_SOURCED_FROM",
-        "KNOWLEDGE_DERIVED_FROM_TASK",
         "TASK_RECORDED_CHANGE",
         "CHANGE_AFFECTED_FILE",
         "RESOLVES_TO",
@@ -5021,7 +4615,6 @@ _GRAPH_RELATION_ORDER = {
         "TASK_CHANGED_FILE",
         "TASK_RECORDED_CHANGE",
         "CHANGE_AFFECTED_FILE",
-        "KNOWLEDGE_DERIVED_FROM_TASK",
         "KNOWLEDGE_SOURCED_FROM",
         "KNOWLEDGE_APPLIES_TO",
         "TESTS_FILE",
@@ -5046,7 +4639,6 @@ _GRAPH_RELATION_ORDER = {
         "TASK_VERIFIED_BY",
         "TASK_CHANGED_FILE",
         "KNOWLEDGE_SOURCED_FROM",
-        "KNOWLEDGE_DERIVED_FROM_TASK",
         "TASK_RECORDED_CHANGE",
         "CHANGE_AFFECTED_FILE",
     ),
@@ -5377,7 +4969,6 @@ def _compact_relation_evidence(
         "TASK_VERIFIED_BY": "task_history",
         "KNOWLEDGE_APPLIES_TO": "knowledge",
         "KNOWLEDGE_SOURCED_FROM": "knowledge",
-        "KNOWLEDGE_DERIVED_FROM_TASK": "knowledge",
     }
     capabilities = completeness.get("capabilities") if isinstance(completeness.get("capabilities"), dict) else {}
     confidence = str(facts.get("confidence") or "unknown")
@@ -5397,7 +4988,6 @@ def _compact_relation_evidence(
         "TASK_VERIFIED_BY",
         "KNOWLEDGE_APPLIES_TO",
         "KNOWLEDGE_SOURCED_FROM",
-        "KNOWLEDGE_DERIVED_FROM_TASK",
     }
     if endpoint_paths & changed_root_paths or (freshness.get("root_evidence_changed") and edge in root_evidence_edges):
         freshness_status = "stale"
@@ -5453,41 +5043,21 @@ def cmd_context_query(args: argparse.Namespace) -> int:
         mode=args.mode or "",
     )
     bundle_data = None
-    result_receipt: dict[str, Any] | None = None
+    guide: dict[str, Any] | None = None
     if bundle is not None:
         full_bundle_data = bundle.to_dict()
         compact_bundle_data = compact_context_bundle(bundle)
+        guide = compact_bundle_data.get("guide")
         bundle_data = full_bundle_data if args.full else compact_bundle_data
-        if not _has_errors(problems):
-            result_receipt = write_result_receipt(
-                root,
-                target=target,
-                producer=ResultProducer.CONTEXT,
-                result_id=bundle.bundle_digest,
-                request=ContextResultRequest(
-                    query=str(bundle.query.get("text") or "").strip(),
-                    mode=str(bundle.query.get("mode") or ""),
-                ),
-                selections=context_result_citations(full_bundle_data),
-            )
         observe_context(
             target.id,
             bundle_data,
-            result_receipt,
             source_completeness=full_bundle_data.get("completeness"),
         )
     data = {
+        "guide": guide,
         "bundle": bundle_data,
         "repository": target.to_dict(),
-        "result_receipt": (
-            context_result_receipt_projection(
-                result_receipt,
-                compact_bundle=compact_bundle_data,
-                full=bool(args.full),
-            )
-            if result_receipt is not None and bundle is not None
-            else None
-        ),
     }
     if args.full or args.explain:
         data.update(meta)
@@ -5505,7 +5075,7 @@ def cmd_context_query(args: argparse.Namespace) -> int:
         "warnings": [
             {
                 "code": "context_not_authoritative",
-                "message": "context query returns a non-authoritative evidence bundle; product/task state is unchanged and only a regenerable result receipt is stored",
+                "message": "context query returns read-only evidence; inspect source before choosing task scope",
             },
             *[problem.to_dict() for problem in optional_absence_warnings],
         ],
@@ -5646,14 +5216,12 @@ def _parse_category_recall_gates(values: list[str]) -> tuple[dict[str, float], l
 def cmd_context_pack(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     output: Path | None = None
-    output_problem: Problem | None = None
     if args.output:
-        output, output_problem = _workspace_output_path(root, args.output, code="context_pack_output_outside_workspace")
+        requested = Path(args.output).expanduser()
+        output = requested if requested.is_absolute() else root / requested
     _invalidate_output_artifact(output)
     target = require_repo_target(root, repo_id=args.repo_id)
     data, problems, meta = build_task_context_pack(root, target=target, task_id=args.task, budget_tokens=args.budget_tokens, explain=args.explain)
-    if output_problem is not None:
-        problems.append(output_problem)
     payload_data = {**data, **meta} if args.full else {**compact_task_context_pack(data), **meta}
     payload = {
         "ok": not _has_errors(problems),
@@ -5665,10 +5233,13 @@ def cmd_context_pack(args: argparse.Namespace) -> int:
     output_format = "json" if args.json else args.format
     written_output = ""
     if output is not None and not _has_errors(problems):
-        written_output = output.relative_to(root).as_posix()
+        try:
+            written_output = output.relative_to(root).as_posix()
+        except ValueError:
+            written_output = output.as_posix()
         if data and output_format == "json":
             payload["data"]["artifact"] = {
-                "path": output.relative_to(root).as_posix(),
+                "path": written_output,
                 "pack_digest": payload["data"].get("pack_digest", ""),
             }
         _complete_json_envelope(payload)
@@ -5777,188 +5348,6 @@ def cmd_context_pack_benchmark_materialize(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def cmd_knowledge_candidate_build(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    claim, claim_problems = _knowledge_candidate_claim_input(root, args)
-    from_task = getattr(args, "from_task", "")
-    source_modes = [bool(args.source), bool(args.from_receipt), bool(args.from_pack), bool(from_task)]
-    if claim_problems:
-        data = {}
-        problems = claim_problems
-    elif sum(1 for enabled in source_modes if enabled) != 1:
-        data: dict[str, Any] = {}
-        problems = [Problem("error", "knowledge_candidate_source_required", "provide exactly one of --source, --from-receipt, --from-pack, or --from-task")]
-    else:
-        with repoctl_lock(root):
-            if from_task:
-                data, problems = build_knowledge_candidate_from_receipt(
-                    root,
-                    task_id=from_task,
-                    repo_id=args.repo_id,
-                    kind=args.kind,
-                    write=not getattr(args, "dry_run", False),
-                    claim=claim,
-                    applies_to=list(getattr(args, "applies_to", []) or []),
-                )
-            elif args.from_receipt:
-                data, problems = build_knowledge_candidate_from_receipt(
-                    root,
-                    task_id=args.from_receipt,
-                    repo_id=args.repo_id,
-                    kind=args.kind,
-                    claim=claim,
-                    applies_to=list(getattr(args, "applies_to", []) or []),
-                )
-            elif args.from_pack:
-                data, problems = build_knowledge_candidate_from_pack(
-                    root,
-                    pack=Path(args.from_pack),
-                    repo_id=args.repo_id,
-                    kind=args.kind,
-                    claim=claim,
-                    applies_to=list(getattr(args, "applies_to", []) or []),
-                )
-            else:
-                data, problems = build_knowledge_candidate(
-                    root,
-                    source=Path(args.source),
-                    repo_id=args.repo_id,
-                    kind=args.kind,
-                    claim=claim,
-                    applies_to=list(getattr(args, "applies_to", []) or []),
-                )
-    failure_actions = _next_actions_for_problems(problems, data={"task_id": from_task or args.from_receipt or "T-..."})
-    if _has_errors(problems):
-        codes = {_problem_code(problem) for problem in problems}
-        if "knowledge_candidate_receipt_invalid" in codes:
-            failure_actions.append({"label": "Rebuild the candidate after choosing its repository, kind, and explicit claim", "kind": NextActionKind.KNOWLEDGE_REVIEW})
-        if "knowledge_candidate_claim_required" in codes:
-            failure_actions.append({"label": "State the reusable decision, invariant, or failure mode explicitly", "kind": NextActionKind.KNOWLEDGE_REVIEW})
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.candidate.build",
-        "data": data if getattr(args, "full", False) else _compact_knowledge_candidate_data(data),
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "knowledge_candidate_not_authoritative",
-                "message": "knowledge candidates are review inputs only; they are not canonical knowledge records",
-            }
-        ],
-        "next_actions": (
-            _knowledge_candidate_next_actions(
-                data,
-                repo_id=args.repo_id,
-                dry_run=bool(getattr(args, "dry_run", False)),
-            )
-            if not _has_errors(problems)
-            else failure_actions
-        ),
-    }
-    if args.json:
-        _json(payload)
-    else:
-        candidate = data.get("candidate", {}) if data else {}
-        print(f"knowledge candidate {candidate.get('id', '')} path={data.get('path', '')}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def _knowledge_candidate_next_actions(data: dict[str, Any], *, repo_id: str, dry_run: bool) -> list[dict[str, Any]]:
-    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else {}
-    candidate_id = str(candidate.get("id") or "")
-    if not candidate_id or dry_run:
-        return []
-    return [
-        {
-            "label": "Review the candidate with source-currentness checks",
-            "command": f"./scripts/repoctl knowledge candidate show {candidate_id} --repo-id {repo_id} --format markdown",
-        },
-        {
-            "label": "Run the candidate contract check",
-            "command": f"./scripts/repoctl knowledge candidate check {candidate_id} --repo-id {repo_id} --json",
-        },
-        {
-            "label": "Approve only after reviewing the claim and sources",
-            "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {repo_id} --json",
-        },
-        {
-            "label": "Reject after supplying a concrete reason file",
-            "kind": NextActionKind.KNOWLEDGE_REVIEW,
-            "source": "data.candidate.id",
-            "choices": [KnowledgeReviewDecision.REJECT],
-        },
-    ]
-
-
-def _knowledge_candidate_claim_input(root: Path, args: argparse.Namespace) -> tuple[str, list[Problem]]:
-    return _explicit_claim_input(
-        root,
-        claim=str(getattr(args, "claim", "") or ""),
-        claim_file=str(getattr(args, "claim_file", "") or ""),
-        code_prefix="knowledge_candidate",
-        label="knowledge candidate",
-    )
-
-
-def _compact_knowledge_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
-    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else None
-    if candidate is None:
-        return data
-    compact_candidate = dict(candidate)
-    compact_candidate.pop("summary", None)
-    derived = compact_candidate.get("derived_from") if isinstance(compact_candidate.get("derived_from"), dict) else {}
-    compact_candidate["derived_from"] = _compact_knowledge_derived_from(derived)
-    return {**data, "candidate": compact_candidate}
-
-
-def _compact_knowledge_derived_from(derived: dict[str, Any]) -> dict[str, Any]:
-    compact_derived = dict(derived)
-    compact_derived.pop("related_symbols", None)
-    compact_derived.pop("related_symbol_warnings", None)
-    return compact_derived
-
-
-def _compact_knowledge_approval_data(data: dict[str, Any]) -> dict[str, Any]:
-    record = data.get("record") if isinstance(data.get("record"), dict) else None
-    if record is None:
-        return data
-    compact_record = dict(record)
-    compact_record.pop("summary", None)
-    created_from = compact_record.get("created_from") if isinstance(compact_record.get("created_from"), dict) else {}
-    compact_created_from = dict(created_from)
-    candidate_derived = compact_created_from.get("candidate_derived_from")
-    if isinstance(candidate_derived, dict):
-        compact_created_from["candidate_derived_from"] = _compact_knowledge_derived_from(candidate_derived)
-    compact_record["created_from"] = compact_created_from
-    return {**data, "record": compact_record}
-
-
-def cmd_knowledge_candidate_list(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data = list_knowledge_candidates(root, repo_id=args.repo_id, with_checks=args.with_checks)
-    payload = {
-        "ok": True,
-        "command": "knowledge.candidate.list",
-        "data": data,
-        "problems": [],
-        "warnings": [
-            {
-                "code": "knowledge_candidate_not_authoritative",
-                "message": "knowledge candidates are review inputs only; they are not canonical knowledge records",
-            }
-        ],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        print(f"knowledge candidates repo_id={args.repo_id} count={len(data.get('candidates', []))}")
-    return 0
-
-
 def cmd_knowledge_status(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
@@ -5973,12 +5362,15 @@ def cmd_knowledge_status(args: argparse.Namespace) -> int:
     if args.json:
         _json(payload)
     else:
-        print(f"knowledge status repo_id={args.repo_id} candidates={data['candidate_count']} records={data['record_count']} events={data['event_count']}")
+        print(
+            f"knowledge status repo_id={args.repo_id} "
+            f"records={data['record_count']} projection={data['projection']['status']}"
+        )
     return 0
 
 
 def cmd_knowledge_rebuild(args: argparse.Namespace) -> int:
-    """Explicitly rebuild the current-head projection from validated cold authority."""
+    """Refresh the derived search projection from saved records."""
 
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
@@ -6002,7 +5394,7 @@ def cmd_knowledge_rebuild(args: argparse.Namespace) -> int:
         "warnings": [
             {
                 "code": "knowledge_projection_rebuild_scanned_cold_history",
-                "message": "knowledge rebuild is an explicit recovery operation that validates and scans all durable records and events for the selected repository",
+                "message": "knowledge rebuild refreshed the derived projection from current-format records",
             }
         ],
     }
@@ -6013,269 +5405,6 @@ def cmd_knowledge_rebuild(args: argparse.Namespace) -> int:
             f"knowledge projection rebuilt repo_id={target.id} "
             f"heads={data['head_count']} path={data['projection_path']}"
         )
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def cmd_knowledge_event_list(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data = list_knowledge_events(root, repo_id=args.repo_id, event_type=args.type, candidate_id=args.candidate_id, record_id=args.record_id)
-    payload = {
-        "ok": True,
-        "command": "knowledge.event.list",
-        "data": data,
-        "problems": [],
-        "warnings": [
-            {
-                "code": "knowledge_events_are_append_only",
-                "message": "knowledge events are append-only lifecycle evidence",
-            }
-        ],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        print(f"knowledge events repo_id={args.repo_id} count={data.get('event_count', 0)}")
-    return 0
-
-
-def cmd_knowledge_event_show(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data, problems = show_knowledge_event(root, repo_id=args.repo_id, event_id=args.event_id)
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.event.show",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "knowledge_events_are_append_only",
-                "message": "knowledge events are append-only lifecycle evidence",
-            }
-        ],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        event = data.get("event", {}) if data else {}
-        print(f"knowledge event {event.get('id', args.event_id)}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def cmd_knowledge_candidate_show(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data, problems = show_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
-    check_data: dict[str, Any] = {}
-    check_problems: list[Problem] = []
-    if not problems:
-        check_data, check_problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
-    candidate = data.get("candidate") if isinstance(data.get("candidate"), dict) else {}
-    candidate_id = str(candidate.get("id") or args.candidate_id)
-    review_actions = []
-    if data and not _has_errors([*problems, *check_problems]):
-        review_actions = [
-            {
-                "label": "Approve after reviewing the claim and sources",
-                "command": f"./scripts/repoctl knowledge approve {candidate_id} --repo-id {args.repo_id} --json",
-            },
-            {
-                "label": "Reject after supplying a concrete reason file",
-                "kind": NextActionKind.KNOWLEDGE_REVIEW,
-                "source": "data.candidate.id",
-                "choices": [KnowledgeReviewDecision.REJECT],
-            },
-        ]
-    payload = {
-        "ok": not _has_errors([*problems, *check_problems]),
-        "command": "knowledge.candidate.show",
-        "data": {**data, "review_summary": check_data} if data else data,
-        "problems": [problem.to_dict() for problem in [*problems, *check_problems] if problem.severity == "error"],
-        "warnings": [
-            {
-                "code": "knowledge_candidate_not_authoritative",
-                "message": "knowledge candidates are review inputs only; they are not canonical knowledge records",
-            }
-        ]
-        + [problem.to_dict() for problem in check_problems if problem.severity == "warning"],
-        "next_actions": review_actions,
-    }
-    if args.json:
-        _json(payload)
-    else:
-        if args.format == "markdown":
-            print(_render_knowledge_candidate_review_markdown(data, check_data, repo_id=args.repo_id))
-        else:
-            candidate = data.get("candidate", {}) if data else {}
-            print(f"knowledge candidate {candidate.get('id', args.candidate_id)}")
-            if data:
-                print(f"kind={candidate.get('kind', '')} claim={candidate.get('claim', '')}")
-        for problem in [*problems, *check_problems]:
-            print(problem.message)
-    return 1 if _has_errors([*problems, *check_problems]) else 0
-
-
-def _render_knowledge_candidate_review_markdown(data: dict[str, Any], check_data: dict[str, Any], *, repo_id: str) -> str:
-    candidate = data.get("candidate", {}) if isinstance(data.get("candidate"), dict) else {}
-    lines = [
-        f"# Knowledge Candidate Review: {candidate.get('id', '')}",
-        "",
-        "## Candidate",
-        "",
-        f"- Repo: `{repo_id}`",
-        f"- Kind: `{candidate.get('kind', '')}`",
-        f"- Title: {candidate.get('title', '')}",
-        f"- Claim: {candidate.get('claim', '')}",
-        f"- Authoritative: `{str(candidate.get('authoritative', ''))}`",
-        "",
-        "## Summary",
-        "",
-        str(candidate.get("summary") or "").strip() or "_No summary._",
-        "",
-        "## Origin",
-        "",
-    ]
-    derived = candidate.get("derived_from") if isinstance(candidate.get("derived_from"), dict) else {}
-    if derived:
-        lines.append(f"- Kind: `{derived.get('kind', '')}`")
-        for key in ("task_id", "repo_id", "verification_artifact", "path", "pack_digest", "record_id", "record_digest"):
-            if derived.get(key):
-                lines.append(f"- {key}: `{derived.get(key)}`")
-        changed_files = derived.get("changed_files") if isinstance(derived.get("changed_files"), list) else []
-        if changed_files:
-            lines.append("- Changed files: " + ", ".join(f"`{item}`" for item in changed_files))
-    else:
-        lines.append("- Kind: `authority_document`")
-    lines.extend(["", "## Source Refs", ""])
-    for ref in candidate.get("source_refs", []) if isinstance(candidate.get("source_refs"), list) else []:
-        if not isinstance(ref, dict):
-            continue
-        lines.append(
-            f"- `{ref.get('path', '')}` section `{ref.get('section', '')}` kind `{ref.get('kind', '')}` digest `{ref.get('content_sha256', '')}`"
-        )
-    lines.extend(["", "## Source Currentness", ""])
-    for status in _candidate_source_statuses_for_review(check_data, candidate):
-        declared_path = str(status.get("declared_path") or status.get("path") or "")
-        resolved_path = str(status.get("resolved_path") or declared_path)
-        cause = str(status.get("cause_code") or "")
-        cause_suffix = f" cause=`{cause}`" if cause else ""
-        lines.append(
-            f"- declared=`{declared_path}` resolved=`{resolved_path}` status=`{status.get('status', '')}` "
-            f"declared_exists=`{status.get('declared_exists', status.get('exists', False))}` "
-            f"resolved_exists=`{status.get('resolved_exists', status.get('exists', False))}` "
-            f"digest_matches=`{status.get('digest_matches', False)}`{cause_suffix}"
-        )
-    lines.extend(["", "## Related Current Records", ""])
-    related = check_data.get("related_records") if isinstance(check_data.get("related_records"), list) else []
-    if related:
-        for item in related:
-            lines.append(f"- `{item.get('record_id', '')}` status `{item.get('status', '')}` relation `{item.get('relation', '')}`")
-    else:
-        lines.append("- None found.")
-    lines.extend(["", "## Review Check", ""])
-    lines.append(f"- Passed: `{check_data.get('passed', False)}`")
-    for problem in check_data.get("problems", []) if isinstance(check_data.get("problems"), list) else []:
-        lines.append(f"- Error `{problem.get('code', '')}`: {problem.get('message', '')}")
-    for warning in check_data.get("warnings", []) if isinstance(check_data.get("warnings"), list) else []:
-        lines.append(f"- Warning `{warning.get('code', '')}`: {warning.get('message', '')}")
-    lines.extend(
-        [
-            "",
-            "## Next Actions",
-            "",
-            f"- Approve: `./scripts/repoctl knowledge approve {candidate.get('id', '')} --repo-id {repo_id} --json`",
-            "- Reject: provide a concrete reason file to `knowledge reject` after review.",
-            "- Supersede: choose the exact current record ID before approving.",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _candidate_source_statuses_for_review(check_data: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    statuses = check_data.get("source_ref_statuses")
-    if isinstance(statuses, list):
-        return [status for status in statuses if isinstance(status, dict)]
-    return [
-        {
-            "path": ref.get("path", ""),
-            "exists": "",
-            "digest_matches": "",
-        }
-        for ref in candidate.get("source_refs", [])
-        if isinstance(ref, dict)
-    ]
-
-
-def cmd_knowledge_candidate_check(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    if args.all:
-        data, problems = check_all_knowledge_candidates(root, repo_id=args.repo_id, pending_only=not args.all_states)
-    elif args.candidate_id:
-        data, problems = check_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
-    else:
-        data = {}
-        problems = [Problem("error", "knowledge_candidate_check_target_required", "provide a candidate id or --all")]
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.candidate.check",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
-        "warnings": [problem.to_dict() for problem in problems if problem.severity == "warning"],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        if args.all:
-            print(f"knowledge candidate check repo_id={args.repo_id} candidates={data.get('candidate_count', 0)} errors={data.get('error_count', 0)} warnings={data.get('warning_count', 0)}")
-        else:
-            print(f"knowledge candidate check candidate={args.candidate_id} passed={data.get('passed', False)}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def cmd_knowledge_candidate_refresh(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    with repoctl_lock(root):
-        if args.all_stale:
-            data, problems = refresh_stale_knowledge_candidates(root, repo_id=args.repo_id, include_records=args.include_records)
-        elif args.record_id:
-            data, problems = refresh_knowledge_record_candidate(root, repo_id=args.repo_id, record_id=args.record_id)
-        elif args.candidate_id:
-            data, problems = refresh_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id)
-        else:
-            data = {}
-            problems = [Problem("error", "knowledge_candidate_refresh_target_required", "provide a candidate id, --record-id, or --all-stale")]
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.candidate.refresh",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "knowledge_candidate_refresh_creates_new_candidate",
-                "message": "refresh creates a new candidate and leaves the original candidate unchanged",
-            }
-        ],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        if args.all_stale:
-            print(f"knowledge candidate refresh repo_id={args.repo_id} refreshed={data.get('refreshed_count', 0)} skipped={data.get('skipped_count', 0)}")
-        elif args.record_id:
-            candidate = data.get("candidate", {}) if data else {}
-            print(f"knowledge candidate refresh record={args.record_id} new={candidate.get('id', '')}")
-        else:
-            candidate = data.get("candidate", {}) if data else {}
-            print(f"knowledge candidate refresh old={args.candidate_id} new={candidate.get('id', '')}")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
@@ -6307,89 +5436,85 @@ def _sync_graph_after_knowledge_change(
     }, problems
 
 
-def cmd_knowledge_approve(args: argparse.Namespace) -> int:
+def cmd_knowledge_add(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = require_repo_target(root, repo_id=args.repo_id)
-    review_note = ""
-    note_problems: list[Problem] = []
-    if args.note_file:
-        note_path = Path(args.note_file)
-        if not note_path.is_absolute():
-            note_path = root / note_path
-        if not note_path.is_file():
-            note_problems.append(Problem("error", "knowledge_approve_note_missing", "approval note file is missing", note_path.as_posix()))
-        else:
-            review_note = note_path.read_text(encoding="utf-8").strip()
-            if not review_note:
-                note_problems.append(Problem("error", "knowledge_approve_note_empty", "approval note file is empty", note_path.as_posix()))
-    if note_problems:
-        data, problems = {}, note_problems
-        graph_sync: dict[str, Any] = {"status": "not_run"}
-        graph_problems: list[Problem] = []
+    claim, claim_problems = _explicit_claim_input(
+        root,
+        claim=str(args.claim or ""),
+        claim_file=str(args.claim_file or ""),
+        code_prefix="knowledge",
+        label="knowledge",
+    )
+    reason, reason_problems = _explicit_claim_input(
+        root,
+        claim=str(args.reason or ""),
+        claim_file=str(args.reason_file or ""),
+        code_prefix="knowledge_reason",
+        label="knowledge reason",
+    )
+    input_problems = [*claim_problems, *reason_problems]
+    if not claim and not claim_problems:
+        input_problems.append(
+            Problem("error", "knowledge_claim_required", "knowledge requires --claim or --claim-file")
+        )
+    if not reason and not reason_problems:
+        input_problems.append(
+            Problem("error", "knowledge_reason_required", "knowledge requires --reason or --reason-file")
+        )
+    if input_problems:
+        data: dict[str, Any] = {}
+        problems = input_problems
+        save_warnings: list[Problem] = []
     else:
         with repoctl_lock(root):
-            data, problems = approve_knowledge_candidate(
+            data, problems, save_warnings = add_knowledge_record(
                 root,
-                repo_id=args.repo_id,
-                candidate_id=args.candidate_id,
-                supersedes=args.supersedes,
-                reviewed_by=args.reviewed_by,
-                review_note=review_note,
+                repo_id=target.id,
+                kind=args.kind,
+                claim=claim,
+                reason=reason,
+                sources=list(args.source or []),
+                applies_to=list(args.applies_to or []),
+                replaces=list(args.replaces or []),
+                author=str(args.author or ""),
             )
-            if data and not _has_errors(problems):
-                graph_sync, graph_problems = _sync_graph_after_knowledge_change(root, target=target)
-            else:
-                graph_sync, graph_problems = {"status": "not_run"}, []
-    record = data.get("record", {}) if data else {}
-    response_data = data if getattr(args, "full", False) else _compact_knowledge_approval_data(data)
-    if response_data:
-        response_data["graph_sync"] = graph_sync
-    all_problems = [*problems, *graph_problems]
-    graph_warnings = [problem.to_dict() for problem in graph_problems if problem.severity == "warning"]
-    next_actions: list[dict[str, Any]] = []
-    if data and not _has_errors(problems):
-        if _has_errors(graph_problems):
-            next_actions.extend(_next_actions_for_problems(graph_problems, data={"repository": target.to_dict()}))
-        else:
-            next_actions.append(
-                {
-                    "label": "Refresh the non-authoritative llmwiki view",
-                    "command": f"./scripts/repoctl knowledge render --repo-id {args.repo_id} --json",
-                }
-            )
-    elif _has_errors(problems):
-        next_actions.extend(_next_actions_for_problems(problems, data={"repository": target.to_dict()}))
+    graph_sync: dict[str, Any] = {"status": "not_run"}
+    graph_problems: list[Problem] = []
+    if data and not problems:
+        graph_sync, graph_problems = _sync_graph_after_knowledge_change(
+            root,
+            target=target,
+        )
+        data["graph_sync"] = graph_sync
+    warnings = [problem.to_dict() for problem in save_warnings]
+    warnings.extend(
+        {
+            **problem.to_dict(),
+            "severity": "warning",
+            "code": "knowledge_graph_sync_failed",
+            "message": "Knowledge was saved; refresh Graph when needed",
+            "cause_code": problem.code,
+        }
+        for problem in graph_problems
+    )
     payload = {
-        "ok": not _has_errors(all_problems),
-        "command": "knowledge.approve",
-        "data": response_data,
-        "problems": [problem.to_dict() for problem in all_problems if problem.severity == "error"],
-        "warnings": [*_knowledge_approval_warnings(record), *graph_warnings],
-        "next_actions": next_actions,
+        "ok": not _has_errors(problems),
+        "command": "knowledge.add",
+        "data": data,
+        "problems": [problem.to_dict() for problem in problems],
+        "warnings": warnings,
+        "next_actions": [],
     }
     if args.json:
         _json(payload)
     else:
-        record = data.get("record", {}) if data else {}
-        print(f"knowledge record {record.get('id', '')} path={data.get('record_path', '')}")
+        record = data.get("record") if isinstance(data.get("record"), dict) else {}
+        if record:
+            print(f"Knowledge saved: {record.get('id', '')}")
         for problem in problems:
             print(problem.message)
-    return 1 if _has_errors(all_problems) else 0
-
-
-def _knowledge_approval_warnings(record: dict[str, Any]) -> list[dict[str, str]]:
-    created_from = record.get("created_from") if isinstance(record.get("created_from"), dict) else {}
-    candidate_check = created_from.get("candidate_check") if isinstance(created_from.get("candidate_check"), dict) else {}
-    warning_codes = candidate_check.get("warning_codes") if isinstance(candidate_check.get("warning_codes"), list) else []
-    return [
-        {
-            "severity": "warning",
-            "code": str(code),
-            "message": "candidate was approved with a non-blocking warning",
-        }
-        for code in warning_codes
-        if str(code)
-    ]
+    return 1 if _has_errors(problems) else 0
 
 
 def cmd_knowledge_show(args: argparse.Namespace) -> int:
@@ -6413,72 +5538,16 @@ def cmd_knowledge_show(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def cmd_knowledge_reject(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    with repoctl_lock(root):
-        data, problems = reject_knowledge_candidate(root, repo_id=args.repo_id, candidate_id=args.candidate_id, reason_file=Path(args.reason_file))
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.reject",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        event = data.get("event", {}) if data else {}
-        print(f"knowledge reject event={event.get('id', '')}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def cmd_knowledge_deprecate(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    target = require_repo_target(root, repo_id=args.repo_id)
-    with repoctl_lock(root):
-        data, problems = deprecate_knowledge_record(root, repo_id=args.repo_id, record_id=args.record_id, reason_file=Path(args.reason_file))
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.deprecate",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "knowledge_deprecation_is_append_only",
-                "message": "deprecation writes a lifecycle event and does not edit the record body",
-            }
-        ],
-        "next_actions": _next_actions_for_problems(problems, data={"repository": target.to_dict()}),
-    }
-    if args.json:
-        _json(payload)
-    else:
-        event = data.get("event", {}) if data else {}
-        print(f"knowledge deprecate event={event.get('id', '')}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
 def cmd_knowledge_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
     data, problems = check_knowledge_records(root, repo_id=args.repo_id)
-    warnings: list[Problem] = []
-    if args.include_candidates:
-        candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=args.repo_id, pending_only=True)
-        data["candidate_checks"] = candidate_data
-        problems.extend(problem for problem in candidate_problems if problem.severity == "error")
-        warnings.extend(problem for problem in candidate_problems if problem.severity == "warning")
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge.check",
         "data": data,
         "problems": [problem.to_dict() for problem in problems],
-        "warnings": [problem.to_dict() for problem in warnings],
+        "warnings": [],
     }
     if args.json:
         _json(payload)
@@ -6492,16 +5561,20 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
 def cmd_knowledge_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     require_repo_target(root, repo_id=args.repo_id)
-    include_stale = args.include_stale or args.include_history
-    include_superseded = args.include_superseded or args.include_history
-    include_deprecated = args.include_deprecated or args.include_history
-    data, problems, warnings = query_knowledge_records(root, repo_id=args.repo_id, query=args.query, include_stale=include_stale, include_superseded=include_superseded, include_deprecated=include_deprecated, limit=args.limit, explain=args.explain)
+    data, problems, warnings = query_knowledge_records(
+        root,
+        repo_id=args.repo_id,
+        query=args.query,
+        include_history=bool(args.include_history),
+        limit=args.limit,
+        explain=args.explain,
+    )
     if not _has_errors(problems) and int(data.get("available_record_count") or 0) == 0:
         warnings.append(
             Problem(
                 "warning",
                 "knowledge_records_empty",
-                "no reviewed knowledge records exist for this repo; this is normal before candidates are explicitly approved",
+                "no Knowledge records exist for this repository",
                 args.repo_id,
             )
         )
@@ -6540,66 +5613,6 @@ def _compact_knowledge_query_data(data: dict[str, Any]) -> dict[str, Any]:
         compact_results.append(compact_item)
     compact["results"] = compact_results
     return compact
-
-
-def cmd_knowledge_render(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    output = Path(args.output) if args.output else _default_knowledge_render_output(args.repo_id)
-    with repoctl_lock(root):
-        data, problems = render_knowledge(root, repo_id=args.repo_id, output=output, check=args.check)
-    response_data = data if args.full else _compact_knowledge_render_data(data)
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "knowledge.render",
-        "data": response_data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "knowledge_render_not_authoritative",
-                "message": "rendered knowledge pages are generated views and must not be ingested as source authority",
-            }
-        ],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        print(f"knowledge render output={data.get('output', '')} records={data.get('record_count', 0)}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def _compact_knowledge_render_data(data: dict[str, Any]) -> dict[str, Any]:
-    rendered = data.get("rendered") if isinstance(data.get("rendered"), list) else []
-    removed = data.get("removed") if isinstance(data.get("removed"), list) else []
-    compact = {key: value for key, value in data.items() if key not in {"rendered", "removed"}}
-    counts = {
-        "records": 0,
-        "file_targets": 0,
-        "symbol_targets": 0,
-        "other": 0,
-    }
-    for item in rendered:
-        path = str(item.get("path") or "") if isinstance(item, dict) else ""
-        if "/records/" in path:
-            counts["records"] += 1
-        elif "/targets/files/" in path:
-            counts["file_targets"] += 1
-        elif "/targets/symbols/" in path:
-            counts["symbol_targets"] += 1
-        else:
-            counts["other"] += 1
-    compact["page_counts"] = {"total": len(rendered), **counts}
-    if "removed" in data:
-        compact["removed_count"] = len(removed)
-    return compact
-
-
-def _default_knowledge_render_output(repo_id: str) -> Path:
-    if repo_id == "main":
-        return Path("docs/knowledge/generated")
-    return Path("docs/knowledge/generated") / repo_id
 
 
 def cmd_upgrade_status(args: argparse.Namespace) -> int:
@@ -6654,69 +5667,24 @@ def cmd_upgrade_plan(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
-_REFRESHABLE_KNOWLEDGE_CANDIDATE_CODES = {
-    "knowledge_source_digest_drift",
-}
-
-_KNOWLEDGE_CANDIDATE_READ_CODES = {
-    KnowledgeArtifactErrorCode.CANDIDATE_INVALID_JSON,
-    KnowledgeArtifactErrorCode.CANDIDATE_NOT_OBJECT,
-    KnowledgeArtifactErrorCode.CANDIDATE_UNREADABLE,
-}
 _KNOWLEDGE_RECORD_READ_CODES = {
     KnowledgeArtifactErrorCode.RECORD_INVALID_JSON,
     KnowledgeArtifactErrorCode.RECORD_NOT_OBJECT,
     KnowledgeArtifactErrorCode.RECORD_UNREADABLE,
 }
-_KNOWLEDGE_EVENT_READ_CODES = {
-    KnowledgeArtifactErrorCode.EVENT_INVALID_JSON,
-    KnowledgeArtifactErrorCode.EVENT_NOT_OBJECT,
-    KnowledgeArtifactErrorCode.EVENT_UNREADABLE,
-}
-
-
-def _knowledge_candidate_postflight_action(*, repo_id: str, result: dict[str, Any]) -> dict[str, str] | None:
-    candidate_id = str(result.get("candidate_id") or "")
-    if not candidate_id:
-        return None
-    raw_problems = result.get("problems") if isinstance(result.get("problems"), list) else []
-    problem_codes = {
-        str(problem.get("code") or "")
-        for problem in raw_problems
-        if isinstance(problem, dict) and str(problem.get("code") or "")
-    }
-    if problem_codes and problem_codes <= _REFRESHABLE_KNOWLEDGE_CANDIDATE_CODES:
-        return {
-            "kind": "knowledge_candidate_refresh",
-            "repo_id": repo_id,
-            "command": f"./scripts/repoctl knowledge candidate refresh {candidate_id} --repo-id {repo_id} --json",
-        }
-    return {
-        "kind": "knowledge_candidate_manual_review",
-        "repo_id": repo_id,
-        "command": f"./scripts/repoctl knowledge candidate show {candidate_id} --repo-id {repo_id} --json",
-    }
-
-
 def _knowledge_artifact_postflight_action(*, repo_id: str, problem: Problem) -> dict[str, str] | None:
     artifact_id = Path(problem.path or "").stem
-    if problem.code in _KNOWLEDGE_CANDIDATE_READ_CODES and artifact_id.startswith("KC-"):
-        return {
-            "kind": "knowledge_candidate_manual_review",
-            "repo_id": repo_id,
-            "command": f"./scripts/repoctl knowledge candidate show {artifact_id} --repo-id {repo_id} --json",
-        }
     if problem.code in _KNOWLEDGE_RECORD_READ_CODES and artifact_id.startswith("K-"):
         return {
             "kind": "knowledge_record_manual_review",
             "repo_id": repo_id,
             "command": f"./scripts/repoctl knowledge show {artifact_id} --repo-id {repo_id} --json",
         }
-    if problem.code in _KNOWLEDGE_EVENT_READ_CODES and artifact_id.startswith("E-"):
+    if problem.code == "knowledge_record_migration_required":
         return {
-            "kind": "knowledge_event_manual_review",
+            "kind": "knowledge_record_migration",
             "repo_id": repo_id,
-            "command": f"./scripts/repoctl knowledge event show {artifact_id} --repo-id {repo_id} --json",
+            "command": "./scripts/repoctl knowledge add --help",
         }
     return None
 
@@ -6795,7 +5763,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
         )
 
     repositories: list[dict[str, Any]] = []
-    recovery_actions: list[dict[str, str]] = []
+    maintenance_actions: list[dict[str, str]] = []
     completion_history: list[dict[str, Any]] = []
     workspace_history, workspace_history_problems = _upgrade_completion_history_status(
         root,
@@ -6804,7 +5772,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
     completion_history.append(workspace_history)
     problems.extend(workspace_history_problems)
     if workspace_history_problems:
-        recovery_actions.append(
+        maintenance_actions.append(
             {
                 "kind": "history_rebuild",
                 "repo_id": "",
@@ -6818,19 +5786,37 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             repo_id=target.id,
         )
         completion_history.append(completion_history_summary)
-        record_data, record_problems = check_knowledge_records(root, repo_id=target.id)
+        record_data, raw_record_problems = check_knowledge_records(root, repo_id=target.id)
+        source_reference_codes = {
+            "knowledge_source_digest_drift",
+            "knowledge_source_missing",
+            "knowledge_source_identity_invalid",
+        }
+        record_problems = [
+            problem
+            for problem in raw_record_problems
+            if problem.code not in source_reference_codes
+        ]
+        record_warnings = [
+            Problem(
+                "warning",
+                "knowledge_source_changed",
+                "a Knowledge source changed or is unavailable; the saved record remains usable",
+                problem.path,
+                problem.code,
+            )
+            for problem in raw_record_problems
+            if problem.code in source_reference_codes
+        ]
         projection: dict[str, Any] = {}
         projection_problems: list[Problem] = []
         durable_record_count = int(record_data.get("record_count") or 0)
         projection_path = knowledge_projection_path(root, repo_id=target.id)
-        knowledge_store_initialized = (
-            (root / "docs/knowledge/records").exists()
-            or projection_path.exists()
-        )
+        knowledge_store_initialized = durable_record_count > 0 or projection_path.exists()
         if knowledge_store_initialized and not _has_errors(record_problems):
             projection, projection_problems = load_knowledge_projection(root, repo_id=target.id)
             checkpoint = projection.get("checkpoint") if isinstance(projection.get("checkpoint"), dict) else {}
-            durable_lifecycle_counts = {"current": 0, "deprecated": 0, "superseded": 0}
+            durable_lifecycle_counts = {"current": 0, "superseded": 0}
             for record in record_data.get("records", []):
                 status = str(record.get("status") or "")
                 lifecycle = "current" if status in {"reviewed", "stale"} else status
@@ -6860,9 +5846,16 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                         cause_code="cold_lifecycle_mismatch",
                     )
                 ]
-        candidate_data, candidate_problems = check_all_knowledge_candidates(root, repo_id=target.id, pending_only=True)
         snapshot, graph_problems, graph_meta = load_materialized_graph(root, target=target)
-        freshness: dict[str, Any] = {"status": str((graph_meta.get("materialization") or {}).get("status") or "missing")}
+        materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
+        graph_status = str(materialization.get("status") or "missing")
+        if graph_status == "missing":
+            graph_problems = [
+                problem
+                for problem in graph_problems
+                if problem.code != "graph_snapshot_missing"
+            ]
+        freshness: dict[str, Any] = {"status": graph_status}
         freshness_problems: list[Problem] = []
         if snapshot is not None and not _has_errors(graph_problems):
             freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
@@ -6875,27 +5868,37 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                         target.display_path,
                     )
                 )
+        derived_warnings = [
+            Problem(
+                "warning",
+                "upgrade_knowledge_projection_stale",
+                "Knowledge projection needs maintenance after installation",
+                problem.path,
+                problem.code,
+            )
+            for problem in projection_problems
+        ] + [
+            Problem(
+                "warning",
+                "upgrade_graph_maintenance_required",
+                "Graph needs maintenance after installation",
+                problem.path,
+                problem.code,
+            )
+            for problem in graph_problems
+        ]
         repository_problems = [
             *metadata_problems,
             *completion_history_problems,
             *record_problems,
-            *projection_problems,
-            *candidate_problems,
-            *graph_problems,
+            *record_warnings,
+            *derived_warnings,
             *freshness_problems,
         ]
         problems.extend(repository_problems)
 
-        materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
-        graph_status = str(materialization.get("status") or "missing")
         graph_recovery: dict[str, str] | None = None
-        if graph_status == "missing":
-            graph_recovery = {
-                "kind": "graph_build",
-                "repo_id": target.id,
-                "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
-            }
-        elif graph_status != "materialized":
+        if graph_status not in {"missing", "materialized"}:
             graph_recovery = {
                 "kind": "graph_rebuild",
                 "repo_id": target.id,
@@ -6909,7 +5912,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             }
         if _has_errors(metadata_problems):
             metadata_codes = {problem.code for problem in metadata_problems}
-            recovery_actions.append(
+            maintenance_actions.append(
                 {
                     "kind": "metadata_repair",
                     "repo_id": target.id,
@@ -6921,45 +5924,39 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                 }
             )
         if completion_history_problems:
-            recovery_actions.append(
+            maintenance_actions.append(
                 {
                     "kind": "history_rebuild",
                     "repo_id": target.id,
                     "command": f"./scripts/repoctl history rebuild --repo-id {target.id} --json",
                 }
             )
-            if graph_recovery is None:
+            if graph_recovery is None and graph_status == "materialized":
                 graph_recovery = {
                     "kind": "graph_refresh",
                     "repo_id": target.id,
                     "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
                 }
         if _has_errors(projection_problems):
-            recovery_actions.append(
+            maintenance_actions.append(
                 {
                     "kind": "knowledge_rebuild",
                     "repo_id": target.id,
                     "command": f"./scripts/repoctl knowledge rebuild --repo-id {target.id} --json",
                 }
             )
-            if graph_recovery is None:
+            if graph_recovery is None and graph_status == "materialized":
                 graph_recovery = {
                     "kind": "graph_refresh",
                     "repo_id": target.id,
                     "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
                 }
         if graph_recovery is not None:
-            recovery_actions.append(graph_recovery)
-        for problem in [*record_problems, *candidate_problems]:
+            maintenance_actions.append(graph_recovery)
+        for problem in record_problems:
             action = _knowledge_artifact_postflight_action(repo_id=target.id, problem=problem)
             if action is not None:
-                recovery_actions.append(action)
-        for result in candidate_data.get("results", []) if isinstance(candidate_data.get("results"), list) else []:
-            if not isinstance(result, dict) or bool(result.get("passed")):
-                continue
-            action = _knowledge_candidate_postflight_action(repo_id=target.id, result=result)
-            if action is not None:
-                recovery_actions.append(action)
+                maintenance_actions.append(action)
         repositories.append(
             {
                 "repository": target.to_dict(),
@@ -6969,20 +5966,13 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                 },
                 "reviewed_knowledge": {
                     "record_count": int(record_data.get("record_count") or 0),
-                    "event_count": int(record_data.get("event_count") or 0),
+                    "migration_required_count": int(record_data.get("legacy_record_count") or 0),
                     "problem_codes": _problem_code_counts(record_problems),
                     "projection_status": "ready" if not _has_errors(projection_problems) else "rebuild_required",
                     "projection_problem_codes": _problem_code_counts(projection_problems),
                 },
                 "completion_history": {
                     **completion_history_summary,
-                },
-                "knowledge_candidates": {
-                    "total_count": int(candidate_data.get("candidate_total_count") or 0),
-                    "checked_count": int(candidate_data.get("candidate_count") or 0),
-                    "error_count": int(candidate_data.get("error_count") or 0),
-                    "warning_count": int(candidate_data.get("warning_count") or 0),
-                    "problem_codes": _problem_code_counts(candidate_problems),
                 },
                 "graph": {
                     "materialization": _compact_graph_materialization(materialization),
@@ -6993,26 +5983,24 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             }
         )
 
-    deduped_recovery: list[dict[str, str]] = []
-    seen_recovery: set[tuple[str, str, str]] = set()
-    for action in recovery_actions:
+    deduped_maintenance: list[dict[str, str]] = []
+    seen_maintenance: set[tuple[str, str, str]] = set()
+    for action in maintenance_actions:
         key = (str(action.get("kind") or ""), str(action.get("repo_id") or ""), str(action.get("command") or ""))
-        if key not in seen_recovery:
-            seen_recovery.add(key)
-            deduped_recovery.append(action)
-    recovery_priority = {
+        if key not in seen_maintenance:
+            seen_maintenance.add(key)
+            deduped_maintenance.append(action)
+    maintenance_priority = {
         "metadata_repair": 0,
         "history_rebuild": 1,
         "knowledge_rebuild": 1,
-        "knowledge_candidate_refresh": 1,
-        "knowledge_candidate_manual_review": 1,
         "knowledge_record_manual_review": 1,
-        "knowledge_event_manual_review": 1,
+        "knowledge_record_migration": 1,
         "graph_build": 2,
         "graph_rebuild": 2,
         "graph_refresh": 2,
     }
-    deduped_recovery.sort(key=lambda item: (recovery_priority.get(str(item.get("kind") or ""), 99), str(item.get("repo_id") or ""), str(item.get("command") or "")))
+    deduped_maintenance.sort(key=lambda item: (maintenance_priority.get(str(item.get("kind") or ""), 99), str(item.get("repo_id") or ""), str(item.get("command") or "")))
     deduped_problems: list[Problem] = []
     seen_problems: set[tuple[str, str, str, str]] = set()
     for problem in problems:
@@ -7021,10 +6009,16 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             seen_problems.add(key)
             deduped_problems.append(problem)
     problems = deduped_problems
-    status = UpgradePostflightStatus.RECOVERY_REQUIRED if _has_errors(problems) or deduped_recovery else UpgradePostflightStatus.READY
+    status = (
+        UpgradePostflightStatus.RECOVERY_REQUIRED
+        if _has_errors(problems)
+        else UpgradePostflightStatus.READY_WITH_MAINTENANCE
+        if deduped_maintenance
+        else UpgradePostflightStatus.READY
+    )
     return {
         "schema": "repoctl.upgrade.postflight",
-        "schema_version": 1,
+        "schema_version": 2,
         "status": status,
         "product_repository_runtime": "configured" if layout.targets else "not_initialized",
         "repository_layout": layout.to_dict(),
@@ -7035,7 +6029,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
         },
         "completion_history": completion_history,
         "repositories": repositories,
-        "recovery_actions": deduped_recovery,
+        "maintenance_actions": deduped_maintenance,
     }, problems
 
 
@@ -7043,18 +6037,21 @@ def cmd_upgrade_postflight(args: argparse.Namespace) -> int:
     root = Path(args.workspace_root).expanduser().resolve() if args.workspace_root else _workspace_root_or_cwd()
     data, problems = _upgrade_postflight(root)
     payload = {
-        "ok": data.get("status") == UpgradePostflightStatus.READY,
+        "ok": data.get("status") in {
+            UpgradePostflightStatus.READY,
+            UpgradePostflightStatus.READY_WITH_MAINTENANCE,
+        },
         "command": "upgrade.postflight",
         "data": data,
         "problems": [problem.to_dict() for problem in problems if problem.severity == "error"],
         "warnings": [problem.to_dict() for problem in problems if problem.severity == "warning"],
-        "next_actions": data.get("recovery_actions", []),
+        "next_actions": data.get("maintenance_actions", []),
     }
     if args.json:
         _json(payload)
     else:
         print(f"repoctl upgrade postflight: {data.get('status', '')}")
-        for action in data.get("recovery_actions", []):
+        for action in data.get("maintenance_actions", []):
             print(action.get("command", ""))
     return 0 if payload["ok"] else 1
 
@@ -7109,12 +6106,16 @@ def cmd_upgrade_apply(args: argparse.Namespace) -> int:
         postflight, postflight_problems, postflight_warnings = {"status": "not_declared"}, [], []
     data["postflight"] = postflight
     payload = {
-        "ok": not postflight_problems and postflight.get("status") in {UpgradePostflightStatus.READY, "not_declared"},
+        "ok": not postflight_problems and postflight.get("status") in {
+            UpgradePostflightStatus.READY,
+            UpgradePostflightStatus.READY_WITH_MAINTENANCE,
+            "not_declared",
+        },
         "command": "upgrade.apply",
         "data": data,
         "problems": postflight_problems,
         "warnings": [*list(data.get("warnings", [])), *postflight_warnings],
-        "next_actions": postflight.get("recovery_actions", []) if isinstance(postflight, dict) else [],
+        "next_actions": postflight.get("maintenance_actions", []) if isinstance(postflight, dict) else [],
     }
     if args.json:
         _json(payload)
@@ -7218,7 +6219,7 @@ def cmd_debug_summary(args: argparse.Namespace) -> int:
         knowledge = data["context_sources"]["knowledge"]
         print(
             f"debug summary events={data['capture']['event_count']} failed={data['outcomes']['failed']} "
-            f"graph_relations={graph['relations_exposed']} "
+            f"graph_available={graph['available']} "
             f"knowledge_results={knowledge['returned']}"
         )
     return 0
@@ -7335,42 +6336,19 @@ def build_parser() -> argparse.ArgumentParser:
     task_handoff_sub = task_handoff.add_subparsers(dest="task_handoff_command", required=True, parser_class=RepoctlArgumentParser)
     task_handoff_bind = task_handoff_sub.add_parser("bind")
     task_handoff_bind.add_argument("task_id")
-    task_handoff_bind.add_argument("--context-pack", help="workspace-local Context Pack to bind as optional active resume evidence")
     task_handoff_bind.add_argument("--json", action="store_true")
     task_handoff_bind.set_defaults(func=cmd_task_handoff_bind)
-    task_discovery = task_sub.add_parser("discovery", help="Manage task Discovery outcomes.")
+    task_discovery = task_sub.add_parser("discovery", help="Manage the Task-owned Chosen scope.")
     task_discovery_sub = task_discovery.add_subparsers(dest="task_discovery_command", required=True, parser_class=RepoctlArgumentParser)
     task_discovery_add = task_discovery_sub.add_parser("add")
     task_discovery_add.add_argument("task_id")
-    task_discovery_add.add_argument("--query", help="candidate search/query command or phrase")
-    task_discovery_add.add_argument("--reviewed", action="append", default=[], help="repos/path inspected during discovery; repeat for multiple files")
-    task_discovery_add.add_argument("--excluded", action="append", default=[], help="reviewed repos/path explicitly rejected for this Discovery episode; repeat for multiple files")
-    task_discovery_add.add_argument("--chosen", action="append", default=[], help="repos/path selected for task scope; repeat for multiple files")
+    task_discovery_add.add_argument("--chosen", action="append", default=[], help="canonical workspace-relative file selected for task scope; repeat for multiple files")
     task_discovery_add.add_argument("--replace-chosen", action="append", default=[], help="replace the active chosen-file set; repeat for multiple files")
     task_discovery_add.add_argument("--reason", help="required rationale when replacing the active chosen-file set")
-    task_discovery_add.add_argument("--note", help="short rationale for the chosen scope")
-    task_discovery_add.add_argument("--result-producer", choices=["context", "graph"], help="producer of an explicitly selected query result")
-    task_discovery_add.add_argument("--result-id", help="bundle_digest or graph result_digest for the selected result")
-    task_discovery_add.add_argument(
-        "--result-authority",
-        choices=["source", "graph", "document", "task_history", "knowledge"],
-        help="authority class of the selected result reference",
-    )
-    task_discovery_add.add_argument("--result-ref", action="append", default=[], help="selected structured result reference; repeat for multiple refs sharing one authority")
-    task_discovery_add.add_argument("--full", action="store_true", help="include the full cumulative Discovery state")
+    task_discovery_add.add_argument("--note", help="short scope decision or source reference worth keeping")
+    task_discovery_add.add_argument("--full", action="store_true", help="include current Chosen files and Notes")
     task_discovery_add.add_argument("--json", action="store_true")
     task_discovery_add.set_defaults(func=cmd_task_discovery_add)
-    task_verification = task_sub.add_parser("verification", help="Manage task verification evidence.")
-    task_verification_sub = task_verification.add_subparsers(dest="task_verification_command", required=True, parser_class=RepoctlArgumentParser)
-    task_verification_add = task_verification_sub.add_parser("add")
-    task_verification_add.add_argument("task_id")
-    task_verification_add.add_argument("--status", choices=["passed", "failed", "mixed", "blocked"], required=True)
-    task_verification_add.add_argument("--evidence-ref", required=True, help="existing evidence file or sha256 digest")
-    task_verification_add.add_argument("--subject", action="append", default=[], help="Discovery subject ID, key, or path covered by this check")
-    task_verification_add.add_argument("--artifact", action="append", default=[], help="existing non-product workspace artifact covered by this root-task check")
-    task_verification_add.add_argument("--claim-id", action="append", default=[], help="sha256 claim ID covered by this check")
-    task_verification_add.add_argument("--json", action="store_true")
-    task_verification_add.set_defaults(func=cmd_task_verification_add)
     task_baseline = task_sub.add_parser("baseline", help="Manage task baseline ownership.")
     task_baseline_sub = task_baseline.add_subparsers(dest="task_baseline_command", required=True, parser_class=RepoctlArgumentParser)
     task_baseline_resolve = task_baseline_sub.add_parser("resolve")
@@ -7386,15 +6364,19 @@ def build_parser() -> argparse.ArgumentParser:
     task_start.add_argument("--force-dirty", action="store_true")
     task_start.add_argument("--json", action="store_true")
     task_start.set_defaults(func=cmd_task_start)
-    task_finish = task_sub.add_parser("finish", help="Verify, close, and archive a task.")
+    task_finish = task_sub.add_parser("finish", help="Close and archive a task.")
     task_finish.add_argument("task_id")
-    task_finish.add_argument("--verification-file")
     task_finish.add_argument("--use-committed-diff", action="store_true", help="validate recorded task-start HEAD through current HEAD when product changes were committed before finish")
     task_finish.add_argument("--knowledge-kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="")
     task_finish_knowledge_claim = task_finish.add_mutually_exclusive_group()
     task_finish_knowledge_claim.add_argument("--knowledge-claim", default="")
     task_finish_knowledge_claim.add_argument("--knowledge-claim-file", default="")
+    task_finish_knowledge_reason = task_finish.add_mutually_exclusive_group()
+    task_finish_knowledge_reason.add_argument("--knowledge-reason", default="")
+    task_finish_knowledge_reason.add_argument("--knowledge-reason-file", default="")
     task_finish.add_argument("--knowledge-applies-to", action="append", default=[], help="current selected-repository file governed by the reusable claim; repeat as needed")
+    task_finish.add_argument("--knowledge-replaces", action="append", default=[], help="prior Knowledge record explicitly corrected or replaced; repeat as needed")
+    task_finish.add_argument("--knowledge-author", default="", help="known author; omit when unknown")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block", help="Block a live task with explicit transition intent.")
@@ -7614,121 +6596,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
-    knowledge_candidate = knowledge_sub.add_parser("candidate", help="Manage Knowledge candidates.")
-    knowledge_candidate_sub = knowledge_candidate.add_subparsers(dest="knowledge_candidate_command", required=True, parser_class=RepoctlArgumentParser)
-    knowledge_candidate_build = knowledge_candidate_sub.add_parser("build")
-    knowledge_candidate_build.add_argument("--source", help=f"authority document under one of: {', '.join(ALLOWED_SOURCE_PREFIXES)}")
-    knowledge_candidate_build.add_argument("--from-receipt")
-    knowledge_candidate_build.add_argument("--from-pack")
-    knowledge_candidate_build.add_argument("--from-task", dest="from_task")
-    knowledge_candidate_build.add_argument("--repo-id", required=True)
-    knowledge_candidate_build.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
-    knowledge_candidate_build_claim = knowledge_candidate_build.add_mutually_exclusive_group()
-    knowledge_candidate_build_claim.add_argument("--claim", default="")
-    knowledge_candidate_build_claim.add_argument("--claim-file", default="")
-    knowledge_candidate_build.add_argument("--applies-to", action="append", default=[], help="current selected-repository file governed by the claim; repeat as needed")
-    knowledge_candidate_build.add_argument("--dry-run", action="store_true", help="preview a --from-task candidate without writing it")
-    knowledge_candidate_build.add_argument("--full", action="store_true", help="include the full candidate summary")
-    knowledge_candidate_build.add_argument("--json", action="store_true")
-    knowledge_candidate_build.set_defaults(func=cmd_knowledge_candidate_build)
-    knowledge_candidate_list = knowledge_candidate_sub.add_parser("list")
-    knowledge_candidate_list.add_argument("--repo-id", required=True)
-    knowledge_candidate_list.add_argument("--with-checks", action="store_true")
-    knowledge_candidate_list.add_argument("--json", action="store_true")
-    knowledge_candidate_list.set_defaults(func=cmd_knowledge_candidate_list)
-    knowledge_candidate_show = knowledge_candidate_sub.add_parser("show")
-    knowledge_candidate_show.add_argument("candidate_id")
-    knowledge_candidate_show.add_argument("--repo-id", required=True)
-    knowledge_candidate_show.add_argument("--format", choices=["text", "markdown"], default="text")
-    knowledge_candidate_show.add_argument("--json", action="store_true")
-    knowledge_candidate_show.set_defaults(func=cmd_knowledge_candidate_show)
-    knowledge_candidate_check = knowledge_candidate_sub.add_parser("check")
-    knowledge_candidate_check.add_argument("candidate_id", nargs="?")
-    knowledge_candidate_check.add_argument("--all", action="store_true")
-    knowledge_candidate_check.add_argument("--all-states", action="store_true")
-    knowledge_candidate_check.add_argument("--repo-id", required=True)
-    knowledge_candidate_check.add_argument("--json", action="store_true")
-    knowledge_candidate_check.set_defaults(func=cmd_knowledge_candidate_check)
-    knowledge_candidate_refresh = knowledge_candidate_sub.add_parser("refresh")
-    knowledge_candidate_refresh.add_argument("candidate_id", nargs="?")
-    knowledge_candidate_refresh.add_argument("--all-stale", action="store_true")
-    knowledge_candidate_refresh.add_argument("--include-records", action="store_true")
-    knowledge_candidate_refresh.add_argument("--record-id")
-    knowledge_candidate_refresh.add_argument("--repo-id", required=True)
-    knowledge_candidate_refresh.add_argument("--json", action="store_true")
-    knowledge_candidate_refresh.set_defaults(func=cmd_knowledge_candidate_refresh)
-    knowledge_rebuild = knowledge_sub.add_parser("rebuild")
-    knowledge_rebuild.add_argument("--repo-id", required=True)
-    knowledge_rebuild.add_argument("--json", action="store_true")
-    knowledge_rebuild.set_defaults(func=cmd_knowledge_rebuild)
-    knowledge_status_parser = knowledge_sub.add_parser("status")
-    knowledge_status_parser.add_argument("--repo-id", required=True)
-    knowledge_status_parser.add_argument("--json", action="store_true")
-    knowledge_status_parser.set_defaults(func=cmd_knowledge_status)
-    knowledge_event = knowledge_sub.add_parser("event", help="Manage Knowledge lifecycle events.")
-    knowledge_event_sub = knowledge_event.add_subparsers(dest="knowledge_event_command", required=True, parser_class=RepoctlArgumentParser)
-    knowledge_event_list = knowledge_event_sub.add_parser("list")
-    knowledge_event_list.add_argument("--repo-id", required=True)
-    knowledge_event_list.add_argument("--type", default="")
-    knowledge_event_list.add_argument("--candidate-id", default="")
-    knowledge_event_list.add_argument("--record-id", default="")
-    knowledge_event_list.add_argument("--json", action="store_true")
-    knowledge_event_list.set_defaults(func=cmd_knowledge_event_list)
-    knowledge_event_show = knowledge_event_sub.add_parser("show")
-    knowledge_event_show.add_argument("event_id")
-    knowledge_event_show.add_argument("--repo-id", required=True)
-    knowledge_event_show.add_argument("--json", action="store_true")
-    knowledge_event_show.set_defaults(func=cmd_knowledge_event_show)
-    knowledge_approve = knowledge_sub.add_parser("approve")
-    knowledge_approve.add_argument("candidate_id")
-    knowledge_approve.add_argument("--repo-id", required=True)
-    knowledge_approve.add_argument("--supersedes", action="append", default=[])
-    knowledge_approve.add_argument("--reviewed-by", default="human")
-    knowledge_approve.add_argument("--note-file")
-    knowledge_approve.add_argument("--full", action="store_true", help="include the full record summary")
-    knowledge_approve.add_argument("--json", action="store_true")
-    knowledge_approve.set_defaults(func=cmd_knowledge_approve)
+    knowledge_add = knowledge_sub.add_parser("add", help="Save one reusable decision, invariant, or failure mode.")
+    knowledge_add.add_argument("--repo-id", required=True)
+    knowledge_add.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
+    knowledge_add_claim = knowledge_add.add_mutually_exclusive_group(required=True)
+    knowledge_add_claim.add_argument("--claim")
+    knowledge_add_claim.add_argument("--claim-file")
+    knowledge_add_reason = knowledge_add.add_mutually_exclusive_group(required=True)
+    knowledge_add_reason.add_argument("--reason")
+    knowledge_add_reason.add_argument("--reason-file")
+    knowledge_add.add_argument("--source", action="append", required=True, help="workspace-relative source path; repeat as needed")
+    knowledge_add.add_argument("--applies-to", action="append", default=[], help="selected-repository file governed by the record; repeat as needed")
+    knowledge_add.add_argument("--replaces", action="append", default=[], help="prior Knowledge record explicitly corrected or replaced; repeat as needed")
+    knowledge_add.add_argument("--author", default="", help="known author; omit when unknown")
+    knowledge_add.add_argument("--json", action="store_true")
+    knowledge_add.set_defaults(func=cmd_knowledge_add)
     knowledge_show = knowledge_sub.add_parser("show")
     knowledge_show.add_argument("record_id")
     knowledge_show.add_argument("--repo-id", required=True)
     knowledge_show.add_argument("--json", action="store_true")
     knowledge_show.set_defaults(func=cmd_knowledge_show)
-    knowledge_reject = knowledge_sub.add_parser("reject")
-    knowledge_reject.add_argument("candidate_id")
-    knowledge_reject.add_argument("--repo-id", required=True)
-    knowledge_reject.add_argument("--reason-file", required=True)
-    knowledge_reject.add_argument("--json", action="store_true")
-    knowledge_reject.set_defaults(func=cmd_knowledge_reject)
-    knowledge_deprecate = knowledge_sub.add_parser("deprecate")
-    knowledge_deprecate.add_argument("record_id")
-    knowledge_deprecate.add_argument("--repo-id", required=True)
-    knowledge_deprecate.add_argument("--reason-file", required=True)
-    knowledge_deprecate.add_argument("--json", action="store_true")
-    knowledge_deprecate.set_defaults(func=cmd_knowledge_deprecate)
-    knowledge_check = knowledge_sub.add_parser("check")
-    knowledge_check.add_argument("--repo-id", required=True)
-    knowledge_check.add_argument("--include-candidates", action="store_true")
-    knowledge_check.add_argument("--json", action="store_true")
-    knowledge_check.set_defaults(func=cmd_knowledge_check)
     knowledge_query = knowledge_sub.add_parser("query")
     knowledge_query.add_argument("query")
     knowledge_query.add_argument("--repo-id", required=True)
-    knowledge_query.add_argument("--include-stale", action="store_true")
-    knowledge_query.add_argument("--include-superseded", action="store_true")
-    knowledge_query.add_argument("--include-deprecated", action="store_true")
-    knowledge_query.add_argument("--include-history", action="store_true")
+    knowledge_query.add_argument("--include-history", action="store_true", help="also search replaced records")
     knowledge_query.add_argument("--explain", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
-    knowledge_query.add_argument("--full", action="store_true", help="include full reviewed record summaries")
+    knowledge_query.add_argument("--full", action="store_true", help="include full Knowledge record summaries")
     knowledge_query.add_argument("--json", action="store_true")
     knowledge_query.set_defaults(func=cmd_knowledge_query)
-    knowledge_render = knowledge_sub.add_parser("render")
-    knowledge_render.add_argument("--repo-id", required=True)
-    knowledge_render.add_argument("--output")
-    knowledge_render.add_argument("--check", action="store_true")
-    knowledge_render.add_argument("--full", action="store_true", help="include per-page digests and source bundles in JSON output")
-    knowledge_render.add_argument("--json", action="store_true")
-    knowledge_render.set_defaults(func=cmd_knowledge_render)
+    knowledge_status_parser = knowledge_sub.add_parser("status")
+    knowledge_status_parser.add_argument("--repo-id", required=True)
+    knowledge_status_parser.add_argument("--json", action="store_true")
+    knowledge_status_parser.set_defaults(func=cmd_knowledge_status)
+    knowledge_check = knowledge_sub.add_parser("check")
+    knowledge_check.add_argument("--repo-id", required=True)
+    knowledge_check.add_argument("--json", action="store_true")
+    knowledge_check.set_defaults(func=cmd_knowledge_check)
+    knowledge_rebuild = knowledge_sub.add_parser("rebuild", help="Refresh the derived Knowledge projection from saved records.")
+    knowledge_rebuild.add_argument("--repo-id", required=True)
+    knowledge_rebuild.add_argument("--json", action="store_true")
+    knowledge_rebuild.set_defaults(func=cmd_knowledge_rebuild)
 
     upgrade = sub.add_parser("upgrade")
     upgrade_sub = upgrade.add_subparsers(dest="upgrade_command", required=True, parser_class=RepoctlArgumentParser)

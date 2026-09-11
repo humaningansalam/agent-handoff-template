@@ -1,21 +1,23 @@
-# Reviewed Knowledge State
+# Knowledge
 
-This directory stores adopter-owned Reviewed Knowledge state for repoctl.
+This directory stores optional reusable decisions, invariants, and failure modes for repoctl.
 
-Reviewed Knowledge is one curated lane inside the broader project knowledge base. `AGENTS.md`, `README.md`, `docs/PRD.md`, contracts, workflows, ADRs, product documentation, and task history remain current source-linked project knowledge consumed directly by Context and Graph. A zero record count here means only that no reusable claim has completed explicit review; it does not mean project knowledge is empty.
+Most implementation detail belongs in Task history or an existing ADR, contract, workflow, or product document. Add a Knowledge record only when a short conclusion and its reason are likely to help across tasks.
 
-## Directories
+```bash
+./scripts/repoctl knowledge add \
+  --repo-id main \
+  --kind decision \
+  --claim "the reusable conclusion" \
+  --reason "why it applies and what problem it avoids" \
+  --source docs/adr/example.md \
+  --json
+```
 
-- `records/` = approved Reviewed Knowledge records; adopter-owned source of truth.
-- `events/` = append-only lifecycle events; adopter-owned source of truth.
-- `generated/` = ignored, non-authoritative llmwiki render output; regenerate it locally when needed.
+`records/` is the durable store. A current record is complete as soon as it is saved; `applies_to`, `replaces`, and `author` are optional. Source paths provide provenance. If a source later changes, queries keep the recorded conclusion visible and report the drift as a warning.
 
-Generated llmwiki pages are views. Do not re-ingest `generated/**` as factual authority for future Context, Knowledge, or task decisions. Use the original source refs, approved records, and lifecycle events instead.
+Use `--replaces K-...` when a new record explicitly corrects an old one. Use `knowledge query --include-history` when replaced current-format records matter.
 
-The implemented current-head projection keeps immutable records/events as audit evidence while ordinary Knowledge queries, Graph materialization, Context, and default llmwiki rendering consume the digest-bound current heads. This hot projection has finite count and byte limits; approval and rebuild fail closed at the limit so ordinary agent work cannot grow with unbounded Knowledge history. Ordinary Knowledge queries, Graph, and Context exclude source-stale heads by default, while llmwiki keeps those heads visible and marks them `stale` so a human can review the drift. Superseded and deprecated records remain available through explicit Knowledge history queries but are absent from the current-head projection and default llmwiki rendering. There is no separate paged historical llmwiki renderer in the current command surface.
+Upgrade leaves older records and `events/` files untouched. They are migration input, not query state: an agent reads the useful conclusion and saves a new current record before relying on it. `knowledge check` and upgrade postflight report records that still need this step. The derived projection under `.repoctl-state/knowledge/<repo-id>/current-head.json` is rebuildable with `knowledge rebuild`; it is an index, not a second source of truth.
 
-The projection under `.repoctl-state/knowledge/<repo-id>/current-head.json` is derived and may be absent after a fresh clone or local-state loss. Recover it explicitly with `./scripts/repoctl knowledge rebuild --repo-id <id> --json`. Rebuild validates all durable records and lifecycle events for that repository before atomically publishing a replacement; approval never initializes an empty projection over existing durable history.
-
-Approving a candidate updates the durable record/event state and synchronizes the selected repository's materialized Graph. A record is usable only when its current content matches `record_digest`, exactly one digest-valid approval event binds that content to its source candidate, and every declared supersession has one matching lifecycle event tied to that approval. Queries, Context, Graph, checks, and generated views fail closed on incomplete or altered approval state. Candidate applicability is explicit through `applies_to.paths`; changed files and prose remain provenance only.
-
-Every candidate claim is explicit through `--claim` or `--claim-file`. Source documents, context packs, task artifacts, and completion receipts provide provenance only; repoctl never derives or replaces a reusable claim from their prose.
+Knowledge never defines Task scope, source authority, or an execution instruction. Follow its source links and inspect current code before acting.

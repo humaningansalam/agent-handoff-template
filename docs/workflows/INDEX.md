@@ -49,9 +49,9 @@ Preferred categories:
 
 | Workflow | Use When | Do Not Use When | Tags | Expected Output |
 | --- | --- | --- | --- | --- |
-| `prd-backlog-sequential.md` | Comparing PRD/external notes to repo, listing missing work, or solving Backlog items one at a time | One-off read-only questions, immediate single known-file fixes | prd, backlog, discovery, sequential | PRD gap Backlog items or one finished archived task per promoted item |
+| `prd-backlog-sequential.md` | Comparing PRD/external notes to repo, listing missing work, or solving Backlog items one at a time | One-off read-only questions, immediate single known-file fixes | prd, backlog, discovery, sequential | PRD gap Backlog items or one archived Task with explicit Chosen scope per promoted item |
 | `repo-metadata.md` | Creating/modifying graph-relevant files in `repos/`, or using `.repometa` to discover candidate files before task promotion | Root workspace files only, generated/vendor/build outputs | metadata, repo, graph, discovery | valid `repos/.repometa` policy/annotation state and inspected discovery candidates |
-| `repoctl-upgrade.md` | Updating an adopting workspace to a newer repoctl/control-plane release | Product repo changes, project-specific workflow edits, or Board/Backlog/task cleanup | upgrade, release, control-plane | dry-run plan, inspected apply result, and repoctl verification gates |
+| `repoctl-upgrade.md` | Updating an adopting workspace to a newer repoctl/control-plane release | Product repo changes, project-specific workflow edits, or Board/Backlog/task cleanup | upgrade, release, control-plane | dry-run plan, inspected apply result, and workspace health checks |
 
 ## Add a New Workflow
 

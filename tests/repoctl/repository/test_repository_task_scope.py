@@ -74,12 +74,9 @@ def test_task_finish_uses_configured_repo_id_in_multi_repo(tmp_path: Path, monke
     assert main(["task", "create", "--area", "repo", "--repo-id", "web", "--start", "--slug", "finish-web", "Finish web", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     (web / "app.py").write_text("print('web changed')\n", encoding="utf-8")
-    assert main(["task", "discovery", "add", task_id, "--query", "web app", "--reviewed", "repos/web/app.py", "--chosen", "repos/web/app.py", "--json"]) == 0
+    assert main(["task", "discovery", "add", task_id, "--chosen", "repos/web/app.py", "--json"]) == 0
     capsys.readouterr()
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Ran focused check\n- Result: pass\n", encoding="utf-8")
-
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["meta_gate"]["status"] == "passed"
@@ -104,7 +101,6 @@ def test_task_doctor_uses_task_repo_id_in_configured_multi_repo(tmp_path: Path, 
     assert payload["data"]["repository"] == {"id": "web", "path": "repos/web", "identity_source": "pinned"}
     assert {warning["code"] for warning in payload["warnings"]} == {
         "missing_discovery_evidence",
-        "missing_verification_file",
         "task_handoff_generated_template",
     }
     assert payload["problems"] == []
@@ -137,7 +133,7 @@ def test_repo_task_discovery_must_match_selected_repository(tmp_path: Path, monk
     assert main(["task", "create", "--area", "repo", "--repo-id", "web", "--start", "--slug", "discovery-web", "Discovery web", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
 
-    assert main(["task", "discovery", "add", task_id, "--query", "api app", "--reviewed", "repos/api/app.py", "--chosen", "repos/api/app.py", "--json"]) == 2
+    assert main(["task", "discovery", "add", task_id, "--chosen", "repos/api/app.py", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "discovery_outside_selected_repository"
@@ -149,10 +145,10 @@ def test_repo_task_discovery_rejects_dotdot_escape_from_selected_repository(tmp_
     assert main(["task", "create", "--area", "repo", "--repo-id", "web", "--start", "--slug", "discovery-dotdot", "Discovery dotdot", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
 
-    assert main(["task", "discovery", "add", task_id, "--query", "api app", "--reviewed", "repos/web/app.py", "--chosen", "repos/web/../api/app.py", "--json"]) == 2
+    assert main(["task", "discovery", "add", task_id, "--chosen", "repos/web/../api/app.py", "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["problems"][0]["code"] == "discovery_outside_selected_repository"
+    assert payload["problems"][0]["code"] == "invalid_discovery_path"
 
 
 def test_repo_task_allows_other_product_repo_preexisting_dirty_at_start(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -174,10 +170,8 @@ def test_root_task_blocks_task_new_uncommitted_product_change_in_configured_mult
     assert main(["task", "create", "--area", "docs", "--start", "--slug", "root-docs", "Root docs", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     (api / "app.py").write_text("print('api changed')\n", encoding="utf-8")
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Checked root docs\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_selector_required"
@@ -193,10 +187,8 @@ def test_root_task_blocks_task_new_uncommitted_unadopted_candidate_change(tmp_pa
     web = tmp_path / "repos/web"
     init_repo(web)
     (web / "app.py").write_text("print('candidate dirty')\n", encoding="utf-8")
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Checked root docs\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_selector_required"
@@ -212,10 +204,8 @@ def test_root_task_allows_preexisting_unadopted_candidate_dirty_when_unchanged(t
 
     assert main(["task", "create", "--area", "docs", "--start", "--slug", "root-docs-preexisting-candidate", "Root docs preexisting candidate", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Checked root docs\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
 
 
 def test_root_task_blocks_unadopted_candidate_removed_after_start(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -229,10 +219,8 @@ def test_root_task_blocks_unadopted_candidate_removed_after_start(tmp_path: Path
     assert main(["task", "create", "--area", "docs", "--start", "--slug", "root-docs-candidate-removed", "Root docs candidate removed", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     shutil.rmtree(web)
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Checked root docs\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repository_selector_required"
@@ -248,10 +236,8 @@ def test_root_task_allows_product_head_change_when_worktree_clean_in_configured_
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     (api / "app.py").write_text("print('api committed')\n", encoding="utf-8")
     commit_all(api)
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Checked root docs after independent product commit\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
 
 
 def test_single_repos_task_lifecycle_finish_passes(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -266,12 +252,10 @@ def test_single_repos_task_lifecycle_finish_passes(tmp_path: Path, monkeypatch, 
     assert main(["task", "create", "--area", "repo", "--start", "--slug", "single-repos", "Single repos", "--json"]) == 0
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     (repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
-    assert main(["task", "discovery", "add", task_id, "--query", "single app", "--reviewed", "repos/app.py", "--chosen", "repos/app.py", "--json"]) == 0
+    assert main(["task", "discovery", "add", task_id, "--chosen", "repos/app.py", "--json"]) == 0
     capsys.readouterr()
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Ran single repos lifecycle\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["meta_gate"]["status"] == "passed"
@@ -296,10 +280,8 @@ def test_task_finish_blocks_when_repo_registry_target_drifted(tmp_path: Path, mo
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     web.rename(renamed)
     write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/renamed"}]})
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Attempt finish after registry drift\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repo_target_changed_since_start"
@@ -330,9 +312,7 @@ def test_repo_task_survives_whole_workspace_relocation_without_rewriting_state(
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"] == []
     assert payload["data"]["repo_changes"]["observed_committed"] == 0
-    verification = relocated / "verification.md"
-    verification.write_text("- Relocated repository continuity observed\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
 
     assert json.loads(capsys.readouterr().out)["data"]["task_id"] == task_id

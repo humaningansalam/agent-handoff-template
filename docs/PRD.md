@@ -1,142 +1,152 @@
-# Agent Workspace Control Plane PRD
-
-> Template adoption note: This file is a disposable seed. After copying this template, delete this file or replace it with the adopter workspace's private PRD/context. Do not keep this template PRD as live project truth. If the context grows, keep `docs/PRD.md` as a thin index and split details under `docs/prd/`.
+# Product Requirements: Agent Workspace Control Plane
 
 ## Problem
 
-Coding agents can edit code, but they do not reliably preserve project state across tools, sessions, and handoffs. Without a shared control plane, teams fall back to chat history, scattered notes, or tool-specific state. That creates predictable failures:
+Coding agents lose important state across sessions and tools. Chat history is incomplete, repository boundaries are easy to cross by accident, unstructured task prose drifts from actual files, and broad rediscovery wastes time in large repositories.
 
-- the next agent cannot tell what task is live, blocked, done, or abandoned
-- product repository boundaries are inferred from paths or prose instead of explicit repo identity
-- task completion claims are not tied to verification evidence
-- metadata, task state, and generated context drift apart
-- useful decisions and failure modes are rediscovered instead of reused
-- generated summaries can be mistaken for source authority
-- a new agent repeatedly scans a large repository to rediscover product authority, implementation owners, direct tests, and prior decisions that the workspace already contains
-- an initial Context result may be wrong or incomplete, so later work needs an explicit, freshness-checked outcome loop instead of treating the first ranking as truth
-- large repositories need query-visible component membership and crossings without turning directory names into ownership or a second graph
+The workspace needs a small durable model that helps an agent answer four questions:
 
-This template solves workspace coordination and repository-understanding startup around agents. For ambiguous work, Context is the natural integrated discovery surface: it provides a compact, source-linked working set over current code, typed relationships, project authority, procedures, task history, and explicitly reviewed reusable knowledge. It narrows where to read and change before the agent spends tokens rescanning a large repository. Exact search, free iterative Graph traversal, and direct source inspection remain available for confirmation and deeper exploration.
+1. What am I working on now?
+2. What exact step should I take after a pause?
+3. What source material should I read?
+4. Which past conclusion and reason are worth reusing?
 
-## Target Users
+It must answer those questions without turning normal development into evidence registration or approval administration.
 
-- A developer or team using one or more coding agents against a private workspace.
-- A maintainer who needs deterministic task state, handoff continuity, and upgradeable workspace tooling.
-- An agent that needs machine-readable boundaries, evidence, and verification gates before changing product code.
+## Product model
 
-## Product Goal
+- **Task** is the current unit of work. Its frontmatter owns lifecycle state and its Chosen set owns intended product file scope.
+- **Handoff** is an explicitly reviewed four-field restart instruction.
+- **Context** is a bounded, source-linked read-only view over current code, project documents, Graph relations, task history, and Knowledge.
+- **Knowledge** is an optional reusable conclusion plus its reason and sources.
 
-Make a copied workspace immediately usable as a private agent workbench where humans and agents can:
+Supporting mechanisms stay narrow:
 
-- know the current work state without reading chat history
-- select the correct product repository explicitly
-- mutate task/control state only through repoctl gates
-- capture verification evidence before declaring work done
-- start ambiguous repository work from a compact, high-signal Context bundle that combines current source, provider-confirmed Graph relations, current project documents, task history, and applicable Reviewed Knowledge without merging their authority
-- follow typed continuations toward likely owner, change, dependency, and verification surfaces without repeatedly rescanning the repository
-- keep exploring caller, callee, import, test, task, document, and Knowledge relationships through typed Graph continuations without a mandatory Context -> Graph -> `rg` sequence
-- use narrow exact search and direct reads to confirm a known identity instead of repeating broad discovery that the working set already answered
-- promote only explicitly reviewed, source-linked knowledge into durable records
-- optionally capture bounded local diagnostics that distinguish direct calls, Context-mediated exposure, explicit Discovery selection, failure, and later same-shape success without changing normal command output or authority state
-- render llmwiki pages as disposable views, not authority
+- product repositories have explicit identities under `repos/`
+- task start records a repository baseline and protects pre-existing dirty work
+- `.repometa` supplies sparse human file metadata and changed-file gates
+- Graph and the persistent evidence index accelerate navigation without becoming authority
+- completion history preserves finished Task and repository-change identity
 
-### Repository-Understanding Loop
+## Users
 
-- Bind a discovery query, its citable evidence, explicit review decisions, and verification into one completion-bound outcome.
-- Keep completion outcomes in explicit history and exact task/artifact queries; ordinary Context ranks only independently retrieved current evidence.
-- Project declared component membership and crossings onto existing typed subjects and relations so an agent can traverse between relevant areas without a second graph.
-- Keep the loop bounded as it is reused: hot state, ordinary query work, incremental refresh work, and agent-facing payload must converge instead of growing with task history.
+- An agent resuming work without reliable chat history.
+- A human coordinating work across coding tools.
+- A team keeping private workspace state separate from product repositories.
+- An agent locating owners, tests, callers, contracts, or past decisions in a large repository.
 
-## Success Criteria
+## Primary flows
 
-- A new agent can resume a live task from `AGENTS.md`, `docs/BOARD.md`, the task file, and Handoff without guessing.
-- Long-running tasks surface structural scope-growth evidence before repeated episodes and verification milestones make the current Goal expensive to recover; repoctl recommends review but never invents a split.
-- A live Handoff is active only after an explicit review binding to the exact structured Task and observed repository state; later input drift is visible as typed inactive resume guidance instead of silently blessing old prose.
-- Repo-scoped work uses an explicit product repository boundary under `repos/` and does not mutate unrelated repositories by path accident.
-- Task finish leaves auditable verification evidence and stable completion receipts.
-- A completion receipt cannot contain one Chosen scope in its Task projection and a different `active_chosen` scope in its structured outcome.
-- An explicit non-canonical Chosen value cannot disappear during alignment, and a live task cannot add structured outcome or verification facts after start without current immutable start-scope evidence.
-- Graph and Context answers preserve repository identity, source refs, digests, freshness, typed continuations, and completeness warnings.
-- Compatible but unresolved relationships remain agent-visible as explicitly non-authoritative candidates without being promoted to Graph edges.
-- For ambiguous work, compact Context improves owner/test/impact hit rate and first-correct rank while reducing irrelevant visible slots, broad rediscovery, serialized bytes, and token cost.
-- Current project documents, task history, and explicitly reviewed reusable records remain distinct evidence lanes; generated views never become source authority.
-- Reviewed Knowledge records require an explicit approval action and remain separate from generated llmwiki output; the actor may be a human or an authorized agent.
-- The outcome loop admits only explicit, source-bound task outcomes as feedback and never turns them into ownership, authority, edit scope, or a hard filter.
-- Repeating equivalent verified work does not increase hot rows, ordinary query reads, unchanged-delta refresh work, or later payload; cold audit growth stays off the ordinary retrieval path.
+### Small known change
 
-## Core Requirements
+1. Create and start a product Task.
+2. Record the known file or coherent file set as Chosen.
+3. Edit and run the checks useful for the change.
+4. Optionally keep concise results in `## Verification`.
+5. Finish the Task.
 
-### Task And Control Ledger
+No Context, Graph, Pack, verification registration, or Knowledge action is required.
 
-- Keep live task registry in `docs/BOARD.md`.
-- Keep executable task state in task frontmatter and required sections under `docs/tasks/**`.
-- Archive completed standalone tasks under `docs/archive/tasks/**`.
-- Require Handoff and Verification evidence so another agent can resume or audit the work.
-- Keep the human-readable four-field Handoff as the collaboration surface while repoctl stores one compact machine-owned binding receipt. Every newly generated Handoff must carry exactly one explicit `<!-- repoctl: generated-handoff -->` marker and remain inactive until an agent replaces the fields, removes the marker, and binds the reviewed state. Starting or showing a task must never create or refresh a binding automatically, starting must preserve an already-authored valid Handoff, and repoctl must never infer authorship from prose. Public freshness is `current | inactive | historical`; later Handoff, task, Discovery, log, Verification, Context Pack, child-lifecycle, or repository changes make a binding inactive until explicit review and rebind. Legacy unmarked Handoffs require one explicit bind, while legacy v3 receipts are readable but inactive until replaced by a v4 binding.
+### Ambiguous change
 
-### Product Repository Boundary
+1. Query Context, inspect Git, use Graph, or search directly before mutation.
+2. Read the strongest source candidates and refine only when needed.
+3. Create and start a Task.
+4. Record Chosen and a Note only for a decision worth remembering.
+5. Implement and finish through the same normal flow.
 
-- Treat root as the private workspace/control-plane repository.
-- Treat `repos/` or configured `repos/<repo-id>/` entries as product repository boundaries.
-- Require explicit `repo_id` where multi-repo ambiguity exists.
-- Keep root operations, task state, contracts, workflows, and repoctl tooling separate from product code changes.
-- Keep versioned authority and procedures shared by humans and agents in workspace or product documentation, executable agent-only behavior in `.agents/skills/**`, and regenerable Graph/index state in `.repoctl-state/**`.
+Search queries, opened files, ranked candidates, and result selections are not durable Task state.
 
-### repoctl Mutation Gates
+### Pause and resume
 
-- Use repoctl as the mutation boundary for Board, Backlog, task lifecycle, archive transitions, `.repometa` validation, and release upgrades.
-- Return stable JSON envelopes for agent consumption.
-- Fail visibly when required verification, metadata, repository identity, or integrity checks are missing.
+1. Write the next step, first file, first command, and done condition.
+2. Bind that exact Handoff before a real pause or transfer.
+3. On the next session, run `task resume` and continue only from a current executable Handoff.
 
-### Evidence And Context
+A Context Pack may be printed or exported for convenience. It is not bound to the Handoff and never controls freshness.
 
-- Materialize Graph and its persistent evidence index as one deterministic boundary over source facts, metadata, documents, receipts, imports, symbols, calls, and artifacts; queries read it without hidden rebuilds or unchanged-source rescans.
-- Build Context / Task Pack outputs as source-linked evidence bundles for questions and task startup, with changed-path overlays scored in the same retrieval corpus as materialized evidence and typed continuations for iterative exploration.
-- Let an optional Task Pack participate in resume guidance only when the user or agent explicitly binds that exact current artifact. JSON and Markdown artifacts must share one canonical input projection, reject missing/tampered/wrong-task/legacy artifacts, and become inactive when their producer-owned source identities, structured Task inputs, Graph snapshot, or repository observation changes.
-- Resolve bounded lexical file hypotheses into the existing typed Graph projection so ambiguous natural-language work can include owners, direct tests, callers, callees, imports, and structured dependencies without a hidden rebuild or a second traversal engine.
-- Preserve exact typed identities, source refs, digests, repository namespaces, field-level evidence, and typed continuations. Lexical relevance may propose a working-set member but never prove semantic ownership.
-- Let root-only coordination tasks with current task-start evidence bind executed checks to typed non-product workspace artifacts without fabricating product Discovery, Chosen scope, or hot product corroboration; reject pre-start and unsupported legacy mutations before outcome state is written.
-- Publish one coherent bounded projection for compact output, completeness, citations, seed refs, human views, and Task Pack; renderer differences must not change evidence identity.
-- Keep confirmed relations and compatible unresolved relationship candidates as separate typed lanes; candidates must preserve their structured resolution reason and never imply task scope.
-- Assign each shared document one closed semantic role and preserve that role through collection, indexing, changed-path overlays, retrieval, compact projection, and Task Pack construction instead of independently re-inferring its meaning at each consumer.
-- Keep active authority and procedures eligible for ordinary retrieval, keep templates from consuming ordinary recall unless explicitly addressed, and never ingest generated views as source evidence.
-- Treat current project documents, task history, and Reviewed Knowledge as separate complementary evidence lanes rather than one interchangeable corpus.
-- Do not turn Context output into task scope, source authority, or reviewed knowledge automatically.
+### Reuse a decision
 
-The completion-bound outcome and bounded-retention semantics are owned by `docs/contracts/repoctl-discovery-outcome-contract.md`. The additive component-crossing projection is owned by `docs/contracts/repoctl-graph-contract.md`.
+1. Leave routine detail in archived Task history.
+2. When a conclusion is likely to matter across tasks, save one Knowledge record with its reason and sources.
+3. Query it directly or through explicit Context history modes later.
+4. Correct it by saving a replacement that names the old record.
 
-### Reviewed Knowledge And llmwiki
+The save itself completes the operation. There is no new candidate, approval, refresh, or rendered-wiki lifecycle.
 
-- Store reviewed knowledge in `docs/knowledge/records/**` with lifecycle events in `docs/knowledge/events/**`.
-- Require an explicit review action before durable knowledge exists; do not infer approval from source prose or task completion alone.
-- Preserve receipt-derived source identity when a completed child task moves from the live task directory to the archive. A byte-identical, uniquely resolved archive move remains current provenance; missing, ambiguous, identity-mismatched, or digest-mismatched evidence fails closed.
-- Treat generated llmwiki pages as regenerable, non-authoritative views.
-- Do not ingest generated llmwiki output as future source evidence.
+## Requirements
 
-## Non-Goals
+### Task lifecycle
 
-- This template is not an autonomous agent runtime.
-- MCP transport is not included in this template release.
-- Chat/session memory is not project authority.
-- Generated llmwiki pages are not source authority.
-- Context is the default integrated discovery surface for ambiguous work, not a ban on exact search, typed Graph traversal, or direct source inspection.
-- Repository Understanding does not require moving the established documentation tree, mandatory per-document frontmatter, embeddings, or a second content-management system.
-- Repository Understanding is not online self-training: query output and task prose do not auto-approve Knowledge, rewrite Graph facts, or become future authority.
+- Keep live registry in `docs/BOARD.md` and authoritative lifecycle status in Task frontmatter.
+- Require `task start` before product mutation and keep the selected repository immutable for that execution.
+- Record one Task-owned Chosen set as the current scope source.
+- Compare actual changes with Chosen at doctor/finish.
+- Protect paths dirty before task start unless ownership is explicitly resolved.
+- Preserve optional Verification prose without parsing, grading, hashing, or requiring it.
+- Archive standalone finished/canceled Tasks and keep completion receipts immutable.
+- Use new follow-up Tasks rather than reopening completed identities.
 
-## Acceptance And Rejection
+### Handoff
 
-Accept the repository-understanding loop only when repeated field scenarios demonstrate all of the following:
+- Preserve exactly four human-written fields.
+- Keep generated placeholders visibly inactive until reviewed and bound.
+- Report freshness separately from repository lifecycle health.
+- Invalidate a binding when its Task, Handoff, Chosen/Notes, log, optional Verification text, child state, or observed repository state changes.
+- Never parse or execute the stored first command.
 
-- later related work improves owner/test/impact hit rate and reduces broad rediscovery, serialized bytes, tokens, and elapsed exploration time
-- the combined capture, storage, indexing, query, and reading cost across a related task pair is lower than the no-reuse baseline
-- exact provenance survives while outcomes remain non-authoritative and current source, direct reads, exact search, and typed traversal stay independently available
-- a typed continuation can cross a derived component boundary without a manually maintained second graph
-- equivalent repetition leaves hot state, ordinary query work, incremental refresh work, and agent-facing payload stable rather than proportional to completed-task count
+### Repository understanding
 
-Reject or revisit the model when those field outcomes do not improve. Investigate retrieval, tokenization, and continuation presentation before adding more schema or fixture-specific ranking rules.
+- Keep direct reads, exact search, Context, and Graph as independent entry points.
+- Return source paths, locations, typed relations, provenance, freshness, completeness, and useful continuations.
+- Keep ranked lexical candidates separate from confirmed Graph relations.
+- Exclude stale Graph relations while allowing current-source overlays.
+- Keep ordinary query cost independent of completed-task count.
+- Never turn retrieval output or old task history into current scope, ownership, or authority.
+- Do not persist Context or Graph result receipts for later selection.
+- Keep Context Pack generation read-only and one-shot.
 
-The 0.10.0 field replay rejected automatic completion-outcome reuse: explicit immediate-follow-up reuse did not improve the Termroom or Areum working sets and increased stored query state. Ordinary Context therefore does not consume completion outcomes. Completion evidence remains available through explicit history and exact Graph task/artifact queries; automatic reuse requires new field evidence that passes the criteria above.
+### Knowledge
 
-## Adoption Rule
+- Store explicit decisions, invariants, and failure modes under `docs/knowledge/records/`.
+- Require a claim, concrete reason, repository, and at least one source.
+- Keep applicability, replacement links, and known author optional.
+- Make the record queryable immediately after one save.
+- Warn when a source changes while retaining the recorded historical reasoning.
+- Preserve older Knowledge files and report them for one-time agent migration; query only current records.
 
-After copying the template, either delete this file or replace it with the adopter workspace's private PRD/context. If the context grows, keep `docs/PRD.md` as a short index and split details under root `docs/prd/`.
+### Repository and metadata boundaries
+
+- Keep root control state separate from product Git roots.
+- Require explicit repository identity when a workspace contains several product repositories.
+- Keep `.repometa` as the canonical sparse file metadata store and mutate it through repoctl.
+- Keep Graph/index state derived and rebuildable.
+- Treat stale Graph or Knowledge projection after upgrade as maintenance, unless source authority or repository identity is actually invalid.
+
+## Success criteria
+
+- A new agent can recover current work and the next action from Task and Handoff without chat history.
+- A known small change needs only create/start, Chosen, ordinary implementation, and finish.
+- Missing Verification prose or an unrecorded test result never blocks finish.
+- Context returns a compact useful first reading set and does not create persistent query bookkeeping.
+- A Context Pack can be printed or exported without affecting any lifecycle state.
+- Saving reusable Knowledge is one operation and later queries keep the conclusion available after source drift with a warning.
+- Product work cannot silently consume pre-existing dirty files or cross a selected repository boundary.
+- Completion and history remain usable for follow-up inspection without becoming a test-proof system.
+- Upgrade preserves accumulated Task logs and older Knowledge files while reporting the one-time updates needed before they re-enter current execution or search.
+- Upgrade succeeds when authoritative state is healthy even if derived indexes need an explicit refresh.
+
+## Non-goals
+
+- Autonomous agent execution.
+- Commit, push, pull request, deployment, or delivery ownership.
+- Proof that a command or test ran.
+- Mandatory Context, Graph, Pack, Knowledge, or debug use.
+- Automatic task creation, scope inference, or Knowledge creation from PRD, Backlog, query, or Task prose.
+- Online learning from agent behavior.
+- A generated documentation or llmwiki subsystem.
+- Replacing source authority with metadata, Graph, Context, completion history, or Knowledge.
+
+## Adoption rule
+
+After copying the template, replace or remove this file. If private context grows, keep `docs/PRD.md` as a short index and put detailed authority under `docs/prd/`.

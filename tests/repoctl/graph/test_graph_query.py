@@ -38,9 +38,6 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
 
         compact_payload = json.loads(capsys.readouterr().out)
         compact_result = compact_payload["data"]["result"]
-        compact_receipt = compact_payload["data"]["result_receipt"]
-        assert compact_receipt["producer"] == "graph"
-        assert {item["ref"] for item in compact_receipt["selectable"]} >= {"src/app.py"}
         assert compact_result["matches"][0]["component_ids"] == [
             "component:package.json:.:graph-query-fixture"
         ]
@@ -72,7 +69,6 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
 
         full_payload = json.loads(capsys.readouterr().out)
         result = full_payload["data"]["result"]
-        assert full_payload["data"]["result_receipt"] == compact_receipt
         assert result["query"] == {"type": "file", "path": "src/app.py"}
         assert any(node["id"] == file_id("main", "src/app.py") for node in result["nodes"])
         assert any(edge["kind"] == "CONTAINS" and edge["to"] == file_id("main", "src/app.py") for edge in result["edges"])
@@ -194,10 +190,6 @@ def test_graph_query_requires_exactly_one_selector(tmp_path: Path, monkeypatch, 
     expected_selector = {"type": "impact_symbol", "symbol": "missing_owner", "depth": 2}
     assert missing_impact["data"]["query_status"] == "not_found"
     assert missing_impact["data"]["result"]["query"] == expected_selector
-    assert missing_impact["data"]["result_receipt"]["request"] == {
-        "kind": "graph_query",
-        "selector": expected_selector,
-    }
 
     assert main(["graph", "query", "--file", "missing/app.py", "--json"]) == 0
     same_name = json.loads(capsys.readouterr().out)

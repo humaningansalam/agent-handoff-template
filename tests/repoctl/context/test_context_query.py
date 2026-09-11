@@ -27,16 +27,7 @@ from tools.repoctl.graph_store import load_materialized_graph, materialize_graph
 from tools.repoctl.knowledge_projection import rebuild_knowledge_projection
 from tools.repoctl.path_roles import PathRole, classify_path_role
 from tools.repoctl.repositories import require_repo_target
-from tools.repoctl.result_receipts import (
-    ResultAuthority,
-    ResultProducer,
-    ResultSelection,
-    context_result_citations,
-    read_result_receipt,
-    result_receipt_path,
-    verify_result_selections,
-)
-from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
+from tests.repoctl.knowledge_test_helpers import _add_knowledge_source
 from tests.repoctl.context_test_helpers import (
     _rebuild_completion_history,
     _write_context_pack_task,
@@ -125,8 +116,7 @@ def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
     original_snapshot = snapshot_path.read_text(encoding="utf-8")
     snapshot_path.write_text("{not-json\n", encoding="utf-8")
     receipts_before = receipt_count()
-    invalid_graph = fails(["context", "query", "where is run", "--repo-id", "main"], "graph_materialization_invalid")
-    assert invalid_graph["data"]["result_receipt"] is None
+    fails(["context", "query", "where is run", "--repo-id", "main"], "graph_materialization_invalid")
     assert receipt_count() == receipts_before
     snapshot_path.write_text(original_snapshot, encoding="utf-8")
 
@@ -135,7 +125,6 @@ def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
         task_id="T-20260902010101Z",
         slug="cold-bootstrap",
         title="Cold bootstrap",
-        query="where is run",
         goal="Verify cold bootstrap.",
         context_doc="AGENTS.md",
     )
@@ -147,8 +136,7 @@ def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
         ["context", "query", "where is run", "--repo-id", "main"],
         ["graph", "query", "--repo-id", "main", "--file", "app.py"],
     ):
-        payload = fails(command, "invalid_policy_json")
-        assert payload["data"]["result_receipt"] is None
+        fails(command, "invalid_policy_json")
     assert receipt_count() == receipts_before
 
     pack = tmp_path / ".repoctl-state/context-pack/u03.json"
@@ -174,77 +162,6 @@ def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
         backup.rename(path)
 
 
-def test_context_query_exposes_one_compact_result_receipt_for_default_and_full_views(tmp_path: Path, monkeypatch, capsys) -> None:
-    repo = _setup_context_workspace(tmp_path, monkeypatch)
-    (repo / "owner.py").write_text("def resolve_invoice_owner():\n    return 'billing'\n", encoding="utf-8")
-
-    assert main(["context", "query", "resolve_invoice_owner", "--repo-id", "main", "--json"]) == 0
-    compact_output = capsys.readouterr().out
-    compact_payload = json.loads(compact_output)
-    compact_receipt = compact_payload["data"]["result_receipt"]
-    assert compact_receipt["schema"] == (
-        "repoctl.repository-understanding.result-receipt-projection"
-    )
-    assert compact_receipt["schema_version"] == 1
-    assert compact_receipt["view"] == "compact"
-    assert compact_receipt["producer"] == "context"
-    assert compact_receipt["request"] == {
-        "kind": "context_query",
-        "query": "resolve_invoice_owner",
-        "mode": "auto",
-    }
-    assert "selectable" not in compact_receipt
-    assert "items" not in compact_receipt["manifest"]
-    visible_citations = {
-        (
-            item["primary_citation"]["authority"],
-            item["primary_citation"]["ref"],
-        )
-        for item in compact_receipt["compact"]["representative_citations"]
-    }
-    assert ("source", "repos/owner.py") in visible_citations
-    target = require_repo_target(tmp_path, repo_id="main")
-    path = result_receipt_path(
-        tmp_path,
-        target=target,
-        producer=ResultProducer.CONTEXT,
-        result_id=compact_receipt["result_id"],
-    )
-    receipt_bytes = path.read_bytes()
-    stored_receipt = read_result_receipt(tmp_path, path)
-    assert compact_receipt["manifest"]["selectable_count"] == len(
-        stored_receipt["selectable"]
-    )
-    hidden = next(
-        item
-        for item in stored_receipt["selectable"]
-        if (item["authority"], item["ref"]) not in visible_citations
-    )
-    assert verify_result_selections(
-        tmp_path,
-        target=target,
-        producer=ResultProducer.CONTEXT,
-        result_id=compact_receipt["result_id"],
-        selections=[
-            ResultSelection(ResultAuthority(hidden["authority"]), hidden["ref"])
-        ],
-    ) == stored_receipt
-
-    assert main(["context", "query", "resolve_invoice_owner", "--repo-id", "main", "--full", "--json"]) == 0
-    full_output = capsys.readouterr().out
-    full_receipt = json.loads(full_output)["data"]["result_receipt"]
-
-    assert full_receipt["view"] == "full"
-    assert full_receipt["compact"] == compact_receipt["compact"]
-    assert full_receipt["manifest"]["items"] == stored_receipt["selectable"]
-    assert {
-        key: value
-        for key, value in full_receipt["manifest"].items()
-        if key != "items"
-    } == compact_receipt["manifest"]
-    assert full_receipt["receipt_digest"] == compact_receipt["receipt_digest"]
-    assert len(compact_output.encode("utf-8")) < len(full_output.encode("utf-8"))
-    assert path.read_bytes() == receipt_bytes
 
 
 def _write_reviewed_knowledge_record(
@@ -255,68 +172,45 @@ def _write_reviewed_knowledge_record(
     applies_to_paths: list[str] | None = None,
     source_paths: list[str] | None = None,
     repo_id: str = "main",
-    status: str = "reviewed",
+    replaces: list[str] | None = None,
 ) -> None:
-    candidate_id = "KC" + record_id[1:]
     source_paths = source_paths or ["docs/contracts/repoctl-context-contract.md"]
     source_refs = []
-    for path in source_paths:
-        text = (root / path).read_text(encoding="utf-8")
+    for source_path in source_paths:
+        source_text = (root / source_path).read_text(encoding="utf-8")
         source_refs.append(
             {
-                "kind": "current_source" if path.startswith("repos/") else "document",
-                "path": path,
-                "content_sha256": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "kind": "current_source" if source_path.startswith("repos/") else "authority_document",
+                "path": source_path,
+                "content_sha256": "sha256:" + hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
             }
         )
     record = {
         "schema": "repoctl.knowledge.record",
-        "schema_version": 1,
+        "schema_version": 2,
         "id": record_id,
         "repo_id": repo_id,
         "kind": "decision",
-        "status": status,
-        "title": "Project-specific routing decision",
         "claim": claim,
-        "summary": claim,
+        "reason": "This reusable rule explains later work.",
         "source_refs": source_refs,
         "applies_to": {"paths": applies_to_paths or []},
-        "supersedes": [],
-        "created_from": {
-            "candidate_id": candidate_id,
-            "candidate_digest": "sha256:" + "c" * 64,
-            "candidate_check": {"passed": True, "warning_codes": [], "related_records": []},
-        },
-        "review": {"status": "reviewed", "reviewed_by": "fixture"},
-        "authoritative": True,
+        "replaces": replaces or [],
+        "recorded_at": "2026-07-19T01:01:00Z",
     }
     record["record_digest"] = digest_data(record)
-    path = root / "docs/knowledge/records" / f"{record_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    event_id = f"E-{record_id[2:16]}Z--approved-{record_id[19:]}"
-    event = {
-        "schema": "repoctl.knowledge.event",
-        "schema_version": 1,
-        "id": event_id,
-        "type": "approved",
-        "repo_id": repo_id,
-        "record_id": record_id,
-        "candidate_id": candidate_id,
-        "record_digest": record["record_digest"],
-        "supersedes": [],
-    }
-    event["event_digest"] = digest_data(event)
-    event_path = root / "docs/knowledge/events" / f"{event['id']}.json"
-    event_path.parent.mkdir(parents=True, exist_ok=True)
-    event_path.write_text(json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if status == "reviewed":
-        projection, projection_problems = rebuild_knowledge_projection(
-            root,
-            repo_id=repo_id,
-        )
-        assert projection
-        assert not projection_problems
+    record_path = root / "docs/knowledge/records" / f"{record_id}.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    projection, projection_problems = rebuild_knowledge_projection(
+        root,
+        repo_id=repo_id,
+    )
+    assert projection
+    assert not projection_problems
 
 
 def _compact_evidence_item(kind: str, path: str, selector_kind: str, selector_value: str, actions: list[str], **extra: object) -> dict:
@@ -2305,7 +2199,7 @@ def test_context_query_exactly_matches_workflow_and_dotfile_identity(tmp_path: P
     }
 
 
-def test_context_query_supports_legal_backtick_path_in_result_receipt(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_query_supports_legal_backtick_path(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     path = repo / "owner`file.py"
     path.write_text("def resolve_owner():\n    return 'owner'\n", encoding="utf-8")
@@ -2315,14 +2209,11 @@ def test_context_query_supports_legal_backtick_path_in_result_receipt(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert ("source", "repos/owner`file.py") in {
-        (
-            item["primary_citation"]["authority"],
-            item["primary_citation"]["ref"],
-        )
-        for item in payload["data"]["result_receipt"]["compact"][
-            "representative_citations"
-        ]
+    assert "repos/owner`file.py" in {
+        item["source_ref"]["path"]
+        for items in payload["data"]["bundle"]["groups"].values()
+        for item in items
+        if isinstance(item.get("source_ref"), dict)
     }
 
 
@@ -3968,7 +3859,6 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
         assert payload["data"]["bundle"] is not None
         assert payload["data"]["bundle"]["completeness"]["graph_available"] is False
         assert any(problem["code"] == dependency_code for problem in payload["problems"])
-        assert payload["data"]["result_receipt"] is None
         assert any(
             item.get("source_ref", {}).get("path") == "repos/app.py"
             for items in payload["data"]["bundle"]["groups"].values()
@@ -4337,10 +4227,6 @@ def test_explicit_history_mode_corroborates_current_owner_and_uses_typed_test_re
         for candidate in bundle.evidence
     )
     assert all(seed.anchor.path != "src/unrelated.py" for seed in bundle.graph_seed_refs)
-    assert all(
-        selection.ref != "repos/src/unrelated.py"
-        for selection in context_result_citations(bundle.to_dict())
-    )
 
 
 def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabled_for_task_pack(
@@ -4749,14 +4635,8 @@ def test_context_multirepo_field_loop_keeps_context_and_knowledge_namespaced(tmp
     fixture = Path("tests/fixtures/context-benchmark-multirepo").resolve()
     _write_context_benchmark_collection_corpus(tmp_path, fixture)
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "web", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    web_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", web_candidate, "--repo-id", "web", "--json"]) == 0
-    web_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "api", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    api_candidate = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", api_candidate, "--repo-id", "api", "--json"]) == 0
-    api_record = json.loads(capsys.readouterr().out)["data"]["record"]["id"]
+    web_record = _add_knowledge_source(capsys, repo_id="web")["data"]["record"]["id"]
+    api_record = _add_knowledge_source(capsys, repo_id="api")["data"]["record"]["id"]
 
     assert main(["context", "benchmark", "--fixture", fixture.as_posix(), "--require-fixture-corpus", "--require-no-cross-repo", "--require-no-forbidden", "--min-category-visible-recall", "multi-repo-isolation=1.0", "--json"]) == 0
     benchmark_payload = json.loads(capsys.readouterr().out)
@@ -5059,21 +4939,6 @@ def test_context_query_uses_product_source_ref_but_not_root_provenance_as_code_a
         for item in provenance_bundle["evidence"]
     )
 
-    (repo / "service.py").write_text("def execute_route():\n    return 'changed'\n", encoding="utf-8")
-    _materialize(tmp_path)
-    stale_snapshot, graph_problems, _meta = load_materialized_graph(
-        tmp_path,
-        target=require_repo_target(tmp_path, repo_id="main"),
-    )
-    assert stale_snapshot is not None
-    assert not graph_problems
-    assert not any(
-        node.kind == "knowledge"
-        and node.identity.get("record_id") == source_record
-        for node in stale_snapshot.nodes
-    )
-
-
 def test_context_query_keeps_weak_knowledge_match_visible_without_code_anchor(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "service.py").write_text("def execute_route():\n    return 'ok'\n", encoding="utf-8")
@@ -5264,37 +5129,52 @@ def test_context_query_does_not_cross_repository_for_knowledge_paths(tmp_path: P
     assert not any(item["source_ref"]["path"] == "repos/api/service.py" for item in bundle["evidence"])
 
 
-@pytest.mark.parametrize(
-    ("status", "record_id"),
-    [
-        ("stale", "K-20260719010107Z--stale-routing"),
-        ("superseded", "K-20260719010108Z--superseded-routing"),
-        ("deprecated", "K-20260719010109Z--deprecated-routing"),
-    ],
-)
-def test_context_query_excludes_noncurrent_knowledge_paths_from_code_anchors(
+def test_context_query_excludes_superseded_knowledge_paths_from_code_anchors(
     tmp_path: Path,
     monkeypatch,
     capsys,
-    status: str,
-    record_id: str,
 ) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
-    (repo / "service.py").write_text("def execute_route():\n    return 'ok'\n", encoding="utf-8")
+    (repo / "service.py").write_text(
+        "def execute_route():\n    return 'ok'\n",
+        encoding="utf-8",
+    )
+    record_id = "K-20260719010108Z--superseded-routing"
     _write_reviewed_knowledge_record(
         tmp_path,
         record_id=record_id,
-        claim=f"{status} prism routing policy.",
+        claim="Old prism routing policy.",
         applies_to_paths=["service.py"],
-        status=status,
+    )
+    _write_reviewed_knowledge_record(
+        tmp_path,
+        record_id="K-20260719010109Z--replacement-routing",
+        claim="Current prism routing policy.",
+        replaces=[record_id],
     )
     _materialize(tmp_path)
 
-    assert main(["context", "query", f"{status} prism routing", "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(
+        [
+            "context",
+            "query",
+            "old prism routing",
+            "--repo-id",
+            "main",
+            "--full",
+            "--json",
+        ]
+    ) == 0
 
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
-    assert bundle["knowledge_results"] == []
-    assert not any("reviewed_knowledge_path" in item.get("evidence_kinds", []) for item in bundle["evidence"])
+    assert [
+        item["record"]["id"] for item in bundle["knowledge_results"]
+    ] == ["K-20260719010109Z--replacement-routing"]
+    assert bundle["knowledge_results"][0]["resolved_code_paths"] == []
+    assert not any(
+        "reviewed_knowledge_path" in item.get("evidence_kinds", [])
+        for item in bundle["evidence"]
+    )
 
 
 def test_context_query_prefers_direct_exact_code_anchor_over_knowledge_path(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -5321,7 +5201,7 @@ def test_context_query_prefers_direct_exact_code_anchor_over_knowledge_path(tmp_
 def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_workspace(tmp_path, monkeypatch)
 
-    record_id = _approve_knowledge_source(capsys, build_args=["--kind", "decision"])["data"]["record"]["id"]
+    record_id = _add_knowledge_source(capsys)["data"]["record"]["id"]
 
     assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--mode", "authority", "--explain", "--full", "--json"]) == 0
 
@@ -5343,31 +5223,15 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
 
     assert main(["context", "query", "reviewed knowledge source authority", "--repo-id", "main", "--mode", "authority", "--full", "--json"]) == 0
     stale_payload = json.loads(capsys.readouterr().out)
-    stale_bundle = stale_payload["data"]["bundle"]
-    assert stale_bundle["knowledge_results"] == []
-    stale_reviewed = stale_bundle["completeness"]["project_knowledge"]["reviewed_records"]
-    assert stale_reviewed["available_record_count"] == 1
-    assert stale_reviewed["lifecycle"]["available_statuses"] == {"stale": 1}
-    assert stale_reviewed["lifecycle"]["excluded_statuses"] == {"stale": 1}
-    assert stale_reviewed["lifecycle"]["returned_statuses"] == {}
-    assert any(problem["code"] == "knowledge_stale_record_excluded" for problem in stale_payload["problems"])
-
-
-
-
-def test_knowledge_render_check_reports_broken_links(tmp_path: Path, monkeypatch, capsys) -> None:
-    _setup_context_workspace(tmp_path, monkeypatch)
-
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative.", "--json"]) == 0
-    candidate_id = json.loads(capsys.readouterr().out)["data"]["candidate"]["id"]
-    assert main(["knowledge", "approve", candidate_id, "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
-    render_payload = json.loads(capsys.readouterr().out)
-
-    index = tmp_path / render_payload["data"]["output"] / "INDEX.md"
-    index.write_text(index.read_text(encoding="utf-8") + "\n[Broken](missing.md)\n", encoding="utf-8")
-
-    assert main(["knowledge", "render", "--repo-id", "main", "--check", "--json"]) == 1
-    check_payload = json.loads(capsys.readouterr().out)
-    assert any(problem["code"] == "knowledge_render_broken_link" for problem in check_payload["problems"])
+    changed_bundle = stale_payload["data"]["bundle"]
+    assert changed_bundle["knowledge_results"][0]["record"]["id"] == record_id
+    changed_reviewed = changed_bundle["completeness"]["project_knowledge"]["reviewed_records"]
+    assert changed_reviewed["available_record_count"] == 1
+    assert changed_reviewed["lifecycle"]["available_statuses"] == {"reviewed": 1}
+    assert changed_reviewed["lifecycle"]["returned_statuses"] == {"reviewed": 1}
+    assert changed_reviewed["lifecycle"]["source_changed_count"] == 1
+    assert any(
+        problem["severity"] == "warning"
+        and problem["code"] == "knowledge_source_changed"
+        for problem in stale_payload["problems"]
+    )

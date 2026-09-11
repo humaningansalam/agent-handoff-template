@@ -124,11 +124,9 @@ def _write_context_pack_task(
     task_id: str,
     slug: str,
     title: str,
-    query: str,
     goal: str,
     status: str = "doing",
     context_doc: str = "docs/contracts/repoctl-context-contract.md",
-    reviewed: str = "repos/app.py",
     chosen: str = "repos/app.py",
     first_command: str | None = None,
 ) -> None:
@@ -163,9 +161,8 @@ depends_on: []
 
 ## Discovery
 
-- Candidate query: {query}
-- Candidate files reviewed: `{reviewed}`
 - Chosen files: `{chosen}`
+- Notes: none yet
 
 ## Goal
 

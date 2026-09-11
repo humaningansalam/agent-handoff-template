@@ -53,9 +53,8 @@ depends_on: []
 
 ## Discovery
 
-- Candidate query: none yet
-- Candidate files reviewed: none yet
 - Chosen files: none yet
+- Notes: none yet
 
 ## Execution Log
 
@@ -231,47 +230,31 @@ def test_repoctl_script_uses_system_python_without_workspace_residue(tmp_path: P
     assert not (tmp_path / "uv-cache").exists()
 
 
-def test_json_error_contract_includes_next_actions_for_missing_verification(tmp_path: Path, monkeypatch, capsys) -> None:
-    write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z", status="doing")
-    add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
-    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
-    assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert payload["command"] == "task.finish"
-    assert payload["data"]["task_id"] == "T-20260609184046Z"
-    assert payload["problems"][0]["code"] == "missing_verification_file"
-    assert any(action["label"] == "Complete task Verification" for action in payload["next_actions"])
-    assert all("command" not in action for action in payload["next_actions"])
-
 def test_task_doctor_is_read_only_and_reports_advisory_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     init_repo(tmp_path / "repos")
-    Path("/tmp/T-20260609184046Z-verification.md").unlink(missing_ok=True)
-    text = task_text("T-20260609184046Z", status="doing").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
+    text = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
-    before = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
+    before = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
 
     assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "task.doctor"
-    assert payload["data"]["finish_ready"] is False
-    assert payload["data"]["verification"] == {"default_source": "task_section", "task_section_complete": False}
+    assert payload["data"]["finish_ready"] is True
+    assert "verification" not in payload["data"]
     assert "missing_discovery_evidence" in payload["data"]["advisory"]
-    assert "missing_verification_file" in payload["data"]["advisory"]
-    assert any(action["label"] == "Record task discovery evidence" for action in payload["next_actions"])
+    assert any(action["label"] == "Record the task's Chosen scope" for action in payload["next_actions"])
     after = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert after == before
 
 
-def test_task_doctor_with_complete_verification_does_not_materialize_finish_writes(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_task_doctor_does_not_materialize_finish_writes(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z", status="doing").replace("- pending", "- Command: pytest\n- Result: pass")
+    text = task_text("T-20260609184046Z", status="doing")
     add_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 

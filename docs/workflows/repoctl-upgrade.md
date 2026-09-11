@@ -4,7 +4,7 @@ Use this workflow to update the workspace control plane in an adopting workspace
 
 ## Scope
 
-`repoctl upgrade` updates only manifest-managed control-plane files such as `scripts/repoctl`, `tools/repoctl/**`, task templates, contracts, and canonical workflow docs.
+`repoctl upgrade` updates manifest-managed control-plane files such as `scripts/repoctl`, `tools/repoctl/**`, task templates, and contracts. It adds canonical workflow docs only when they are missing.
 
 It must preserve project state:
 
@@ -24,11 +24,13 @@ It must preserve project state:
 3. Inspect `operations`, `preserve_paths`, and `conflicts`.
 4. Apply only the inspected plan:
    `/path/to/release/scripts/repoctl upgrade apply --workspace-root /path/to/adopter --plan-file /tmp/repoctl-upgrade-plan.json --json`
-5. Inspect the `postflight` result emitted by apply. The upgraded runtime runs in a fresh process and reports repository identity, metadata, candidate, Reviewed Knowledge, and Graph state with typed recovery commands. Run it again directly when needed:
+5. Inspect the `postflight` result emitted by apply. The upgraded runtime runs in a fresh process and reports repository identity, metadata, completion history, Knowledge projection, and Graph state. Rebuildable derived state appears as optional maintenance and does not make a successful install fail. Run postflight again directly when needed:
    `./scripts/repoctl upgrade postflight --json`
-6. Run verification:
+6. Run workspace health checks:
    `./scripts/repoctl check --json`
    `./scripts/repoctl meta check --json`
+
+An unused, absent Graph or empty Knowledge projection needs no initialization action. Postflight suggests maintenance only for derived state that exists or is required by durable records.
 
 The release archive contains runtime field-gate fixtures, not Python test modules. Source tests and release/publication policy checks remain in the source repository CI and are not distributed to adopting workspaces.
 
@@ -43,9 +45,9 @@ Planning is read-only and rejects managed-content drift when the adopter already
 
 Upgrade never rewrites task baselines, ownership decisions, completion receipts, archived tasks, or other preserved authority state. These records remain byte-for-byte unchanged while managed control-plane code is replaced. One explicit versioned migration may create a derived fixed archive locator when an exact live `follow_up_of` identity has no valid completion-receipt lookup and resolves to exactly one regular, non-symlink archived task with matching canonical ID and terminal status. The migration, authority fingerprints, target content, and existing-target state are visible in and bound to the inspected plan; any missing, ambiguous, changed, invalid, conflicting, or escaping input fails closed before apply mutates the workspace. Apply receipts record planned and applied migrations, and rollback removes a newly published locator. No archived task or receipt is changed or inferred.
 
-The upgraded runtime accepts its current schemas and the immediately preceding task-state/completion-receipt pair through one isolated, fail-closed compatibility boundary because in-flight tasks and immutable receipts are persisted public data. That boundary does not rewrite records, infer missing transitions, add aliases, or create a separate legacy store; unsupported older state, incompatible candidates, unbound repositories, and invalid or stale Graph materialization remain explicit postflight findings.
+The upgraded runtime executes current Task, Handoff, Discovery, and Knowledge formats only. Upgrade preserves older Task prose, logs, Knowledge files, and machine state without rewriting them. An agent reviews live Task/Handoff state once, writes current Chosen/Notes or binds the current Handoff as needed, and recreates useful older Knowledge as current records. Historical completion receipts retain the minimum read boundary needed by finished work and open parents. Unbound repositories and invalid authority state remain errors. A stale Graph or Knowledge projection is reported as `ready_with_maintenance` with an explicit rebuild action and exit 0.
 
-A repo-scoped completion receipt keeps the `repo_id` that owned the task when it finished; a workspace-only receipt uses `repo_id: ""` and must not claim repository evidence. After a repository split or replacement, a namespace containing only repo-scoped completion receipts is historical evidence: postflight reports it under `historical_unbound_repo_ids`, but it does not require a currently configured repository identity. Graph materializations, pending candidates, reviewed Knowledge records, and Knowledge events remain current repository state and still fail closed when their `repo_id` is unbound. Remove or rebuild obsolete generated Graph state and review invalid pending candidates explicitly; never rewrite receipt provenance to make an old identity look current.
+A repo-scoped completion receipt keeps the `repo_id` that owned the Task when it finished; a workspace-only receipt uses `repo_id: ""` and must not claim repository evidence. After a repository split or replacement, a namespace containing only repo-scoped completion receipts is historical evidence: postflight reports it under `historical_unbound_repo_ids`, but it does not require a currently configured repository identity. Current Graph and Knowledge state still requires a configured repository identity. Remove or rebuild obsolete derived state; never rewrite receipt provenance to make an old identity look current.
 
 Each apply receipt records the managed source digest and backup tree digest. `./scripts/repoctl upgrade status --json` calculates backup `availability` as `available`, `missing`, `digest_mismatch`, or `not_required` without modifying the receipt. Pre-digest receipts remain readable as `digest_unavailable`. Backups use manual retention in this version; there is no prune command.
 

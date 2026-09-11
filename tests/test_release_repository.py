@@ -165,8 +165,8 @@ def test_release_archive_smokes_context_and_knowledge_commands(tmp_path: Path) -
     checks = [
         (["./scripts/repoctl", "context", "--help"], "query"),
         (["./scripts/repoctl", "graph", "--help"], "query"),
-        (["./scripts/repoctl", "knowledge", "--help"], "render"),
-        (["./scripts/repoctl", "knowledge", "render", "--help"], "--check"),
+        (["./scripts/repoctl", "knowledge", "--help"], "add"),
+        (["./scripts/repoctl", "knowledge", "add", "--help"], "--reason"),
     ]
     for command, expected in checks:
         result = subprocess.run(
@@ -265,11 +265,11 @@ def test_v090_release_upgrade_and_fresh_postflight(tmp_path: Path) -> None:
         "--output",
         str(plan_file),
     )
-    assert plan["data"]["source_version"] == "0.11.1"
+    assert plan["data"]["source_version"] == "0.12.0"
     assert plan["data"]["operations"]
     repoctl(release_root, "upgrade", "apply", "--workspace-root", str(target), "--plan-file", str(plan_file))
     version = repoctl(target, "version")
-    assert version["data"]["pyproject_version"] == version["data"]["manifest_version"] == "0.11.1"
+    assert version["data"]["pyproject_version"] == version["data"]["manifest_version"] == "0.12.0"
     assert repoctl(target, "upgrade", "postflight")["ok"] is True
     assert not list((target / "tests").rglob("*.py"))
     assert repoctl(release_root, "upgrade", "plan", "--workspace-root", str(release_root), "--from", str(release_root))["data"]["operations"] == []

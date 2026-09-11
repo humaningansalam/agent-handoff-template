@@ -58,9 +58,7 @@ class RepositoryStateIdentityBinding(StrEnum):
 
 class RepositoryStateSource(StrEnum):
     GRAPH = "graph"
-    KNOWLEDGE_CANDIDATE = "knowledge_candidate"
     KNOWLEDGE_RECORD = "knowledge_record"
-    KNOWLEDGE_EVENT = "knowledge_event"
     COMPLETION_RECEIPT = "completion_receipt"
 
     @property
@@ -580,7 +578,6 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
 
     for state_root, source in (
         (root / ".repoctl-state/graph", RepositoryStateSource.GRAPH),
-        (root / ".repoctl-state/knowledge/candidates", RepositoryStateSource.KNOWLEDGE_CANDIDATE),
     ):
         if not state_root.is_dir():
             continue
@@ -590,7 +587,6 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
 
     for directory, pattern, source in (
         (root / "docs/knowledge/records", "K-*.json", RepositoryStateSource.KNOWLEDGE_RECORD),
-        (root / "docs/knowledge/events", "E-*.json", RepositoryStateSource.KNOWLEDGE_EVENT),
         (root / "docs/tasks/.repoctl-state/completions", "T-*.json", RepositoryStateSource.COMPLETION_RECEIPT),
     ):
         if directory.is_dir():

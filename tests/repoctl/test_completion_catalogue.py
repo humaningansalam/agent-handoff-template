@@ -31,19 +31,8 @@ from tools.repoctl.completion_catalogue import (
     completion_catalogue_status,
     versioned_completion_subject_key,
 )
-from tools.repoctl.discovery_outcomes import (
-    current_path_subject,
-)
 from tools.repoctl.graph_model import digest_data
-from tools.repoctl.repositories import RepoTarget
 from tools.repoctl.release import build_release_archive
-from tools.repoctl.result_receipts import (
-    ContextResultRequest,
-    ResultAuthority,
-    ResultProducer,
-    ResultSelection,
-    write_result_receipt,
-)
 
 
 def _digest(text: str) -> str:
@@ -121,15 +110,6 @@ def _publish_receipt_authority(root: Path, item: CompletionReceiptInput) -> None
     artifact_path.write_text(item.artifact_text, encoding="utf-8")
 
 
-def _current_file_completion_key(root: Path, path: str) -> str:
-    subject = current_path_subject(
-        root,
-        target=RepoTarget("main", root / "repos", "repos", "reserved"),
-        path=path,
-    )
-    return versioned_completion_subject_key(subject["key"], subject["version_digest"])
-
-
 def _tamper_empty_checkpoint(root: Path, repo_id: str) -> tuple[Path, str]:
     checkpoint_path = completion_catalogue_paths(root, repo_id).checkpoint
     original = checkpoint_path.read_text(encoding="utf-8")
@@ -144,7 +124,7 @@ def test_first_public_finish_can_follow_an_empty_history_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    task_id, _task_path, verification = _public_finish_fixture(
+    task_id, _task_path = _public_finish_fixture(
         tmp_path,
         monkeypatch,
         capsys,
@@ -156,7 +136,7 @@ def test_first_public_finish_can_follow_an_empty_history_rebuild(
 
     checkpoint_path, checkpoint_text = _tamper_empty_checkpoint(tmp_path, "main")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
     rejected = json.loads(capsys.readouterr().out)
     assert rejected["problems"][0]["code"] == "completion_catalogue_gap"
     assert any(
@@ -165,7 +145,7 @@ def test_first_public_finish_can_follow_an_empty_history_rebuild(
     )
 
     checkpoint_path.write_text(checkpoint_text, encoding="utf-8")
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
     finished = json.loads(capsys.readouterr().out)
     assert (tmp_path / finished["data"]["new_path"]).is_file()
     assert (tmp_path / finished["data"]["completion_receipt"]).is_file()
@@ -183,10 +163,8 @@ def test_workspace_finish_recovery_uses_the_workspace_history_namespace(
     task_id = json.loads(capsys.readouterr().out)["data"]["task_id"]
     rebuild_completion_catalogue(tmp_path, "", receipt_artifacts=[])
     _tamper_empty_checkpoint(tmp_path, "")
-    verification = tmp_path / "workspace-verification.md"
-    verification.write_text("- Checked workspace docs\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
 
     rejected = json.loads(capsys.readouterr().out)
     assert rejected["data"]["repo_id"] == ""
@@ -483,7 +461,7 @@ def _public_finish_fixture(
     *,
     slug: str,
     extra_files: dict[str, str] | None = None,
-) -> tuple[str, Path, Path]:
+) -> tuple[str, Path]:
     write_workspace(root)
     repo = root / "repos"
     init_committed_product_repo(repo, {"app.py": "value = 1\n", **(extra_files or {})})
@@ -512,10 +490,6 @@ def _public_finish_fixture(
             "discovery",
             "add",
             task_id,
-            "--query",
-            "change app value",
-            "--reviewed",
-            "repos/app.py",
             "--chosen",
             "repos/app.py",
             "--json",
@@ -523,9 +497,7 @@ def _public_finish_fixture(
     ) == 0
     capsys.readouterr()
 
-    verification = root / "verification.md"
-    verification.write_text("- Ran focused catalogue integration check\n- Result: pass\n", encoding="utf-8")
-    return task_id, task_path, verification
+    return task_id, task_path
 
 
 def _run_release_repoctl(root: Path, *args: str, expected: int = 0) -> dict[str, object]:
@@ -583,15 +555,9 @@ def test_release_archive_closes_first_and_later_completion_tails_and_recovers(
             "discovery",
             "add",
             task_id,
-            "--query",
-            f"catalogue release decision {index}",
-            "--reviewed",
-            "repos/app.py",
             "--chosen",
             "repos/app.py",
         )
-        verification = root / f"verification-{index}.md"
-        verification.write_text("- Runtime journey passed\n", encoding="utf-8")
         if index == 2:
             _run_release_repoctl(root, "graph", "build", "--repo-id", "main")
         result = _run_release_repoctl(
@@ -599,8 +565,6 @@ def test_release_archive_closes_first_and_later_completion_tails_and_recovers(
             "task",
             "finish",
             task_id,
-            "--verification-file",
-            verification.as_posix(),
         )
         finished.append(result)
 
@@ -700,14 +664,14 @@ def test_public_task_finish_publishes_catalogue_ingress_and_hot_frontier(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    task_id, _task_path, verification = _public_finish_fixture(
+    task_id, _task_path = _public_finish_fixture(
         tmp_path,
         monkeypatch,
         capsys,
         slug="catalogue-public-finish",
     )
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     receipt_path = tmp_path / payload["data"]["completion_receipt"]
     archive_path = tmp_path / payload["data"]["new_path"]
@@ -728,178 +692,8 @@ def test_public_task_finish_publishes_catalogue_ingress_and_hot_frontier(
 
     refresh = ingest_completion_catalogue_tail(tmp_path, "main")
     assert refresh.ingested_count == 1
-    frontier = current_completion_frontier(tmp_path, "main", _current_file_completion_key(tmp_path, "app.py"))
+    frontier = current_completion_frontier(tmp_path, "main", file_completion_subject_key("app.py"))
     assert [record["task_id"] for record in frontier.records] == [task_id]
-
-
-def test_public_finish_projects_discovery_roles_and_verification_to_subject_frontier(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    task_id, _task_path, verification = _public_finish_fixture(
-        tmp_path,
-        monkeypatch,
-        capsys,
-        slug="catalogue-outcome-frontier",
-    )
-    decoy = tmp_path / "repos/decoy.py"
-    decoy.write_text("value = 0\n", encoding="utf-8")
-    assert main(
-        [
-            "task",
-            "discovery",
-            "add",
-            task_id,
-            "--reviewed",
-            "repos/decoy.py",
-            "--excluded",
-            "repos/decoy.py",
-            "--json",
-        ]
-    ) == 0
-    capsys.readouterr()
-    decoy.unlink()
-    subject_evidence = tmp_path / "outcome-verification.txt"
-    subject_evidence.write_text("app.py verification passed\n", encoding="utf-8")
-    assert main(
-        [
-            "task",
-            "verification",
-            "add",
-            task_id,
-            "--status",
-            "passed",
-            "--evidence-ref",
-            subject_evidence.as_posix(),
-            "--subject",
-            "app.py",
-            "--json",
-        ]
-    ) == 0
-    capsys.readouterr()
-
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
-    ingest_completion_catalogue_tail(tmp_path, "main")
-
-    app = current_completion_frontier(tmp_path, "main", _current_file_completion_key(tmp_path, "app.py"))
-    app_role = app.records[0]["outcome"]["subject_roles"]["file:app.py"]
-    assert {
-        key: app_role[key]
-        for key in (
-            "reviewed",
-            "excluded",
-            "chosen",
-            "outside_candidate_set",
-            "verification_statuses",
-        )
-    } == {
-        "reviewed": True,
-        "excluded": False,
-        "chosen": True,
-        "outside_candidate_set": False,
-        "verification_statuses": ["passed"],
-    }
-    outcome_subject = next(
-        subject
-        for subject in app.records[0]["outcome"]["subject_roles"].values()
-        if subject["key"] == "file:app.py"
-    )
-    assert outcome_subject["kind"] == "file"
-    assert outcome_subject["identity"] == {"path": "app.py"}
-    assert outcome_subject["version_digest"].startswith("sha256:")
-    decoy_frontier = current_completion_frontier(
-        tmp_path,
-        "main",
-        _receipt_file_completion_key(receipt, "decoy.py"),
-    )
-    decoy_role = decoy_frontier.records[0]["outcome"]["subject_roles"]["file:decoy.py"]
-    assert decoy_role["reviewed"] is True
-    assert decoy_role["excluded"] is True
-    assert decoy_role["chosen"] is False
-
-
-def test_hot_outcome_projection_is_file_only_and_keeps_changed_entry_witness(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    task_id, _task_path, verification = _public_finish_fixture(
-        tmp_path,
-        monkeypatch,
-        capsys,
-        slug="catalogue-file-only-hot-outcome",
-        extra_files={"guide.md": "# Guide\n"},
-    )
-    repo = tmp_path / "repos"
-    target = RepoTarget("main", repo, "repos", "reserved")
-    selections = [
-        ResultSelection(ResultAuthority.SOURCE, "repos/app.py"),
-        ResultSelection(ResultAuthority.DOCUMENT, "repos/guide.md"),
-        ResultSelection(
-            ResultAuthority.GRAPH,
-            '{"in_file":"app.py","kind":"symbol","value":"run"}',
-        ),
-        ResultSelection(ResultAuthority.GRAPH, "run->save"),
-    ]
-    result_id = digest_data({"mixed completion subjects": task_id})
-    write_result_receipt(
-        tmp_path,
-        target=target,
-        producer=ResultProducer.CONTEXT,
-        result_id=result_id,
-        request=ContextResultRequest(query="change app value", mode="auto"),
-        selections=selections,
-    )
-    for selection in selections:
-        assert main(
-            [
-                "task",
-                "discovery",
-                "add",
-                task_id,
-                "--result-producer",
-                "context",
-                "--result-id",
-                result_id,
-                "--result-authority",
-                selection.authority.value,
-                "--result-ref",
-                selection.ref,
-                "--json",
-            ]
-        ) == 0
-        capsys.readouterr()
-
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    receipt_path = tmp_path / payload["data"]["completion_receipt"]
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 4
-    subject_kinds = {subject["kind"] for subject in receipt["discovery_outcome"]["subjects"]}
-    assert subject_kinds == {"file", "document", "symbol", "relationship_fact"}
-
-    file_subject = next(
-        subject
-        for subject in receipt["discovery_outcome"]["subjects"]
-        if subject["kind"] == "file" and subject["identity"] == {"path": "app.py"}
-    )
-    file_key = versioned_completion_subject_key(file_subject["key"], file_subject["version_digest"])
-    paths = completion_catalogue_paths(tmp_path, "main")
-    event = json.loads(next(paths.events_directory.glob("*.json")).read_text(encoding="utf-8"))
-    assert event["subject_keys"] == [file_key]
-    assert event["hot_witnesses"][file_key]["graph"]["changed_entry"] == {
-        "change": "modified",
-        "path": "app.py",
-    }
-    ingest_completion_catalogue_tail(tmp_path, "main")
-    frontier = current_completion_frontier(tmp_path, "main", file_key)
-    assert set(frontier.records[0]["outcome"]["subject_roles"]) == {"file:app.py"}
-    exact = lookup_completion_exact(tmp_path, "main", task_id)
-    assert exact is not None
-    assert {subject["kind"] for subject in exact.receipt["discovery_outcome"]["subjects"]} == subject_kinds
 
 
 def test_public_task_finish_rolls_back_catalogue_ingress_when_board_write_fails(
@@ -907,7 +701,7 @@ def test_public_task_finish_rolls_back_catalogue_ingress_when_board_write_fails(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    task_id, task_path, verification = _public_finish_fixture(
+    task_id, task_path = _public_finish_fixture(
         tmp_path,
         monkeypatch,
         capsys,
@@ -928,7 +722,7 @@ def test_public_task_finish_rolls_back_catalogue_ingress_when_board_write_fails(
 
     monkeypatch.setattr("tools.repoctl.cli.atomic_write", fail_board_write)
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 2
+    assert main(["task", "finish", task_id, "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "io_error"
     assert attempted_catalogue_paths

@@ -102,7 +102,7 @@ def test_registered_command_help_executes_and_visible_commands_describe_required
             elif action.required or (not action.option_strings and action.dest != "help"):
                 assert action.help, f"missing help for {current.prog} {action.dest}"
 
-    assert len(commands) == 87
+    assert len(commands) == 73
     source_root = Path(__file__).resolve().parents[2]
     for command in commands:
         result = subprocess.run(
@@ -180,24 +180,29 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
     exercise(_next_actions_for_problems([{"code": "knowledge_projection_unavailable"}], data={"repository": {"id": "main"}}))
     exercise(_next_actions_for_problems([{"code": "missing_upgrade_plan"}]))
 
-    assert main(["knowledge", "candidate", "build", "--source", "docs/contracts/repoctl-context-contract.md", "--repo-id", "main", "--kind", "decision", "--claim", "Context remains non-authoritative.", "--json"]) == 0
+    assert main(
+        [
+            "knowledge",
+            "add",
+            "--source",
+            "docs/contracts/repoctl-context-contract.md",
+            "--repo-id",
+            "main",
+            "--kind",
+            "decision",
+            "--claim",
+            "Context remains non-authoritative.",
+            "--reason",
+            "Task owns scope while Context supplies evidence.",
+            "--json",
+        ]
+    ) == 0
     exercise(json.loads(capsys.readouterr().out)["next_actions"])
 
     task_id = "T-20260902030000Z"
     add_board_task(tmp_path, f"{task_id}--resume.md", task_text(task_id))
     exercise(_task_next_actions([{"code": "repo_head_changed_since_start"}], {"task_id": task_id}))
     exercise(_task_next_actions([{"code": "task_handoff_stale"}], {"task_id": task_id, "resume_guidance": {"handoff": {"status": "stale"}}}))
-    exercise(
-        _task_next_actions(
-            [{"code": "context_pack_stale"}],
-            {
-                "task_id": task_id,
-                "task": {"path": f"docs/tasks/{task_id}--resume.md", "repo_id": "main"},
-                "resume_guidance": {"context_pack": {"status": "stale", "path": f".repoctl-state/context-pack/{task_id}.json"}},
-            },
-        )
-    )
-
     graph_actions = _next_actions_for_problems(
             [{"code": "context_graph_seed_identity_unavailable"}],
             data={
@@ -250,25 +255,6 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: collection)
     assert main(["repo", "list", "--json"]) == 0
     exercise(json.loads(capsys.readouterr().out)["next_actions"], workspace=collection)
-
-    verification_actions = _task_next_actions(
-        [{"code": "verification_file_inside_repo", "path": "repos/report.md"}],
-        {"task": {"path": "docs/tasks/T-example.md"}},
-    )
-    assert verification_actions == [
-        {"label": "Move verification evidence to an existing workspace file outside repos/", "path": "repos/report.md"}
-    ]
-    alignment_actions = _task_next_actions(
-        [{"code": "discovery_outcome_chosen_mismatch"}],
-        {
-            "task_id": task_id,
-            "task": {"path": f"docs/tasks/{task_id}--resume.md"},
-            "discovery_outcome_alignment": {"invalid_outcome_subject_ids": ["invalid"]},
-        },
-    )
-    assert alignment_actions[0]["target_ref"] == "data.discovery_outcome_alignment.invalid_outcome_subject_ids"
-    assert alignment_actions[1]["label"] == "Open the Task Discovery section"
-
 
 def test_repository_errors_return_next_actions(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_workspace(tmp_path, monkeypatch)

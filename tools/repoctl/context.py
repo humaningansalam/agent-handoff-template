@@ -53,7 +53,7 @@ from .graph_model import GraphContextAnchor, GraphContextAnchorKind, digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
 from .io import RepoctlError
-from .knowledge_candidates import (
+from .knowledge_records import (
     KnowledgeExplicitPathKind,
     KnowledgeExplicitPathRole,
     KnowledgeQueryMatchStrength,
@@ -420,7 +420,6 @@ def build_context_bundle(
             root,
             repo_id=target.id,
             query=query,
-            include_stale=False,
             limit=3,
             explain=explain,
             related_paths=related_paths,
@@ -750,7 +749,13 @@ def build_context_bundle(
     if graph_anchor_resolution is not None:
         selection["graph_anchor"] = graph_anchor_resolution.to_dict()
     if not knowledge_queried and query_mode in {"authority_or_contract", "invariant", "past_decision", "failure_mode"}:
-        knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(root, repo_id=target.id, query=query, include_stale=False, limit=10, explain=explain)
+        knowledge_data, knowledge_problems, knowledge_warnings = query_knowledge_records(
+            root,
+            repo_id=target.id,
+            query=query,
+            limit=10,
+            explain=explain,
+        )
         knowledge_queried = True
         problems.extend(knowledge_problems)
         problems.extend(knowledge_warnings)
@@ -1414,10 +1419,20 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     )
     graph_anchor = compact_completeness.get("graph_anchor") if isinstance(compact_completeness.get("graph_anchor"), dict) else {}
     working_set_coverage = compact_completeness.get("working_set_coverage") if isinstance(compact_completeness.get("working_set_coverage"), dict) else {}
+    guide = compact_context_bundle(bundle).get("guide", {})
+    implementation = guide.get("first_implementation_file", {})
+    test = guide.get("test", {})
+    rule = guide.get("relevant_rule", {})
+    prior = guide.get("prior_reason", {})
     lines = [
         "# Context Bundle",
         "",
-        f"- Query: {query.get('text', '')}",
+        f"- Current intent: {guide.get('current_intent', query.get('text', ''))}",
+        f"- First implementation file: `{implementation.get('path', '')}` — {implementation.get('reason', '') or implementation.get('status', '')}",
+        f"- Test: `{test.get('status', 'unconfirmed')}` `{test.get('path', '')}` — {test.get('reason', '')}",
+        f"- Relevant rule: `{rule.get('path', '')}` — {rule.get('reason', '')}",
+        f"- Prior reason: `{prior.get('path', '')}` — {prior.get('reason', '')}",
+        f"- Next narrow action: {guide.get('next_narrow_action', '')}",
         f"- Mode: `{query.get('mode', '')}`",
         f"- Repository: `{bundle.repository.get('id', '')}`",
         f"- Bundle digest: `{bundle.bundle_digest}`",
@@ -1497,7 +1512,16 @@ def render_context_markdown(bundle: ContextBundle) -> str:
 
 def render_context_text(bundle: ContextBundle) -> str:
     data = compact_context_bundle(bundle)
+    guide = data.get("guide") if isinstance(data.get("guide"), dict) else {}
+    implementation = guide.get("first_implementation_file") if isinstance(guide.get("first_implementation_file"), dict) else {}
+    test = guide.get("test") if isinstance(guide.get("test"), dict) else {}
     lines = [
+        f"intent {guide.get('current_intent', bundle.query.get('text', ''))}",
+        f"first_file {implementation.get('path', '')} - {implementation.get('reason', '') or implementation.get('status', '')}",
+        f"test status={test.get('status', 'unconfirmed')} path={test.get('path', '')} - {test.get('reason', '')}",
+        f"rule {(guide.get('relevant_rule') or {}).get('path', '')}",
+        f"prior_reason {(guide.get('prior_reason') or {}).get('path', '')}",
+        f"next {guide.get('next_narrow_action', '')}",
         f"context repository={bundle.repository.get('id', '')} mode={bundle.query.get('mode', '')}",
     ]
     graph_anchor = (
@@ -1605,6 +1629,7 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "authoritative": bundle.authoritative,
         "repository": bundle.repository,
         "query": bundle.query,
+        "guide": _context_query_guide(groups, query=bundle.query),
         "completeness": _compact_completeness(
             bundle.completeness,
             working_set_coverage=projection.stats.get("working_set_coverage"),
@@ -1619,6 +1644,51 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "graph_seed_refs": [seed.to_dict() for seed in bundle.graph_seed_refs],
         "continuations": projection.continuations,
         "bundle_digest": bundle.bundle_digest,
+    }
+
+
+def _context_query_guide(
+    groups: dict[str, list[dict[str, Any]]],
+    *,
+    query: dict[str, Any],
+) -> dict[str, Any]:
+    """Put the first useful reading decision ahead of retrieval diagnostics."""
+
+    def first(group: str) -> dict[str, Any] | None:
+        values = groups.get(group, [])
+        return values[0] if values else None
+
+    def summary(item: dict[str, Any] | None, *, status: str) -> dict[str, Any]:
+        if item is None:
+            return {"status": "unconfirmed", "path": "", "reason": ""}
+        source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+        return {
+            "status": status,
+            "path": str(source_ref.get("path") or item.get("record_id") or ""),
+            "reason": str(item.get("selection_reason") or item.get("status") or ""),
+        }
+
+    implementation = first("likely_change_surface")
+    test = first("tests_and_verification")
+    test_provenance = test.get("provenance") if isinstance(test, dict) and isinstance(test.get("provenance"), dict) else {}
+    edge_kinds = test_provenance.get("edge_kinds") if isinstance(test_provenance.get("edge_kinds"), list) else []
+    test_status = "confirmed_direct_test" if "TESTS_FILE" in edge_kinds else "candidate" if test is not None else "unconfirmed"
+    rule = first("must_read")
+    prior = first("reviewed_knowledge") or first("related_history")
+    implementation_summary = summary(implementation, status="candidate")
+    first_path = implementation_summary["path"]
+    next_action = (
+        f"Open {first_path} and inspect it against the cited reason."
+        if first_path
+        else "Open the relevant rule or refine the query to one implementation file."
+    )
+    return {
+        "current_intent": str(query.get("text") or ""),
+        "first_implementation_file": implementation_summary,
+        "test": summary(test, status=test_status),
+        "relevant_rule": summary(rule, status="source"),
+        "prior_reason": summary(prior, status="recorded"),
+        "next_narrow_action": next_action,
     }
 
 

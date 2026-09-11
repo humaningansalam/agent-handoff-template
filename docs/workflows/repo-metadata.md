@@ -268,7 +268,7 @@ Status output keeps separate views for store presence, index coverage, semantic 
 
 When there are no product repo changes and the selected product repo is a valid independent git repository, `repoctl task finish` skips the gate with `reason = no_repo_changes`.
 
-If `repos/` exists but its git metadata is missing or unusable, changed-file metadata status/check and task finish must fail with `repo_git_unavailable`. Treat this as a blocked verification gate, not as `no_repo_changes`.
+If `repos/` exists but its git metadata is missing or unusable, changed-file metadata status/check and task finish must fail with `repo_git_unavailable`. Treat this as a repository configuration error, not as `no_repo_changes`.
 
 ## Discovery Before Task Promotion
 
@@ -286,7 +286,7 @@ Then inspect the candidate files directly in the selected product repo before cr
 
 Discovery output is evidence, not authority:
 
-- Good: record which candidates were reviewed and why the task scope was chosen.
+- Good: inspect candidates directly, then record Chosen and a short scope reason only when it will help the next reader.
 - Required: for Backlog-origin tasks that change a product repo, fill the task's `## Discovery` section before `repoctl task finish`.
 - Bad: create a task or choose files solely because `meta suggest` returned them.
 - Forbidden: parse Backlog or PRD prose inside repoctl to infer area, files, validation, or task metadata.

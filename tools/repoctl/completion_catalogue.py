@@ -812,8 +812,9 @@ def completion_graph_inputs(
             "content_sha256": task["content_sha256"],
             "changed_entries": changed_entries,
             "repo_evidence": task["repo_evidence"],
-            "verification": task["verification"],
         }
+        if task["verification"]:
+            receipt["verification"] = task["verification"]
         records.append(
             CompletionGraphInput(
                 event_id=task["event_id"],
@@ -2030,18 +2031,21 @@ def _graph_subject_witness(receipt: Mapping[str, Any], *, subject_key: str) -> d
             break
     repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), Mapping) else {}
     verification = receipt.get("verification") if isinstance(receipt.get("verification"), Mapping) else {}
-    return {
+    witness = {
         "task_path_at_completion": str(receipt.get("task_path_at_completion") or ""),
         "repo_evidence": {
             "attribution": str(repo_evidence.get("attribution") or "none"),
         },
-        "verification": {
-            key: verification[key]
-            for key in ("source_sha256", "normalized_sha256", "stored_sha256", "truncated")
-            if key in verification and isinstance(verification[key], (str, bool))
-        },
         **({"changed_entry": changed_entry} if changed_entry is not None else {}),
     }
+    legacy_verification = {
+        key: verification[key]
+        for key in ("source_sha256", "normalized_sha256", "stored_sha256", "truncated")
+        if key in verification and isinstance(verification[key], (str, bool))
+    }
+    if legacy_verification:
+        witness["verification"] = legacy_verification
+    return witness
 
 
 def _apply_event(projection: Mapping[str, Any], event: Mapping[str, Any], *, policy: CompletionCataloguePolicy) -> dict[str, Any]:

@@ -8,7 +8,7 @@ import subprocess
 
 from tools.repoctl.cli import main
 from tests.repoctl.context_test_helpers import _write_completion_receipt
-from tests.repoctl.task_lifecycle_helpers import add_board_task, commit_all, task_text, write_verification
+from tests.repoctl.task_lifecycle_helpers import add_board_task, commit_all, task_text
 from tests.repoctl.workspace.test_check import write_workspace
 
 
@@ -153,14 +153,14 @@ def test_root_completion_receipt_does_not_create_repository_namespace(tmp_path: 
     task_id = "T-20260609184046Z"
     text = task_text(task_id, status="doing").replace('area: ""', 'area: "ops"')
     add_board_task(tmp_path, f"{task_id}--workspace-update.md", text)
-    verification = write_verification(tmp_path, "workspace update verified\n")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
     receipt = json.loads((tmp_path / finish_payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 5
     assert receipt["repo_id"] == ""
+    assert "verification" not in receipt
 
     assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 0
     postflight_payload = json.loads(capsys.readouterr().out)
@@ -200,12 +200,11 @@ def test_repo_scoped_completion_receipt_with_empty_identity_fails_closed(tmp_pat
         .replace('repo_id: ""', 'repo_id: "main"')
     )
     add_board_task(tmp_path, f"{task_id}--repo-update.md", text)
-    verification = write_verification(tmp_path, "repository update verified\n")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "start", task_id, "--json"]) == 0
     capsys.readouterr()
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
     receipt_path = tmp_path / finish_payload["data"]["completion_receipt"]
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))

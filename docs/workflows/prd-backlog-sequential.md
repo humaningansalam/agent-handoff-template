@@ -1,6 +1,6 @@
 ---
 title: PRD Backlog Triage and Sequential Execution
-description: Turn PRD gaps into opaque Backlog items, then promote and finish them one at a time with discovery evidence.
+description: Turn PRD gaps into opaque Backlog items, then promote and finish them one at a time with explicit Chosen scope.
 tags:
   - prd
   - backlog
@@ -28,7 +28,7 @@ This workflow is agent-facing. Users do not need to mention `repoctl`, Backlog, 
 - Do not create implementation tasks while merely listing PRD gaps.
 - Do not promote a Backlog item from memory; always `backlog list` and `backlog show` first.
 - Do not implement multiple Backlog items in one task unless the user explicitly asks for a combined scope and the items are inseparable.
-- Do not finish a Backlog-origin repo task without recorded `## Discovery` evidence.
+- Do not finish a Backlog-origin repo task whose product changes are missing from its Chosen scope.
 
 ## Phase 1: PRD Gap Triage
 
@@ -98,15 +98,16 @@ Required sequence:
 ./scripts/repoctl task start T-...
 ```
 
-Before editing `repos/`, fill the task's `## Discovery` section with:
+Before editing `repos/`, record the canonical workspace-relative files that the task may change:
 
-```md
-- Candidate query: `<the repository question this task must answer>`
-- Candidate files reviewed: `repos/path`, ...
-- Chosen files: `repos/path`, ...
+```bash
+./scripts/repoctl task discovery add T-... \
+  --chosen repos/path \
+  --note "Why this scope or source matters" \
+  --json
 ```
 
-Record commands under Verification or the execution log when they matter; the Candidate query is the problem statement, not a feature-use log.
+Repeat `--chosen` for a coherent multi-file change. The Note is optional. Do not register searches, opened files, rejected candidates, or tool use.
 
 Then implement the smallest complete change for that one item.
 
@@ -119,7 +120,7 @@ cd <selected-product-repo> && <focused test or smoke command>
 ./scripts/repoctl meta check --changed --json
 ```
 
-Record the commands and results in the task `## Verification`, then finish:
+Optionally keep a concise command or result in `## Verification`, then finish:
 
 ```bash
 ./scripts/repoctl task finish T-... --json
@@ -133,8 +134,8 @@ Expected final state for one completed item:
 - promoted Backlog item removed
 - finished task archived under `docs/archive/tasks/`
 - Board has no stale row for the finished task
-- verification section includes tests and metadata gate evidence
-- `## Discovery` remains in the archived task
+- the archived Task retains its Chosen scope and any useful Notes
+- optional Verification prose is preserved without becoming a finish gate
 
 ## Phase 5: Continue Sequentially
 
@@ -150,4 +151,4 @@ If an item is ambiguous, do not guess. Leave it in Backlog, or create a task and
 | Parsing `Area:` or `Likely files:` from Backlog raw text | Agent reads context and passes explicit task fields |
 | Running `meta suggest` and blindly editing the first result | Inspect files directly before choosing scope |
 | Finishing several Backlog items in one archive task | Promote and finish one item at a time |
-| Leaving `## Discovery` placeholders in a Backlog-origin repo task | Fill discovery evidence before finish |
+| Registering every search and opened file | Record only Chosen scope and a useful Note when needed |

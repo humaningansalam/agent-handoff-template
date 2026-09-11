@@ -81,22 +81,15 @@ def commit_all(repo: Path, message: str = "base") -> None:
     subprocess.run(["git", "commit", "-m", message], cwd=repo, check=True, stdout=subprocess.DEVNULL)
 
 
-def write_verification(root: Path, text: str = "ok\n") -> Path:
-    verification = root / "verification.md"
-    verification.write_text(text, encoding="utf-8")
-    return verification
-
-
 def start_task_for_finish(monkeypatch, capsys, root: Path, task_id: str = "T-20260609184046Z") -> None:
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: root)
     assert main(["task", "start", task_id, "--json"]) == 0
     capsys.readouterr()
 
 
-def record_discovery(root: Path, task_id: str, *, query: str, reviewed: str, chosen: str) -> None:
+def record_discovery(root: Path, task_id: str, *, chosen: str) -> None:
     task_path = next((root / "docs/tasks").glob(f"{task_id}--*.md"))
     text = task_path.read_text(encoding="utf-8")
-    reviewed_values = [value.strip() for value in reviewed.split(",") if value.strip()]
     chosen_values = [value.strip() for value in chosen.split(",") if value.strip()]
 
     def field(name: str, values: list[str]) -> str:
@@ -104,10 +97,6 @@ def record_discovery(root: Path, task_id: str, *, query: str, reviewed: str, cho
             return f"- {name}: `{values[0]}`\n"
         return f"- {name}:\n" + "".join(f"  - `{value}`\n" for value in values)
 
-    discovery = (
-        f"- Candidate query: `{query}`\n"
-        + field("Candidate files reviewed", reviewed_values)
-        + field("Chosen files", chosen_values)
-    )
+    discovery = field("Chosen files", chosen_values) + "- Notes: none yet\n"
     text = replace_section(text, "Discovery", discovery)
     task_path.write_text(text, encoding="utf-8")

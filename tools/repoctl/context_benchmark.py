@@ -282,7 +282,6 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     problem_codes = [problem.code for problem in problems]
     stale_knowledge_excluded = problem_codes.count("knowledge_stale_record_excluded")
     superseded_knowledge_excluded = problem_codes.count("knowledge_superseded_record_excluded")
-    deprecated_knowledge_excluded = problem_codes.count("knowledge_deprecated_record_excluded")
 
     top5 = evidence_refs[:5]
     top10 = evidence_refs[:10]
@@ -351,7 +350,6 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
             "knowledge_source_status_current": stale_knowledge_excluded == 0 and all(status.get("digest_matches") is True for status in knowledge_source_statuses),
             "knowledge_stale_record_excluded": stale_knowledge_excluded,
             "knowledge_superseded_record_excluded": superseded_knowledge_excluded,
-            "knowledge_deprecated_record_excluded": deprecated_knowledge_excluded,
         },
         "required_found_at_5": required_top5,
         "required_found_at_10": required_top10,
@@ -408,7 +406,6 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "knowledge_source_status_current": all(metric["knowledge_source_status_current"] for metric in metrics),
         "knowledge_stale_record_excluded": sum(int(metric["knowledge_stale_record_excluded"]) for metric in metrics),
         "knowledge_superseded_record_excluded": sum(int(metric["knowledge_superseded_record_excluded"]) for metric in metrics),
-        "knowledge_deprecated_record_excluded": sum(int(metric["knowledge_deprecated_record_excluded"]) for metric in metrics),
         "mean_graph_edge_recall": _mean(metric["graph_edge_recall"] for metric in metrics if metric["required_graph_edge_count"]),
         "graph_edge_expected_questions": sum(1 for metric in metrics if metric["required_graph_edge_count"]),
         "forbidden_selected": sum(int(metric["forbidden_selected"]) for metric in metrics),
@@ -450,7 +447,6 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
             "cross_repo_ref_count": sum(int(metric.get("cross_repo_ref_count") or 0) for metric in items),
             "knowledge_stale_record_excluded": sum(int(metric.get("knowledge_stale_record_excluded") or 0) for metric in items),
             "knowledge_superseded_record_excluded": sum(int(metric.get("knowledge_superseded_record_excluded") or 0) for metric in items),
-            "knowledge_deprecated_record_excluded": sum(int(metric.get("knowledge_deprecated_record_excluded") or 0) for metric in items),
         }
     return summary
 

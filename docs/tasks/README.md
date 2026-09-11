@@ -1,40 +1,53 @@
 # Tasks
 
-This folder contains live task files, parent tasks, and canonical creation templates. Done/canceled tasks are immutable; child files may remain here only until their parent archives them.
+This directory contains live Task files and the canonical creation templates. Standalone done or canceled Tasks move to `docs/archive/tasks/`; completed child files may remain here until their parent closes.
 
-Create most tasks with `./scripts/repoctl task create "Task title"` from the workspace root.
-Use `./scripts/repoctl task create --type parent "Parent title"` for root-only coordination; product changes belong to repo-scoped child tasks.
-Use `./scripts/repoctl backlog add/list/show/remove` to manage human-written Backlog items consistently. After reading an item and enough repo context, create an executable task with explicit `./scripts/repoctl task create --backlog-id BL-... ...` arguments and refine Goal, Discovery, Verification, and Handoff as work proceeds.
-repoctl uses `TEMPLATE.md` or `PARENT_TEMPLATE.md` internally; these files are operational templates, not example tasks.
+Create product work with:
 
-Backlog text is free-form planning text. repoctl treats each backlog item as an opaque raw block; it must not infer `area`, likely files, expected behavior, validation, or task body sections from that text.
-Repo-scoped live tasks should fill in structured `## Discovery` with the inspected sources, candidate files, and selected files; `repoctl check` warns when this evidence is missing. The finish gate blocks placeholder discovery for Backlog-origin repo changes.
-Use `repoctl meta query` and `repoctl meta suggest` only as discovery aids; inspect the files yourself and keep the final task scope explicit.
-Use `./scripts/repoctl task discovery add T-... --query "..." --reviewed repos/path --chosen repos/path --json` to record structured Discovery without hand-editing the task file. A `todo` task may do this before start; a `doing` or `blocked` task must have current task-start evidence with the same repository scope. Free-form Discovery prose is not enough unless it preserves the exact `Candidate query`, `Candidate files reviewed`, and `Chosen files` fields, and explicit Chosen values must be canonical workspace-relative paths.
-One Candidate query owns the active Discovery episode. The same query accumulates Reviewed files, notes, selected results, and explicit exclusions; a distinct query retains Chosen scope while replacing those earlier episode values in the task view and sealing meaningful prior outcome state. Reviewed minus Chosen is neutral supporting evidence, not an exclusion. Use `--excluded repos/path` only for a file explicitly rejected for that episode; it must also be Reviewed and cannot be Chosen. Replace the Chosen set with `--replace-chosen ... --reason "..."` only when edit scope changes.
-When a specific Context or Graph result materially informed the selection, optionally copy `producer`, `result_id`, and one exact `{authority, ref}` tuple from its public `data.result_receipt` into `task discovery add`. For Context, the default projection exposes visible tuples at `compact.representative_citations[*].primary_citation`; rerun with `--full` and select from `manifest.items` when an omitted member is the relevant evidence. Graph receipts expose `selectable` directly. repoctl validates the tuple against the immutable stored manifest and freezes its canonical member capsule, request identity, episode identity, and receipt digest in task-owned outcome state; do not invent a digest/ref or select any other full-only diagnostic. This is provenance, not mandatory feature-use logging.
-Run compact `repoctl context query` when the intent is ambiguous and inspect the suggested product files directly. Selecting its receipt sets the exact Context query as the episode owner without requiring duplicate query text. Refine and repeat until the evidence is sufficient, then record Reviewed and Chosen files. A scoped Context Pack is optional when a durable handoff or relationship summary is useful.
+```bash
+./scripts/repoctl task create --start --json "Task title"
+```
 
-When an executed check has subject- or claim-level meaning, record it with `./scripts/repoctl task verification add T-... --status passed --evidence-ref verification.txt --subject repos/path --json`. Every verification record requires current task-start evidence. A started root-only task may instead use `--artifact docs/reviews/review.md`; its immutable start scope must also be root-only. This structured record complements `## Verification`; repoctl does not parse the prose to infer a status. Task finish freezes the recorded outcome into the immutable completion receipt.
+Use `--type parent` only to coordinate independently verifiable repo-scoped child Tasks. Use `backlog add/list/show/remove` for deferred prose, then create an explicit Task with `--backlog-id` when work starts. Repoctl never derives area, files, expected behavior, or checks from Backlog text.
 
-Use `./scripts/repoctl task resume --json` to obtain the workspace lifecycle's typed `no_live | single_live | ambiguous` selection. For `ambiguous`, run `./scripts/repoctl task resume <TASK_ID> --json` to select one returned live task without persisting selection state. It never falls back to archived tasks and exposes Handoff prose only for one current active binding. Use `task show T-... --summary --json` for explicit compact inspection; omit `--summary` only when the full task body is needed. Use `task log append T-... "message" --json` for timestamped execution log entries.
-Before pausing or transferring work, update all four Handoff fields and explicitly bind the reviewed state with `./scripts/repoctl task handoff bind T-... --json`. Generated prose contains exactly one `<!-- repoctl: generated-handoff -->` marker and cannot be bound until the marker is removed. Repoctl never guesses authorship from wording. If a generated Pack should travel with the Handoff, review it and add `--context-pack .repoctl-state/context-pack/<file>`. Start/show never create or refresh this binding. Public freshness is `current | inactive | historical`; later task, log, verification, Discovery, child-lifecycle, repository-content, or bound-Pack input changes make current guidance inactive. This freshness status is independent of repository lifecycle health: `task show` reports the latter as `data.health`, while `task resume` reports it as `data.resume_guidance.health`, and a current Handoff does not certify a healthy lifecycle.
-When `## Verification` is complete, finish with `./scripts/repoctl task finish T-... --json`. Pass `--verification-file` only when the evidence already exists as an external file.
-Blocking and cancellation use separate transition intent: pass exactly one of `--reason` or `--reason-file`. Repoctl appends the normalized reason to `## Execution Log` and preserves `## Verification` unchanged. Dirty cancellation additionally requires `--allow-dirty-cancel` and records the complete residue and baseline-conflict path sets.
+## Current scope
 
-Agents and humans write task meaning in Markdown. repoctl alone writes `.repoctl-state` baseline data, fingerprints, result receipts, resume bindings, ownership decisions, completion receipts, Closure, Board changes, and archive transitions.
+For repo-scoped work, `## Discovery` contains one authoritative Chosen set plus optional Notes:
 
-For live tasks, keep `First file to open` pointed at an existing workspace file. repoctl preserves `First command to run` as text only; it does not shell-parse or execute that field. After completion, `Last Active Handoff` is historical and is not revalidated against the current filesystem.
+```bash
+./scripts/repoctl task discovery add T-... \
+  --chosen repos/src/owner.py \
+  --chosen repos/tests/test_owner.py \
+  --note "owner and its direct behavior check" \
+  --json
+```
 
-Do not reopen a completed task ID. Create a new task with `--follow-up-of T-old`; the new task receives a new baseline while the completed task and receipt remain unchanged.
+Chosen values must be canonical workspace-relative files inside the selected product repository. Add files to the current set with `--chosen`. Replace the set with `--replace-chosen ... --reason "..."` when scope changes. A `todo` Task may record scope before start; a `doing` or `blocked` Task needs a current matching start baseline.
 
-Example task files live under `examples/tasks/` and are documentation-only references.
+Context, Graph, Git, metadata, and direct reads help decide scope. Their queries, candidate lists, opened files, and result selections are not recorded as separate Task state. Legacy Candidate/Reviewed/Excluded fields and outcome JSON remain readable but are not written by the current command flow.
 
-If `repoctl` is installed on `PATH`, the shorter `repoctl ...` form is equivalent. The wrapper resolves the workspace root from the script location, so invoking it by explicit path from `repos/` or a nested directory is also supported.
+## Work notes and Handoff
 
-Standalone tasks reaching `done` or `canceled` move to `docs/archive/tasks/` and are removed from `docs/BOARD.md`.
-Child tasks reaching `done` or `canceled` are also removed from `docs/BOARD.md`, but may stay here until their parent task is archived.
+`## Verification` is optional free-form text. Keep a command or result only when it helps a future reader. Repoctl does not parse, grade, register, hash, or require it.
 
-Finishing a root coordination parent validates every completed descendant receipt before subtracting child-owned working-tree changes. Current receipts bind each changed path to a stable before/after state and execution interval. Attribution succeeds only when the child transitions form one unambiguous state chain from the parent's recorded path state to the current terminal state; task lifetimes may overlap when their path states connect exactly, and completion events break a tie only among transitions from the same state. A repository adopted after the parent started has no parent root evidence and cannot be attributed retroactively. Missing, corrupt, task-ID-mismatched, ambiguous, discontinuous, or drifted evidence fails closed instead of silently assigning changes to a child or parent. The isolated legacy-receipt boundary uses only recorded Git identities and terminal fingerprints that remain directly provable; it never reconstructs ownership from task prose or filenames.
+Use `task log append` for short timestamped checkpoints. Before a real pause or transfer, replace the generated Handoff placeholder with four concrete fields, remove its marker, and bind it:
 
-Task-start dirty baselines cover the full recorded path set, not only paths still shown by `git status`. Restoring a tracked dirty file to `HEAD`, deleting an untracked baseline file, or otherwise changing its recorded path state remains a baseline conflict. Repo-scoped tasks may explicitly assign that conflict to the task; workspace tasks must restore the recorded state or move product ownership to a repo-scoped child. Finish and cancel preserve the baseline until one of those explicit outcomes occurs.
+```bash
+./scripts/repoctl task handoff bind T-... --json
+```
+
+The fields are Next exact step, First file to open, First command to run, and Done when. The command is inert text. A later Task, Handoff, Chosen/Notes, log, optional Verification, child, or repository change makes the binding inactive. Context Packs are one-time reference views and are not bindable.
+
+## Finish and history
+
+Finish directly after the work is ready:
+
+```bash
+./scripts/repoctl task finish T-... --json
+```
+
+Finish checks repository selection, the task-start baseline, pre-existing dirty ownership, actual changes against Chosen, and metadata for changed files. It does not check whether Verification text exists or whether a test passed. If task changes were committed after start, use `task doctor --use-committed-diff` and finish with the same flag.
+
+Block and cancel need explicit intent through `--reason` or `--reason-file`. Completed Tasks and completion receipts are immutable; create later work with `task create --follow-up-of T-old`. Receipt hashes bind lifecycle history to the stored Task artifact and do not represent test proof.
+
+Repoctl alone mutates Board membership, lifecycle frontmatter, start baselines, ownership decisions, Handoff bindings, completion receipts, archive locators, and archive transitions. Humans and agents own the meaning of Goal, Chosen/Notes, Execution Log, optional Verification, and Handoff.

@@ -11,7 +11,7 @@ from tests.repoctl.context_test_helpers import (
     _setup_context_workspace,
     _write_completion_receipt,
 )
-from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
+from tests.repoctl.knowledge_test_helpers import _add_knowledge_source
 from tests.repoctl.meta.test_meta_check import commit_all
 from tests.repoctl.repository.test_repositories import write_settings
 from tests.repoctl.task_lifecycle_helpers import add_board_task, task_text
@@ -25,48 +25,6 @@ def _events(root: Path) -> list[dict]:
         json.loads(line)
         for line in (root / DEBUG_EVENTS_REL).read_text(encoding="utf-8").splitlines()
     ]
-
-
-def _repo_task(task_id: str) -> str:
-    return (
-        task_text(task_id, status="todo")
-        .replace('area: ""', 'area: "repo"')
-        .replace('repo_id: ""', 'repo_id: "main"')
-    )
-
-
-def _select_result_member(
-    capsys,
-    *,
-    task_id: str,
-    query: str,
-    receipt: dict,
-    authority: str,
-    ref: str = "",
-    producer: str = "context",
-) -> None:
-    items = receipt.get("selectable") or receipt["manifest"]["items"]
-    ref = ref or next(item["ref"] for item in items if item["authority"] == authority)
-    assert main(
-        [
-            "task",
-            "discovery",
-            "add",
-            task_id,
-            "--query",
-            query,
-            "--result-producer",
-            producer,
-            "--result-id",
-            receipt["result_id"],
-            "--result-authority",
-            authority,
-            "--result-ref",
-            ref,
-            "--json",
-        ]
-    ) == 0
-    capsys.readouterr()
 
 
 def test_debug_mode_is_opt_in_and_preserves_normal_output(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -149,7 +107,7 @@ def test_debug_mode_records_failures_without_values_or_handoff_mutation(tmp_path
     assert events[-1]["outcome"]["problem_codes"] == ["argparse_error"]
 
 
-def test_debug_summary_correlates_context_features_selection_and_later_success(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "service.py").write_text(
         "from auth import validate_token\n\ndef blue_comet_route(token):\n    return validate_token(token)\n",
@@ -164,11 +122,10 @@ def test_debug_summary_correlates_context_features_selection_and_later_success(t
     capsys.readouterr()
     before_graph = _events(tmp_path)[-1]["context_sources"]["graph"]
     assert before_graph["available"] is False
-    assert before_graph["relation_exposed"] == 0
-    _approve_knowledge_source(
+    _add_knowledge_source(
         capsys,
         claim="Blue comet routing owns settlement dispatch policy.",
-        build_args=["--applies-to", "service.py"],
+        applies_to=["service.py"],
     )
     _write_completion_receipt(tmp_path)
     _rebuild_completion_history(tmp_path)
@@ -176,26 +133,11 @@ def test_debug_summary_correlates_context_features_selection_and_later_success(t
     assert main(["graph", "build", "--repo-id", "main", "--json"]) == 0
     capsys.readouterr()
     assert main(["graph", "query", "--repo-id", "main", "--file", "service.py", "--json"]) == 0
-    graph_receipt = json.loads(capsys.readouterr().out)["data"]["result_receipt"]
-
-    task_id = "T-20260609184046Z"
-    add_board_task(tmp_path, f"{task_id}--debug-use.md", _repo_task(task_id))
-    assert main(["task", "start", task_id, "--json"]) == 0
     capsys.readouterr()
 
     query = "blue comet route validate_token"
     assert main(["context", "query", query, "--mode", "call-impact", "--repo-id", "main", "--full", "--json"]) == 0
-    context_payload = json.loads(capsys.readouterr().out)
-    context_receipt = context_payload["data"]["result_receipt"]
-    authorities = {item["authority"] for item in context_receipt["manifest"]["items"]}
-    assert {"graph", "knowledge"} <= authorities
-    relation_ref = next(
-        item["ref"]
-        for item in context_receipt["manifest"]["items"]
-        if item["authority"] == "graph" and item["ref"].startswith("<graph-relation:")
-    )
-    _select_result_member(capsys, task_id=task_id, query=query, receipt=context_receipt, authority="graph", ref=relation_ref)
-    _select_result_member(capsys, task_id=task_id, query=query, receipt=context_receipt, authority="knowledge")
+    capsys.readouterr()
 
     history_query = "validate_token token validation"
     assert main(
@@ -208,37 +150,16 @@ def test_debug_summary_correlates_context_features_selection_and_later_success(t
     assert main(
         ["context", "query", history_query, "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]
     ) == 0
-    history_payload = json.loads(capsys.readouterr().out)
-    history_receipt = history_payload["data"]["result_receipt"]
-    assert any(item["authority"] == "task_history" for item in history_receipt["manifest"]["items"])
-    _select_result_member(capsys, task_id=task_id, query=history_query, receipt=history_receipt, authority="task_history")
-    graph_selection = graph_receipt["selectable"][0]
-    _select_result_member(
-        capsys,
-        task_id=task_id,
-        query=history_query,
-        receipt=graph_receipt,
-        producer="graph",
-        authority=graph_selection["authority"],
-        ref=graph_selection["ref"],
-    )
+    capsys.readouterr()
 
     assert main(["debug", "summary", "--json"]) == 0
     summary = json.loads(capsys.readouterr().out)["data"]
 
     assert summary["commands"]["graph.query"]["later_same_shape_success_after_failure"] == 1
-    assert summary["context_sources"]["graph"]["relations_exposed"] > 0
-    assert summary["context_sources"]["graph"]["navigation_exposed"] > 0
+    assert summary["context_sources"]["graph"]["available"] > 0
     assert summary["context_sources"]["knowledge"]["returned"] > 0
     assert summary["context_sources"]["task_history"]["returned"] > 0
-    assert summary["discovery_selections"]["context"]["selected_results"] == 2
-    assert summary["discovery_selections"]["context_graph_relation"]["selected_results"] == 1
-    assert summary["discovery_selections"]["context_graph_navigation"]["selected_results"] == 0
-    assert summary["discovery_selections"]["context_graph_navigation"]["exposed_members"] > 0
-    assert summary["discovery_selections"]["context_knowledge"]["selected_results"] == 1
-    assert summary["discovery_selections"]["context_task_history"]["selected_results"] == 1
-    assert summary["discovery_selections"]["graph_query"]["exposed_results"] == 1
-    assert summary["discovery_selections"]["graph_query"]["selected_results"] == 1
+    assert "discovery_selections" not in summary
     assert main(["debug", "summary"]) == 0
     assert capsys.readouterr().out
     journal = (tmp_path / DEBUG_EVENTS_REL).read_text(encoding="utf-8")

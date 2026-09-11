@@ -83,11 +83,10 @@ Update on a best-effort basis; omissions are not rule violations.
 
 ## Verification
 
-- Command(s) run
-- Evidence captured
-- Result
+- Optional notes: none.
 
-<!-- When this section is complete, `./scripts/repoctl task finish T-... --json` uses it directly. -->
+<!-- Keep only commands or results useful to a future reader. Repoctl preserves
+this prose but does not parse, grade, hash, or require it for finish. -->
 
 ## Handoff
 

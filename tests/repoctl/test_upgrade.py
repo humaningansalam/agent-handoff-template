@@ -15,7 +15,7 @@ from tools.repoctl.knowledge_projection import knowledge_projection_path
 from tools.repoctl.tasks import archive_locator_text
 from tools.repoctl.upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 from tests.repoctl.knowledge_test_helpers import (
-    _approve_knowledge_source,
+    _add_knowledge_source,
     _setup_knowledge_workspace,
 )
 from tests.repoctl.meta.test_meta_check import write_repometa
@@ -801,8 +801,7 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
     checks = [
         (["./scripts/repoctl", "context", "--help"], ["query", "pack"]),
         (["./scripts/repoctl", "graph", "--help"], ["build", "query"]),
-        (["./scripts/repoctl", "knowledge", "--help"], ["render"]),
-        (["./scripts/repoctl", "knowledge", "render", "--help"], ["--check"]),
+        (["./scripts/repoctl", "knowledge", "--help"], ["add", "query", "check"]),
     ]
     for command, expected in checks:
         result = subprocess.run(command, cwd=workspace, env=env, text=True, capture_output=True, timeout=30, check=False)
@@ -811,7 +810,7 @@ def test_upgrade_apply_exposes_context_and_knowledge_commands(tmp_path: Path, mo
             assert text in result.stdout
 
 
-def test_upgrade_apply_supports_pack_to_reviewed_knowledge_flow(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_upgrade_apply_supports_pack_and_direct_knowledge_flow(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     plan_file = tmp_path / "plan.json"
     source = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
@@ -849,20 +848,19 @@ depends_on: []
 
 ## Discovery
 
-- Candidate query: repoctl Context contract
-- Candidate files reviewed: `repos/app.py`
 - Chosen files: `repos/app.py`
+- Notes: `The Context contract is the source for this reusable decision.`
 
 ## Goal
 
-Promote a context pack into reviewed knowledge after upgrade.
+Build a context pack and save reusable Knowledge after upgrade.
 
 ## Handoff
 
-- Next exact step: build candidate from context pack.
+- Next exact step: save the reusable Context decision.
 - First file to open: `docs/contracts/repoctl-context-contract.md`
-- First command to run: `./scripts/repoctl knowledge candidate build --from-pack .repoctl-state/context-pack/T-20260624101010Z.json --repo-id main --claim 'Reviewed Context remains non-authoritative.' --json`
-- Done when: reviewed knowledge is queryable and render output is current.
+- First command to run: `./scripts/repoctl knowledge add --source docs/contracts/repoctl-context-contract.md --repo-id main --kind decision --claim 'Reviewed Context remains non-authoritative.' --reason 'Context is evidence, while Task owns scope.' --json`
+- Done when: saved Knowledge is queryable.
 """,
         encoding="utf-8",
     )
@@ -870,24 +868,29 @@ Promote a context pack into reviewed knowledge after upgrade.
     pack_payload = run_repoctl_json(workspace, ["context", "pack", "--task", task_id, "--repo-id", "main", "--output", pack_path])
     assert pack_payload["data"]["metrics"]["unique_must_read_source_count"] >= 1
 
-    candidate_payload = run_repoctl_json(workspace, ["knowledge", "candidate", "build", "--from-pack", pack_path, "--repo-id", "main", "--kind", "decision", "--claim", "Reviewed Context remains non-authoritative."])
-    candidate_id = candidate_payload["data"]["candidate"]["id"]
-    assert candidate_payload["data"]["candidate"]["authoritative"] is False
-
-    check_payload = run_repoctl_json(workspace, ["knowledge", "candidate", "check", candidate_id, "--repo-id", "main"])
-    assert check_payload["data"]["checks"]["pack_provenance_current"] is True
-
-    approve_payload = run_repoctl_json(workspace, ["knowledge", "approve", candidate_id, "--repo-id", "main"])
-    record_id = approve_payload["data"]["record"]["id"]
-    assert approve_payload["warnings"] == []
+    add_payload = run_repoctl_json(
+        workspace,
+        [
+            "knowledge",
+            "add",
+            "--source",
+            "docs/contracts/repoctl-context-contract.md",
+            "--repo-id",
+            "main",
+            "--kind",
+            "decision",
+            "--claim",
+            "Reviewed Context remains non-authoritative.",
+            "--reason",
+            "Context is evidence, while Task owns scope.",
+        ],
+    )
+    record_id = add_payload["data"]["record"]["id"]
+    assert not (workspace / "docs/knowledge/candidates").exists()
+    assert not list((workspace / "docs/knowledge/events").glob("*.json"))
 
     query_payload = run_repoctl_json(workspace, ["knowledge", "query", "context returns source bundles", "--repo-id", "main"])
     assert query_payload["data"]["results"][0]["record"]["id"] == record_id
-
-    render_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main", "--full"])
-    assert render_payload["data"]["rendered"]
-    render_check_payload = run_repoctl_json(workspace, ["knowledge", "render", "--repo-id", "main", "--check"])
-    assert render_check_payload["data"]["check"]["current"] is True
 
 
 def test_empty_knowledge_is_optional_until_its_projection_is_corrupt(
@@ -904,16 +907,14 @@ def test_empty_knowledge_is_optional_until_its_projection_is_corrupt(
     (records / ".gitkeep").write_text("", encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 
-    assert main(["upgrade", "postflight", "--workspace-root", str(workspace), "--json"]) == 1
+    assert main(["upgrade", "postflight", "--workspace-root", str(workspace), "--json"]) == 0
     postflight = json.loads(capsys.readouterr().out)
+    assert postflight["data"]["status"] == "ready"
     reviewed = postflight["data"]["repositories"][0]["reviewed_knowledge"]
     assert reviewed["record_count"] == 0
-    assert reviewed["projection_status"] == "rebuild_required"
-    assert any(problem["code"] == "knowledge_projection_unavailable" for problem in postflight["problems"])
-    assert any(
-        action.get("command") == "./scripts/repoctl knowledge rebuild --repo-id main --json"
-        for action in postflight["data"]["recovery_actions"]
-    )
+    assert reviewed["projection_status"] == "ready"
+    assert postflight["warnings"] == []
+    assert postflight["data"]["maintenance_actions"] == []
 
     assert main(["context", "query", "product", "--repo-id", "main", "--json"]) == 0
     context = json.loads(capsys.readouterr().out)
@@ -931,43 +932,79 @@ def test_empty_knowledge_is_optional_until_its_projection_is_corrupt(
         and problem.get("cause_code") == "unreadable"
         for problem in corrupt["problems"]
     )
-    assert corrupt["data"]["result_receipt"] is None
 
 
-def test_postflight_rejects_projection_that_misses_durable_deprecation(
+def test_postflight_preserves_and_reports_legacy_knowledge_for_migration(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
-    record = _approve_knowledge_source(capsys)["data"]["record"]
-    projection_path = knowledge_projection_path(tmp_path, repo_id="main")
-    projection_before_deprecation = projection_path.read_bytes()
-    reason = tmp_path / "deprecation-reason.md"
-    reason.write_text("The reviewed decision no longer applies.\n", encoding="utf-8")
-    assert main(
-        [
-            "knowledge",
-            "deprecate",
-            record["id"],
-            "--repo-id",
-            "main",
-            "--reason-file",
-            reason.as_posix(),
-            "--json",
-        ]
-    ) == 0
-    capsys.readouterr()
-    projection_path.write_bytes(projection_before_deprecation)
+    record_id = "K-20260609184045Z--legacy-routing"
+    record_path = tmp_path / f"docs/knowledge/records/{record_id}.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    event_path = tmp_path / "docs/knowledge/events/E-preserved-legacy.json"
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    event_text = '{"id":"E-preserved-legacy","opaque":"unchanged"}\n'
+    event_path.write_text(event_text, encoding="utf-8")
+    original = json.dumps(
+        {
+            "schema": "repoctl.knowledge.record",
+            "schema_version": 1,
+            "id": record_id,
+            "repo_id": "main",
+            "kind": "decision",
+            "claim": "Keep the accumulated routing decision.",
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    record_path.write_text(original, encoding="utf-8")
 
-    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 1
+    assert main(
+        ["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    reviewed = payload["data"]["repositories"][0]["reviewed_knowledge"]
+    assert reviewed["record_count"] == 0
+    assert reviewed["migration_required_count"] == 1
+    assert any(
+        warning["code"] == "knowledge_record_migration_required"
+        for warning in payload["warnings"]
+    )
+    assert any(
+        action["kind"] == "knowledge_record_migration"
+        for action in payload["data"]["maintenance_actions"]
+    )
+    assert record_path.read_text(encoding="utf-8") == original
+    assert event_path.read_text(encoding="utf-8") == event_text
+
+
+def test_postflight_reports_projection_that_misses_durable_replacement_as_maintenance(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    record = _add_knowledge_source(capsys)["data"]["record"]
+    projection_path = knowledge_projection_path(tmp_path, repo_id="main")
+    projection_before_replacement = projection_path.read_bytes()
+    _add_knowledge_source(
+        capsys,
+        claim="The replacement Context decision supersedes the earlier rule.",
+        replaces=[record["id"]],
+    )
+    projection_path.write_bytes(projection_before_replacement)
+
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 0
     postflight = json.loads(capsys.readouterr().out)
+    assert postflight["data"]["status"] == "ready_with_maintenance"
     reviewed = postflight["data"]["repositories"][0]["reviewed_knowledge"]
     assert reviewed["projection_status"] == "rebuild_required"
     assert any(
-        problem["code"] == "knowledge_projection_unavailable"
-        and problem["cause_code"] == "cold_lifecycle_mismatch"
-        for problem in postflight["problems"]
+        warning["code"] == "upgrade_knowledge_projection_stale"
+        and warning["cause_code"] == "knowledge_projection_unavailable"
+        for warning in postflight["warnings"]
     )
 
 
@@ -986,7 +1023,7 @@ def test_postflight_reports_invalid_projection_lifecycle_without_crashing(
     projection_path.parent.mkdir(parents=True)
     projection = {
         "schema": "repoctl.knowledge.current-head",
-        "schema_version": 1,
+        "schema_version": 2,
         "repo_id": "main",
         "generation": 1,
         "checkpoint": {"record_count": 0},
@@ -996,19 +1033,20 @@ def test_postflight_reports_invalid_projection_lifecycle_without_crashing(
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: workspace)
 
     for lifecycle_counts, cause_code in (
-        ({"current": "0", "deprecated": 0, "superseded": 0}, "lifecycle_counts_invalid"),
-        ({"current": 0, "deprecated": 1, "superseded": 0}, "lifecycle_record_count_mismatch"),
+        ({"current": "0", "superseded": 0}, "lifecycle_counts_invalid"),
+        ({"current": 0, "superseded": 1}, "lifecycle_record_count_mismatch"),
     ):
         invalid_projection = {**projection, "lifecycle_counts": lifecycle_counts}
         invalid_projection["projection_digest"] = digest_data(invalid_projection)
         projection_path.write_text(json.dumps(invalid_projection), encoding="utf-8")
 
-        assert main(["upgrade", "postflight", "--workspace-root", str(workspace), "--json"]) == 1
+        assert main(["upgrade", "postflight", "--workspace-root", str(workspace), "--json"]) == 0
         postflight = json.loads(capsys.readouterr().out)
+        assert postflight["data"]["status"] == "ready_with_maintenance"
         reviewed = postflight["data"]["repositories"][0]["reviewed_knowledge"]
         assert reviewed["projection_status"] == "rebuild_required"
         assert any(
-            problem["code"] == "knowledge_projection_schema_mismatch"
-            and problem["cause_code"] == cause_code
-            for problem in postflight["problems"]
+            warning["code"] == "upgrade_knowledge_projection_stale"
+            and warning["cause_code"] == "knowledge_projection_schema_mismatch"
+            for warning in postflight["warnings"]
         )

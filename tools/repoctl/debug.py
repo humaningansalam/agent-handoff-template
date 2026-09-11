@@ -9,10 +9,9 @@ from collections import Counter
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from .io import RepoctlError
-from .result_receipts import context_result_citations
 
 
 DEBUG_EVENTS_REL = Path("docs/tasks/.repoctl-state/debug/events.jsonl")
@@ -27,18 +26,7 @@ _REPO_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _OPTION_RE = re.compile(r"--[a-z0-9][a-z0-9-]{0,63}")
 _COMMAND_RE = re.compile(r"(?:repoctl|[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*)")
 _CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,127}")
-_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-_GRAPH_RELATION_RE = re.compile(r"<graph-relation:[0-9a-f]{12}>")
 _OUTPUT_OPTIONS = frozenset({"--json", "--full", "--explain", "--verbose", "--format"})
-_COUNT_KEYS = ("total", "graph_relation", "graph_navigation", "knowledge", "task_history")
-_LANES = (
-    "context",
-    "graph_query",
-    "context_graph_relation",
-    "context_graph_navigation",
-    "context_knowledge",
-    "context_task_history",
-)
 _CURRENT: ContextVar[dict[str, Any] | None] = ContextVar("repoctl_debug", default=None)
 
 
@@ -96,20 +84,9 @@ def observe_envelope(envelope: Any) -> None:
     _record_id(trace["target"], "repo_id", repository.get("id"), _REPO_ID_RE)
 
 
-def observe_result(repo_id: str, receipt: Mapping[str, Any]) -> None:
-    trace = _CURRENT.get()
-    if trace is None:
-        return
-    _record_id(trace["target"], "repo_id", repo_id, _REPO_ID_RE)
-    result = _result_projection(repo_id, receipt, receipt.get("selectable", []))
-    if result:
-        trace["result"] = result
-
-
 def observe_context(
     repo_id: str,
     bundle: Mapping[str, Any],
-    receipt: Mapping[str, Any] | None,
     *,
     source_completeness: Mapping[str, Any] | None = None,
 ) -> None:
@@ -117,11 +94,6 @@ def observe_context(
     if trace is None:
         return
     _record_id(trace["target"], "repo_id", repo_id, _REPO_ID_RE)
-    if receipt is not None:
-        result = _result_projection(repo_id, receipt, context_result_citations(dict(bundle)))
-        if result:
-            trace["result"] = result
-    counts = (trace.get("result") or {}).get("member_counts", {})
     completeness = source_completeness or (
         bundle.get("completeness") if isinstance(bundle.get("completeness"), Mapping) else {}
     )
@@ -135,40 +107,18 @@ def observe_context(
         "graph": {
             "available": bool(completeness.get("graph_available")),
             "anchor_status": str(anchor.get("status") or "not_requested"),
-            "relation_exposed": int(counts.get("graph_relation") or 0),
-            "navigation_exposed": int(counts.get("graph_navigation") or 0),
         },
         "knowledge": {
             "consulted": bool(reviewed.get("queried")),
             "available": _optional_count(reviewed.get("available_record_count")),
             "returned": _optional_count(reviewed.get("result_count")),
-            "exposed": int(counts.get("knowledge") or 0),
         },
         "task_history": {
             "consulted": history_status != "disabled",
             "status": history_status,
             "returned": _optional_count(history.get("result_count")),
-            "exposed": int(counts.get("task_history") or 0),
         },
     }
-
-
-def observe_discovery_selections(values: Any, *, repo_id: str = "") -> None:
-    trace = _CURRENT.get()
-    if trace is None or not isinstance(values, list) or not values:
-        return
-    _record_id(trace["target"], "repo_id", repo_id, _REPO_ID_RE)
-    first = next((value for value in values if isinstance(value, Mapping)), None)
-    if first is None:
-        return
-    producer = str(first.get("producer") or "")
-    projection = {
-        "producer": producer,
-        "result_id": str(first.get("result_id") or ""),
-        "member_counts": _member_counts(producer, values),
-    }
-    if _valid_projection(projection):
-        trace["selections"] = [projection]
 
 
 def finish_debug(root: Path, token: Token[dict[str, Any] | None], *, exit_code: int, duration_ms: int) -> None:
@@ -191,7 +141,7 @@ def finish_debug(root: Path, token: Token[dict[str, Any] | None], *, exit_code: 
                 "warning_codes": sorted(trace["warning_codes"])[:_MAX_ITEMS],
             },
         }
-        for field in ("result", "context_sources", "selections"):
+        for field in ("context_sources",):
             if field in trace:
                 event[field] = trace[field]
         append_debug_event(root, event)
@@ -203,7 +153,6 @@ def debug_summary(root: Path) -> dict[str, Any]:
     events, invalid_count, incomplete = _read_events(root)
     events = [event for event in events if event["command"] != "debug.summary"]
     commands = _command_summary(events)
-    results = _captured_results(events)
     problems = Counter(code for event in events for code in event["outcome"]["problem_codes"])
     warnings = Counter(code for event in events for code in event["outcome"]["warning_codes"])
     timestamps = [event["timestamp"] for event in events]
@@ -218,7 +167,6 @@ def debug_summary(root: Path) -> dict[str, Any]:
         },
         "commands": commands,
         "context_sources": _context_source_summary(events),
-        "discovery_selections": {lane: _lane_summary(lane, events, results) for lane in _LANES},
         "outcomes": {
             "succeeded": sum(event["outcome"]["ok"] for event in events),
             "failed": sum(not event["outcome"]["ok"] for event in events),
@@ -258,9 +206,9 @@ def _command_summary(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
 
 
 def _context_source_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
-    graph: dict[str, Any] = {"queries": 0, "available": 0, "anchor_statuses": Counter(), "relations_exposed": 0, "navigation_exposed": 0}
-    knowledge = {"consulted": 0, "queries_with_results": 0, "returned": 0, "exposed": 0}
-    history: dict[str, Any] = {"consulted": 0, "statuses": Counter(), "queries_with_results": 0, "returned": 0, "exposed": 0}
+    graph: dict[str, Any] = {"queries": 0, "available": 0, "anchor_statuses": Counter()}
+    knowledge = {"consulted": 0, "queries_with_results": 0, "returned": 0}
+    history: dict[str, Any] = {"consulted": 0, "statuses": Counter(), "queries_with_results": 0, "returned": 0}
     for event in events:
         sources = event.get("context_sources")
         if not isinstance(sources, dict):
@@ -269,105 +217,16 @@ def _context_source_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
         graph["queries"] += 1
         graph["available"] += int(graph_source["available"])
         graph["anchor_statuses"][graph_source["anchor_status"]] += 1
-        graph["relations_exposed"] += graph_source["relation_exposed"]
-        graph["navigation_exposed"] += graph_source["navigation_exposed"]
         for name, summary in (("knowledge", knowledge), ("task_history", history)):
             source = sources[name]
             summary["consulted"] += int(source["consulted"])
             returned = source["returned"] or 0
             summary["queries_with_results"] += int(returned > 0)
             summary["returned"] += returned
-            summary["exposed"] += source["exposed"]
         history["statuses"][sources["task_history"]["status"]] += 1
     graph["anchor_statuses"] = dict(sorted(graph["anchor_statuses"].items()))
     history["statuses"] = dict(sorted(history["statuses"].items()))
     return {"graph": graph, "knowledge": knowledge, "task_history": history}
-
-
-def _lane_summary(lane: str, events: list[dict[str, Any]], results: dict[tuple[str, str, str], dict[str, Any]]) -> dict[str, Any]:
-    exposed = {key: _lane_count(value, lane) for key, value in results.items() if _lane_count(value, lane)}
-    selected_results: set[tuple[str, str, str]] = set()
-    selected_tasks: set[str] = set()
-    selected_members = 0
-    outside_members = 0
-    for event in events:
-        if not event["outcome"]["ok"]:
-            continue
-        for selection in event.get("selections", []):
-            count = _lane_count(selection, lane)
-            if not count:
-                continue
-            key = _projection_key(selection, repo_id=str(event["target"].get("repo_id") or ""))
-            selected_results.add(key)
-            selected_members += count
-            task_id = event["target"].get("task_id")
-            if task_id:
-                selected_tasks.add(task_id)
-            if key not in exposed:
-                outside_members += count
-    return {
-        "exposed_results": len(exposed),
-        "exposed_members": sum(exposed.values()),
-        "selected_results": len(selected_results),
-        "selected_members": selected_members,
-        "selected_task_ids": sorted(selected_tasks)[:_MAX_ITEMS],
-        "selected_outside_capture": outside_members,
-    }
-
-
-def _captured_results(events: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
-    results: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for event in events:
-        result = event.get("result")
-        if not isinstance(result, dict):
-            continue
-        key = _projection_key(result)
-        previous = results.get(key)
-        if previous is None:
-            results[key] = result
-        else:
-            results[key] = {**result, "member_counts": {name: max(previous["member_counts"][name], result["member_counts"][name]) for name in _COUNT_KEYS}}
-    return results
-
-
-def _result_projection(repo_id: str, receipt: Mapping[str, Any], values: Iterable[Any]) -> dict[str, Any] | None:
-    projection = {
-        "producer": str(receipt.get("producer") or ""),
-        "result_id": str(receipt.get("result_id") or ""),
-        "member_counts": _member_counts(str(receipt.get("producer") or ""), values),
-        "repo_id": repo_id,
-    }
-    return projection if _valid_projection(projection, repo=True) else None
-
-
-def _member_counts(producer: str, values: Iterable[Any]) -> dict[str, int]:
-    counts = Counter({key: 0 for key in _COUNT_KEYS})
-    for value in values:
-        if isinstance(value, Mapping):
-            authority, ref = str(value.get("authority") or ""), str(value.get("ref") or "")
-        else:
-            authority, ref = str(getattr(value, "authority", "")), str(getattr(value, "ref", ""))
-        if not authority or not ref:
-            continue
-        counts["total"] += 1
-        if producer == "context" and authority == "graph":
-            counts["graph_relation" if _GRAPH_RELATION_RE.fullmatch(ref) else "graph_navigation"] += 1
-        elif producer == "context" and authority in {"knowledge", "task_history"}:
-            counts[authority] += 1
-    return dict(counts)
-
-
-def _lane_count(projection: Mapping[str, Any], lane: str) -> int:
-    producer, counts = projection["producer"], projection["member_counts"]
-    if lane == "context":
-        return counts["total"] if producer == "context" else 0
-    if lane == "graph_query":
-        return counts["total"] if producer == "graph" else 0
-    return counts.get(lane.removeprefix("context_"), 0) if producer == "context" else 0
-
-
-def _projection_key(value: Mapping[str, Any], *, repo_id: str = "") -> tuple[str, str, str]:
-    return str(value.get("repo_id") or repo_id), str(value["producer"]), str(value["result_id"])
 
 
 def append_debug_event(root: Path, event: Mapping[str, Any]) -> None:
@@ -466,8 +325,6 @@ def _valid_event(value: Any) -> bool:
             and _valid_request(value.get("request"))
             and _valid_target(value.get("target"))
             and _valid_outcome(value.get("outcome"))
-            and ("result" not in value or _valid_projection(value["result"], repo=True))
-            and all(_valid_projection(item) for item in value.get("selections", []))
             and _valid_sources(value.get("context_sources"))
         )
     except (KeyError, TypeError):
@@ -509,26 +366,11 @@ def _valid_outcome(value: Any) -> bool:
     )
 
 
-def _valid_projection(value: Any, *, repo: bool = False) -> bool:
-    counts = value.get("member_counts") if isinstance(value, dict) else None
-    return bool(
-        isinstance(value, dict)
-        and value.get("producer") in {"context", "graph"}
-        and isinstance(value.get("result_id"), str)
-        and _DIGEST_RE.fullmatch(value["result_id"])
-        and isinstance(counts, dict)
-        and set(counts) == set(_COUNT_KEYS)
-        and all(type(counts[key]) is int and counts[key] >= 0 for key in _COUNT_KEYS)
-        and (not repo or isinstance(value.get("repo_id"), str) and _REPO_ID_RE.fullmatch(value["repo_id"]))
-    )
-
-
 def _valid_sources(value: Any) -> bool:
     if value is None:
         return True
     try:
         graph, knowledge, history = value["graph"], value["knowledge"], value["task_history"]
-        counts = (graph["relation_exposed"], graph["navigation_exposed"], knowledge["exposed"], history["exposed"])
         optional = (knowledge["available"], knowledge["returned"], history["returned"])
         return bool(
             isinstance(graph["available"], bool)
@@ -536,7 +378,6 @@ def _valid_sources(value: Any) -> bool:
             and isinstance(knowledge["consulted"], bool)
             and isinstance(history["consulted"], bool)
             and history["status"] in {"disabled", "not_applicable", "available", "partial", "unavailable"}
-            and all(type(count) is int and count >= 0 for count in counts)
             and all(count is None or type(count) is int and count >= 0 for count in optional)
         )
     except (KeyError, TypeError):

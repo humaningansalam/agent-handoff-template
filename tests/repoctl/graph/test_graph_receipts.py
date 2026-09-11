@@ -17,7 +17,7 @@ from tools.repoctl.graph_model import GraphContextAnchor, GraphContextAnchorKind
 from tools.repoctl.graph_store import graph_materialization_freshness, materialize_graph
 from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.io_audit import reject_directory_enumeration
-from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source, _setup_knowledge_workspace
+from tests.repoctl.knowledge_test_helpers import _add_knowledge_source, _setup_knowledge_workspace
 from tests.repoctl.workspace.test_check import add_task, task_text, write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import commit_all, init_repo, write_settings
@@ -187,20 +187,14 @@ def test_graph_build_consumes_task_completion_receipts(tmp_path: Path, monkeypat
             "discovery",
             "add",
             task_id,
-            "--query",
-            "run implementation",
-            "--reviewed",
-            "repos/app.py",
             "--chosen",
             "repos/app.py",
             "--json",
         ]
     ) == 0
     capsys.readouterr()
-    verification = tmp_path / "verification.md"
-    verification.write_text("- Command: pytest\n- Result: pass\n", encoding="utf-8")
 
-    assert main(["task", "finish", task_id, "--verification-file", str(verification), "--json"]) == 0
+    assert main(["task", "finish", task_id, "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
     receipt = json.loads((tmp_path / finish_payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
     assert receipt["repo_id"] == "main"
@@ -650,26 +644,24 @@ def test_explicit_history_rejects_ambiguous_receipt_artifact_authority(tmp_path:
     )
 
 
-def test_graph_root_freshness_reads_only_current_knowledge_bindings(
+def test_graph_root_freshness_uses_projection_without_scanning_knowledge_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys,
 ) -> None:
     repo = _setup_knowledge_workspace(tmp_path, monkeypatch)
     (repo / "app.py").write_text("VALUE = True\n", encoding="utf-8")
-    current = _approve_knowledge_source(capsys)["data"]["record"]
-    cold = _approve_knowledge_source(
+    current = _add_knowledge_source(capsys)["data"]["record"]
+    cold = _add_knowledge_source(
         capsys,
         claim="Deprecated Graph guidance must stay outside current root evidence.",
     )["data"]["record"]
-    reason = tmp_path / "deprecate.md"
-    reason.write_text("No longer applies.\n", encoding="utf-8")
-    assert main(
-        ["knowledge", "deprecate", cold["id"], "--repo-id", "main", "--reason-file", str(reason), "--json"]
-    ) == 0
-    capsys.readouterr()
+    replacement = _add_knowledge_source(
+        capsys,
+        claim="Replacement Graph guidance supersedes the cold rule.",
+        replaces=[cold["id"]],
+    )["data"]["record"]
 
-    current_path = (tmp_path / f"docs/knowledge/records/{current['id']}.json").resolve()
     cold_path = tmp_path / f"docs/knowledge/records/{cold['id']}.json"
     cold_text = cold_path.read_text(encoding="utf-8")
     target = require_repo_target(tmp_path, repo_id="main")
@@ -683,8 +675,15 @@ def test_graph_root_freshness_reads_only_current_knowledge_bindings(
         assert snapshot is not None
         assert not [problem for problem in problems if problem.severity == "error"]
         freshness, freshness_problems = graph_materialization_freshness(tmp_path, target=target)
-    assert current_path in reads
-    assert cold_path.resolve() not in reads
+    knowledge_ids = {
+        node.identity.get("record_id")
+        for node in snapshot.nodes
+        if node.kind == "knowledge"
+    }
+    assert current["id"] in knowledge_ids
+    assert replacement["id"] in knowledge_ids
+    assert cold["id"] not in knowledge_ids
+    assert reads == []
     assert freshness_problems == []
     assert freshness["status"] == "current"
 

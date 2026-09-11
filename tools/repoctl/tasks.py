@@ -11,24 +11,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .completion_catalogue import prepare_completion_sidecar_writes
-from .discovery_outcomes import (
-    add_verification_record as add_discovery_verification_record,
-    add_workspace_artifact_verification_record,
-    completion_outcome_projection,
-    load_outcome_state,
-    outcome_state_path,
-    serialize_outcome_state,
-    update_outcome_state,
-    validate_completion_outcome,
-)
 from .io import LOCK_REL, RepoctlError, atomic_write, decode_schema_version
 from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states
 from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoLayout, RepoSelectorStatus, RepoTarget, RepositoryIdentitySource, default_repo_target, repo_layout, resolve_repo_selector_path, resolve_task_repo_target
-from .result_receipts import ResultAuthority as DiscoveryResultAuthority
-from .result_receipts import ResultProducer as DiscoveryResultProducer
-from .result_receipts import ResultSelection, parse_result_request, result_receipt_episode, verify_result_selections
 from .settings import document_language, validate_document_language
 
 LIVE = {"todo", "doing", "blocked"}
@@ -42,11 +29,11 @@ SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQUIRED = {"id", "title", "status", "owner", "created", "parent", "depends_on"}
 TASK_STATE_SCHEMA_VERSION = 4
 LEGACY_TASK_STATE_SCHEMA_VERSION = 3
-COMPLETION_RECEIPT_SCHEMA_VERSION = 4
+COMPLETION_RECEIPT_SCHEMA_VERSION = 5
+DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION = 4
 TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION = 2
-RESUME_BINDING_SCHEMA_VERSION = 4
-LEGACY_RESUME_BINDING_SCHEMA_VERSIONS = {1, 2, 3}
+RESUME_BINDING_SCHEMA_VERSION = 5
 ARCHIVE_LOCATOR_SCHEMA_VERSION = 1
 HANDOFF_GENERATED_MARKER = "<!-- repoctl: generated-handoff -->"
 
@@ -192,81 +179,6 @@ class CompletionReceiptCollection:
         )
 
 
-@dataclass(frozen=True)
-class DiscoveryResultSelection:
-    producer: DiscoveryResultProducer
-    result_id: str
-    authority: DiscoveryResultAuthority
-    ref: str
-    episode_id: str = ""
-    request: dict[str, Any] | None = None
-    schema_version: int = 2
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.result_id, str) or not isinstance(self.ref, str) or not isinstance(self.episode_id, str):
-            raise ValueError("selected result identity fields must be strings")
-        if type(self.schema_version) is not int:
-            raise ValueError("selected result evidence schema version must be an integer")
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", self.result_id):
-            raise ValueError("selected result identity must be a sha256 digest")
-        if not self.ref.strip() or self.ref != self.ref.strip():
-            raise ValueError("selected result reference must be a non-empty canonical value")
-        if self.schema_version == 1:
-            if self.episode_id or self.request is not None:
-                raise ValueError("legacy selected result evidence must not invent request ownership")
-            return
-        if self.schema_version != 2:
-            raise ValueError("selected result evidence has an unsupported schema version")
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", self.episode_id):
-            raise ValueError("selected result episode identity must be a sha256 digest")
-        if self.request is None or parse_result_request(self.producer, self.request).to_dict() != self.request:
-            raise ValueError("selected result request must be canonical structured data")
-
-    def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "producer": self.producer.value,
-            "result_id": self.result_id,
-            "authority": self.authority.value,
-            "ref": self.ref,
-        }
-        if self.schema_version == 1:
-            return data
-        return {
-            "schema_version": self.schema_version,
-            **data,
-            "episode_id": self.episode_id,
-            "request": self.request,
-        }
-
-    def to_text(self) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=True, separators=(",", ":"), sort_keys=True).replace("`", "\\u0060")
-
-    @classmethod
-    def from_text(cls, value: str) -> "DiscoveryResultSelection":
-        try:
-            data = json.loads(_strip_ticks(value))
-            if not isinstance(data, dict):
-                raise ValueError
-            legacy = set(data) == {"producer", "result_id", "authority", "ref"}
-            current = set(data) == {"schema_version", "producer", "result_id", "episode_id", "request", "authority", "ref"}
-            if not legacy and not current:
-                raise ValueError
-            return cls(
-                producer=DiscoveryResultProducer(data["producer"]),
-                result_id=data["result_id"],
-                authority=DiscoveryResultAuthority(data["authority"]),
-                ref=data["ref"],
-                episode_id=data.get("episode_id", ""),
-                request=data.get("request") if isinstance(data.get("request"), dict) else None,
-                schema_version=1 if legacy else data["schema_version"],
-            )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RepoctlError(
-                "Selected result evidence must be canonical structured data produced by repoctl",
-                code="invalid_discovery_result_evidence",
-            ) from exc
-
-
 class _CompletionEvidenceAttribution(StrEnum):
     NONE = "none"
     TASK_WORKING_TREE = "task_working_tree"
@@ -286,12 +198,12 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "task_started": "task started.",
         "task_started_dirty": "task started with dirty repo state recorded.",
         "task_started_git_unavailable": "task started; repo dirty check unavailable ({reason}).",
-        "task_finished": "task finished and verified.",
+        "task_finished": "task finished.",
         "task_canceled": "task canceled: {reason}",
         "task_blocked": "task blocked: {reason}",
         "repo_head_at_start": "repo head at start",
-        "closure_done": "Implementation and verification completed.",
-        "closure_canceled": "Task canceled with recorded evidence.",
+        "closure_done": "Task completed.",
+        "closure_canceled": "Task canceled.",
         "git_delivery_outside": "Not managed by repoctl.",
         "done_handoff_next": "No further action; task is complete.",
         "canceled_handoff_next": "No further action; task is canceled.",
@@ -300,26 +212,26 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "canceled_handoff_done": "Task remains archived or non-live as canceled according to repoctl check.",
         "blocked_handoff_done": "The blocker is resolved or the task remains explicitly blocked with current evidence.",
         "work_area_primary": "Identify the exact repo, docs, or workspace files during the first implementation pass; do not guess them from the title alone.",
-        "parent_goal": "Coordinate `{title}` by splitting the work into child tasks, keeping shared decisions current, and closing integration with verification evidence.",
+        "parent_goal": "Coordinate `{title}` by splitting the work into child tasks, keeping shared decisions current, and closing the integration.",
         "parent_plan": [
             "Inspect the likely repos/docs surfaces and decide whether child tasks are truly needed.",
-            "Create child tasks with explicit parent frontmatter for each independently verifiable surface.",
+            "Create child tasks with explicit parent frontmatter for each independent surface.",
             "Keep shared decisions and child status summaries current while treating child frontmatter as authoritative.",
-            "Finish only after all children are done/canceled and integration verification is recorded.",
+            "Finish only after all children are done/canceled and the integration is complete.",
         ],
         "parent_handoff_next": "Inspect the work area and define the first child task for `{title}` if coordination is still warranted.",
         "parent_handoff_done": "Child tasks, shared decisions, and integration criteria are current enough for another agent to continue.",
         "live_child_summary": "<!-- Child tasks are discovered from child frontmatter `parent`, not this list. -->",
         "non_live_child_summary": "<!-- Non-live child summaries may be added here after children exist. -->",
         "shared_decisions": "Record cross-child decisions here as they are made.",
-        "integration_done": "All child tasks are done or canceled and integration verification is recorded.",
-        "task_goal": "Deliver `{title}` as the smallest verified change, with exact touched files, validation evidence, and restartable handoff recorded before finish.",
+        "integration_done": "All child tasks are done or canceled and the integration is complete.",
+        "task_goal": "Deliver `{title}` as the smallest coherent change, with exact touched files, focused checks, and a restartable handoff recorded before finish.",
         "task_handoff_next": "Start the task, inspect `{repo_hint}`, and record Discovery before editing.",
-        "task_handoff_done": "Chosen files match the actual changes, Verification is complete, and repoctl finish records the result.",
+        "task_handoff_done": "Chosen files match the actual changes and repoctl finish records the result.",
         "task_scope": [
             "Change only the files recorded in Discovery for this goal.",
             "Keep `repos/.repometa` annotations valid when coverage requires them for changed product files.",
-            "Run focused validation and `repoctl meta check --changed` before finish.",
+            "Run focused checks that matter for the change and `repoctl meta check --changed` before finish.",
             "Commit, push, PR, deploy, and release state are not managed by repoctl.",
         ],
         "root_scope": [
@@ -331,27 +243,23 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
             "Identify and record the concrete files/docs that define this task.",
             "Make only the narrow changes needed for the stated goal.",
             "Keep `repos/.repometa` annotations valid for any changed `repos/` files required by metadata coverage policy.",
-            "Keep Execution Log entries meaningful: creation, start, implementation decision, verification, blocker, or finish.",
-            "Record commands and results in `## Verification`; use an external file only when an existing artifact is the evidence source.",
+            "Keep Execution Log entries meaningful: creation, start, implementation decision, blocker, or finish.",
+            "Use `## Verification` for concise commands or results when they help the next agent.",
         ],
         "root_in_scope": [
             "Identify and record the concrete workspace/docs files that define this task.",
             "Make only the narrow changes needed for the stated goal.",
             "Do not touch product files under `repos/` unless the task is intentionally converted into repo-scoped work.",
-            "Keep Execution Log entries meaningful: creation, start, implementation decision, verification, blocker, or finish.",
-            "Record commands and results in `## Verification`; use an external file only when an existing artifact is the evidence source.",
+            "Keep Execution Log entries meaningful: creation, start, implementation decision, blocker, or finish.",
+            "Use `## Verification` for concise commands or results when they help the next agent.",
         ],
         "out_of_scope": [
             "Unrelated refactors or cleanup.",
             "Branch, commit, PR, deploy, or release automation unless explicitly requested.",
         ],
-        "verification_pending": "Pending.",
+        "verification_pending": "Optional notes.",
         "context_docs": "<!-- Add only the minimum context docs needed for this task, or leave empty. -->",
-        "discovery": [
-            "Candidate query: none yet",
-            "Candidate files reviewed: none yet",
-            "Chosen files: none yet",
-        ],
+        "discovery": ["Chosen files: none yet", "Notes: none yet"],
     },
     "ko": {
         "area_unspecified": "지정되지 않음",
@@ -359,12 +267,12 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "task_started": "작업을 시작함.",
         "task_started_dirty": "작업을 시작했고, 더러운 repo 상태를 기록함.",
         "task_started_git_unavailable": "작업을 시작했으나 repo dirty 확인을 사용할 수 없음({reason}).",
-        "task_finished": "작업을 검증하고 완료함.",
+        "task_finished": "작업을 완료함.",
         "task_canceled": "작업을 취소함: {reason}",
         "task_blocked": "작업을 blocked로 표시함: {reason}",
         "repo_head_at_start": "repo head at start",
-        "closure_done": "구현과 검증을 완료함.",
-        "closure_canceled": "기록된 증거와 함께 작업을 취소함.",
+        "closure_done": "작업을 완료함.",
+        "closure_canceled": "작업을 취소함.",
         "git_delivery_outside": "repoctl 관리 범위가 아님.",
         "done_handoff_next": "추가 작업 없음; 작업이 완료됨.",
         "canceled_handoff_next": "추가 작업 없음; 작업이 취소됨.",
@@ -373,26 +281,26 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "canceled_handoff_done": "repoctl check 기준으로 작업이 canceled archive 또는 non-live 상태를 유지함.",
         "blocked_handoff_done": "blocker가 해결되었거나 작업이 최신 증거와 함께 명시적으로 blocked 상태임.",
         "work_area_primary": "첫 구현 단계에서 정확한 repo, docs, workspace 파일을 확인한다. 제목만 보고 추측하지 않는다.",
-        "parent_goal": "`{title}`를 조율한다. 필요한 child task로 나누고, 공유 결정을 최신으로 유지하며, 통합 검증 증거로 마무리한다.",
+        "parent_goal": "`{title}`를 조율한다. 필요한 child task로 나누고, 공유 결정을 최신으로 유지하며, 통합을 마무리한다.",
         "parent_plan": [
             "관련 repos/docs 표면을 확인하고 child task가 정말 필요한지 판단한다.",
-            "독립적으로 검증 가능한 표면마다 명시적 parent frontmatter가 있는 child task를 만든다.",
+            "독립적인 표면마다 명시적 parent frontmatter가 있는 child task를 만든다.",
             "child frontmatter를 권위 source로 두고 공유 결정과 child 상태 요약을 최신으로 유지한다.",
-            "모든 child가 done/canceled가 되고 통합 검증이 기록된 뒤에만 완료한다.",
+            "모든 child가 done/canceled가 되고 통합이 끝난 뒤에만 완료한다.",
         ],
         "parent_handoff_next": "작업 영역을 확인하고, 조율이 여전히 필요하면 `{title}`의 첫 child task를 정의한다.",
         "parent_handoff_done": "child task, 공유 결정, 통합 기준이 다음 agent가 이어갈 만큼 최신 상태임.",
         "live_child_summary": "<!-- Child task는 이 목록이 아니라 child frontmatter `parent`에서 찾는다. -->",
         "non_live_child_summary": "<!-- Child가 생긴 뒤 non-live child 요약을 여기에 추가할 수 있다. -->",
         "shared_decisions": "작업 중 생긴 cross-child 결정을 여기에 기록한다.",
-        "integration_done": "모든 child task가 done 또는 canceled이고 통합 검증이 기록됨.",
-        "task_goal": "`{title}`를 가장 작은 검증 가능한 변경으로 완수한다. 정확한 변경 파일, 검증 증거, 재시작 가능한 handoff를 완료 전에 기록한다.",
+        "integration_done": "모든 child task가 done 또는 canceled이고 통합이 완료됨.",
+        "task_goal": "`{title}`를 가장 작은 일관된 변경으로 완수한다. 정확한 변경 파일, 필요한 확인 결과, 재시작 가능한 handoff를 완료 전에 기록한다.",
         "task_handoff_next": "작업을 시작하고 `{repo_hint}`를 확인한 뒤 편집 전에 Discovery를 기록한다.",
-        "task_handoff_done": "Chosen files와 실제 변경이 일치하고 Verification이 완료되며 repoctl finish가 결과를 기록함.",
+        "task_handoff_done": "Chosen files와 실제 변경이 일치하고 repoctl finish가 결과를 기록함.",
         "task_scope": [
             "이 목표를 위해 Discovery에 기록한 파일만 변경한다.",
             "변경한 제품 파일에 필요한 `repos/.repometa` annotation을 유효하게 유지한다.",
-            "완료 전에 집중 검증과 `repoctl meta check --changed`를 실행한다.",
+            "변경에 필요한 확인과 `repoctl meta check --changed`를 완료 전에 실행한다.",
             "commit, push, PR, deploy, release 상태는 repoctl이 관리하지 않는다.",
         ],
         "root_scope": [
@@ -404,27 +312,23 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
             "이 작업을 정의하는 구체적인 파일/docs를 식별하고 기록한다.",
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
             "metadata coverage policy가 요구하는 변경 `repos/` 파일의 `repos/.repometa` annotation을 유효하게 유지한다.",
-            "Execution Log에는 생성, 시작, 구현 결정, 검증, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "명령과 결과를 `## Verification`에 기록한다. 이미 존재하는 외부 artifact가 증거 원본일 때만 외부 파일을 사용한다.",
+            "Execution Log에는 생성, 시작, 구현 결정, blocker, 완료처럼 의미 있는 항목만 남긴다.",
+            "다음 agent에게 도움이 될 때만 명령이나 결과를 `## Verification`에 간결히 남긴다.",
         ],
         "root_in_scope": [
             "이 작업을 정의하는 구체적인 workspace/docs 파일을 식별하고 기록한다.",
             "명시된 목표에 필요한 좁은 변경만 수행한다.",
             "작업을 의도적으로 repo-scoped로 전환하지 않는 한 `repos/` 제품 파일은 건드리지 않는다.",
-            "Execution Log에는 생성, 시작, 구현 결정, 검증, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "명령과 결과를 `## Verification`에 기록한다. 이미 존재하는 외부 artifact가 증거 원본일 때만 외부 파일을 사용한다.",
+            "Execution Log에는 생성, 시작, 구현 결정, blocker, 완료처럼 의미 있는 항목만 남긴다.",
+            "다음 agent에게 도움이 될 때만 명령이나 결과를 `## Verification`에 간결히 남긴다.",
         ],
         "out_of_scope": [
             "무관한 refactor 또는 cleanup.",
             "명시적으로 요청되지 않은 branch, commit, PR, deploy, release 자동화.",
         ],
-        "verification_pending": "대기 중.",
+        "verification_pending": "선택 메모.",
         "context_docs": "<!-- 이 작업에 필요한 최소 context docs만 추가한다. 없으면 비워 둔다. -->",
-        "discovery": [
-            "Candidate query: none yet",
-            "Candidate files reviewed: none yet",
-            "Chosen files: none yet",
-        ],
+        "discovery": ["Chosen files: none yet", "Notes: none yet"],
     },
 }
 
@@ -535,6 +439,7 @@ class _DescendantPathClaim:
     task_id: str
     receipt_path: str
     repo_id: str
+    mode: _CompletionEvidenceMode
     path: str
     effect: str
     basis: tuple[str, ...]
@@ -602,14 +507,6 @@ class TaskResumeSelection:
     live_task_count: int
     task: Task | None
     candidates: tuple[Task, ...]
-
-
-@dataclass(frozen=True)
-class VerificationInput:
-    source: str
-    text: str
-    source_sha256: str
-    source_path: str = ""
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -715,15 +612,6 @@ def _strip_ticks(value: str) -> str:
     return stripped
 
 
-def _normalize_discovery_path(value: str) -> str:
-    raw = _strip_ticks(value)
-    path = Path(raw)
-    if not raw or path.is_absolute() or ".." in path.parts or "\\" in raw:
-        return ""
-    normalized = normalize_repo_path(raw)
-    return normalized if normalized.startswith("repos/") else ""
-
-
 def _dedupe_preserve(values: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -758,18 +646,11 @@ def task_discovery_values(task: Task) -> dict[str, list[str]]:
         fields = parse_labeled_list_section(
             task.body,
             "Discovery",
-            ("Candidate query", "Candidate files reviewed", "Chosen files", "Selected result evidence", "Notes"),
+            ("Chosen files", "Notes"),
         )
     except RepoctlError:
         return {}
     return {key: _explicit_discovery_values(values) for key, values in fields.items()}
-
-
-def task_discovery_result_selections(task: Task) -> list[DiscoveryResultSelection]:
-    return [
-        DiscoveryResultSelection.from_text(value)
-        for value in task_discovery_values(task).get("Selected result evidence", [])
-    ]
 
 
 def _format_discovery_scalar(value: str) -> str:
@@ -790,324 +671,156 @@ def update_task_discovery(
     root: Path,
     task_id: str,
     *,
-    query: str = "",
-    reviewed: list[str] | None = None,
-    excluded: list[str] | None = None,
     chosen: list[str] | None = None,
     replace_chosen: list[str] | None = None,
     reason: str = "",
     note: str = "",
-    result_producer: str = "",
-    result_id: str = "",
-    result_authority: str = "",
-    result_refs: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Update the Task-owned Chosen scope and optional human note."""
+
     task = resolve_live_task(root, task_id)
     if task.status not in LIVE:
-        raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
-    reviewed = reviewed or []
-    excluded = excluded or []
+        raise RepoctlError(
+            "done or canceled tasks are immutable; create a follow-up task",
+            code="task_not_live",
+            path=task.rel_path,
+        )
     chosen = chosen or []
     replace_chosen = replace_chosen or []
-    result_refs = result_refs or []
     if chosen and replace_chosen:
-        raise RepoctlError("task discovery add accepts --chosen or --replace-chosen, not both", code="ambiguous_chosen_update", path=task.rel_path)
-    if replace_chosen and not reason.strip():
-        raise RepoctlError("--replace-chosen requires --reason", code="missing_scope_change_reason", path=task.rel_path)
-    result_fields_present = [bool(result_producer), bool(result_id), bool(result_authority), bool(result_refs)]
-    if any(result_fields_present) and not all(result_fields_present):
         raise RepoctlError(
-            "selected result evidence requires --result-producer, --result-id, --result-authority, and --result-ref",
-            code="incomplete_discovery_result_evidence",
+            "task discovery add accepts --chosen or --replace-chosen, not both",
+            code="ambiguous_chosen_update",
             path=task.rel_path,
         )
-    if not any([query.strip(), reviewed, excluded, chosen, replace_chosen, note.strip(), result_refs]):
-        raise RepoctlError("task discovery add requires scope evidence, a note, or selected result evidence", code="missing_discovery_input", path=task.rel_path)
+    if replace_chosen and not reason.strip():
+        raise RepoctlError(
+            "--replace-chosen requires --reason",
+            code="missing_scope_change_reason",
+            path=task.rel_path,
+        )
+    if not any([chosen, replace_chosen, note.strip()]):
+        raise RepoctlError(
+            "task discovery add requires --chosen, --replace-chosen, or --note",
+            code="missing_discovery_input",
+            path=task.rel_path,
+        )
 
     fields = task_discovery_values(task)
-    previous_queries = fields.get("Candidate query", [])
-    previous_reviewed = fields.get("Candidate files reviewed", [])
     previous_chosen = fields.get("Chosen files", [])
     previous_notes = fields.get("Notes", [])
-    previous_result_selections = [
-        DiscoveryResultSelection.from_text(value)
-        for value in fields.get("Selected result evidence", [])
-    ]
+    chosen_values = (
+        _dedupe_preserve(replace_chosen)
+        if replace_chosen
+        else _dedupe_preserve([*previous_chosen, *chosen])
+    )
+    note_values = _dedupe_preserve(
+        [*previous_notes, *([note] if note.strip() else [])]
+    )
 
-    incoming_result_selections: list[DiscoveryResultSelection] = []
-    receipt_request_episode_id = ""
-    receipt_seed_query = ""
-    receipt_request: dict[str, Any] | None = None
-    incoming_producer: DiscoveryResultProducer | None = None
-    requested_selections: list[ResultSelection] = []
     target = _target_for_task(root, task)
     _require_task_start_scope_alignment(root, task, target=target)
-    if result_refs:
-        if target is None:
-            raise RepoctlError(
-                "selected result evidence requires a repository-scoped task",
-                code="discovery_result_repository_required",
-                path=task.rel_path,
-            )
-        try:
-            incoming_producer = DiscoveryResultProducer(result_producer)
-            authority = DiscoveryResultAuthority(result_authority)
-            requested_selections = [ResultSelection(authority, ref) for ref in result_refs]
-            receipt = verify_result_selections(
-                root,
-                target=target,
-                producer=incoming_producer,
-                result_id=result_id,
-                selections=requested_selections,
-            )
-            episode = result_receipt_episode(receipt)
-            receipt_request_episode_id = episode.id
-            receipt_seed_query = episode.seed_query
-            receipt_request = receipt["request"]
-        except (RepoctlError, ValueError) as exc:
-            if isinstance(exc, RepoctlError):
-                raise
-            raise RepoctlError(str(exc), code="invalid_discovery_result_evidence", path=task.rel_path) from exc
 
-    previous_episode_ids = {
-        selection.episode_id
-        for selection in previous_result_selections
-        if selection.episode_id
-    }
-    if len(previous_episode_ids) > 1:
+    invalid_paths: list[str] = []
+    normalized_paths: list[str] = []
+    for value in chosen_values:
+        raw = _strip_ticks(value).strip()
+        candidate = PurePosixPath(raw)
+        if (
+            not raw
+            or "\\" in raw
+            or candidate.is_absolute()
+            or str(candidate) != raw
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            invalid_paths.append(value)
+        else:
+            normalized_paths.append(raw)
+    if invalid_paths:
         raise RepoctlError(
-            "current Discovery result evidence belongs to more than one episode",
-            code="discovery_result_episode_conflict",
-            path=task.rel_path,
+            "chosen files must be canonical workspace-relative paths: "
+            + ", ".join(invalid_paths),
+            code="invalid_discovery_path",
+            path=invalid_paths[0],
         )
-    active_episode_id = next(iter(previous_episode_ids), "")
-    active_context_owner = any(
-        selection.producer == DiscoveryResultProducer.CONTEXT
-        and selection.episode_id == active_episode_id
-        for selection in previous_result_selections
-    )
-    explicit_query = _strip_ticks(query).strip()
-    active_query = previous_queries[-1] if previous_queries else ""
-    adopts_context_owner = False
-    if incoming_producer == DiscoveryResultProducer.CONTEXT:
-        if explicit_query and explicit_query != receipt_seed_query:
-            raise RepoctlError(
-                "selected Context result request does not match the supplied Discovery query",
-                code="discovery_result_episode_mismatch",
-                path=task.rel_path,
-            )
-        incoming_query = receipt_seed_query
-        incoming_episode_id = receipt_request_episode_id
-        if active_episode_id and active_context_owner:
-            starts_new_episode = active_episode_id != incoming_episode_id
-        elif active_query:
-            starts_new_episode = active_query != incoming_query
-            adopts_context_owner = not starts_new_episode and bool(active_episode_id)
-        else:
-            starts_new_episode = False
-    elif incoming_producer == DiscoveryResultProducer.GRAPH:
-        incoming_query = explicit_query or active_query or receipt_seed_query
-        if explicit_query and active_query and explicit_query != active_query:
-            incoming_episode_id = digest_data({"kind": "task_discovery_query", "query": explicit_query})
-            starts_new_episode = True
-        elif active_episode_id:
-            incoming_episode_id = active_episode_id
-            starts_new_episode = False
-        elif active_query:
-            incoming_episode_id = digest_data({"kind": "task_discovery_query", "query": active_query})
-            starts_new_episode = False
-        else:
-            incoming_episode_id = receipt_request_episode_id
-            starts_new_episode = False
-    else:
-        incoming_episode_id = ""
-        incoming_query = explicit_query
-        starts_new_episode = bool(incoming_query and incoming_query != active_query)
-    if incoming_producer is not None:
-        incoming_result_selections = [
-            DiscoveryResultSelection(
-                producer=incoming_producer,
-                result_id=result_id,
-                episode_id=incoming_episode_id,
-                request=receipt_request,
-                authority=selection.authority,
-                ref=selection.ref,
-            )
-            for selection in requested_selections
-        ]
-    query_values = [incoming_query or active_query] if incoming_query or active_query else []
-    episode_reviewed = [] if starts_new_episode else previous_reviewed
-    episode_notes = [] if starts_new_episode else previous_notes
-    if starts_new_episode:
-        episode_result_selections = []
-    elif adopts_context_owner:
-        episode_result_selections = [
-            DiscoveryResultSelection(
-                producer=selection.producer,
-                result_id=selection.result_id,
-                episode_id=incoming_episode_id if selection.schema_version == 2 else "",
-                request=selection.request,
-                schema_version=selection.schema_version,
-                authority=selection.authority,
-                ref=selection.ref,
-            )
-            for selection in previous_result_selections
-        ]
-    else:
-        episode_result_selections = previous_result_selections
-    reviewed_values = _dedupe_preserve([*episode_reviewed, *reviewed, *excluded])
-    chosen_values = _dedupe_preserve(replace_chosen) if replace_chosen else _dedupe_preserve([*previous_chosen, *chosen])
-    note_values = _dedupe_preserve([*episode_notes, *([note] if note.strip() else [])])
-    result_selection_by_text = {
-        selection.to_text(): selection
-        for selection in [*episode_result_selections, *incoming_result_selections]
-    }
-    episode_result_selection_texts = {
-        selection.to_text() for selection in episode_result_selections
-    }
-    result_selections = [result_selection_by_text[key] for key in sorted(result_selection_by_text)]
     if target is not None:
-        for label, values in (("reviewed", reviewed_values), ("excluded", excluded), ("chosen", chosen_values)):
-            normalized_paths = [_normalize_discovery_path(value) for value in values]
-            invalid_paths = [value for value, normalized in zip(values, normalized_paths, strict=True) if not normalized]
-            if invalid_paths:
-                escaping_paths = [value for value in invalid_paths if ".." in Path(_strip_ticks(value)).parts]
-                if escaping_paths:
-                    raise RepoctlError(
-                        f"{label} discovery files must stay under selected repository {target.id} ({target.display_path}): {', '.join(escaping_paths)}",
-                        code="discovery_outside_selected_repository",
-                        path=escaping_paths[0],
-                    )
-                raise RepoctlError(
-                    f"{label} discovery files must be workspace-relative product paths: {', '.join(invalid_paths)}",
-                    code="invalid_discovery_path",
-                    path=invalid_paths[0],
-                )
-            outside = _discovery_paths_outside_target(normalized_paths, target)
-            if outside:
-                raise RepoctlError(
-                    f"{label} discovery files must stay under selected repository {target.id} ({target.display_path}): {', '.join(outside)}",
-                    code="discovery_outside_selected_repository",
-                    path=outside[0],
-                )
-        directory_paths = [
-            path
-            for path in _dedupe_preserve([*reviewed_values, *chosen_values])
-            if (normalized := _normalize_discovery_path(path)) and (root / normalized).is_dir()
-        ]
-        if directory_paths:
+        prefix = f"{target.display_path.rstrip('/')}/"
+        outside = [path for path in normalized_paths if not path.startswith(prefix)]
+        if outside:
             raise RepoctlError(
-                f"discovery entries must be files, not directories: {', '.join(directory_paths)}",
-                code="discovery_path_is_directory",
-                path=directory_paths[0],
+                f"chosen files must stay under selected repository {target.id} "
+                f"({target.display_path}): {', '.join(outside)}",
+                code="discovery_outside_selected_repository",
+                path=outside[0],
             )
+    directory_paths = [path for path in normalized_paths if (root / path).is_dir()]
+    if directory_paths:
+        raise RepoctlError(
+            "chosen entries must be files, not directories: "
+            + ", ".join(directory_paths),
+            code="discovery_path_is_directory",
+            path=directory_paths[0],
+        )
 
-    lines: list[str] = []
-    lines.extend(_format_discovery_list("Candidate query", query_values))
-    lines.extend(_format_discovery_list("Candidate files reviewed", reviewed_values))
-    lines.extend(_format_discovery_list("Chosen files", chosen_values))
-    if result_selections:
-        lines.extend(_format_discovery_list("Selected result evidence", [selection.to_text() for selection in result_selections]))
-    if note_values:
-        lines.extend(_format_discovery_list("Notes", note_values))
+    lines = _format_discovery_list("Chosen files", chosen_values)
+    lines.extend(_format_discovery_list("Notes", note_values))
+
     current_text = task.path.read_text(encoding="utf-8")
     discovery_body = "\n".join(lines) + "\n"
     try:
-        text = replace_section(current_text, "Discovery", discovery_body)
+        updated_text = replace_section(current_text, "Discovery", discovery_body)
     except RepoctlError as exc:
         if exc.code != "missing_section":
             raise
         execution_log = find_section(current_text, "Execution Log")
-        text = current_text[: execution_log.start] + f"## Discovery\n\n{discovery_body}\n" + current_text[execution_log.start :]
+        updated_text = (
+            current_text[: execution_log.start]
+            + f"## Discovery\n\n{discovery_body}\n"
+            + current_text[execution_log.start :]
+        )
     if replace_chosen:
         removed = sorted(set(previous_chosen) - set(chosen_values))
         added = sorted(set(chosen_values) - set(previous_chosen))
-        text = append_section_entry(
-            text,
+        updated_text = append_section_entry(
+            updated_text,
             "Execution Log",
-            f"- {utc_stamp()}: scope changed: removed {', '.join(removed) or 'none'}; added {', '.join(added) or 'none'}; reason={reason.strip()}",
+            f"- {utc_stamp()}: scope changed: removed "
+            f"{', '.join(removed) or 'none'}; added {', '.join(added) or 'none'}; "
+            f"reason={reason.strip()}",
         )
-    outcome_state = update_outcome_state(
-        root,
-        task_id=task.id,
-        target=target,
-        query=query_values[-1] if query_values else "",
-        episode_id=incoming_episode_id or active_episode_id,
-        starts_new_episode=starts_new_episode,
-        reviewed_paths=reviewed_values,
-        excluded_paths=excluded,
-        chosen_paths=chosen_values,
-        result_receipt=receipt if result_refs else None,
-        result_selections=requested_selections,
-    )
+
     return {
         "task": task,
-        "text": text,
-        "discovery": {
-            "candidate_query": query_values[-1] if query_values else "",
-            "candidate_query_history": query_values,
-            "candidate_files_reviewed": reviewed_values,
-            "chosen_files": chosen_values,
-            "excluded_files": [
-                str(item.get("identity", {}).get("path") or "")
-                for item in (outcome_state.get("active_episode") or {}).get("excluded", [])
-            ],
-            "notes": note_values,
-            "selected_result_evidence": [selection.to_dict() for selection in result_selections],
-        },
+        "text": updated_text,
+        "discovery": {"chosen_files": chosen_values, "notes": note_values},
         "update": {
-            "candidate_queries": {
-                "episode_changed": starts_new_episode,
-                "added": [incoming_query] if starts_new_episode else [],
-                "already_present": [incoming_query] if incoming_query and incoming_query == active_query else [],
-            },
-            "reviewed_files": {
-                "added": sorted(set(reviewed_values) - set(episode_reviewed)),
-                "removed": sorted(set(previous_reviewed) - set(reviewed_values)),
-                "already_present": sorted(set(reviewed) & set(episode_reviewed)),
-            },
             "chosen_files": {
-                "mode": "replace" if replace_chosen else "append" if chosen else "unchanged",
+                "mode": (
+                    "replace"
+                    if replace_chosen
+                    else "append"
+                    if chosen
+                    else "unchanged"
+                ),
                 "added": sorted(set(chosen_values) - set(previous_chosen)),
                 "removed": sorted(set(previous_chosen) - set(chosen_values)),
-                "already_present": sorted(set(replace_chosen or chosen) & set(previous_chosen)),
+                "already_present": sorted(
+                    set(replace_chosen or chosen) & set(previous_chosen)
+                ),
             },
             "notes": {
-                "added": [value for value in note_values if value not in episode_notes],
+                "added": [value for value in note_values if value not in previous_notes],
                 "removed": [value for value in previous_notes if value not in note_values],
-                "already_present": [note] if note.strip() and note in episode_notes else [],
-            },
-            "selected_result_evidence": {
-                "added": [
-                    selection.to_dict()
-                    for selection in result_selections
-                    if selection.to_text() not in episode_result_selection_texts
-                ],
-                "removed": [
-                    selection.to_dict()
-                    for selection in previous_result_selections
-                    if selection.to_text() not in result_selection_by_text
-                ],
-                "already_present": [
-                    selection.to_dict()
-                    for selection in incoming_result_selections
-                    if selection.to_text() in episode_result_selection_texts
-                ],
+                "already_present": (
+                    [note] if note.strip() and note in previous_notes else []
+                ),
             },
         },
         "totals": {
-            "candidate_query_count": len(query_values),
-            "reviewed_file_count": len(reviewed_values),
             "chosen_file_count": len(chosen_values),
-            "excluded_file_count": len((outcome_state.get("active_episode") or {}).get("excluded", [])),
             "note_count": len(note_values),
-            "selected_result_evidence_count": len(result_selections),
         },
-        "state_writes": [
-            (outcome_state_path(root, task.id), serialize_outcome_state(outcome_state)),
-        ],
     }
-
 
 def _require_task_start_scope_alignment(
     root: Path,
@@ -1152,90 +865,6 @@ def _require_task_start_scope_alignment(
             path=task.rel_path,
         )
     return baseline
-
-
-def record_task_verification_outcome(
-    root: Path,
-    task_id: str,
-    *,
-    status: str,
-    evidence_ref: str,
-    subject_refs: list[str],
-    claim_ids: list[str] | None = None,
-    artifact_refs: list[str] | None = None,
-) -> dict[str, Any]:
-    task = resolve_live_task(root, task_id)
-    if task.status not in LIVE:
-        raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
-    artifacts = artifact_refs or []
-    if artifacts and _repo_scoped_task(task):
-        raise RepoctlError(
-            "--artifact is only valid for root-only workspace tasks; use --subject for product repository files",
-            code="workspace_verification_artifact_invalid",
-            path=task.rel_path,
-        )
-    if artifacts:
-        _require_task_start_scope_alignment(root, task, target=None, require_current_start=True)
-        # The start baseline is monotonic for a task: blocked-task restart
-        # preserves this exact state and no command refreshes it. Therefore a
-        # successful add is already bound to the same generation finish later
-        # validates, without inventing a second mutable lineage owner.
-        state = add_workspace_artifact_verification_record(
-            root,
-            task_id=task.id,
-            status=status,
-            evidence_ref=evidence_ref,
-            artifact_refs=artifacts,
-            subject_refs=subject_refs,
-            claim_ids=claim_ids or [],
-        )
-    else:
-        target = _target_for_task(root, task)
-        _require_task_start_scope_alignment(root, task, target=target, require_current_start=True)
-        state = add_discovery_verification_record(
-            root,
-            task_id=task.id,
-            target=target,
-            status=status,
-            evidence_ref=evidence_ref,
-            subject_refs=subject_refs,
-            claim_ids=claim_ids or [],
-        )
-    return {
-        "task": task,
-        "state": state,
-        "state_writes": [(outcome_state_path(root, task.id), serialize_outcome_state(state))],
-    }
-
-
-def task_decomposition_evidence(root: Path, task_id: str) -> dict[str, int]:
-    """Return structural task-growth facts without assigning task meaning."""
-
-    task = resolve_task(root, task_id)
-    state = load_outcome_state(root, task.id)
-    if state is None:
-        return {
-            "chosen_subject_count": 0,
-            "discovery_episode_count": 0,
-            "prior_discovery_episode_count": 0,
-            "structured_verification_record_count": 0,
-        }
-    active = state.get("active_episode")
-    active_has_evidence = bool(
-        isinstance(active, dict)
-        and (
-            active.get("citations")
-            or active.get("reviewed")
-            or active.get("excluded")
-        )
-    )
-    prior_count = len(state.get("prior_episodes") or [])
-    return {
-        "chosen_subject_count": len(state.get("active_chosen") or []),
-        "discovery_episode_count": prior_count + int(active_has_evidence),
-        "prior_discovery_episode_count": prior_count,
-        "structured_verification_record_count": len(state.get("verification_records") or []),
-    }
 
 
 def discovery_scope_delta(
@@ -1292,94 +921,6 @@ def _task_chosen_path_projection(
             continue
         chosen.add(normalized)
     return chosen, sorted(set(invalid))
-
-
-def task_discovery_outcome_alignment(
-    root: Path,
-    task: Task,
-    *,
-    target: RepoTarget | None,
-) -> dict[str, Any]:
-    """Compare the human Chosen projection with its machine-owned outcome."""
-
-    state = load_outcome_state(root, task.id)
-    if state is None:
-        return {
-            "status": "not_recorded",
-            "reason_codes": [],
-            "task_chosen_paths": [],
-            "outcome_chosen_paths": [],
-            "task_only_paths": [],
-            "outcome_only_paths": [],
-            "invalid_task_chosen_values": [],
-            "invalid_outcome_subject_ids": [],
-        }
-
-    expected_repository = target.to_dict() if target is not None else None
-    reason_codes: list[str] = []
-    if state.get("repository") != expected_repository:
-        reason_codes.append("discovery_outcome_repository_mismatch")
-
-    task_paths, invalid_task_values = _task_chosen_path_projection(task, target=target)
-
-    outcome_paths: set[str] = set()
-    invalid_subject_ids: list[str] = []
-    for subject in state.get("active_chosen", []):
-        identity = subject.get("identity") if isinstance(subject, dict) else None
-        raw_path = identity.get("path") if isinstance(identity, dict) else None
-        normalized = normalize_repo_path(raw_path) if isinstance(raw_path, str) else ""
-        if not isinstance(subject, dict) or subject.get("kind") != "file" or not normalized:
-            invalid_subject_ids.append(str(subject.get("subject_id") or "") if isinstance(subject, dict) else "")
-            continue
-        outcome_paths.add(normalized)
-
-    task_only = sorted(task_paths - outcome_paths)
-    outcome_only = sorted(outcome_paths - task_paths)
-    if invalid_task_values:
-        reason_codes.append("discovery_task_chosen_invalid")
-    if invalid_subject_ids:
-        reason_codes.append("discovery_outcome_chosen_invalid")
-    if task_only or outcome_only:
-        reason_codes.append("discovery_outcome_chosen_mismatch")
-    return {
-        "status": "mismatch" if reason_codes else "aligned",
-        "reason_codes": reason_codes,
-        "task_chosen_paths": sorted(task_paths),
-        "outcome_chosen_paths": sorted(outcome_paths),
-        "task_only_paths": task_only,
-        "outcome_only_paths": outcome_only,
-        "invalid_task_chosen_values": invalid_task_values,
-        "invalid_outcome_subject_ids": sorted(set(invalid_subject_ids)),
-    }
-
-
-def task_discovery_outcome_alignment_problem(
-    root: Path,
-    task: Task,
-    *,
-    target: RepoTarget | None,
-) -> Problem | None:
-    alignment = task_discovery_outcome_alignment(root, task, target=target)
-    reason_codes = list(alignment["reason_codes"])
-    if not reason_codes:
-        return None
-    code = reason_codes[0]
-    if code == "discovery_outcome_repository_mismatch":
-        message = "task Discovery outcome repository identity does not match the task's current selected repository"
-    elif code == "discovery_task_chosen_invalid":
-        message = (
-            "task Discovery contains explicit Chosen values that are not canonical workspace-relative paths "
-            f"(invalid={len(alignment['invalid_task_chosen_values'])})"
-        )
-    elif code == "discovery_outcome_chosen_invalid":
-        message = "task Discovery outcome contains a non-file or invalid active Chosen subject"
-    else:
-        message = (
-            "task Discovery Chosen projection does not match machine outcome active_chosen "
-            f"(task_only={len(alignment['task_only_paths'])}, outcome_only={len(alignment['outcome_only_paths'])}); "
-            "reconcile scope through repoctl task discovery add before completion"
-        )
-    return Problem("error", code, message, task.rel_path)
 
 
 def _dirty_entry(dirty: list[str], *, copy: dict[str, Any], baseline_ref: str) -> str:
@@ -1537,7 +1078,11 @@ def _task_archive_locator(root: Path, task_id: str) -> Path | None:
                 or not _valid_sha256(str(receipt.get("content_sha256") or ""))
                 or not isinstance(receipt.get("changed_entries"), list)
                 or not isinstance(receipt.get("repo_evidence"), dict)
-                or not isinstance(receipt.get("verification"), dict)
+                or (
+                    _completion_receipt_schema_version(receipt, rel=receipt_path.relative_to(root).as_posix())
+                    < COMPLETION_RECEIPT_SCHEMA_VERSION
+                    and not isinstance(receipt.get("verification"), dict)
+                )
             ):
                 return None
         except RepoctlError:
@@ -1858,14 +1403,8 @@ def task_resume_input_digests(
     *,
     layout: RepoLayout | None = None,
 ) -> dict[str, str]:
-    outcome_state = load_outcome_state(root, task.id)
     section_digests = {
-        "discovery": digest_data(
-            {
-                "section": _normalized_task_section_body(task, "Discovery"),
-                "outcome_state_digest": str((outcome_state or {}).get("state_digest") or ""),
-            }
-        ),
+        "discovery": digest_data({"section": _normalized_task_section_body(task, "Discovery")}),
         "execution_log": digest_data({"section": _normalized_task_section_body(task, "Execution Log")}),
         "verification": digest_data({"section": _normalized_task_section_body(task, "Verification")}),
     }
@@ -1879,53 +1418,31 @@ def task_resume_input_digests(
 
 def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]) -> None:
     rel = path.as_posix()
+    schema_version = data.get("schema_version")
+    if (
+        data.get("schema") != "repoctl.task.resume_binding"
+        or schema_version != RESUME_BINDING_SCHEMA_VERSION
+    ):
+        raise RepoctlError("task resume binding has invalid schema", code="task_resume_binding_invalid", path=rel)
     expected_keys = {
         "schema",
         "schema_version",
         "task_id",
         "handoff_digest",
         "input_digests",
-        "context_pack",
     }
     if set(data) != expected_keys:
         raise RepoctlError("task resume binding has invalid fields", code="task_resume_binding_invalid", path=rel)
-    schema_version = data.get("schema_version")
-    if (
-        data.get("schema") != "repoctl.task.resume_binding"
-        or type(schema_version) is not int
-        or schema_version not in LEGACY_RESUME_BINDING_SCHEMA_VERSIONS | {RESUME_BINDING_SCHEMA_VERSION}
-    ):
-        raise RepoctlError("task resume binding has invalid schema", code="task_resume_binding_invalid", path=rel)
     if str(data.get("task_id") or "") != task_id:
         raise RepoctlError("task resume binding task id does not match", code="task_resume_binding_invalid", path=rel)
     if not _valid_sha256(str(data.get("handoff_digest") or "")):
         raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
     input_digests = data.get("input_digests")
-    expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository"}
-    if schema_version != 1:
-        expected_input_keys.add("direct_children")
+    expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository", "direct_children"}
     if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
         raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)
     if any(not _valid_sha256(str(value or "")) for value in input_digests.values()):
         raise RepoctlError("task resume binding has invalid input digest", code="task_resume_binding_invalid", path=rel)
-    context_pack = data.get("context_pack")
-    if context_pack is None:
-        return
-    if not isinstance(context_pack, dict) or set(context_pack) != {"path", "artifact_sha256", "input_digest"}:
-        raise RepoctlError("task resume binding has invalid Context Pack binding", code="task_resume_binding_invalid", path=rel)
-    pack_path = str(context_pack.get("path") or "")
-    candidate = Path(pack_path)
-    if (
-        not pack_path
-        or candidate.is_absolute()
-        or ".." in candidate.parts
-        or "\\" in pack_path
-        or normalize_repo_path(pack_path) != pack_path
-    ):
-        raise RepoctlError("task resume binding has invalid Context Pack path", code="task_resume_binding_invalid", path=rel)
-    for key in ("artifact_sha256", "input_digest"):
-        if not _valid_sha256(str(context_pack.get(key) or "")):
-            raise RepoctlError("task resume binding has invalid Context Pack digest", code="task_resume_binding_invalid", path=rel)
 
 
 def load_task_resume_binding(root: Path, task_id: str) -> dict[str, Any] | None:
@@ -1945,6 +1462,9 @@ def load_task_resume_binding(root: Path, task_id: str) -> dict[str, Any] | None:
         raise RepoctlError("task resume binding is unreadable", code="task_resume_binding_invalid", path=path.relative_to(root).as_posix()) from exc
     if not isinstance(data, dict):
         raise RepoctlError("task resume binding must be an object", code="task_resume_binding_invalid", path=path.relative_to(root).as_posix())
+    schema_version = data.get("schema_version")
+    if type(schema_version) is int and 1 <= schema_version < RESUME_BINDING_SCHEMA_VERSION:
+        return None
     _validate_resume_binding_data(path.relative_to(root), normalized_task_id, data)
     return data
 
@@ -1952,8 +1472,6 @@ def load_task_resume_binding(root: Path, task_id: str) -> dict[str, Any] | None:
 def bind_task_handoff(
     root: Path,
     task_id: str,
-    *,
-    context_pack: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not (root / LOCK_REL).is_dir():
         raise RepoctlError(f"task Handoff binding requires repoctl lock: {LOCK_REL}", code="task_lock_required", path=LOCK_REL.as_posix())
@@ -1973,21 +1491,12 @@ def bind_task_handoff(
     handoff = task_handoff_body(task)
     if handoff is None:
         raise RepoctlError("live task must contain a Handoff section", code="missing_handoff", path=task.rel_path)
-    if context_pack is not None:
-        candidate_binding = {
-            "path": str(context_pack.get("path") or ""),
-            "artifact_sha256": str(context_pack.get("artifact_sha256") or ""),
-            "input_digest": str(context_pack.get("input_digest") or ""),
-        }
-    else:
-        candidate_binding = None
     data: dict[str, Any] = {
         "schema": "repoctl.task.resume_binding",
         "schema_version": RESUME_BINDING_SCHEMA_VERSION,
         "task_id": task.id,
         "handoff_digest": digest_data({"handoff": handoff}),
         "input_digests": task_resume_input_digests(root, task),
-        "context_pack": candidate_binding,
     }
     path = _resume_binding_path(root, task.id)
     _validate_resume_binding_data(path.relative_to(root), task.id, data)
@@ -1997,7 +1506,6 @@ def bind_task_handoff(
         "task_id": task.id,
         "receipt_path": path.relative_to(root).as_posix(),
         "current_revision": digest_data(data["input_digests"]),
-        "context_pack": candidate_binding,
     }
 
 
@@ -2051,17 +1559,6 @@ def task_handoff_observation(
             "current_revision": current_revision,
             "changed_inputs": [],
         }
-    if binding["schema_version"] != RESUME_BINDING_SCHEMA_VERSION:
-        return {
-            "status": TaskHandoffStatus.INACTIVE.value,
-            "active": False,
-            "body": handoff,
-            "reason_codes": ["handoff_binding_legacy"],
-            "receipt_ref": _resume_binding_path(root, task.id).relative_to(root).as_posix(),
-            "bound_revision": digest_data(binding["input_digests"]),
-            "current_revision": "",
-            "changed_inputs": ["binding"],
-        }
     bound_digests = binding["input_digests"]
     if not repository_observation_available:
         return {
@@ -2087,10 +1584,14 @@ def task_handoff_observation(
             "current_revision": "",
             "changed_inputs": [],
         }
+    comparable_current_digests = {
+        key: current_digests[key]
+        for key in bound_digests
+    }
     changed_inputs = [
         key
-        for key in ("task_contract", "discovery", "execution_log", "verification", "repository", "direct_children")
-        if str(bound_digests.get(key) or "") != str(current_digests.get(key) or "")
+        for key in bound_digests
+        if str(bound_digests[key]) != str(comparable_current_digests[key])
     ]
     reason_codes = [f"{key}_changed" for key in changed_inputs]
     if str(binding.get("handoff_digest") or "") != digest_data({"handoff": handoff}):
@@ -2104,7 +1605,7 @@ def task_handoff_observation(
         "reason_codes": reason_codes,
         "receipt_ref": _resume_binding_path(root, task.id).relative_to(root).as_posix(),
         "bound_revision": digest_data(bound_digests),
-        "current_revision": digest_data(current_digests),
+        "current_revision": digest_data(comparable_current_digests),
         "changed_inputs": changed_inputs,
     }
 
@@ -2269,6 +1770,7 @@ def _completion_receipt_schema_version(data: dict[str, Any], *, rel: str) -> int
             supported=(
                 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION,
                 TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
+                DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
                 COMPLETION_RECEIPT_SCHEMA_VERSION,
             ),
         )
@@ -2501,7 +2003,11 @@ def _validate_completion_receipt(
     completed_at = data.get("completed_at")
     if not isinstance(task_id, str):
         raise RepoctlError(f"task completion receipt has invalid identity: {rel}", code="invalid_completion_receipt", path=rel)
-    if schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
+    has_transition_fields = "started_at" in data or "completed_event_at" in data
+    if schema_version in {
+        TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
+        DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
+    } or has_transition_fields:
         valid_completion_stamp = isinstance(completed_at, str) and _valid_utc_stamp(completed_at)
     else:
         valid_completion_stamp = "completed_at" not in data or (
@@ -2518,15 +2024,18 @@ def _validate_completion_receipt(
     if not isinstance(content_sha256, str) or not _valid_sha256(content_sha256):
         raise RepoctlError(f"task completion receipt has invalid content hash: {rel}", code="invalid_completion_receipt", path=rel)
     verification = data.get("verification")
-    if not isinstance(verification, dict):
-        raise RepoctlError(f"task completion receipt has invalid verification: {rel}", code="invalid_completion_receipt", path=rel)
-    if verification.get("source") not in {"external_file", "task_section"}:
-        raise RepoctlError(f"task completion receipt has invalid verification source: {rel}", code="invalid_completion_receipt", path=rel)
-    for key in ("source_sha256", "normalized_sha256", "stored_sha256"):
-        if not isinstance(verification.get(key), str) or not _valid_sha256(verification[key]):
-            raise RepoctlError(f"task completion receipt has invalid verification hash: {rel}", code="invalid_completion_receipt", path=rel)
-    if not isinstance(verification.get("truncated"), bool):
-        raise RepoctlError(f"task completion receipt has invalid verification truncation flag: {rel}", code="invalid_completion_receipt", path=rel)
+    if schema_version < COMPLETION_RECEIPT_SCHEMA_VERSION:
+        if not isinstance(verification, dict):
+            raise RepoctlError(f"task completion receipt has invalid verification: {rel}", code="invalid_completion_receipt", path=rel)
+        if verification.get("source") not in {"external_file", "task_section"}:
+            raise RepoctlError(f"task completion receipt has invalid verification source: {rel}", code="invalid_completion_receipt", path=rel)
+        for key in ("source_sha256", "normalized_sha256", "stored_sha256"):
+            if not isinstance(verification.get(key), str) or not _valid_sha256(verification[key]):
+                raise RepoctlError(f"task completion receipt has invalid verification hash: {rel}", code="invalid_completion_receipt", path=rel)
+        if not isinstance(verification.get("truncated"), bool):
+            raise RepoctlError(f"task completion receipt has invalid verification truncation flag: {rel}", code="invalid_completion_receipt", path=rel)
+    elif verification is not None:
+        raise RepoctlError(f"current task completion receipt must not contain verification proof state: {rel}", code="invalid_completion_receipt", path=rel)
     resolution = artifact_resolution or _resolve_receipt_artifact(root, task_id, task_path, receipt_path=rel)
     if resolution.status is not CompletionReceiptArtifactResolutionStatus.RESOLVED:
         raise _completion_receipt_artifact_resolution_error(resolution)
@@ -2553,7 +2062,10 @@ def _validate_completion_receipt(
     if len(set(entries)) != len(entries):
         raise RepoctlError(f"task completion receipt has duplicate changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
     _validate_receipt_fingerprint_manifest(rel=rel, data=data, repo_evidence=repo_evidence, entries=entries)
-    if schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if schema_version in {
+        TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
+        DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
+    } or has_transition_fields:
         started_at = data.get("started_at")
         completed_event_at = data.get("completed_event_at")
         if not isinstance(started_at, str) or not _valid_event_stamp(started_at):
@@ -2569,18 +2081,9 @@ def _validate_completion_receipt(
             ownership=ownership,
         )
     outcome = data.get("discovery_outcome")
-    if schema_version == COMPLETION_RECEIPT_SCHEMA_VERSION:
-        try:
-            validate_completion_outcome(outcome)
-        except ValueError as exc:
-            raise RepoctlError(
-                f"task completion receipt has invalid Discovery outcome: {rel}",
-                code="invalid_completion_receipt",
-                path=rel,
-            ) from exc
-    elif outcome is not None:
+    if schema_version != DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION and outcome is not None:
         raise RepoctlError(
-            f"legacy task completion receipt must not invent Discovery outcome facts: {rel}",
+            f"task completion receipt must not invent Discovery outcome facts: {rel}",
             code="invalid_completion_receipt",
             path=rel,
         )
@@ -3858,6 +3361,7 @@ def _legacy_descendant_path_claims(
                 task_id=child.id,
                 receipt_path=receipt_path,
                 repo_id=target.id,
+                mode=_CompletionEvidenceMode.WORKING_TREE_DIFF,
                 path=path,
                 effect="remove" if after.get("kind") == "missing" else "write",
                 basis=("observed_change",),
@@ -3875,6 +3379,7 @@ def _descendant_claims_by_path(
     root: Path,
     descendant_receipts: list[tuple[Task, dict[str, Any]]],
     target: RepoTarget,
+    claim_mode: _CompletionEvidenceMode,
 ) -> tuple[dict[str, list[_DescendantPathClaim]], list[Problem], set[str]]:
     claims: dict[str, list[_DescendantPathClaim]] = {}
     problems: list[Problem] = []
@@ -3884,10 +3389,12 @@ def _descendant_claims_by_path(
             continue
         receipt_path = f"docs/tasks/.repoctl-state/completions/{child.id}.json"
         entries = [_receipt_changed_entry(item, rel=receipt_path) for item in receipt.get("changed_entries", [])]
-        mutation_paths = set(_entry_mutation_paths(entries))
-        evidence_paths.update(mutation_paths)
         schema_version = receipt.get("schema_version")
         if schema_version == LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION:
+            if claim_mode is not _CompletionEvidenceMode.WORKING_TREE_DIFF:
+                continue
+            mutation_paths = set(_entry_mutation_paths(entries))
+            evidence_paths.update(mutation_paths)
             legacy_claims, legacy_problems, legacy_paths = _legacy_descendant_path_claims(
                 root,
                 child=child,
@@ -3903,17 +3410,17 @@ def _descendant_claims_by_path(
             continue
         repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
         mode, attribution = _completion_evidence_pair(repo_evidence, rel=receipt_path)
-        if not (
-            mode is _CompletionEvidenceMode.WORKING_TREE_DIFF
-            and attribution is _CompletionEvidenceAttribution.TASK_WORKING_TREE
-        ):
+        if mode is not claim_mode:
             continue
+        mutation_paths = set(_entry_mutation_paths(entries))
+        evidence_paths.update(mutation_paths)
         for raw_transition in repo_evidence.get("path_transitions", []):
             transition = _receipt_path_transition(raw_transition, rel=receipt_path)
             claim = _DescendantPathClaim(
                 task_id=child.id,
                 receipt_path=receipt_path,
                 repo_id=target.id,
+                mode=mode,
                 path=transition["path"],
                 effect=transition["effect"],
                 basis=tuple(transition["basis"]),
@@ -4121,6 +3628,7 @@ def _parent_path_states(
     target: RepoTarget,
     baseline: dict[str, Any] | None,
     paths: set[str],
+    terminal_revision: str | None = None,
 ) -> tuple[dict[str, StablePathState], dict[str, StablePathState], list[Problem]]:
     if not paths:
         return {}, {}, []
@@ -4176,7 +3684,12 @@ def _parent_path_states(
             )
         else:
             root_states.update(revision_states)
-    terminal_states, terminal_state = repo_path_stable_states(root, sorted(paths), target)
+    terminal_states, terminal_state = repo_path_stable_states(
+        root,
+        sorted(paths),
+        target,
+        revision=terminal_revision,
+    )
     if not terminal_state.available:
         terminal_states = {}
         problems.extend(
@@ -4235,6 +3748,8 @@ def _attribute_descendant_changes(
     entries: list[ChangedEntry],
     descendant_receipts: list[tuple[Task, dict[str, Any]]],
     baseline: dict[str, Any] | None,
+    claim_mode: _CompletionEvidenceMode = _CompletionEvidenceMode.WORKING_TREE_DIFF,
+    terminal_revision: str | None = None,
 ) -> _DescendantAttributionResult:
     if not descendant_receipts:
         return _DescendantAttributionResult(tuple(entries), (), ())
@@ -4243,6 +3758,7 @@ def _attribute_descendant_changes(
             root=root,
             descendant_receipts=descendant_receipts,
             target=target,
+            claim_mode=claim_mode,
         )
     except RepoctlError as exc:
         problem = Problem("error", exc.code or "child_completion_evidence_invalid", str(exc), exc.path or target.display_path)
@@ -4255,6 +3771,7 @@ def _attribute_descendant_changes(
         target=target,
         baseline=baseline,
         paths=observed_paths | lineage_paths,
+        terminal_revision=terminal_revision,
     )
     problems.extend(observation_problems)
     valid_path_tasks: dict[str, list[str]] = {}
@@ -4284,6 +3801,7 @@ def _attribute_descendant_changes(
         record: dict[str, Any] = {
             "task_ids": task_ids,
             "repo_id": target.id,
+            "evidence_mode": claim_mode.value,
             "change": change,
             "path": path,
             "path_state_sha256": stable_path_state_digest(terminal_states[path]),
@@ -4392,6 +3910,9 @@ def repo_changes_since_task_start(
         selected: RepoTarget,
         selected_entries: list[ChangedEntry],
         selected_baseline: dict[str, Any] | None,
+        *,
+        claim_mode: _CompletionEvidenceMode = _CompletionEvidenceMode.WORKING_TREE_DIFF,
+        terminal_revision: str | None = None,
     ) -> tuple[list[ChangedEntry], list[dict[str, Any]]]:
         result = _attribute_descendant_changes(
             root,
@@ -4399,6 +3920,8 @@ def repo_changes_since_task_start(
             entries=selected_entries,
             descendant_receipts=descendant_receipts,
             baseline=selected_baseline,
+            claim_mode=claim_mode,
+            terminal_revision=terminal_revision,
         )
         integrity_problems.extend(result.problems)
         return list(result.remaining), list(result.attributed)
@@ -4474,6 +3997,14 @@ def repo_changes_since_task_start(
                     repo_git=current_state,
                 )
                 integrity_problems.extend(observation.problems)
+                _committed_remaining, committed_attributed = attribute(
+                    matched,
+                    list(observation.committed_changes),
+                    selected_baseline,
+                    claim_mode=_CompletionEvidenceMode.COMMITTED_RANGE,
+                    terminal_revision=observation.current_head or None,
+                )
+                attributed_changes.extend(committed_attributed)
                 observed_committed_changes.extend(
                     (
                         entry[0],
@@ -4796,42 +4327,6 @@ def start_task(root: Path, task_id: str, *, force_dirty: bool = False) -> dict[s
     }
 
 
-def _verification_body(verification: VerificationInput) -> tuple[str, dict[str, Any]]:
-    if verification.source == "external_file":
-        normalized_body = _normalize_verification_artifact(verification.text)
-        normalization = "strip_verification_heading_and_normalize_final_newline"
-    elif verification.source == "task_section":
-        normalized_body = verification.text.rstrip()
-        normalization = "normalize_final_newline"
-    else:
-        raise RepoctlError("verification source must be external_file or task_section", code="invalid_verification_source")
-    if not normalized_body.strip():
-        raise RepoctlError("verification evidence must contain commands and results", code="empty_verification_file", path=verification.source_path)
-    normalized = normalized_body.rstrip() + "\n"
-    stored = normalized
-    metadata = {
-        "source": verification.source,
-        "source_path": verification.source_path,
-        "source_sha256": verification.source_sha256,
-        "normalization": normalization,
-        "normalized_sha256": _sha256_text(normalized),
-        "stored_sha256": _sha256_text(stored),
-        "truncated": False,
-    }
-    return stored, metadata
-
-
-def _normalize_verification_artifact(verification: str) -> str:
-    lines = verification.splitlines()
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    if lines and re.match(r"^#\s+Verification(?:\s+for\b.*)?\s*$", lines[0].strip(), re.IGNORECASE):
-        lines.pop(0)
-        while lines and not lines[0].strip():
-            lines.pop(0)
-    return "\n".join(lines).strip()
-
-
 def _finalize_handoff(text: str, *, status: str, new_path: str, receipt_path: str, evidence_mode: str, copy: dict[str, Any]) -> str:
     if has_section(text, "Last Active Handoff") or has_section(text, "Closure"):
         raise RepoctlError("task already contains completion-only sections", code="duplicate_closure_section")
@@ -4855,30 +4350,7 @@ def _finalize_handoff(text: str, *, status: str, new_path: str, receipt_path: st
     return text[: section.start] + closure + suffix
 
 
-def validate_verification_file(root: Path, verification_file: Path) -> None:
-    resolved_verification = verification_file.resolve()
-    layout = repo_layout(root)
-    product_roots = [target.root_path for target in layout.targets]
-    seen_roots = {path.resolve() for path in product_roots}
-    for candidate in layout.candidates:
-        resolved_candidate = candidate.root_path.resolve()
-        if resolved_candidate not in seen_roots:
-            product_roots.append(candidate.root_path)
-            seen_roots.add(resolved_candidate)
-    if not product_roots:
-        product_roots = [path for path in (root / "repos",) if path.exists()]
-    for product_root in product_roots:
-        try:
-            resolved_verification.relative_to(product_root.resolve())
-        except (OSError, ValueError):
-            continue
-        rel = product_root.relative_to(root).as_posix() if product_root.is_relative_to(root) else product_root.as_posix()
-        raise RepoctlError(f"verification file is an input artifact; keep it outside {rel}/ so finish records durable evidence in the task without creating product metadata residue", code="verification_file_inside_repo", path=verification_file.as_posix())
-    if not verification_file.is_file():
-        raise RepoctlError(f"verification file cannot be read: {verification_file}", code="missing_verification_file", path=verification_file.as_posix())
-
-
-def finish_task(root: Path, task_id: str, *, verification: VerificationInput, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None, allow_head_changed: bool = False) -> dict[str, Any]:
+def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = None, repo_delta: dict[str, Any] | None = None, allow_head_changed: bool = False) -> dict[str, Any]:
     """Validate finish and build its write set without mutating the workspace."""
     task = resolve_live_task(root, task_id)
     copy = _copy(_task_language(root, task))
@@ -4893,23 +4365,6 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     repo_scoped = _repo_scoped_task(task)
     area = str(task.frontmatter.get("area") or "")
     target = _target_for_task(root, task)
-    alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
-    if alignment_problem is not None:
-        raise RepoctlError(
-            alignment_problem.message,
-            code=alignment_problem.code,
-            path=alignment_problem.path,
-        )
-    discovery_outcome = completion_outcome_projection(root, task.id)
-    if discovery_outcome is not None:
-        try:
-            validate_completion_outcome(discovery_outcome)
-        except ValueError as exc:
-            raise RepoctlError(
-                f"task Discovery completion outcome is invalid: {exc}",
-                code="discovery_completion_outcome_invalid",
-                path=task.rel_path,
-            ) from exc
     _assert_repo_baseline_matches(root, task, target)
     repo_changed = bool(meta_gate and meta_gate.get("status") == "passed" and meta_gate.get("scope") == "changed")
     start_head = _repo_head_from_state(root, task)
@@ -4927,7 +4382,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     if repo_changed and area not in REPO_REQUIRED_AREAS and not str(task.frontmatter.get("repo_id") or ""):
         raise RepoctlError("task that changes repos/ must set area to one of: repo, backend, frontend, infra, mobile or set repo_id for the selected product repository", code="repository_selector_required", path=task.rel_path)
     if repo_changed and not discovery_recorded(task, target):
-        raise RepoctlError("repo task must record candidate discovery before finish", code="placeholder_discovery", path=task.rel_path)
+        raise RepoctlError("repo task must record canonical Chosen files before finish", code="placeholder_discovery", path=task.rel_path)
     if repo_scoped and target is None:
         raise RepoctlError("repo-scoped task cannot finish because product repository is missing; initialize repos/ as the product repository or use area docs/ops for root-only work", code="repository_not_found", path=task.rel_path)
     finish_timestamp = utc_stamp()
@@ -4935,8 +4390,6 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
     timestamp_problem = _execution_log_timestamp_problem(task, now=finish_timestamp)
     if timestamp_problem:
         raise RepoctlError(f"task finish would create non-monotonic Execution Log timestamps; {timestamp_problem}", code="execution_log_timestamp_order", path=task.rel_path)
-    if not verification.text.strip():
-        raise RepoctlError("verification evidence must contain the commands run and their results", code="empty_verification_file", path=verification.source_path or task.rel_path)
     all_tasks = load_tasks(root, include_archived=False)
     children = children_by_parent(all_tasks)
     live_children = [child for child in children.get(task.id, []) if child.status in LIVE]
@@ -4944,8 +4397,6 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         raise RepoctlError("cannot finish parent task while live children remain", code="live_children_block_finish", path=task.rel_path)
 
     text = task.path.read_text(encoding="utf-8")
-    verification_body, verification_metadata = _verification_body(verification)
-    text = replace_section(text, "Verification", verification_body)
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_finished']}")
     text = replace_frontmatter_line(text, "status", "done")
 
@@ -4994,21 +4445,8 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
                 code="transition_evidence_incomplete",
                 path=task.rel_path,
             )
-    if discovery_outcome is not None and (
-        path_transitions is None or not _valid_event_stamp(started_at)
-    ):
-        raise RepoctlError(
-            "task Discovery outcome cannot be frozen without current task-start transition evidence; start a todo task first or use a follow-up with a fresh baseline",
-            code="transition_evidence_incomplete",
-            path=task.rel_path,
-        )
-    receipt_schema_version = (
-        COMPLETION_RECEIPT_SCHEMA_VERSION
-        if discovery_outcome is not None
-        else TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION
-        if path_transitions is not None and _valid_event_stamp(started_at)
-        else LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION
-    )
+    receipt_schema_version = COMPLETION_RECEIPT_SCHEMA_VERSION
+    has_transition_evidence = path_transitions is not None and _valid_event_stamp(started_at)
     receipt_rel = receipt_path.relative_to(root).as_posix()
     text = _finalize_handoff(text, status="done", new_path=new_path, receipt_path=receipt_rel, evidence_mode=evidence_mode.value, copy=copy)
     if moves:
@@ -5035,7 +4473,7 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
             "scope": (repo_delta or {}).get("scope") or {},
         },
     }
-    if receipt_schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if has_transition_evidence:
         repo_evidence["path_transitions"] = path_transitions
     receipt = {
         "schema": "repoctl.task.completion",
@@ -5048,13 +4486,10 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         "content_sha256": _sha256_text(text),
         "changed_entries": changed_entries,
         "repo_evidence": repo_evidence,
-        "verification": verification_metadata,
     }
-    if receipt_schema_version >= TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION:
+    if has_transition_evidence:
         receipt["started_at"] = started_at
         receipt["completed_event_at"] = finish_event_timestamp
-    if discovery_outcome is not None:
-        receipt["discovery_outcome"] = discovery_outcome
     receipt_text = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     receipt_writes.append((receipt_path, receipt_text))
     catalogue_writes = prepare_completion_sidecar_writes(
@@ -5074,7 +4509,6 @@ def finish_task(root: Path, task_id: str, *, verification: VerificationInput, me
         "archived": archived,
         "moves": moves,
         "archive_texts": archive_texts,
-        "truncated": bool(verification_metadata["truncated"]),
         "receipt_path": receipt_path,
         "receipt_text": receipt_text,
         "receipt_writes": receipt_writes,
@@ -5232,38 +4666,13 @@ def _repo_scoped_task(task: Task) -> bool:
     return bool(str(task.frontmatter.get("repo_id") or "").strip()) or area in {"repo", "backend", "frontend", "infra", "mobile"}
 
 
-def _repo_discovery_paths(values: list[str]) -> list[str]:
-    return [normalized for value in values if (normalized := _normalize_discovery_path(value))]
-
-
-def _discovery_paths_outside_target(values: list[str], target: RepoTarget) -> list[str]:
-    paths = _repo_discovery_paths(values)
-    if not paths:
-        return []
-    prefix = f"{target.display_path.rstrip('/')}/"
-    invalid: list[str] = []
-    for path in paths:
-        normalized = normalize_repo_path(path)
-        if not normalized or not normalized.startswith(prefix):
-            invalid.append(path)
-    return invalid
-
-
 def discovery_recorded(task: Task, target: RepoTarget | None = None) -> bool:
     fields = task_discovery_values(task)
-    required: dict[str, list[str]] = {}
-    for key in ("Candidate query", "Candidate files reviewed", "Chosen files"):
-        values = fields.get(key, [])
-        if not values:
-            return False
-        required[key] = values
-    reviewed_paths = _repo_discovery_paths(required["Candidate files reviewed"])
-    chosen_paths = _repo_discovery_paths(required["Chosen files"])
-    if len(reviewed_paths) != len(required["Candidate files reviewed"]) or len(chosen_paths) != len(required["Chosen files"]):
+    chosen_values = fields.get("Chosen files", [])
+    if not chosen_values:
         return False
-    if target is not None and (
-        _discovery_paths_outside_target(reviewed_paths, target) or _discovery_paths_outside_target(chosen_paths, target)
-    ):
+    chosen_paths, invalid = _task_chosen_path_projection(task, target=target)
+    if invalid or len(chosen_paths) != len(chosen_values):
         return False
     return True
 
@@ -5622,10 +5031,6 @@ def children_by_parent(tasks: list[Task]) -> dict[str, list[Task]]:
 
 def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
     problems: list[Problem] = []
-    try:
-        layout = repo_layout(root)
-    except RepoctlError:
-        layout = None
     for task in live_tasks(tasks):
         path = _baseline_path(root, task.id)
         if path.is_file():
@@ -5646,22 +5051,6 @@ def validate_live_task_states(root: Path, tasks: list[Task]) -> list[Problem]:
                         exc.path or resume_path.relative_to(root).as_posix(),
                     )
                 )
-        if layout is not None:
-            try:
-                target = _target_for_task(root, task, layout=layout)
-                alignment_problem = task_discovery_outcome_alignment_problem(root, task, target=target)
-            except RepoctlError as exc:
-                problems.append(
-                    Problem(
-                        "error",
-                        exc.code or "discovery_outcome_state_invalid",
-                        str(exc),
-                        exc.path or task.rel_path,
-                    )
-                )
-            else:
-                if alignment_problem is not None:
-                    problems.append(alignment_problem)
     return problems
 
 
@@ -5714,12 +5103,8 @@ def validate_tasks(tasks: list[Task], *, include_archived_warnings: bool = False
             append_warning(
                 task,
                 "missing_discovery_evidence",
-                "repo-scoped task needs structured Discovery fields: Candidate query, Candidate files reviewed, and Chosen files. Prefer `repoctl task discovery add`; free-form prose is not enough.",
+                "repo-scoped task needs canonical Chosen files. Use `repoctl task discovery add --chosen ...`.",
             )
-        try:
-            task_discovery_result_selections(task)
-        except RepoctlError as exc:
-            problems.append(Problem("error", exc.code, str(exc), task.rel_path))
         root = _task_workspace_root(task)
         if task.status in LIVE and not task.archived:
             problems.extend(_live_handoff_problems(task, root))

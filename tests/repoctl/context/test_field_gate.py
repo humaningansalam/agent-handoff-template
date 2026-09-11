@@ -8,7 +8,7 @@ import pytest
 
 from tools.repoctl.cli import main
 from tests.repoctl.context_test_helpers import _write_context_docs, init_repo, write_workspace
-from tests.repoctl.knowledge_test_helpers import _approve_knowledge_source
+from tests.repoctl.knowledge_test_helpers import _add_knowledge_source
 
 
 def _copy_release_fixtures(root: Path) -> None:
@@ -31,13 +31,11 @@ def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_
     monkeypatch.chdir(tmp_path.parent)
     output = tmp_path / ".repoctl-state/field-gates/repoctl-release.json"
 
-    _approve_knowledge_source(
+    _add_knowledge_source(
         capsys,
         source="docs/contracts/repoctl-module-boundaries.md",
         claim="A future layer rule prevents Context from replacing task, Board, Backlog, Graph, or repometa authority.",
     )
-    assert main(["knowledge", "render", "--repo-id", "main", "--json"]) == 0
-    capsys.readouterr()
     source_annotation = repo / ".repometa/annotations/preexisting.json"
     source_annotation.parent.mkdir(parents=True)
     source_annotation.write_text("{}\n", encoding="utf-8")
@@ -52,7 +50,6 @@ def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_
     assert payload["data"]["product_readiness"] == "not_evaluated"
     assert payload["data"]["failed_count"] == 0
     assert "reviewed_knowledge_check" in gates
-    assert "knowledge_render_check" in gates
     assert gates["context_benchmark"]["ok"] is True
     assert "knowledge_result_questions" not in gates["context_benchmark"]["summary"]
     assert "by_category" not in gates["context_benchmark"]["summary"]

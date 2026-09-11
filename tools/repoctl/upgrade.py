@@ -852,11 +852,6 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         "applied_migrations": applied_migrations,
         "receipt_path": (UPGRADE_STATE_REL / run_id / "receipt.json").as_posix(),
         "postflight_command": list(plan.get("postflight_command") or []),
-        "verification_commands": [
-            "./scripts/repoctl upgrade postflight --json",
-            "./scripts/repoctl check --json",
-            "./scripts/repoctl meta check --json",
-        ],
     }
 
 

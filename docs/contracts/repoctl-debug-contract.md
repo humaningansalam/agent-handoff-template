@@ -1,27 +1,30 @@
-# repoctl debug-mode contract
+# repoctl Debug-Mode Contract
 
-Debug mode records how repoctl's own control-plane features behave during ordinary development. It is local diagnostic evidence, not a feedback-writing mode, agent runtime, or source of Task, Graph, Knowledge, metadata, or Verification authority.
+Debug mode records bounded local observations about repoctl commands. It is diagnostic data, not Task state, product telemetry, verification proof, or project authority.
 
 ## Activation and invariance
 
-Set the optional top-level `debug_mode` field in `docs/repoctl.json` to JSON boolean `true`. Missing or `false` disables capture; any other type fails with `invalid_debug_mode`.
+Set top-level `"debug_mode": true` in `docs/repoctl.json`. Missing or `false` disables capture; another type fails with `invalid_debug_mode`.
 
-Debug mode does not change command arguments, stdout, stderr, exit status, task files, product files, or Handoff freshness. It adds no hook, daemon, or agent instruction. Each ordinary repoctl invocation attempts to append one event to the ignored journal `docs/tasks/.repoctl-state/debug/events.jsonl`; reading `debug summary` does not record itself. Journal failure never replaces the command result.
+Enabled capture does not change arguments, stdout, stderr, exit status, product files, Task Markdown, Chosen, Handoff freshness, Graph, Knowledge, or metadata. Each ordinary invocation attempts to append one event to ignored local state at `docs/tasks/.repoctl-state/debug/events.jsonl`. `debug summary` does not record itself, and journal failure never replaces the command result.
 
-When the journal would exceed 8 MiB, repoctl marks `capture-truncated`, starts a new bounded generation, and continues recording current events. `repoctl debug summary --json` then reports `capture.incomplete`; delete the ignored debug directory before a new observation period when a complete window is required.
+The journal is capped at 8 MiB. On overflow, repoctl marks the capture incomplete, starts a new bounded generation, and keeps current events. Remove the ignored debug directory before a new observation window when complete history is needed.
 
 ## Recorded data
 
-An event contains a UTC timestamp, duration, command identity, recognized option names before the standard `--` delimiter, argument count, validated repository/task IDs, exit status, observed problem/warning codes, and bounded feature counts. Parse failures retain no option names. Context and Graph results retain only their producer, opaque result ID, repository ID, and visible-member counts. A successful `task discovery add` retains only opaque result identity and counts for newly added selections.
+An event may contain:
 
-Raw argument values, queries, source refs, excerpts, stdout, stderr, error messages, task prose, claims, reasons, credentials, environment variables, and full result payloads are never stored.
+- UTC timestamp and duration
+- dotted command identity
+- recognized option names and argument count, without values
+- validated repository and Task IDs
+- exit status and problem/warning codes
+- for Context only, bounded counts for Graph availability/anchor state, Knowledge consultation, and explicit task-history consultation
+
+Raw queries, paths from arguments, excerpts, Task prose, Knowledge claims/reasons, stdout, stderr, error messages, credentials, environment variables, and result payloads are not stored. Context and Graph result IDs, selectable members, Discovery selections, and verification outcomes are not recorded.
 
 ## Summary meaning
 
-- `commands` reports calls, success/failure, duration, and `later_same_shape_success_after_failure`. A same-shape signal shares command, validated target, argument count, and non-output option names; because values are deliberately not stored, it is only a retry clue and never proof that the same request recovered.
-- `context_sources.graph` separates Graph availability and resolved anchors from semantic `graph_relation` evidence and navigation continuations. A `graph.file` continuation is navigation, not a Graph relation.
-- `context_sources.knowledge` distinguishes a Context consultation, returned records, and records visible in the emitted result.
-- `context_sources.task_history` records explicit history attempts, including unavailable and not-applicable outcomes, separately from visible history evidence.
-- `discovery_selections` reports visible result members and newly added selections observed while capture was enabled. `selected_outside_capture` means no matching result event was retained.
+`debug summary --json` reports command counts, success/failure, duration, later same-shape success after failure, Context source consultation, and journal completeness. A request shape uses command, validated target, argument count, and non-output option names because raw values are deliberately absent.
 
-Exposure does not prove selection, and selection does not prove usefulness or correctness. Final feedback must compare this summary with Task goals, Chosen scope, Verification, completion outcomes, the PRD, and the resulting product behavior. Direct Graph counts alone cannot establish Graph use because Context can consult it; zero Reviewed Knowledge does not imply that ordinary project documents or task history were absent.
+The summary can show that a command ran or that Context consulted an available source lane. It cannot show that a result influenced a decision, that the user read it, that code was correct, or that a test passed. Compare it with the actual Task, changes, and product behavior only when diagnosing repoctl ergonomics.

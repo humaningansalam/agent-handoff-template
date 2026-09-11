@@ -370,8 +370,8 @@ def _root_evidence_records(
         repo_id=target.id,
     )
     if not projection_problems:
-        for head in knowledge_projection.get("heads", []):
-            record = head.get("record") if isinstance(head, dict) else {}
+        for record in knowledge_projection.get("heads", []):
+            record = record if isinstance(record, dict) else {}
             record_id = str(record.get("id") or "") if isinstance(record, dict) else ""
             if record_id:
                 record_rel = f"docs/knowledge/records/{record_id}.json"
@@ -380,19 +380,6 @@ def _root_evidence_records(
                         root / record_rel,
                         logical_path=record_rel,
                         previous=previous.get(record_rel),
-                    )
-                )
-            binding_events = head.get("binding_events") if isinstance(head, dict) else []
-            for event in binding_events if isinstance(binding_events, list) else []:
-                event_id = str(event.get("id") or "") if isinstance(event, dict) else ""
-                if not event_id:
-                    continue
-                event_rel = f"docs/knowledge/events/{event_id}.json"
-                records.append(
-                    _path_record(
-                        root / event_rel,
-                        logical_path=event_rel,
-                        previous=previous.get(event_rel),
                     )
                 )
             refs = record.get("source_refs") if isinstance(record, dict) else []

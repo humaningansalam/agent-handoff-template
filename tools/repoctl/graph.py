@@ -21,7 +21,7 @@ from .graph_semantic_model import SemanticProviderResult
 from .graph_semantic_provider import build_semantic_providers
 from .graph_structured_relations import RpcResolutionOutcome, STRUCTURED_EDGE_KIND, build_structured_file_relations
 from .language_profiles import graph_language_capabilities, is_semantic_source_language, language_for_path
-from .knowledge_candidates import KnowledgeExplicitPathKind, KnowledgeExplicitPathRole, knowledge_records_for_graph
+from .knowledge_records import KnowledgeExplicitPathKind, KnowledgeExplicitPathRole, knowledge_records_for_graph
 from .io import RepoctlError
 from .meta import RepoMetadataFacts, read_metadata_facts, without_absent_repometa
 from .path_roles import is_test_path
@@ -443,11 +443,16 @@ def build_graph(
         artifact_path = completion_input.artifact_path
         if artifact_path:
             artifact_node_id = artifact_id(receipt_task_id, artifact_path)
+            artifact_receipt = {
+                "content_sha256": str(receipt.get("content_sha256") or "")
+            }
+            if verification:
+                artifact_receipt["verification"] = verification
             nodes[artifact_node_id] = GraphNode(
                 id=artifact_node_id,
                 kind="artifact",
                 identity={"task_id": receipt_task_id, "path": artifact_path},
-                facts={"receipt": {"content_sha256": str(receipt.get("content_sha256") or ""), "verification": verification}},
+                facts={"receipt": artifact_receipt},
             )
             add_edge(GraphEdge("TASK_VERIFIED_BY", task_node_id, artifact_node_id, "recorded", "task_completion"))
         repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
@@ -486,7 +491,6 @@ def build_graph(
         knowledge_records_for_graph(
             root,
             repo_id=repo_id,
-            receipt_collection=None,
         )
         if include_knowledge
         else ([], [])
@@ -583,22 +587,6 @@ def build_graph(
                     {"freshness": record.get("status", "reviewed")},
                 )
             )
-        provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
-        source_task = str(provenance.get("source_task") or "")
-        if source_task:
-            source_task_id = graph_task_id(source_task)
-            if source_task_id in nodes:
-                add_edge(
-                    GraphEdge(
-                        "KNOWLEDGE_DERIVED_FROM_TASK",
-                        record_node_id,
-                        source_task_id,
-                        "recorded",
-                        "knowledge_record",
-                        {"freshness": record.get("status", "reviewed")},
-                    )
-                )
-
     provider_entries = semantic_provider_entries(entries)
     import_resolutions, import_meta = resolve_code_imports(provider_entries, repo=target.root_path)
     semantic_results = build_semantic_providers(

@@ -37,19 +37,15 @@ Example:
 
 ## Discovery
 
-<!-- For repo work, record candidate-file discovery evidence before editing.
-The current Candidate query owns one Discovery episode. The same query accumulates evidence; a distinct query keeps Chosen scope, seals any meaningful prior episode, and starts fresh Reviewed, Excluded, note, and selected-result evidence.
-Run compact `repoctl context query` and inspect suggested files directly. Refine and repeat before choosing scope when evidence is insufficient.
-Prefer `./scripts/repoctl task discovery add T-... --query "..." --json`, then add `--reviewed` and `--chosen` after inspection. Use `--excluded` only for an explicitly reviewed file rejected in this episode; Reviewed minus Chosen remains neutral.
-If a particular Context or Graph result was selected, copy its public `data.result_receipt` producer/result ID and one exact authority/ref tuple into the same command; this is optional. For Context, use a default `compact.representative_citations[*].primary_citation` or rerun with `--full` to select an omitted `manifest.items` member. Graph receipts expose `selectable` directly.
-A scoped Context Pack is optional when a durable handoff or relationship summary is useful.
-Record a structured verification outcome only when a check meaningfully covers a recorded subject or claim; ordinary Verification prose remains valid and is not parsed into outcome state.
-Each required field may be one line or an indented sub-list; include at least one `repos/...` path under Chosen files.
-This section may be empty for root-only or already-obvious work. -->
+<!-- For repo work, record the concrete edit scope with
+`./scripts/repoctl task discovery add T-... --chosen repos/path --json`.
+Repeat --chosen for one coherent multi-file scope. Add --note only for a scope
+reason or source reference worth keeping. Context, Graph, Git, metadata, and
+direct reads may help choose files, but their search history is not Task state.
+This section may remain empty for root-only work. -->
 
-- Candidate query: none yet
-- Candidate files reviewed: none yet
 - Chosen files: none yet
+- Notes: none yet
 
 ## Goal
 
@@ -65,11 +61,10 @@ State the outcome in one clear sentence.
 
 ## Verification
 
-- Command(s) run
-- Evidence captured
-- Result
+- Optional notes: none.
 
-<!-- When this section is complete, `./scripts/repoctl task finish T-... --json` uses it directly. Use --verification-file only for an external artifact. -->
+<!-- Keep only commands or results useful to a future reader. Repoctl preserves
+this prose but does not parse, grade, hash, or require it for finish. -->
 
 ## Handoff
 
@@ -80,4 +75,4 @@ State the outcome in one clear sentence.
 - First command to run: `<command>`
 - Done when: <objective completion condition>
 
-<!-- Keep these four fields concrete enough for another agent to resume in about 30 seconds. Before pausing or transferring, review them and run `./scripts/repoctl task handoff bind T-... --json`; add `--context-pack <path>` only for an optional Pack reviewed with this Handoff. -->
+<!-- Keep these four fields concrete enough for another agent to resume in about 30 seconds. Before pausing or transferring, review them and run `./scripts/repoctl task handoff bind T-... --json`. Context Packs are optional one-time views and are not part of the binding. -->
