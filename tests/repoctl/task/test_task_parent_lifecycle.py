@@ -12,6 +12,7 @@ from tests.repoctl.task_lifecycle_helpers import (
     init_committed_product_repo,
     record_discovery,
     task_text,
+    write_repometa,
     write_workspace,
 )
 from tests.repoctl.repository.test_repositories import write_settings
@@ -505,7 +506,7 @@ def test_parent_attributes_legacy_v2_delete_from_typed_change_effect(tmp_path: P
     assert problem.code == "terminal_evidence_drift"
 
 
-def test_parent_blocks_legacy_v2_transition_after_repository_head_changes(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_parent_blocks_legacy_v2_transition_with_committed_terminal_drift(tmp_path: Path, monkeypatch, capsys) -> None:
     parent_id = "T-20260609184046Z"
     child_id = "T-20260609184047Z"
     repo = _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
@@ -520,10 +521,13 @@ def test_parent_blocks_legacy_v2_transition_after_repository_head_changes(tmp_pa
     assert main(["task", "finish", child_id, "--json"]) == 0
     capsys.readouterr()
     _downgrade_child_evidence_to_v2(tmp_path, child_id)
+    # A new HEAD alone is not drift; a different committed terminal state is.
+    (repo / "app.py").write_text("value = 3\n", encoding="utf-8")
     subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "commit child state"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
 
     delta = repo_changes_since_task_start(tmp_path, parent_id)
+    assert delta["child_attributed_count"] == 0
     problem = next(problem for problem in delta["integrity_problems"] if problem.path == "repos/app.py")
     assert problem.code == "transition_evidence_incomplete"
     assert problem.cause_code == "legacy_completion_receipt_v2"
@@ -764,3 +768,195 @@ def test_task_finish_parent_rejects_incoherent_child_repository_evidence_tuple(t
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "child_completion_receipt_invalid"
+
+
+def _repo_snapshot(repo: Path, paths: list[str]) -> tuple[bytes, bytes, bytes, tuple[tuple[str, bytes | None], ...]]:
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo)
+    refs = subprocess.check_output(["git", "for-each-ref", "--format=%(refname) %(objectname)"], cwd=repo)
+    index = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=repo)
+    worktree = tuple(
+        (path, (repo / path).read_bytes() if (repo / path).is_file() else None)
+        for path in paths
+    )
+    return head, refs, index, worktree
+
+
+def test_parent_blocks_legacy_v2_child_without_terminal_fingerprint_after_descendant_commit(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    repo = _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, child_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    assert main(["task", "finish", child_id, "--json"]) == 0
+    capsys.readouterr()
+
+    receipt_path, receipt = _downgrade_child_evidence_to_v2(tmp_path, child_id)
+    manifest = receipt["repo_evidence"]["fingerprint_manifest"]
+    manifest.pop("entry_fingerprints")
+    receipt["repo_evidence"]["diff_fingerprint_sha256"] = _sha256_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+    _write_receipt(receipt_path, receipt)
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "commit child state"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    delta = repo_changes_since_task_start(tmp_path, parent_id)
+    problem = next(problem for problem in delta["integrity_problems"] if problem.path == "repos/app.py")
+    assert problem.code == "transition_evidence_incomplete"
+    assert problem.cause_code == "legacy_completion_receipt_v2"
+    assert delta["child_attributed_count"] == 0
+
+    assert main(["task", "finish", parent_id, "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "transition_evidence_incomplete"
+    assert payload["problems"][0]["cause_code"] == "legacy_completion_receipt_v2"
+
+
+def test_parent_attributes_provable_legacy_v2_transition_after_descendant_commit(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    repo = _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, child_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    assert main(["task", "finish", child_id, "--json"]) == 0
+    capsys.readouterr()
+    _downgrade_child_evidence_to_v2(tmp_path, child_id)
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "commit child state"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    receipt_path = tmp_path / f"docs/tasks/.repoctl-state/completions/{child_id}.json"
+    child_path = tmp_path / f"docs/tasks/{child_id}--child-1.md"
+    receipt_bytes = receipt_path.read_bytes()
+    child_bytes = child_path.read_bytes()
+    before = _repo_snapshot(repo, ["app.py"])
+
+    first = repo_changes_since_task_start(tmp_path, parent_id)
+    second = repo_changes_since_task_start(tmp_path, parent_id)
+
+    assert first == second
+    assert first["changes"] == []
+    assert first["integrity_problems"] == ()
+    assert first["child_attributed_count"] == 1
+    assert first["child_attributed_changes"][0]["task_ids"] == [child_id]
+    assert first["child_attributed_changes"][0]["evidence_mode"] == "committed_range"
+    assert first["observed_committed_changes"] == [("modified", "repos/app.py", "")]
+    assert _repo_snapshot(repo, ["app.py"]) == before
+    assert receipt_path.read_bytes() == receipt_bytes
+    assert child_path.read_bytes() == child_bytes
+
+    assert main(["task", "finish", parent_id, "--json"]) == 0
+    capsys.readouterr()
+
+    assert _repo_snapshot(repo, ["app.py"]) == before
+    assert receipt_path.read_bytes() == receipt_bytes
+    assert (tmp_path / f"docs/archive/tasks/{child_id}--child-1.md").read_bytes() == child_bytes
+
+
+def test_parent_attributes_provable_legacy_v2_transition_from_unborn_head(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    write_workspace(tmp_path)
+    add_task(tmp_path, f"{parent_id}--parent.md", task_text(parent_id))
+    add_task(tmp_path, f"{child_id}--child.md", _repo_child_text(child_id, parent=parent_id))
+    (tmp_path / "docs/BOARD.md").write_text(
+        f"# BOARD\n\n## Board\n\n- docs/tasks/{parent_id}--parent.md\n- docs/tasks/{child_id}--child.md\n\n## Backlog\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repos"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    write_repometa(repo)
+    verification = tmp_path / "verification.md"
+    verification.write_text("verified\n", encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", parent_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, child_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    assert main(["task", "finish", child_id, "--json"]) == 0
+    capsys.readouterr()
+    receipt_path, receipt = _downgrade_child_evidence_to_v2(tmp_path, child_id)
+    assert receipt["repo_evidence"]["observed_head"] == "<unborn>"
+    receipt_bytes = receipt_path.read_bytes()
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "commit child state"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    delta = repo_changes_since_task_start(tmp_path, parent_id)
+
+    assert delta["changes"] == []
+    assert delta["integrity_problems"] == ()
+    assert delta["child_attributed_count"] == 1
+    assert delta["child_attributed_changes"][0]["evidence_mode"] == "committed_range"
+    assert receipt_path.read_bytes() == receipt_bytes
+
+
+def test_parent_blocks_legacy_v2_transition_on_rewritten_history(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    repo = _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, child_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    assert main(["task", "finish", child_id, "--json"]) == 0
+    capsys.readouterr()
+    _downgrade_child_evidence_to_v2(tmp_path, child_id)
+
+    subprocess.run(["git", "checkout", "--orphan", "rewritten"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "rewritten history"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    delta = repo_changes_since_task_start(tmp_path, parent_id)
+    assert delta["child_attributed_count"] == 0
+    assert any(problem.code == "repo_history_rewritten" for problem in delta["integrity_problems"])
+    problem = next(problem for problem in delta["integrity_problems"] if problem.path == "repos/app.py")
+    assert problem.code == "transition_evidence_incomplete"
+    assert problem.cause_code == "legacy_completion_receipt_v2"
+
+
+def test_parent_blocks_legacy_v2_transition_with_partial_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent_id = "T-20260609184046Z"
+    child_id = "T-20260609184047Z"
+    repo = _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, child_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    (repo / "app.py").write_text("value = 3\n", encoding="utf-8")
+    assert main(["task", "finish", child_id, "--json"]) == 0
+    capsys.readouterr()
+    _downgrade_child_evidence_to_v2(tmp_path, child_id)
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "commit partial state"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+
+    delta = repo_changes_since_task_start(tmp_path, parent_id)
+    assert delta["child_attributed_count"] == 0
+    problem = next(problem for problem in delta["integrity_problems"] if problem.path == "repos/app.py")
+    assert problem.code == "transition_evidence_incomplete"
+    assert problem.cause_code == "legacy_completion_receipt_v2"

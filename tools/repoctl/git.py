@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -1237,6 +1238,319 @@ def verify_legacy_change_terminal_states(
     for path in unverified_paths:
         states.pop(path, None)
     return LegacyTerminalStateVerification(states, tuple(sorted(unverified_paths))), state
+
+
+def verify_legacy_change_terminal_states_at_revision(
+    root: Path,
+    *,
+    entries: list[ChangedEntry],
+    candidate_paths: set[str],
+    manifest: dict[str, Any],
+    observed_head: str,
+    terminal_revision: str,
+    target: RepoTarget | None = None,
+) -> tuple[LegacyTerminalStateVerification, RepoGitState]:
+    """Replay a legacy v2 terminal state against one descendant commit.
+
+    Legacy v2 fingerprints include the index and worktree status, so a clean
+    checkout cannot be compared to them directly.  This creates a disposable
+    repository that reads the source object database through Git alternates and
+    tries the two complete v2 projections: unstaged/untracked and fully staged.
+    The source repository is never used as a worktree or index.
+    """
+    selected = _target(root, target)
+    state = repo_git_state(root, selected)
+    normalized_candidates = {
+        normalized
+        for path in candidate_paths
+        if (normalized := normalize_repo_path(path)) and normalized == path
+    }
+    if not state.available:
+        return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), state
+    if (
+        normalized_candidates != candidate_paths
+        or not isinstance(manifest, dict)
+        or not normalized_candidates
+        or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", terminal_revision)
+        or (
+            observed_head != "<unborn>"
+            and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", observed_head)
+        )
+    ):
+        return (
+            LegacyTerminalStateVerification(
+                {},
+                tuple(sorted(candidate_paths)),
+                GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
+            ),
+            state,
+        )
+    assert selected is not None
+
+    source_states, source_state = repo_path_stable_states(
+        root,
+        sorted(normalized_candidates),
+        selected,
+        revision=terminal_revision,
+    )
+    if not source_state.available or set(source_states) != normalized_candidates:
+        if source_state.available:
+            source_state = RepoGitState(
+                False,
+                f"{selected.display_path}/ historical terminal path state is incomplete",
+                selected.id,
+                selected.display_path,
+                GitObservationProblem.PATH_UNAVAILABLE.value,
+            )
+        return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), source_state
+
+    try:
+        objects_result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "objects"],
+            cwd=selected.root_path,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        objects_result = None
+    if objects_result is None or objects_result.returncode != 0:
+        return (
+            LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))),
+            RepoGitState(
+                False,
+                f"{selected.display_path}/ cannot locate the Git object database for historical replay",
+                selected.id,
+                selected.display_path,
+                "legacy_terminal_replay_unavailable",
+            ),
+        )
+    object_path = Path(objects_result.stdout.strip())
+    if not object_path.is_absolute():
+        object_path = selected.root_path / object_path
+    try:
+        object_path = object_path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return (
+            LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))),
+            RepoGitState(
+                False,
+                f"{selected.display_path}/ cannot resolve the Git object database for historical replay",
+                selected.id,
+                selected.display_path,
+                "legacy_terminal_replay_unavailable",
+            ),
+        )
+    if not object_path.is_dir() or any(value in object_path.as_posix() for value in "\r\n"):
+        return (
+            LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))),
+            RepoGitState(
+                False,
+                f"{selected.display_path}/ cannot use the Git object database for historical replay",
+                selected.id,
+                selected.display_path,
+                "legacy_terminal_replay_unavailable",
+            ),
+        )
+
+    replay_unavailable = RepoGitState(
+        False,
+        f"{selected.display_path}/ cannot construct an isolated historical Git projection",
+        selected.id,
+        selected.display_path,
+        "legacy_terminal_replay_unavailable",
+    )
+
+    def invalid_projection() -> tuple[LegacyTerminalStateVerification, RepoGitState]:
+        return (
+            LegacyTerminalStateVerification(
+                {},
+                tuple(sorted(candidate_paths)),
+                GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
+            ),
+            state,
+        )
+
+    replay_env = os.environ.copy()
+    for variable in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        replay_env.pop(variable, None)
+    replay_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    replay_env["GIT_CONFIG_SYSTEM"] = os.devnull
+    replay_env["GIT_TERMINAL_PROMPT"] = "0"
+
+    def projection_matches(
+        verification: LegacyTerminalStateVerification,
+        verification_state: RepoGitState,
+    ) -> bool:
+        if (
+            not verification_state.available
+            or verification.problem is not None
+            or verification.unverified_paths
+            or set(verification.states) != normalized_candidates
+        ):
+            return False
+        return all(
+            stable_path_state_digest(verification.states[path])
+            == stable_path_state_digest(source_states[path])
+            for path in normalized_candidates
+        )
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="repoctl-legacy-v2-") as temporary_root:
+            replay_root = Path(temporary_root)
+            source_root = selected.root_path.resolve()
+            try:
+                replay_root.resolve().relative_to(source_root)
+            except ValueError:
+                pass
+            else:
+                return invalid_projection()[0], replay_unavailable
+
+            try:
+                initialized = subprocess.run(
+                    ["git", "init", "--quiet"],
+                    cwd=replay_root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=replay_env,
+                    check=False,
+                )
+            except OSError:
+                initialized = None
+            if initialized is None or initialized.returncode != 0:
+                return invalid_projection()[0], replay_unavailable
+
+            git_dir = replay_root / ".git"
+            alternate_file = git_dir / "objects" / "info" / "alternates"
+            try:
+                alternate_file.parent.mkdir(parents=True, exist_ok=True)
+                alternate_file.write_text(object_path.as_posix() + "\n", encoding="utf-8")
+            except OSError:
+                return invalid_projection()[0], replay_unavailable
+
+            def run_git(arguments: list[str]) -> bool:
+                try:
+                    result = subprocess.run(
+                        ["git", *arguments],
+                        cwd=replay_root,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=replay_env,
+                        check=False,
+                    )
+                except OSError:
+                    return False
+                return result.returncode == 0
+
+            if not all(
+                run_git(["config", key, value])
+                for key, value in (
+                    ("core.autocrlf", "false"),
+                    ("core.symlinks", "true"),
+                    ("core.filemode", "true"),
+                    ("core.attributesFile", os.devnull),
+                )
+            ):
+                return invalid_projection()[0], replay_unavailable
+            if not run_git(["symbolic-ref", "HEAD", "refs/heads/repoctl-replay"]):
+                return invalid_projection()[0], replay_unavailable
+            if observed_head != "<unborn>" and not run_git(
+                ["update-ref", "refs/heads/repoctl-replay", observed_head]
+            ):
+                return invalid_projection()[0], replay_unavailable
+            if not run_git(["cat-file", "-e", f"{terminal_revision}^{{commit}}"]):
+                return invalid_projection()[0], replay_unavailable
+            if observed_head != "<unborn>" and not run_git(
+                ["cat-file", "-e", f"{observed_head}^{{commit}}"]
+            ):
+                return invalid_projection()[0], replay_unavailable
+
+            def read_tree(revision: str) -> bool:
+                return run_git(
+                    ["read-tree", "--empty"]
+                    if revision == "<unborn>"
+                    else ["read-tree", "--reset", revision]
+                )
+
+            def apply_recorded_modes() -> bool:
+                raw_untracked = manifest.get("untracked")
+                if raw_untracked is None:
+                    return True
+                if not isinstance(raw_untracked, list):
+                    return False
+                for item in raw_untracked:
+                    if not isinstance(item, dict):
+                        return False
+                    path = item.get("path")
+                    if not isinstance(path, str) or normalize_repo_path(path) != path:
+                        return False
+                    if path not in normalized_candidates:
+                        continue
+                    mode = item.get("mode")
+                    if not isinstance(mode, str) or not re.fullmatch(r"[0-7]{4}", mode):
+                        return False
+                    candidate = replay_root / path
+                    try:
+                        file_stat = os.lstat(candidate)
+                    except (FileNotFoundError, NotADirectoryError):
+                        continue
+                    except OSError:
+                        return False
+                    if stat.S_ISREG(file_stat.st_mode):
+                        try:
+                            os.chmod(candidate, int(mode, 8), follow_symlinks=False)
+                        except OSError:
+                            return False
+                return True
+
+            def evaluate(index_revision: str) -> tuple[LegacyTerminalStateVerification, RepoGitState]:
+                if not read_tree(terminal_revision):
+                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
+                if not run_git(["checkout-index", "--all", "--force"]):
+                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
+                if not apply_recorded_modes():
+                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), state
+                if not read_tree(index_revision):
+                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
+                replay_target = RepoTarget(
+                    selected.id,
+                    replay_root,
+                    selected.display_path,
+                    selected.identity_source,
+                )
+                return verify_legacy_change_terminal_states(
+                    replay_root,
+                    entries=entries,
+                    candidate_paths=normalized_candidates,
+                    manifest=manifest,
+                    target=replay_target,
+                )
+
+            for index_revision in (observed_head, terminal_revision):
+                verification, verification_state = evaluate(index_revision)
+                if projection_matches(verification, verification_state):
+                    return verification, state
+                if not verification_state.available and verification_state.problem_code == "legacy_terminal_replay_unavailable":
+                    return verification, replay_unavailable
+    except (OSError, RuntimeError):
+        return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
+
+    return (
+        LegacyTerminalStateVerification(
+            {},
+            tuple(sorted(candidate_paths)),
+            GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
+        ),
+        state,
+    )
 
 
 def repo_path_fingerprints(root: Path, paths: list[str], target: RepoTarget | None = None) -> tuple[dict[str, str], RepoGitState]:

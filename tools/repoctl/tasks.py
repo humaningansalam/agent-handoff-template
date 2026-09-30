@@ -12,7 +12,7 @@ from typing import Any
 
 from .completion_catalogue import prepare_completion_sidecar_writes
 from .io import LOCK_REL, RepoctlError, atomic_write, decode_schema_version
-from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states
+from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states, verify_legacy_change_terminal_states_at_revision
 from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoLayout, RepoSelectorStatus, RepoTarget, RepositoryIdentitySource, default_repo_target, repo_layout, resolve_repo_selector_path, resolve_task_repo_target
@@ -3217,6 +3217,8 @@ def _legacy_descendant_path_claims(
     receipt_path: str,
     entries: list[ChangedEntry],
     target: RepoTarget,
+    claim_mode: _CompletionEvidenceMode,
+    terminal_revision: str | None,
 ) -> tuple[list[_DescendantPathClaim], list[Problem], set[str]]:
     """Project a v2 receipt only while its recorded terminal state is still provable."""
     repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
@@ -3268,10 +3270,30 @@ def _legacy_descendant_path_claims(
         and str(manifest.get("observed_head") or "") == observed_head
         and (start_head == "<unborn>" or bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", start_head)))
         and current_head_state.available
-        and current_head == observed_head
     )
     if not identity_matches:
         return incomplete(evidence_paths, "legacy child receipt and task-start repository identities do not match")
+
+    if not current_head_state.available:
+        return incomplete(evidence_paths, "legacy child terminal Git evidence cannot be observed")
+    if current_head == observed_head:
+        if claim_mode is not _CompletionEvidenceMode.WORKING_TREE_DIFF:
+            return [], [], set()
+        evaluation_mode = _CompletionEvidenceMode.WORKING_TREE_DIFF
+    else:
+        if claim_mode is not _CompletionEvidenceMode.COMMITTED_RANGE:
+            return [], [], set()
+        is_ancestor, ancestry_state = repo_is_ancestor(
+            root,
+            ancestor=observed_head,
+            descendant=current_head,
+            target=target,
+        )
+        if not ancestry_state.available or not is_ancestor:
+            return incomplete(evidence_paths, "legacy child recorded HEAD is not a proven ancestor of the current repository HEAD")
+        if terminal_revision and terminal_revision != current_head:
+            return incomplete(evidence_paths, "legacy child repository identity changed while terminal evidence was observed")
+        evaluation_mode = _CompletionEvidenceMode.COMMITTED_RANGE
 
     interval = _legacy_event_interval(
         str(baseline.get("created_at") or ""),
@@ -3290,13 +3312,24 @@ def _legacy_descendant_path_claims(
     if not candidate_paths:
         return [], problems, evidence_paths
 
-    terminal_verification, terminal_state = verify_legacy_change_terminal_states(
-        root,
-        entries=entries,
-        candidate_paths=candidate_paths,
-        manifest=manifest,
-        target=target,
-    )
+    if evaluation_mode is _CompletionEvidenceMode.WORKING_TREE_DIFF:
+        terminal_verification, terminal_state = verify_legacy_change_terminal_states(
+            root,
+            entries=entries,
+            candidate_paths=candidate_paths,
+            manifest=manifest,
+            target=target,
+        )
+    else:
+        terminal_verification, terminal_state = verify_legacy_change_terminal_states_at_revision(
+            root,
+            entries=entries,
+            candidate_paths=candidate_paths,
+            manifest=manifest,
+            observed_head=observed_head,
+            terminal_revision=current_head,
+            target=target,
+        )
     if not terminal_state.available:
         return incomplete(candidate_paths, "legacy child terminal Git evidence cannot be observed")
     after_states = dict(terminal_verification.states)
@@ -3305,7 +3338,8 @@ def _legacy_descendant_path_claims(
         drifted_paths.update(candidate_paths)
 
     confirmed_head, confirmed_head_state = repo_git_head(root, target)
-    if not confirmed_head_state.available or confirmed_head != observed_head:
+    expected_head = observed_head if evaluation_mode is _CompletionEvidenceMode.WORKING_TREE_DIFF else current_head
+    if not confirmed_head_state.available or confirmed_head != expected_head:
         problems.extend(
             _legacy_transition_problem(
                 path,
@@ -3351,7 +3385,7 @@ def _legacy_descendant_path_claims(
                 task_id=child.id,
                 receipt_path=receipt_path,
                 repo_id=target.id,
-                mode=_CompletionEvidenceMode.WORKING_TREE_DIFF,
+                mode=evaluation_mode,
                 path=path,
                 effect="remove" if after.get("kind") == "missing" else "write",
                 basis=("observed_change",),
@@ -3370,6 +3404,7 @@ def _descendant_claims_by_path(
     descendant_receipts: list[tuple[Task, dict[str, Any]]],
     target: RepoTarget,
     claim_mode: _CompletionEvidenceMode,
+    terminal_revision: str | None,
 ) -> tuple[dict[str, list[_DescendantPathClaim]], list[Problem], set[str]]:
     claims: dict[str, list[_DescendantPathClaim]] = {}
     problems: list[Problem] = []
@@ -3381,10 +3416,6 @@ def _descendant_claims_by_path(
         entries = [_receipt_changed_entry(item, rel=receipt_path) for item in receipt.get("changed_entries", [])]
         schema_version = receipt.get("schema_version")
         if schema_version == LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION:
-            if claim_mode is not _CompletionEvidenceMode.WORKING_TREE_DIFF:
-                continue
-            mutation_paths = set(_entry_mutation_paths(entries))
-            evidence_paths.update(mutation_paths)
             legacy_claims, legacy_problems, legacy_paths = _legacy_descendant_path_claims(
                 root,
                 child=child,
@@ -3392,6 +3423,8 @@ def _descendant_claims_by_path(
                 receipt_path=receipt_path,
                 entries=entries,
                 target=target,
+                claim_mode=claim_mode,
+                terminal_revision=terminal_revision,
             )
             evidence_paths.update(legacy_paths)
             problems.extend(legacy_problems)
@@ -3749,6 +3782,7 @@ def _attribute_descendant_changes(
             descendant_receipts=descendant_receipts,
             target=target,
             claim_mode=claim_mode,
+            terminal_revision=terminal_revision,
         )
     except RepoctlError as exc:
         problem = Problem("error", exc.code or "child_completion_evidence_invalid", str(exc), exc.path or target.display_path)

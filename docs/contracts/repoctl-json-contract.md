@@ -117,7 +117,7 @@ A Chosen-scope decision action owns the complete path list at `data.action_input
 
 New completion receipts use schema v5. They retain stable Task/artifact identity, repository identity, changed entries, baseline/transition information when available, and metadata-gate history. They omit `verification` and `discovery_outcome`.
 
-Receipt and task-artifact hashes protect lifecycle-history identity. They do not assert that a command ran, a file state was tested, or a result passed. Readers continue to accept immutable v2–v4 receipts under their historical schema, including their legacy verification and Discovery outcome fields.
+Receipt and task-artifact hashes protect lifecycle-history identity. They do not assert that a command ran, a file state was tested, or a result passed. Readers continue to accept immutable v2–v4 receipts under their historical schema, including their legacy verification and Discovery outcome fields. Legacy v2 working-tree child evidence may also be read after a descendant commit when repository identity, ancestry, the original fingerprint commitment, and the committed terminal path state are all provable. Replay uses an isolated temporary Git index/worktree and never rewrites the source repository or historical records; missing or unreproducible evidence remains an error.
 
 ## Context, Graph, and Pack output
 
