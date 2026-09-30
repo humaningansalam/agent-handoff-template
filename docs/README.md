@@ -16,6 +16,8 @@ Root `docs/**` contains the private workspace ledger, repoctl contracts and work
 
 Keep product-public documentation in the relevant repository under `repos/**`. Large private project context may be split under root `docs/prd/` with `docs/PRD.md` as its index.
 
+For project understanding, follow the entry route in `AGENTS.md`: repository identity, selected product README/local guidance, active PRD index, then the source and checks relevant to the request. The command examples below are alternatives, not a checklist. Product build/test/runtime commands belong to the product contribution guide, manifests and CI; repoctl checks validate the control plane.
+
 ## Common commands
 
 ```bash

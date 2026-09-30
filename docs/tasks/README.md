@@ -8,6 +8,8 @@ Create product work with:
 ./scripts/repoctl task create --start --json "Task title"
 ```
 
+This shorthand selects the only configured product repository. For explicitly tracked root-only work, use `task create --area docs --start --slug reconcile-workspace-docs "Reconcile workspace docs" --json` without `--repo-id` or `--repo-ref`; `--area ops` is also root-only when no repository is selected. `--area docs --repo-id main` selects product documentation. Root control-plane edits ordinarily need no Task (see `AGENTS.md`).
+
 Use `--type parent` only to coordinate independently verifiable repo-scoped child Tasks. Use `backlog add/list/show/remove` for deferred prose, then create an explicit Task with `--backlog-id` when work starts. Repoctl never derives area, files, expected behavior, or checks from Backlog text.
 
 ## Current scope
@@ -49,5 +51,7 @@ Finish directly after the work is ready:
 Finish checks repository selection, the task-start baseline, pre-existing dirty ownership, actual changes against Chosen, and metadata for changed files. It does not check whether Verification text exists or whether a test passed. If task changes were committed after start, use `task doctor --use-committed-diff` and finish with the same flag.
 
 Block and cancel need explicit intent through `--reason` or `--reason-file`. Completed Tasks and completion receipts are immutable; create later work with `task create --follow-up-of T-old`. Receipt hashes bind lifecycle history to the stored Task artifact and do not represent test proof.
+
+Cancel creates no completion receipt. A canceled child leaves Board but stays in `docs/tasks/` until its parent closes; inspect its frontmatter and Closure instead of asking for a nonexistent archive or receipt. A finish receipt records lifecycle/change identity, while tests, product acceptance, and Git delivery need their own observed evidence. No Handoff binding is required solely to finish uninterrupted work.
 
 Repoctl alone mutates Board membership, lifecycle frontmatter, start baselines, ownership decisions, Handoff bindings, completion receipts, archive locators, and archive transitions. Humans and agents own the meaning of Goal, Chosen/Notes, Execution Log, optional Verification, and Handoff.

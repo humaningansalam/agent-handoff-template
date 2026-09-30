@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.repoctl.task_lifecycle_helpers import (
     add_task,
     init_committed_product_repo,
@@ -66,6 +68,36 @@ def test_started_task_defaults_to_the_only_configured_repository(tmp_path: Path,
     }
     assert payload["next_actions"][1]["kind"] == "discovery_input"
     assert "command" not in payload["next_actions"][1]
+
+
+@pytest.mark.parametrize("language", ["en", "ko"])
+@pytest.mark.parametrize("area,repo_id", [("backend", "main"), ("docs", "main"), ("docs", ""), ("ops", "")])
+def test_generated_goal_and_scope_follow_the_task_contract(tmp_path: Path, monkeypatch, capsys, language: str, area: str, repo_id: str) -> None:
+    write_workspace(tmp_path)
+    init_committed_product_repo(tmp_path / "repos", {"app.py": "value = 1\n"})
+    (tmp_path / "docs/repoctl.json").write_text(json.dumps({"document_language": language}), encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    args = ["task", "create", "--start", "--area", area, "--slug", "contract-copy", "Contract copy", "--json"]
+    if repo_id:
+        args.extend(["--repo-id", repo_id])
+    assert main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    text = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
+    goal = text.split("## Goal\n", 1)[1].split("## Scope", 1)[0]
+    scope = text.split("## Scope\n", 1)[1].split("## Execution Log", 1)[0]
+    assert "Contract copy" in goal
+    assert "handoff" not in goal.lower()
+    assert len([line for line in scope.splitlines() if line.startswith("- ")]) == 1
+    assert "meta check" not in scope
+    assert text.count("<!-- repoctl: generated-handoff -->") == 1
+    assert f'repo_id: "{repo_id}"' in text
+    if not repo_id:
+        state = json.loads((tmp_path / "docs/tasks/.repoctl-state" / f"{payload['data']['task_id']}.json").read_text())
+        assert not state["initial"].get("repo_id")
+        # Uninterrupted root work can finish with the inactive generated placeholder.
+        assert main(["task", "finish", payload["data"]["task_id"], "--json"]) == 0
+        finished = json.loads(capsys.readouterr().out)
+        assert finished["data"]["status"] == "done"
 
 
 def test_task_create_rejects_invalid_document_language_config(tmp_path: Path, monkeypatch, capsys) -> None:

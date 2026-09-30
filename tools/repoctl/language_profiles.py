@@ -197,13 +197,18 @@ def collect_verification_hints(repo: Path) -> list[VerificationHint]:
 def _package_json_hints(repo: Path) -> list[VerificationHint]:
     path = repo / "package.json"
     data = _read_json(path)
+    declared_value = str(data.get("packageManager") or "")
+    declared_manager = declared_value.split("@", 1)[0]
+    if declared_manager and declared_manager not in {"npm", "pnpm", "yarn", "bun"}:
+        return [VerificationHint("", "package.json", "javascript_package_manifest", f"Unsupported packageManager {declared_value!r}; command unresolved. Inspect package.json and project contribution guidance for the supported runner.")]
     scripts = data.get("scripts") if isinstance(data, dict) else None
     if not isinstance(scripts, dict):
         return []
     commands: list[VerificationHint] = []
+    manager = declared_manager or "npm"
     for script in ("test", "lint", "typecheck", "check", "build", "e2e"):
         if isinstance(scripts.get(script), str):
-            command = "npm test" if script == "test" else f"npm run {script}"
+            command = "npm test" if manager == "npm" and script == "test" else f"{manager} run {script}"
             commands.append(VerificationHint(command, "package.json", "javascript_package_manifest", f"package.json script `{script}`"))
     return commands
 

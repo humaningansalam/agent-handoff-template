@@ -15,6 +15,7 @@ It must preserve project state:
 - `docs/tasks/.repoctl-state/**`
 - `docs/archive/tasks/**`
 - project-specific workflow docs
+- existing `AGENTS.md` operating rules (seeded only when missing)
 
 ## Flow
 
@@ -52,6 +53,8 @@ A repo-scoped completion receipt keeps the `repo_id` that owned the Task when it
 Each apply receipt records the managed source digest and backup tree digest. `./scripts/repoctl upgrade status --json` calculates backup `availability` as `available`, `missing`, `digest_mismatch`, or `not_required` without modifying the receipt. Pre-digest receipts remain readable as `digest_unavailable`. Backups use manual retention in this version; there is no prune command.
 
 Workflow docs are distributed as `create_paths` by default. This lets new workspaces receive the canonical workflows while preserving modified workflows in existing workspaces.
+
+`AGENTS.md` also uses `create_paths`: the installed workspace's operating policy is adopter-owned. Upgrade neither replaces local rules nor merges upstream policy changes. Compare relevant upstream rule changes when updating the runtime; postflight checks machine state, not the meaning or compatibility of policy prose. No policy receipt or extra approval step is required.
 
 ## Forbidden Shortcuts
 

@@ -35,6 +35,15 @@ def _write_context_docs(root: Path) -> None:
     (root / "docs/workflows/generated.md").write_text("# Workflow\n\nGenerated output is not an authority.\n", encoding="utf-8")
 
 
+def _write_context_benchmark_docs(root: Path) -> None:
+    """Benchmark the shipped contracts instead of obsolete synthetic prose."""
+    source_root = Path(__file__).resolve().parents[2]
+    for rel in ("docs/PRD.md", "docs/contracts/repoctl-context-contract.md", "docs/contracts/repoctl-graph-contract.md", "docs/contracts/repoctl-module-boundaries.md"):
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((source_root / rel).read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def _sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 

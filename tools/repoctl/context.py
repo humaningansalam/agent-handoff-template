@@ -220,9 +220,15 @@ def build_context_bundle(
     include_linked_records: bool = True,
 ) -> tuple[ContextBundle | None, list[Problem], dict[str, Any]]:
     query_mode = normalize_context_mode(mode)
-    snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else load_materialized_graph(root, target=target)
+    snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else load_materialized_graph(root, target=target, state_root=graph_state_root, with_freshness=True)
+    graph_meta = dict(graph_meta)
+    observed_freshness = graph_meta.pop("freshness", None)
+    observed_freshness_problems = graph_meta.pop("freshness_problems", [])
     materialization = graph_meta.get("materialization") if isinstance(graph_meta.get("materialization"), dict) else {}
-    if snapshot is not None:
+    if snapshot is not None and graph_result is None and isinstance(observed_freshness, dict):
+        freshness = observed_freshness
+        freshness_problems = [Problem(**item) for item in observed_freshness_problems]
+    elif snapshot is not None:
         freshness, freshness_problems = graph_materialization_freshness(
             root,
             target=target,
@@ -250,6 +256,14 @@ def build_context_bundle(
             if str(path)
         },
     }
+    # Existing indexes may predate collection of local operating guidance.
+    # Overlay these two bounded entry files without rebuilding product Graph.
+    if snapshot is not None:
+        stale_workspace_paths.update(
+            f"{target.display_path.rstrip('/')}/{name}"
+            for name in ("AGENTS.md", "CONTRIBUTING.md")
+            if (target.root_path / name).is_file()
+        )
     stale_path_classifications = (
         freshness.get("stale_path_classifications")
         if isinstance(freshness.get("stale_path_classifications"), dict)
@@ -1682,6 +1696,13 @@ def _context_query_guide(
         if first_path
         else "Open the relevant rule or refine the query to one implementation file."
     )
+    if query.get("mode") == "startup_reading":
+        rule_path = summary(rule, status="source")["path"]
+        next_action = (
+            f"Open {rule_path}, then follow the project PRD index and selected repository guidance before choosing an implementation file."
+            if rule_path
+            else "Read AGENTS.md and the project PRD entry point, then confirm the selected repository guidance."
+        )
     return {
         "current_intent": str(query.get("text") or ""),
         "first_implementation_file": implementation_summary,
@@ -3209,9 +3230,10 @@ def _compact_bundle_projection(
                 repository_path=repository_path,
             )
         ]
-    projection_groups["must_read"] = _role_diverse_must_read_items(
-        projection_groups.get("must_read", [])
-    )
+    if mode != "startup_reading":
+        projection_groups["must_read"] = _role_diverse_must_read_items(
+            projection_groups.get("must_read", [])
+        )
     selected_item_count = 0
 
     def try_add(group: str, item: dict[str, Any]) -> bool:
@@ -3674,7 +3696,7 @@ def _startup_query_candidates(
                 source_ref=chunk.source_ref,
                 text=_truncate(chunk.text, 700),
                 score=score,
-                score_breakdown={"startup_reading": 1.0},
+                score_breakdown={"startup_reading": score},
                 selection_reasons=["startup/read-first source"],
                 graph_path=[],
                 evidence_kinds=(ContextEvidenceKind.STARTUP_READING,),
@@ -3692,7 +3714,11 @@ def _startup_query_candidates(
 def _startup_source_priority(root: Path, target: RepoTarget) -> dict[str, float]:
     repo_prefix = target.display_path.rstrip("/")
     paths = [
+        ("AGENTS.md", 33.0),
+        ("docs/PRD.md", 32.0),
+        (f"{repo_prefix}/AGENTS.md", 31.0),
         (f"{repo_prefix}/README.md", 30.0),
+        (f"{repo_prefix}/CONTRIBUTING.md", 29.5),
         (f"{repo_prefix}/package.json", 29.0),
         (f"{repo_prefix}/tsconfig.json", 28.5),
         (f"{repo_prefix}/jsconfig.json", 28.5),
@@ -3705,9 +3731,7 @@ def _startup_source_priority(root: Path, target: RepoTarget) -> dict[str, float]
         (f"{repo_prefix}/ProjectSettings/ProjectVersion.txt", 28.5),
         (f"{repo_prefix}/docs/README.md", 28.0),
         (f"{repo_prefix}/docs/PRD.md", 27.0),
-        ("AGENTS.md", 26.0),
         ("docs/BOARD.md", 25.0),
-        ("docs/PRD.md", 24.0),
         ("README.md", 15.0),
         ("docs/README.md", 14.0),
     ]
@@ -6146,6 +6170,8 @@ def _dedupe_candidates(candidates: list[ContextCandidate]) -> list[ContextCandid
 
 def _candidate_sort_key(candidate: ContextCandidate) -> tuple[int, int, float, str, int]:
     breakdown = candidate.score_breakdown
+    if breakdown.get("startup_reading"):
+        return (-1, 0, -candidate.score, candidate.source_ref.path, candidate.source_ref.line_start)
     direct_query_evidence = _has_direct_query_evidence(candidate)
     graph_evidence = float(breakdown.get("graph") or 0.0) > 0
     strong_direct_evidence = direct_query_evidence and (
@@ -6636,6 +6662,9 @@ def _group_item_sort_key(
     *,
     direct_query_score: float,
 ) -> tuple[int, int, int, float, float, str]:
+    breakdown = item.get("score_breakdown") or {}
+    if breakdown.get("startup_reading"):
+        return (-1, 0, 0, -float(breakdown["startup_reading"]), 0.0, str((item.get("source_ref") or {}).get("path") or ""))
     role = str(item.get("evidence_role") or "")
     role_priority = _evidence_role_priority(role)
     try:

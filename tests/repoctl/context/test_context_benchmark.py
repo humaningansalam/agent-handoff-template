@@ -8,7 +8,7 @@ from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projec
 from tests.repoctl.context_test_helpers import (
     _setup_context_multirepo_workspace,
     _write_context_benchmark_collection_corpus,
-    _write_context_docs,
+    _write_context_benchmark_docs,
     init_repo,
     write_repometa,
     write_workspace,
@@ -17,13 +17,22 @@ from tests.repoctl.context_test_helpers import (
 
 def _setup_benchmark_workspace(tmp_path: Path, monkeypatch) -> Path:
     write_workspace(tmp_path)
-    _write_context_docs(tmp_path)
+    _write_context_benchmark_docs(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
     write_repometa(repo)
     initialize_empty_knowledge_projection(tmp_path, repo_id="main")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     return Path("tests/fixtures/context-benchmark").resolve()
+
+
+def test_benchmark_authority_anchors_exist_in_shipped_documents() -> None:
+    source_root = Path(__file__).resolve().parents[3]
+    expected = json.loads((source_root / "tests/fixtures/context-benchmark/expected-sources.json").read_text())
+    for question_id in ("Q-001", "Q-002", "Q-009", "Q-010", "Q-011", "Q-012"):
+        for ref in expected[question_id]["must_find"]:
+            headings = [line.lstrip("#").strip() for line in (source_root / ref["path"]).read_text().splitlines() if line.startswith("#")]
+            assert ref["section"] in headings, (question_id, ref)
 
 
 def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_quality(

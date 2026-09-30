@@ -25,6 +25,8 @@ DOCUMENT_PATTERNS = (
     "docs/workflows/**/*.md",
 )
 PRODUCT_DOCUMENT_PATTERNS = (
+    "AGENTS.md",
+    "CONTRIBUTING.md",
     "README.md",
     "README.*.md",
     "docs/**/*.md",
@@ -125,6 +127,8 @@ def collect_context_sources(
         if not source_path.exists():
             continue
         rel = source_path.relative_to(root).as_posix()
+        if not hint.command:
+            problems.append(Problem("warning", "verification_command_unresolved", hint.reason, rel))
         text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"
         chunks.append(
             chunk_text_source(
@@ -365,6 +369,8 @@ def context_overlay_chunks(
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
+        if not hint.command:
+            problems.append(Problem("warning", "verification_command_unresolved", hint.reason, rel))
         if rel not in selected:
             continue
         text = f"Verification command: {hint.command}\nSource: {rel}\nReason: {hint.reason}\nProvider: {hint.provider}"

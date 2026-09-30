@@ -1084,17 +1084,30 @@ def load_materialized_graph(
     *,
     target: RepoTarget,
     state_root: Path | None = None,
+    with_freshness: bool = False,
 ) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
     materialized, problems, status = _admit_materialization(root, target=target, state_root=state_root)
     if materialized is None:
         return None, problems, {"repository": target.to_dict(), "materialization": {"status": status}}
-    return materialized.snapshot, [], {
+    meta = {
         "repository": target.to_dict(),
         "materialization": {
             "status": "materialized",
             "input_digest": str(materialized.manifest.get("input_digest") or ""),
         },
     }
+    if with_freshness:
+        freshness, freshness_problems = _observed_graph_freshness(
+            root,
+            target=target,
+            snapshot=materialized.snapshot,
+            manifest=materialized.manifest,
+            provider_results=materialized.provider_results,
+            component_manifest_registry=DEFAULT_COMPONENT_MANIFEST_REGISTRY,
+        )
+        meta["freshness"] = freshness
+        meta["freshness_problems"] = [problem.to_dict() for problem in freshness_problems]
+    return materialized.snapshot, [], meta
 
 
 def graph_materialization_freshness(
@@ -1150,6 +1163,30 @@ def graph_materialization_freshness(
                 else "invalid"
             )
             return {"status": provider_status, "changed_paths": []}, provider_problems
+    return _observed_graph_freshness(
+        root,
+        target=target,
+        snapshot=snapshot,
+        manifest=manifest,
+        provider_results=provider_results,
+        component_manifest_registry=component_manifest_registry,
+    )
+
+
+def _observed_graph_freshness(
+    root: Path,
+    *,
+    target: RepoTarget,
+    snapshot: GraphSnapshot,
+    manifest: dict[str, Any],
+    provider_results: dict[str, SemanticProviderResult],
+    component_manifest_registry: ComponentManifestRegistry,
+) -> tuple[dict[str, Any], list[Problem]]:
+    """Check live inputs against artifacts admitted once in this observation.
+
+    This is invocation-local reuse, never a cache across queries. Admission
+    still validates repository/schema/digests/providers/index before entry.
+    """
     inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
     inventory_problems, metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
     previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}

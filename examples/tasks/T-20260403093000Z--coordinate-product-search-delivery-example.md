@@ -26,8 +26,6 @@ Demonstrate a root-only parent task that coordinates independently verifiable re
 
 ## Discovery
 
-- Candidate query: `coordinate product search indexing and API integration`
-- Candidate files reviewed: none; this parent coordinates child outcomes and does not select product files
 - Chosen files: none; each repo-scoped child owns its own explicit product scope
 - Notes: Child links below are illustrative task IDs inside this example, not paths expected to exist in a copied workspace.
 
@@ -66,11 +64,17 @@ The child's `parent` frontmatter field is the authoritative link.
 ## Non-Live Child Tasks
 
 - `T-20260403092900Z` — define product search contract (illustrative child)
+- `T-20260403092800Z` — canceled duplicate (illustrative child); removed from Board, retained at `docs/tasks/T-20260403092800Z--duplicate-search-example.md` until this parent closes; cancellation creates no completion receipt
 
 ## Shared Interfaces / Decisions
 
 - Each child records `repo_id: "main"` and its own Discovery, chosen files, and verification
 - The search result schema is the shared interface; implementation details remain owned by each child
+- Current decision: index before API integration; amendment `example-search-order-v2` supersedes the parallel schedule in `example-search-order-v1`, retaining the shared schema and child repository boundaries. Original: `examples/tasks/T-20260403093000Z--coordinate-product-search-delivery-example.md`, heading `Preserved request (illustrative)`; requestRef `example-search-order-v2`.
+
+### Preserved request (illustrative)
+
+requestRef `example-search-order-v2`: Finish the index child before starting API integration. This replaces only the parallel schedule in `example-search-order-v1`; keep the shared result schema and each child's selected repository. This is illustrative source text, not authority for a live Task.
 
 ## Integration Done When
 

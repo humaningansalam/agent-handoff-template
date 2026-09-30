@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -15,7 +15,6 @@
     ".devcontainer/devcontainer.json",
     ".gitignore",
     ".ignore",
-    "AGENTS.md",
     "CLAUDE.md",
     "README.md",
     "docs/README.md",
@@ -119,6 +118,7 @@
     "repos/**"
   ],
   "create_paths": [
+    "AGENTS.md",
     "docs/workflows/INDEX.md",
     "docs/workflows/README.md",
     "docs/workflows/TEMPLATE.md",

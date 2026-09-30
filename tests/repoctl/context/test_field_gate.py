@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
-from tests.repoctl.context_test_helpers import _write_context_docs, init_repo, write_workspace
+from tests.repoctl.context_test_helpers import _write_context_benchmark_docs, init_repo, write_workspace
 from tests.repoctl.knowledge_test_helpers import _add_knowledge_source
 
 
@@ -23,7 +23,7 @@ def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_
     capsys,
 ) -> None:
     write_workspace(tmp_path)
-    _write_context_docs(tmp_path)
+    _write_context_benchmark_docs(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
     _copy_release_fixtures(tmp_path)
@@ -79,7 +79,7 @@ def test_repoctl_release_field_gate_cleans_materialized_state_when_a_gate_raises
     monkeypatch,
 ) -> None:
     write_workspace(tmp_path)
-    _write_context_docs(tmp_path)
+    _write_context_benchmark_docs(tmp_path)
     repo = tmp_path / "repos"
     init_repo(repo)
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())

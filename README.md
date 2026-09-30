@@ -64,6 +64,8 @@ Build Graph only when typed code navigation would help:
 
 ## Daily work
 
+For first entry, use [AGENTS.md](AGENTS.md#session-start-and-read-order) for policy and [docs/README.md](docs/README.md) for the document map. Confirm the product Git root with `repo list`, read its README and local guidance, and start requirements at `docs/PRD.md` (following relevant index links). Inspect implementation, manifests, tests and CI in that Git root before choosing changes or commands. Resume identifies current work; an empty Board does not establish implementation or release readiness.
+
 At session start:
 
 ```bash

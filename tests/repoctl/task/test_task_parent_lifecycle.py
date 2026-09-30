@@ -101,6 +101,31 @@ def test_task_finish_child_does_not_move_file(tmp_path: Path, monkeypatch, capsy
     assert "docs/tasks/T-20260609184047Z--child.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
 
 
+def test_canceled_child_has_no_receipt_and_archives_only_with_parent(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent_id, child_id = "T-20260609184046Z", "T-20260609184047Z"
+    _parent_child_repo_fixture(tmp_path, parent_id, [child_id])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", child_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "cancel", child_id, "--reason", "duplicate work", "--json"]) == 0
+    canceled = json.loads(capsys.readouterr().out)
+    child_path = tmp_path / canceled["data"]["new_path"]
+    original = child_path.read_bytes()
+    assert canceled["data"]["archived"] is False
+    assert child_path.parent == tmp_path / "docs/tasks"
+    assert "Completion receipt: none" in original.decode()
+    assert child_id not in (tmp_path / "docs/BOARD.md").read_text()
+    receipt = tmp_path / f"docs/tasks/.repoctl-state/completions/{child_id}.json"
+    assert not receipt.exists()
+    assert main(["task", "finish", parent_id, "--json"]) == 0
+    capsys.readouterr()
+    assert not child_path.exists()
+    assert (tmp_path / "docs/archive/tasks" / child_path.name).read_bytes() == original
+    assert not receipt.exists()
+
+
 def test_task_finish_child_rolls_back_task_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     add_task(tmp_path, "T-20260609184046Z--parent.md", task_text("T-20260609184046Z", status="doing"))

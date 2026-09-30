@@ -19,20 +19,15 @@
     "acceptable": [
       {
         "path": "docs/PRD.md",
-        "section": "Evidence And Context"
+        "section": "Product model"
       }
     ],
     "noise": [],
-    "required_knowledge_source_refs": [
-      {
-        "path": "docs/contracts/repoctl-context-contract.md",
-        "section": "repoctl Context contract"
-      }
-    ],
+    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
-        "section": "repoctl Context contract"
+        "section": "Purpose"
       }
     ]
   },
@@ -161,7 +156,7 @@
     "acceptable": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
-        "section": "repoctl Context contract"
+        "section": "Purpose"
       }
     ],
     "noise": [],
@@ -177,7 +172,7 @@
     "acceptable": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
-        "section": "repoctl Context contract"
+        "section": "Project documents, history, and Knowledge"
       }
     ],
     "noise": [],
@@ -185,7 +180,7 @@
     "must_find": [
       {
         "path": "docs/PRD.md",
-        "section": "Evidence And Context"
+        "section": "Reuse a decision"
       }
     ]
   },
@@ -201,7 +196,7 @@
     "must_find": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
-        "section": "Derived layer rules"
+        "section": "Derived-layer rules"
       }
     ]
   },
@@ -212,7 +207,7 @@
     "must_find": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
-        "section": "Derived layer rules"
+        "section": "Forbidden shortcuts"
       }
     ]
   },

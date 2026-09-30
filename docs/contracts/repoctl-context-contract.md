@@ -31,6 +31,8 @@ invariant
 
 Mode selection changes bounded ranking and Graph traversal policy. It never changes source authority or Task scope.
 
+`startup-reading` preserves project entry sources ahead of incidental lexical matches and suggests orientation before implementation. Product-root `AGENTS.md` and `CONTRIBUTING.md` are collected when present; rules in ancestor directories still need direct inspection for a chosen file. Manifest verification hints respect a recognized declared package manager, but require review of local guidance, working directory and runtime prerequisites before execution. Retrieval benchmarks measure source visibility and navigation coverage, not an agent's understanding or product acceptance.
+
 ## Evidence model
 
 A Context item carries a `source_ref` with repository-aware path identity and, when available, section, lines, source fact, provider symbol, and content digest. Full output may also expose evidence kinds, anchor strength, field matches, score diagnostics, and document role.

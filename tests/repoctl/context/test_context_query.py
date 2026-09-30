@@ -5235,3 +5235,127 @@ def test_context_query_includes_reviewed_knowledge_separately(tmp_path: Path, mo
         and problem["code"] == "knowledge_source_changed"
         for problem in stale_payload["problems"]
     )
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_startup_orientation_survives_lexical_distractors_and_old_index(
+    tmp_path: Path, monkeypatch, capsys, indexed: bool,
+) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    (repo / "README.md").write_text("# Product\n\nProduct entry and architecture.\n")
+    (tmp_path / "docs/PRD.md").write_text("# Active requirements\n\nSee [current](prd/current.md).\n")
+    (repo / "app.py").write_text("# project structure applicable rules active PRD current implementation\ndef run(): pass\n")
+    if indexed:
+        _materialize(tmp_path)
+    # Existing indexes must not conceal subsequently introduced local rules.
+    (repo / "AGENTS.md").write_text("# Local rules\n\nPreserve the selected product boundary.\n")
+    (repo / "CONTRIBUTING.md").write_text("# Checks\n\nUse pnpm run check on the dev branch.\n")
+    assert main(["context", "query", "project structure applicable rules active PRD current implementation", "--mode", "startup-reading", "--repo-id", "main", "--json"]) == 0
+    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    paths = [item["source_ref"]["path"] for item in bundle["groups"]["must_read"]]
+    assert paths[:5] == ["AGENTS.md", "docs/PRD.md", "repos/AGENTS.md", "repos/README.md", "repos/CONTRIBUTING.md"]
+    assert bundle["guide"]["next_narrow_action"].startswith("Open AGENTS.md,")
+    assert "before choosing an implementation file" in bundle["guide"]["next_narrow_action"]
+    assert next(item for item in bundle["groups"]["must_read"] if item["source_ref"]["path"] == "repos/CONTRIBUTING.md")["document_role"] == "procedure"
+
+
+@pytest.mark.parametrize("manager,expected", [
+    ("pnpm@10.11.0", "pnpm run test"), ("yarn@4.0.0", "yarn run test"),
+    ("bun@1.2.0", "bun run test"), ("npm@10.0.0", "npm test"),
+    ("", "npm test"),
+])
+def test_manifest_command_hints_respect_declared_manager(tmp_path: Path, manager: str, expected: str) -> None:
+    from tools.repoctl.language_profiles import collect_verification_hints
+    (tmp_path / "package.json").write_text(json.dumps({"packageManager": manager, "scripts": {"test": "test-runner", "typecheck": "tsc"}}))
+    hints = collect_verification_hints(tmp_path)
+    assert {hint.command for hint in hints} == {expected, expected.split()[0] + " run typecheck"}
+    assert all(hint.source_path == "package.json" for hint in hints)
+
+
+def test_manifest_command_hints_do_not_override_unknown_declared_manager(tmp_path: Path) -> None:
+    from tools.repoctl.language_profiles import collect_verification_hints
+    (tmp_path / "package.json").write_text(json.dumps({"packageManager": "custom@1.0.0", "scripts": {"test": "test-runner"}}))
+    hints = collect_verification_hints(tmp_path)
+    assert len(hints) == 1
+    assert hints[0].command == ""
+    assert hints[0].source_path == "package.json"
+    assert "custom@1.0.0" in hints[0].reason and "command unresolved" in hints[0].reason
+
+
+@pytest.mark.parametrize("index", ["missing", "current", "stale"])
+def test_unknown_manager_is_actionable_in_context_and_pack(tmp_path: Path, monkeypatch, capsys, index: str) -> None:
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    if index == "stale":
+        _materialize(tmp_path)
+    (repo / "package.json").write_text(json.dumps({"packageManager": "custom@1.0.0", "scripts": {"test": "test-runner"}}))
+    if index == "current":
+        _materialize(tmp_path)
+    _write_context_pack_task(tmp_path, task_id="T-20260902010101Z", slug="manager-check", title="Manager check", goal="Find the test command", context_doc="AGENTS.md")
+    for args in (["context", "query", "where is run", "--repo-id", "main"], ["context", "pack", "--task", "T-20260902010101Z", "--repo-id", "main"]):
+        assert main([*args, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        rendered = json.dumps(payload)
+        diagnostics = payload["problems"] if args[1] == "query" else payload["warnings"]
+        unresolved = [problem for problem in diagnostics if problem["code"] == "verification_command_unresolved"]
+        assert len(unresolved) == 1
+        assert unresolved[0]["severity"] == "warning"
+        assert unresolved[0]["path"] == "repos/package.json"
+        assert "Unsupported packageManager" in rendered
+        assert "custom@1.0.0" in rendered and "command unresolved" in rendered
+        assert "Inspect package.json" in rendered
+        assert "npm test" not in rendered
+
+
+@pytest.mark.parametrize("mode", ["startup-reading", "code-location"])
+def test_context_reuses_admitted_artifacts_only_within_current_query(
+    tmp_path: Path, monkeypatch, mode: str,
+) -> None:
+    from tools.repoctl.context import build_context_bundle
+    from tools.repoctl.graph_store import graph_materialization_freshness
+    repo = _setup_context_workspace(tmp_path, monkeypatch)
+    target = require_repo_target(tmp_path, repo_id="main")
+    _materialize(tmp_path)
+    reads: list[Path] = []
+    original = Path.read_text
+
+    def counted(path, *args, **kwargs):
+        reads.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted)
+
+    def query():
+        reads.clear()
+        bundle, problems, meta = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode)
+        assert bundle is not None
+        assert not [p for p in problems if p.severity == "error"]
+        assert reads.count(tmp_path / ".repoctl-state/graph/main/manifest.json") == 1
+        for path in (tmp_path / ".repoctl-state/graph/main/providers").glob("*.json"):
+            assert reads.count(path) == 1
+        return compact_context_bundle(bundle)
+
+    fresh = query()
+    assert fresh["completeness"]["graph_freshness"]["status"] == "current"
+    # An externally supplied snapshot must recheck live inputs, even if its
+    # metadata contains a freshness observation from an earlier invocation.
+    observed = load_materialized_graph(tmp_path, target=target, with_freshness=True)
+    (repo / "app.py").write_text("def changed_after_admission():\n    return 2\n")
+    (tmp_path / "docs/PRD.md").write_text("# Requirements\n\nchanged_after_admission rule.\n")
+    (repo / "CONTRIBUTING.md").write_text("# Checks\n\nchanged_after_admission requires source review.\n")
+    stale = query()
+    assert stale["completeness"]["graph_freshness"]["status"] == "stale"
+    bundle, problems, _ = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode, graph_result=observed)
+    assert bundle is not None
+    assert compact_context_bundle(bundle) == stale
+    legacy = load_materialized_graph(tmp_path, target=target)
+    expected, _ = graph_materialization_freshness(tmp_path, target=target, snapshot=legacy[0])
+    assert "app.py" in expected["changed_paths"]
+    assert "docs/PRD.md" in expected["changed_root_paths"]
+    # Corruption on the next query must still fail admission; there is no
+    # persistent trusted-provider cache that can hide the modification.
+    provider = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
+    provider.write_text("{}")
+    bundle, problems, _ = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode)
+    assert any(p.code == "graph_materialization_invalid" for p in problems)
+    assert bundle is not None
+    assert bundle.completeness["graph_available"] is False

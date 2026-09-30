@@ -1,5 +1,5 @@
 {"id":"Q-001","category":"authority","repo_id":"main","mode":"authority","question":"Why is Graph a read-only derived evidence snapshot and what source authorities remain?"}
-{"id":"Q-002","category":"contract","repo_id":"main","mode":"authority","question":"What source authorities remain after context retrieval?"}
+{"id":"Q-002","category":"contract","repo_id":"main","mode":"authority","question":"How does Context return source-linked working sets without turning results into edit scope or authority?"}
 {"id":"Q-003","category":"impact","repo_id":"main","question":"What files are impacted if utils/tokens.py changes?"}
 {"id":"Q-004","category":"typed-consumer-closure","repo_id":"main","question":"What files are impacted if handlers/session_tokens.py changes?"}
 {"id":"Q-005","category":"impact","repo_id":"main","question":"What files are impacted if frontend/src/api/tokens.ts changes?"}
@@ -7,9 +7,9 @@
 {"id":"Q-007","category":"method-impact","repo_id":"main","question":"What methods are impacted if TokenFlow.validate changes?"}
 {"id":"Q-008","category":"cross-file-call-impact","repo_id":"main","question":"What functions are impacted if issue_session changes?"}
 {"id":"Q-009","category":"authority","repo_id":"main","mode":"authority","question":"Which source authorities remain: repo registry code index repometa task completion receipts?"}
-{"id":"Q-010","category":"authority","repo_id":"main","mode":"authority","question":"Why does Evidence Context come before reviewed knowledge?"}
-{"id":"Q-011","category":"authority","repo_id":"main","mode":"authority","question":"Does Context retrieval replace Board Backlog Graph or repometa authority?"}
-{"id":"Q-012","category":"contract","repo_id":"main","mode":"authority","question":"What future layer rule prevents Context from replacing task Board Backlog Graph repometa authority?"}
+{"id":"Q-010","category":"authority","repo_id":"main","mode":"authority","question":"How can an agent save and correct a reusable Knowledge decision with its reason and sources?"}
+{"id":"Q-011","category":"authority","repo_id":"main","mode":"authority","question":"Which derived-layer rules keep Context and Graph output from defining Task scope, ownership, or authority?"}
+{"id":"Q-012","category":"contract","repo_id":"main","mode":"authority","question":"Which module boundary forbids parsing Task, Verification, or Handoff prose into scope, status, or proof?"}
 {"id":"Q-013","category":"code-location","repo_id":"main","question":"Where is services token_service issue_token defined?"}
 {"id":"Q-014","category":"code-location","repo_id":"main","question":"Where is utils tokens issue_token defined?"}
 {"id":"Q-015","category":"code-location","repo_id":"main","question":"Where is TokenFlow validate method defined?"}

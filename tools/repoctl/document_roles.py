@@ -45,6 +45,8 @@ def classify_document_role(path: str, *, repository_path: str = "") -> DocumentR
         return DocumentRole.TEMPLATE
     if local_path == "agents.md":
         return DocumentRole.OPERATING_AUTHORITY
+    if local_path == "contributing.md":
+        return DocumentRole.PROCEDURE
     if local_path == "docs/board.md":
         return DocumentRole.REFERENCE
     if local_path == "docs/prd.md" or local_path.startswith("docs/prd/"):

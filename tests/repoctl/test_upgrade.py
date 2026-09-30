@@ -1050,3 +1050,31 @@ def test_postflight_reports_invalid_projection_lifecycle_without_crashing(
             and warning["cause_code"] == "knowledge_projection_schema_mismatch"
             for warning in postflight["warnings"]
         )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_shipped_upgrade_seeds_or_preserves_adopter_operating_rules(tmp_path: Path, existing: bool) -> None:
+    source = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace)
+    agents = workspace / "AGENTS.md"
+    local = b"# Local operating policy\n\nPreserve dev/release boundaries; do not publish without authorization.\n"
+    if existing:
+        agents.write_bytes(local)
+    else:
+        agents.unlink()
+    protected = {p: p.read_bytes() for p in [workspace / "docs/BOARD.md", workspace / "docs/PRD.md", workspace / "repos/app.py", *workspace.glob("docs/tasks/T-*.md"), *workspace.glob("docs/archive/tasks/T-*.md")]}
+    plan = plan_upgrade(workspace, source=source)
+    assert plan["conflicts"] == []
+    operations = [op for op in plan["operations"] if op["path"] == "AGENTS.md"]
+    assert operations == [] if existing else len(operations) == 1 and operations[0]["action"] == "create"
+    plan_file = tmp_path / "plan.json"
+    write_plan(plan_file, plan)
+    # A further local edit after planning remains adopter-owned, not a stale
+    # managed replacement or a reason to discard the local operating policy.
+    if existing:
+        agents.write_bytes(local + b"Keep the approved runtime prerequisite.\n")
+    expected = agents.read_bytes() if existing else (source / "AGENTS.md").read_bytes()
+    apply_upgrade(workspace, plan_file=plan_file)
+    assert agents.read_bytes() == expected
+    assert all(path.read_bytes() == raw for path, raw in protected.items())
