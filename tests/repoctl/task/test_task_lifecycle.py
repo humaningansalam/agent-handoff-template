@@ -1251,10 +1251,12 @@ def test_task_handoff_repository_digest_detects_same_head_content_drift_but_not_
     assert _show_resume_guidance(capsys)["status"] == "current"
 
 
+@pytest.mark.parametrize("compact", [False, True])
 def test_current_handoff_is_readable_but_not_executable_when_repository_lineage_is_unhealthy(
     tmp_path: Path,
     monkeypatch,
     capsys,
+    compact: bool,
 ) -> None:
     _task_path, repo, _receipt = _start_repo_task_with_resume_surface(tmp_path, monkeypatch, capsys)
     _bind_handoff(capsys)
@@ -1276,7 +1278,7 @@ def test_current_handoff_is_readable_but_not_executable_when_repository_lineage_
     binding["input_digests"] = task_resume_input_digests(tmp_path, current_task)
     binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["task", "resume", "--json"]) == 1
+    assert main(["task", "resume", *(["--compact"] if compact else []), "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     guidance = payload["data"]["resume_guidance"]
     assert guidance["status"] == "current"
@@ -1441,3 +1443,60 @@ def test_task_show_rejects_missing_handoff_and_keeps_summary_inputs_bounded(
     assert payload["ok"] is False
     assert payload["problems"][0]["code"] == "missing_handoff"
     assert payload["data"]["resume_guidance"]["status"] == "inactive"
+
+
+def test_compact_resume_keeps_full_context_once_and_legacy_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    tid = "T-20260609184046Z"
+    text = task_text(tid, status="doing")
+    history = "Historical transition: wait for old request.\n\n### Original review\n" + "Preserved verdict.\n" * 300
+    text = text.replace("## Handoff\n", "## Handoff\n\n" + history)
+    add_board_task(tmp_path, f"{tid}--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "handoff", "bind", tid, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "resume", tid, "--json"]) == 0
+    legacy = json.loads(capsys.readouterr().out)
+    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    output = capsys.readouterr().out
+    compact = json.loads(output)
+    old = legacy["data"]["resume_guidance"]
+    new = compact["data"]["resume_guidance"]
+    assert new["readable_handoff"] == old["readable_handoff"] == old["executable_handoff"]
+    assert history in new["readable_handoff"]
+    assert output.count("Historical transition") == 1
+    assert len(output.encode()) < len(json.dumps(legacy, indent=2).encode())
+    assert set(new["executable_handoff"]["field_labels"]) == {"Next exact step", "First file to open", "First command to run", "Done when"}
+    assert new["executable_handoff"]["reviewed_context_ref"] == "data.resume_guidance.readable_handoff"
+    assert new["health"] == old["health"] and new["handoff"] == old["handoff"]
+    assert "historical prose is not made current" in new["handoff_interpretation"]
+    assert main(["task", "resume", tid, "--full", "--json"]) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert full["executable_handoff"] == old["executable_handoff"]
+    # Changed inputs still invalidate both projections; no cache bypass.
+    assert main(["task", "log", "append", tid, "new input", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert stale["status"] == "inactive" and stale["executable_handoff"] is None
+
+
+@pytest.mark.parametrize("extra", ["", "- Next exact step: conflicting second instruction\n"])
+def test_compact_resume_does_not_select_ambiguous_fields(tmp_path: Path, monkeypatch, capsys, extra: str) -> None:
+    write_workspace(tmp_path)
+    tid = "T-20260609184046Z"
+    text = task_text(tid, status="doing")
+    add_board_task(tmp_path, f"{tid}--alpha.md", text)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "handoff", "bind", tid, "--json"]) == 0
+    capsys.readouterr()
+    path = tmp_path / f"docs/tasks/{tid}--alpha.md"
+    if extra:
+        path.write_text(path.read_text() + extra)
+    result = main(["task", "resume", tid, "--compact", "--json"])
+    guidance = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    if extra:
+        assert result == 1
+        assert guidance["status"] == "inactive" and guidance["executable_handoff"] is None
+    else:
+        assert result == 0 and isinstance(guidance["executable_handoff"], dict)

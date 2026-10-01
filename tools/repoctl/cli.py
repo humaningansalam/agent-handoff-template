@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -44,7 +45,7 @@ from .knowledge_projection import (
     rebuild_knowledge_projection,
 )
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
-from .markdown import find_section
+from .markdown import find_section, parse_labeled_list_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
 from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
@@ -2093,6 +2094,7 @@ def build_task_resume_projection(
     *,
     full: bool = False,
     task_id: str | None = None,
+    compact: bool = False,
 ) -> dict[str, Any]:
     tasks = load_tasks(root, include_archived=False)
     selection = select_task_for_resume(tasks)
@@ -2201,6 +2203,29 @@ def build_task_resume_projection(
         "blocked_by_health": blocked_by_health,
         "executable_handoff": executable_handoff,
     }
+    if compact:
+        # Preserve the complete reviewed section once; never rank prose by age.
+        guidance["view"] = "compact"
+        guidance["handoff_source"] = {
+            "path": task.rel_path,
+            "section": "Handoff",
+            "command": f"./scripts/repoctl task show {task.id} --section Handoff --json",
+        }
+        guidance["handoff_interpretation"] = (
+            "The canonical fields identify the reviewed restart instructions. "
+            "Read their sources and the complete reviewed context; historical prose "
+            "is not made current by a current binding. Resolve conflicting instructions before acting."
+        )
+        if executable_handoff is not None:
+            fields = parse_labeled_list_section(
+                task.body, "Handoff",
+                ("Next exact step", "First file to open", "First command to run", "Done when"),
+            )
+            guidance["executable_handoff"] = {
+                "field_labels": list(fields),
+                "reviewed_context_ref": "data.resume_guidance.readable_handoff",
+            }
+        guidance["readable_handoff"] = guidance.pop("readable_handoff")
     data.update({"task": task.to_list_dict(), "resume_guidance": guidance})
     payload = {
         "ok": not _has_errors(problems),
@@ -2223,6 +2248,7 @@ def cmd_task_resume(args: argparse.Namespace) -> int:
         find_workspace_root(),
         full=bool(args.full),
         task_id=args.task_id,
+        compact=bool(getattr(args, "compact", False)),
     )
     if not args.json:
         observe_envelope(payload)
@@ -5034,6 +5060,30 @@ def _compact_graph_query_warnings(completeness: Any) -> list[dict[str, str]]:
 
 def cmd_context_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
+    # A narrow explicit lifecycle request is not implementation discovery.
+    resume_request = re.fullmatch(
+        r"(?:resume|(?:\./scripts/repoctl\s+)?task\s+resume)"
+        r"(?:\s+(T-\d{14}Z))?(?:\s*:\s*.*)?", args.query.strip(), re.IGNORECASE,
+    )
+    if resume_request:
+        task_id = resume_request.group(1)
+        payload = build_task_resume_projection(root, task_id=task_id.upper() if task_id else None, compact=True, full=bool(args.full))
+        selected = payload["data"].get("task")
+        if selected and args.repo_id and selected.get("repo_id") != args.repo_id:
+            raise RepoctlError("resume task belongs to a different repository; use its recorded repository selection", code="task_repo_mismatch", path=selected["path"])
+        command = "./scripts/repoctl task resume" + (f" {selected['id']}" if selected else "") + " --compact --json"
+        payload["command"] = "context.query"
+        payload["data"] = {
+            "guide": {"current_intent": args.query, "next_narrow_action": command},
+            "bundle": None,
+            "task_resume": payload["data"],
+        }
+        if args.json:
+            _json(payload)
+        else:
+            observe_envelope(payload)
+            print(command)
+        return 0 if payload["ok"] else 1
     target = require_repo_target(root, repo_id=args.repo_id)
     bundle, problems, meta = build_context_bundle(
         root,
@@ -6311,6 +6361,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.set_defaults(func=cmd_task_list)
     task_resume = task_sub.add_parser("resume", help="Select resumable task state without mutation.")
     task_resume.add_argument("task_id", nargs="?", help="live task id to select when more than one task is resumable")
+    task_resume.add_argument("--compact", action="store_true", help="show canonical restart fields with the complete reviewed context once; legacy output is unchanged without this flag")
     task_resume.add_argument("--full", action="store_true", help="include every repository lifecycle problem instead of the bounded code summary")
     task_resume.add_argument("--json", action="store_true")
     task_resume.set_defaults(func=cmd_task_resume)

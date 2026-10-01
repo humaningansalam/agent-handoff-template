@@ -103,6 +103,8 @@ Handoff freshness and lifecycle health are independent:
 - `blocked_by_health` is true when lifecycle state is not executable.
 - `executable_handoff` is non-null only when a current binding and lifecycle health both permit execution.
 
+`task resume --compact` is an opt-in restart view; default and `--full` legacy consumers retain their string fields unchanged. The compact view keeps the complete reviewed section once in `readable_handoff`; a non-null `executable_handoff` contains `field_labels` (references to the four unique validated canonical labels in that section) and `reviewed_context_ref` pointing to that complete context. The fields are not a standalone authorization: preserve constraints and evidence in the reviewed context and cited sources. `handoff_source` provides the original section command. A current binding does not make historical prose current or settle conflicting instructions; no prose is ranked by position/date or removed. Invalid, unbound, stale or unhealthy instructions never acquire an executable projection. `--full --compact` adds full health details to this same view.
+
 `task discovery add` returns current `chosen_files`, `notes`, per-input update details, and counts. It does not return a query episode, Reviewed/Excluded disposition, selected result, or structured check state.
 
 `task doctor` and `task finish` share hard closure checks for repository identity, baseline ownership, actual paths outside Chosen, committed-range validity, and changed-file metadata. They do not expose a verification status or decide whether optional `## Verification` prose is complete. `finish_ready` means repoctl's lifecycle checks pass; it is not a claim that product behavior is correct.
@@ -122,6 +124,8 @@ Receipt and task-artifact hashes protect lifecycle-history identity. They do not
 ## Context, Graph, and Pack output
 
 `context query` and `graph query` return their evidence directly. Repeating either command creates no persistent result-receipt cache or selectable-result state. Stable source refs, typed relations, repository identity, completeness, freshness, and continuations remain in the command payload.
+
+An explicit `resume [TASK_ID]` or `task resume [TASK_ID]` query (optionally followed by a colon and the question) routes to the existing read-only compact Task resume projection before repository candidate retrieval. `data.bundle` is null and `data.task_resume` contains that projection; selection, freshness, lifecycle errors and warnings are preserved. An explicit conflicting repository selector is rejected. General implementation queries retain ordinary Context behavior.
 
 Default Context JSON is a bounded working projection. `--full` adds raw evidence and diagnostics without changing the meaning of visible members. Graph `--full` likewise adds raw nodes, edges, and provider diagnostics.
 

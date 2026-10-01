@@ -5359,3 +5359,48 @@ def test_context_reuses_admitted_artifacts_only_within_current_query(
     assert any(p.code == "graph_materialization_invalid" for p in problems)
     assert bundle is not None
     assert bundle.completeness["graph_available"] is False
+
+
+@pytest.mark.parametrize("query", [
+    "Resume T-20260609184046Z: current product requirement and next exact step",
+    "task resume T-20260609184046Z", "./scripts/repoctl task resume T-20260609184046Z",
+])
+def test_explicit_resume_query_uses_task_authority_not_retrieval(tmp_path: Path, monkeypatch, capsys, query: str) -> None:
+    from tests.repoctl.task_lifecycle_helpers import add_board_task, task_text, write_workspace
+    write_workspace(tmp_path)
+    tid = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{tid}--alpha.md", task_text(tid, status="doing"))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    def no_retrieval(*args, **kwargs):
+        pytest.fail("explicit resume must not run candidate retrieval")
+    monkeypatch.setattr("tools.repoctl.cli.build_context_bundle", no_retrieval)
+    assert main(["task", "handoff", "bind", tid, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["context", "query", query, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["bundle"] is None
+    assert data["guide"]["next_narrow_action"] == f"./scripts/repoctl task resume {tid} --compact --json"
+    assert data["task_resume"]["task"]["id"] == tid
+    assert data["task_resume"]["resume_guidance"]["status"] == "current"
+    assert isinstance(data["task_resume"]["resume_guidance"]["executable_handoff"], dict)
+    assert main(["context", "query", query, "--repo-id", "different", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "task_repo_mismatch"
+    assert main(["task", "log", "append", tid, "changed input", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["context", "query", query, "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["task_resume"]["resume_guidance"]
+    assert stale["status"] == "inactive" and stale["executable_handoff"] is None
+
+
+def test_resume_query_preserves_ambiguity_and_missing_task_errors(tmp_path: Path, monkeypatch, capsys) -> None:
+    from tests.repoctl.task_lifecycle_helpers import add_board_task, task_text, write_workspace
+    write_workspace(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    for tid in ("T-20260609184046Z", "T-20260609184047Z"):
+        add_board_task(tmp_path, f"{tid}--alpha.md", task_text(tid, status="doing"))
+    assert main(["context", "query", "resume", "--json"]) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["data"]["task_resume"]["selection"]["status"] == "ambiguous"
+    assert len(data["next_actions"]) == 2
+    assert main(["context", "query", "resume T-20260609184048Z", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "task_not_found"

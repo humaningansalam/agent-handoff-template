@@ -25,6 +25,7 @@ Run `./scripts/repoctl task resume --json` at session start and after compaction
 - `no_live` resumes nothing.
 - `single_live` selects the only live task.
 - `ambiguous` requires read-only selection with `./scripts/repoctl task resume <TASK_ID> --json`.
+- For focused restart reading, use `task resume <TASK_ID> --compact --json`: canonical fields refer to the complete reviewed context returned once. Default/`--full` output retains legacy strings; a current binding does not make historical prose current.
 - Only a non-null `executable_handoff` with `status: current` is an execution instruction.
 - Board rows, task history, archived Handoffs, and `readable_handoff` are inspection evidence only.
 - Handoff freshness and lifecycle health are independent. A current Handoff is not executable while lifecycle health is unhealthy.
