@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.repoctl.graph.test_graph_receipts import _receipt, _sha256_text
 from tests.repoctl.task_lifecycle_helpers import (
     add_task,
     init_committed_product_repo,
@@ -14,6 +15,7 @@ from tests.repoctl.task_lifecycle_helpers import (
     write_workspace,
 )
 from tools.repoctl.cli import main
+from tools.repoctl.tasks import completion_receipt_artifact_for_task, load_tasks
 
 
 def test_task_create_matches_existing_filename_contract(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -318,6 +320,68 @@ def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, mo
     assert f'follow_up_of: "{previous_id}"' in created
     assert f"- Follow-up of: `{previous_id}`" in created
     assert previous_path.read_text(encoding="utf-8") == previous_text
+
+
+@pytest.mark.parametrize("damage", ["", "hash_mismatch", "ambiguous", "symlink", "invalid_locator"])
+def test_legacy_live_path_receipt_resolves_archived_predecessor_without_backfill(
+    tmp_path: Path, monkeypatch, capsys, damage: str,
+) -> None:
+    write_workspace(tmp_path)
+    previous_id = "T-20260712114850Z"
+    filename = f"{previous_id}--implement-profile-reset-room-delete.md"
+    previous = tmp_path / "docs/archive/tasks" / filename
+    previous.write_text(task_text(previous_id, status="done"), encoding="utf-8")
+    receipt = tmp_path / f"docs/tasks/.repoctl-state/completions/{previous_id}.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps(_receipt(
+        previous_id, repo_id="main", task_path=f"docs/tasks/{filename}",
+        content_sha256=_sha256_text(previous.read_text(encoding="utf-8")), changed_entries=[],
+    )) + "\n", encoding="utf-8")
+    locator = tmp_path / f"docs/tasks/.repoctl-state/archive/{previous_id}.json"
+    if damage == "hash_mismatch":
+        previous.write_text(previous.read_text(encoding="utf-8") + "changed\n", encoding="utf-8")
+    elif damage == "ambiguous":
+        previous.with_name(f"{previous_id}--other.md").write_bytes(previous.read_bytes())
+    elif damage == "symlink":
+        outside = tmp_path / "outside.md"
+        previous.rename(outside)
+        previous.symlink_to(outside)
+    elif damage == "invalid_locator":
+        locator.parent.mkdir(parents=True)
+        locator.write_text("{}\n", encoding="utf-8")
+    protected = {path: path.read_bytes() for path in [previous, receipt, tmp_path / "docs/BOARD.md"]}
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "show", previous_id, "--json"]) == (2 if damage else 0)
+    shown = json.loads(capsys.readouterr().out)
+    if damage:
+        assert shown["problems"][0]["code"] == "task_not_found"
+    else:
+        assert shown["data"]["task"]["path"] == previous.relative_to(tmp_path).as_posix()
+        assert shown["data"]["task"]["status"] == "done"
+        artifact, problems = completion_receipt_artifact_for_task(tmp_path, task_id=previous_id)
+        assert problems == []
+        assert artifact is not None
+        assert artifact.declared_path == f"docs/tasks/{filename}"
+        assert artifact.resolved_path == previous.relative_to(tmp_path).as_posix()
+    assert all(path.read_bytes() == raw for path, raw in protected.items())
+    assert locator.exists() == (damage == "invalid_locator")
+
+    assert main([
+        "task", "create", "--follow-up-of", previous_id, "--area", "docs",
+        "--slug", "legacy-follow-up", "Legacy follow-up", "--json",
+    ]) == (2 if damage else 0)
+    created = json.loads(capsys.readouterr().out)
+    if damage:
+        assert created["problems"][0]["code"] == "task_not_found"
+        assert (tmp_path / "docs/BOARD.md").read_bytes() == protected[tmp_path / "docs/BOARD.md"]
+        assert not list((tmp_path / "docs/tasks").glob("T-*.md"))
+    else:
+        assert f'follow_up_of: "{previous_id}"' in (tmp_path / created["data"]["path"]).read_text(encoding="utf-8")
+        assert previous_id in {task.id for task in load_tasks(tmp_path)}
+    assert previous.read_bytes() == protected[previous]
+    assert receipt.read_bytes() == protected[receipt]
+    assert locator.exists() == (damage == "invalid_locator")
 
 
 def test_check_loads_only_the_transitive_archived_follow_up_chain(tmp_path: Path, monkeypatch, capsys) -> None:

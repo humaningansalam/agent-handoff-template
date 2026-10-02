@@ -1042,6 +1042,7 @@ def _task_archive_locator(root: Path, task_id: str) -> Path | None:
     if ID_RE.fullmatch(task_id) is None:
         return None
     task_path = ""
+    relocated_content_sha256 = ""
     locator_path = archive_locator_path(root, task_id)
     if locator_path.exists() or locator_path.is_symlink():
         if not _contained_regular_file(root, locator_path, _state_dir(root) / "archive"):
@@ -1078,12 +1079,26 @@ def _task_archive_locator(root: Path, task_id: str) -> Path | None:
         except RepoctlError:
             return None
         task_path = completion_receipt_task_path(receipt)
+        if task_path.startswith("docs/tasks/"):
+            # Older receipts retain the pre-archive path. Resolve only its
+            # exact filename and hash, without rewriting immutable history.
+            archived_path = root / "docs/archive/tasks" / PurePosixPath(task_path).name
+            if (
+                (root / task_path).exists()
+                or (root / task_path).is_symlink()
+                or sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")) != [archived_path]
+            ):
+                return None
+            task_path = archived_path.relative_to(root).as_posix()
+            relocated_content_sha256 = receipt["content_sha256"]
     if not _valid_receipt_task_path(task_path, task_id=task_id) or not task_path.startswith("docs/archive/tasks/"):
         return None
     path = root / task_path
     if not _contained_regular_file(root, path, root / "docs/archive/tasks"):
         return None
     try:
+        if relocated_content_sha256 and _sha256_bytes(path.read_bytes()) != relocated_content_sha256:
+            return None
         task = load_task(path, root, archived=True)
     except (OSError, UnicodeError, RepoctlError):
         return None
