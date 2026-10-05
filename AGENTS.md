@@ -30,8 +30,6 @@ At session start and after compaction, resume the known live task with `./script
 - Board rows, task history, archived Handoffs, and `readable_handoff` are inspection evidence only.
 - Handoff freshness and lifecycle health are independent. A current Handoff is not executable while lifecycle health is unhealthy.
 
-Apply restart instructions only to their intended actor. A Worker checks shared task scope and freshness, then continues its current assigned action; a Coordinator's "collect the same Worker/submission" step is not an instruction for that Worker to wait on itself. Reading shared Task state does not reassign roles or expand authority.
-
 Read only what the work needs, using this order when applicable. Resume already identifies live work; open the Board only for registry context, and Task/parent/Context Docs only for the selected work. A known small edit needs its affected source, applicable rules and relevant check, not a fresh project-wide tour or unrelated PRD/workflows.
 
 1. `AGENTS.md`
@@ -109,7 +107,7 @@ Keep the Execution Log short and append-only through `task log append`. Use `## 
 
 Preserve a long external request or review once, in the Task or an existing workspace source file, and reference its exact path/heading and requestRef when available. Keep the current outcome and effective decisions near Goal or Shared Interfaces / Decisions; identify which earlier instructions an amendment supersedes and which constraints remain in force. Handoff points to the current next step and those sources. Do not recopy full requests into Goal, log, Verification, and Handoff, trim meaningful events to meet a quota, or rewrite completed records. These notes do not replace Chosen, lifecycle frontmatter, or a current Handoff binding.
 
-For a retained-Worker dispatch, send its current action/scope, effective constraints and exact source references. Refer to the relevant sections of existing Task or orchestration records; do not forward the full growing history or substitute a Coordinator collection step for the Worker's assignment. Keep complete sources accessible and read them when needed.
+For a dispatch, send the current action/scope, effective constraints and exact source references. Refer to the relevant sections of existing Task or orchestration records; do not forward the full growing history. Keep complete sources accessible and read them when needed.
 
 Block or cancel with explicit transition intent: `task block T-... --reason "..."` or `task cancel T-... --reason "..."`. Use `--reason-file` only when that intent already exists in a UTF-8 file. These transitions append the reason to Execution Log and preserve Verification unchanged.
 
