@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.12.7",
+  "version": "0.12.8",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -124,7 +124,8 @@
     "docs/workflows/TEMPLATE.md",
     "docs/workflows/prd-backlog-sequential.md",
     "docs/workflows/repo-metadata.md",
-    "docs/workflows/repoctl-upgrade.md"
+    "docs/workflows/repoctl-upgrade.md",
+    "docs/workflows/well-written-tests.md"
   ],
   "remove_paths": [
     "docs/adr/repoctl-graph-v0.md",

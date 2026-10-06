@@ -46,6 +46,8 @@ For project orientation, confirm the selected Git root from `docs/repoctl.json` 
 
 Find implementation and dependencies in the selected repository's source, manifest, and relevant tests. Obtain check commands and their working directory from contribution guidance, manifest scripts, or CI; Context verification hints are suggestions to review, not an execution plan. Confirm runtime prerequisites and acceptance evidence separately (for example hardware, credentials, approved input data, or an existing worker). Use exact reads for known paths; neither a Graph build nor a Context Pack is required to understand a small change or run its checks.
 
+Before writing or changing tests, read [잘 작성된 테스트 코드](docs/workflows/well-written-tests.md).
+
 ## Product Work Loop
 
 1. Explore without changing product files. Use compact `context query` for ambiguous intent, Git status/diff for a changed-set review, Graph or direct reads for a known file, `rg` for an exact identity, and explicit history or Knowledge queries for prior decisions.

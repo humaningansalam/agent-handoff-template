@@ -47,6 +47,8 @@ Preferred categories:
 
 ### Quality / Review Workflows
 
+For test changes, read [잘 작성된 테스트 코드](well-written-tests.md).
+
 | Workflow | Use When | Do Not Use When | Tags | Expected Output |
 | --- | --- | --- | --- | --- |
 | `prd-backlog-sequential.md` | Comparing PRD/external notes to repo, listing missing work, or solving Backlog items one at a time | One-off read-only questions, immediate single known-file fixes | prd, backlog, discovery, sequential | PRD gap Backlog items or one archived Task with explicit Chosen scope per promoted item |
