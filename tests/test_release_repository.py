@@ -208,6 +208,7 @@ def test_release_help_is_read_only_and_archives_are_reproducible(tmp_path: Path)
 
 def test_v090_release_upgrade_and_fresh_postflight(tmp_path: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
+    expected_version = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text())["version"]
     archive_path = build_release_archive(source_root, tmp_path / "dist")
     release_parent = tmp_path / "release"
     with tarfile.open(archive_path, "r:gz") as archive:
@@ -252,11 +253,11 @@ def test_v090_release_upgrade_and_fresh_postflight(tmp_path: Path) -> None:
         "--output",
         str(plan_file),
     )
-    assert plan["data"]["source_version"] == "0.12.8"
+    assert plan["data"]["source_version"] == expected_version
     assert plan["data"]["operations"]
     repoctl(release_root, "upgrade", "apply", "--workspace-root", str(target), "--plan-file", str(plan_file))
     version = repoctl(target, "version")
-    assert version["data"]["pyproject_version"] == version["data"]["manifest_version"] == "0.12.8"
+    assert version["data"]["pyproject_version"] == version["data"]["manifest_version"] == expected_version
     assert repoctl(target, "upgrade", "postflight")["ok"] is True
     assert not list((target / "tests").rglob("*.py"))
     assert repoctl(release_root, "upgrade", "plan", "--workspace-root", str(release_root), "--from", str(release_root))["data"]["operations"] == []
