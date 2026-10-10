@@ -2696,8 +2696,11 @@ def _task_doctor_payload(
     task_id: str,
     *,
     use_committed_diff: bool = False,
+    acknowledge_completed: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     task = resolve_task(root, task_id)
+    if acknowledge_completed and _repo_scoped_frontmatter(task):
+        raise RepoctlError("completion acknowledgement is only for root-only tasks", code="completion_acknowledgement_invalid", path=task.rel_path)
     related_tasks = load_tasks(root, include_archived=False)
     if task.archived:
         related_tasks.append(task)
@@ -2723,7 +2726,7 @@ def _task_doctor_payload(
                 use_committed_diff=use_committed_diff,
             )
             if target is not None
-            else repo_changes_since_task_start(root, task.id)
+            else repo_changes_since_task_start(root, task.id, acknowledge_completed=acknowledge_completed)
         )
         doctor_problems.extend(
             problem
@@ -2755,6 +2758,7 @@ def _task_doctor_payload(
                 task.id,
                 use_committed_diff=use_committed_diff,
                 prepared_delta=delta,
+                acknowledge_completed=acknowledge_completed,
             )
         except RepoctlError as exc:
             discovery_is_already_advisory = (
@@ -2808,6 +2812,8 @@ def _task_doctor_payload(
             "committed_range" if use_committed_diff else "working_tree_diff"
         ),
     }
+    if delta.get("acknowledged_completions"):
+        data["acknowledged_completions"] = delta["acknowledged_completions"]
     action_inputs = _task_action_inputs(delta)
     if action_inputs:
         data["action_inputs"] = action_inputs
@@ -2949,7 +2955,7 @@ def _metadata_coverage_warnings(meta: dict[str, Any]) -> list[dict[str, str]]:
 
 def cmd_task_doctor(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    payload = _task_doctor_payload(root, args.task_id, use_committed_diff=args.use_committed_diff)
+    payload = _task_doctor_payload(root, args.task_id, use_committed_diff=args.use_committed_diff, acknowledge_completed=tuple(args.acknowledge_completed))
     if args.json:
         _json(payload)
     else:
@@ -3335,14 +3341,17 @@ def _finish_meta_gate(
     task_id: str,
     *,
     use_committed_diff: bool = False,
+    acknowledge_completed: tuple[str, ...] = (),
     prepared_delta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     task = resolve_task(root, task_id)
     target = _repo_target_for_task_command(root, task)
+    if acknowledge_completed and target is not None:
+        raise RepoctlError("completion acknowledgement is only for root-only tasks", code="completion_acknowledgement_invalid", path=task.rel_path)
     if use_committed_diff and target is None:
         raise RepoctlError("committed diff finish requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
     if target is None:
-        delta = repo_changes_since_task_start(root, task_id)
+        delta = prepared_delta if prepared_delta is not None else repo_changes_since_task_start(root, task_id, acknowledge_completed=acknowledge_completed)
         _require_no_integrity_problems(delta)
         if delta.get("baseline_conflicts"):
             conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
@@ -3486,6 +3495,7 @@ def _prepare_task_finish(
     task_id: str,
     *,
     use_committed_diff: bool = False,
+    acknowledge_completed: tuple[str, ...] = (),
     prepared_delta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     meta_gate, delta = _finish_meta_gate(
@@ -3493,6 +3503,7 @@ def _prepare_task_finish(
         task_id,
         use_committed_diff=use_committed_diff,
         prepared_delta=prepared_delta,
+        acknowledge_completed=acknowledge_completed,
     )
     result = finish_task(
         root,
@@ -3780,6 +3791,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
             root,
             task_id,
             use_committed_diff=args.use_committed_diff,
+            acknowledge_completed=tuple(args.acknowledge_completed),
         )
         receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
         repo_id = str(receipt.get("repo_id") or "")
@@ -6374,6 +6386,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness and lifecycle problems.")
     task_doctor.add_argument("task_id")
     task_doctor.add_argument("--use-committed-diff", action="store_true", help="preflight the recorded task-start HEAD through current HEAD")
+    task_doctor.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="root-only closure: validate an archived standalone product task receipt without changing its ownership; repeat for multiple tasks")
     task_doctor.add_argument("--json", action="store_true")
     task_doctor.set_defaults(func=cmd_task_doctor)
     task_log = task_sub.add_parser("log", help="Manage task execution logs.")
@@ -6428,6 +6441,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.add_argument("--knowledge-applies-to", action="append", default=[], help="current selected-repository file governed by the reusable claim; repeat as needed")
     task_finish.add_argument("--knowledge-replaces", action="append", default=[], help="prior Knowledge record explicitly corrected or replaced; repeat as needed")
     task_finish.add_argument("--knowledge-author", default="", help="known author; omit when unknown")
+    task_finish.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="root-only closure: validate an archived standalone product task receipt without changing its ownership; repeat for multiple tasks")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block", help="Block a live task with explicit transition intent.")

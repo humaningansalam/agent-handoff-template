@@ -3052,11 +3052,23 @@ def _done_descendant_completion_receipts(
     task: Task,
     *,
     layout: RepoLayout,
+    acknowledge_completed: tuple[str, ...] = (),
 ) -> tuple[list[tuple[Task, dict[str, Any]]], list[Problem]]:
     if _repo_scoped_task(task):
+        if acknowledge_completed:
+            raise RepoctlError("completion acknowledgement is only for root-only tasks", code="completion_acknowledgement_invalid", path=task.rel_path)
         return [], []
     children = children_by_parent(load_tasks(root, include_archived=False))
     stack = list(children.get(task.id, []))
+    for task_id in sorted(set(acknowledge_completed)):
+        if not ID_RE.fullmatch(task_id):
+            raise RepoctlError("acknowledgement requires an exact Task ID", code="completion_acknowledgement_invalid", path=task_id)
+        completed = resolve_task(root, task_id)
+        if completed.status != "done" or not completed.archived or completed.parent or not _repo_scoped_task(completed):
+            raise RepoctlError("acknowledge only an archived standalone done product task", code="completion_acknowledgement_invalid", path=completed.rel_path)
+        if not _completion_receipt_path(root, completed.id).is_file():
+            raise RepoctlError("acknowledged task has no completion receipt", code="completion_acknowledgement_invalid", path=completed.rel_path)
+        stack.append(completed)
     seen = {task.id}
     done: list[tuple[Task, dict[str, Any]]] = []
     problems: list[Problem] = []
@@ -3935,6 +3947,7 @@ def repo_changes_since_task_start(
     root: Path,
     task_id: str,
     *,
+    acknowledge_completed: tuple[str, ...] = (),
     layout: RepoLayout | None = None,
 ) -> dict[str, Any]:
     task = resolve_task(root, task_id)
@@ -3942,7 +3955,7 @@ def repo_changes_since_task_start(
     layout = layout or repo_layout(root)
     target = _target_for_task(root, task, layout=layout)
     integrity_problems: list[Problem] = []
-    descendant_receipts, receipt_problems = _done_descendant_completion_receipts(root, task, layout=layout)
+    descendant_receipts, receipt_problems = _done_descendant_completion_receipts(root, task, layout=layout, acknowledge_completed=acknowledge_completed)
     integrity_problems.extend(receipt_problems)
 
     def attribute(
@@ -3966,6 +3979,14 @@ def repo_changes_since_task_start(
         return list(result.remaining), list(result.attributed)
 
     def complete(delta: dict[str, Any]) -> dict[str, Any]:
+        if acknowledge_completed:
+            delta["acknowledged_completions"] = [
+                {"task_id": completed.id,
+                 "receipt_path": _completion_receipt_path(root, completed.id).relative_to(root).as_posix(),
+                 "receipt_sha256": _sha256_bytes(_completion_receipt_path(root, completed.id).read_bytes())}
+                for completed, _receipt in descendant_receipts
+                if completed.id in acknowledge_completed
+            ]
         return _complete_repo_delta(
             delta,
             integrity_problems=integrity_problems,
@@ -4436,6 +4457,8 @@ def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = 
         raise RepoctlError("cannot finish parent task while live children remain", code="live_children_block_finish", path=task.rel_path)
 
     text = task.path.read_text(encoding="utf-8")
+    for acknowledged in (repo_delta or {}).get("acknowledged_completions", []):
+        text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: root closure acknowledged completed product task {acknowledged['task_id']}; receipt `{acknowledged['receipt_path']}` ({acknowledged['receipt_sha256']}); original ownership unchanged.")
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_finished']}")
     text = replace_frontmatter_line(text, "status", "done")
 

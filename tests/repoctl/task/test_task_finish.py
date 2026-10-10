@@ -890,3 +890,69 @@ def test_task_finish_blocks_repo_scoped_no_changes_without_start_head(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["problems"][0]["code"] == "repo_head_missing_at_start"
+
+
+def test_root_finish_acknowledges_standalone_completion_without_reassigning_it(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    root_id, product_id = "T-20260609184046Z", "T-20260609184047Z"
+    add_board_task(tmp_path, f"{root_id}--ops.md", task_text(root_id, status="todo").replace('area: ""', 'area: "ops"'))
+    add_board_task(tmp_path, f"{product_id}--product.md", task_text(product_id, status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"'))
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    (repo / "preexisting.txt").write_text("retain me\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    def run(*args):
+        result = main(["task", *args, "--json"])
+        return result, json.loads(capsys.readouterr().out)
+
+    assert run("start", root_id, "--force-dirty")[0] == 0
+    assert run("start", product_id, "--force-dirty")[0] == 0
+    assert run("doctor", root_id, "--acknowledge-completed", product_id)[0] == 1
+    assert run("finish", product_id, "--acknowledge-completed", root_id)[0] == 2
+    record_discovery(tmp_path, product_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n")
+    assert run("finish", product_id)[0] == 0
+    assert run("block", root_id, "--reason", "closure pending")[0] == 0
+    receipt_path = tmp_path / f"docs/tasks/.repoctl-state/completions/{product_id}.json"
+    artifact_path = tmp_path / f"docs/archive/tasks/{product_id}--product.md"
+    receipt_bytes, artifact_bytes = receipt_path.read_bytes(), artifact_path.read_bytes()
+    baseline_path = tmp_path / f"docs/tasks/.repoctl-state/{root_id}.json"
+    baseline_bytes = baseline_path.read_bytes()
+    ack = ("--acknowledge-completed", product_id)
+    code, payload = run("doctor", root_id)
+    assert code == 1 and "repository_selector_required" in payload["data"]["blocked_by"]
+    code, acknowledged = run("doctor", root_id, *ack)
+    assert code == 0 and acknowledged["data"]["finish_ready"] is True
+    assert acknowledged["data"]["acknowledged_completions"][0]["task_id"] == product_id
+    receipt_path.unlink()
+    assert run("finish", root_id, *ack)[0] == 2
+    receipt_path.write_bytes(receipt_bytes)
+    # Neither stale completion evidence nor unowned additional changes may close root work.
+    for path, bad_bytes in [(artifact_path, artifact_bytes + b"\nchanged\n"),
+                            (receipt_path, receipt_bytes.replace(b'"content_sha256": "sha256:', b'"content_sha256": "sha256:0')),
+                            (repo / "app.py", b"value = 3\n"),
+                            (repo / "preexisting.txt", b"overwritten\n"),
+                            (repo / "extra.py", b"new unowned change\n")]:
+        original = path.read_bytes() if path.exists() else None
+        path.write_bytes(bad_bytes)
+        assert run("doctor", root_id, *ack)[0] == 1
+        assert run("finish", root_id, *ack)[0] == 2
+        assert not (tmp_path / f"docs/tasks/.repoctl-state/completions/{root_id}.json").exists()
+        if original is None:
+            path.unlink()
+        else:
+            path.write_bytes(original)
+    assert run("finish", product_id, *ack)[0] == 2
+    code, payload = run("finish", root_id, *ack)
+    assert code == 0
+    root_receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text())
+    assert root_receipt["repo_id"] == "" and root_receipt["changed_entries"] == []
+    archived = (tmp_path / payload["data"]["new_path"]).read_text()
+    assert f"acknowledged completed product task {product_id}" in archived
+    assert 'repo_id: ""' in archived
+    assert receipt_path.read_bytes() == receipt_bytes
+    assert artifact_path.read_bytes() == artifact_bytes
+    assert baseline_path.read_bytes() == baseline_bytes
+    assert (repo / "app.py").read_text() == "value = 2\n"
+    assert (repo / "preexisting.txt").read_text() == "retain me\n"

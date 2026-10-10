@@ -58,3 +58,12 @@ Fields from retired Discovery workflows and files under `docs/tasks/.repoctl-sta
 Task finish still publishes one immutable completion receipt and bounded history entry. New history derives changed paths and searchable human Task text without freezing a Discovery episode or structured check record. Explicit Context history modes and Graph task/artifact selectors may inspect that history; ordinary current-source ranking does not consume it as scope or authority.
 
 Completion receipts and Task artifacts preserve history identity. They make no claim that a command or test ran.
+
+For root-only closure blocked by changes already owned by an archived standalone
+product Task, use `task doctor T-root --acknowledge-completed T-product --json`,
+then `task finish` with the same option. Repeat the option only for the exact
+completed Tasks being acknowledged. This reuses receipt integrity, repository
+identity and baseline-to-current path lineage checks; additional drift remains
+blocking. It does not change repository selection, parentage or product ownership.
+Finish records the acknowledged receipt path/hash in the root Task log without
+rewriting the completed Task or receipt. Product acceptance remains separate.
