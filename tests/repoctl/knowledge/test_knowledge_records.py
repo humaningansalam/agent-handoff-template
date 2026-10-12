@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import tools.repoctl.cli as cli
 from tools.repoctl.cli import main
 from tools.repoctl.tasks import Problem
@@ -189,6 +191,43 @@ def test_task_finish_saves_knowledge_without_candidate_or_event(
     assert "author" not in record
     assert not (tmp_path / ".repoctl-state/knowledge/candidates").exists()
     assert not list((tmp_path / "docs/knowledge/events").glob("E-*.json"))
+
+
+@pytest.mark.parametrize("operation", ["add", "finish"])
+def test_saved_knowledge_keeps_successful_graph_history_advisory(
+    tmp_path: Path, monkeypatch, capsys, operation: str,
+) -> None:
+    task_id = "T-20260609184048Z"
+    _finishable_task(tmp_path, monkeypatch, capsys, task_id=task_id)
+    materialize = cli.materialize_graph
+
+    def bounded_history(*args, **kwargs):
+        snapshot, problems, meta = materialize(*args, **kwargs)
+        return snapshot, [*problems, Problem(
+            "warning", "completion_catalogue_hot_history_partial",
+            "active Graph task history is bounded by the completion catalogue hot policy; use exact cold lookup for older tasks",
+        )], meta
+
+    monkeypatch.setattr(cli, "materialize_graph", bounded_history)
+    if operation == "finish":
+        args = _finish_with_knowledge(task_id)
+    else:
+        assert main(["task", "finish", task_id, "--json"]) == 0
+        _payload(capsys)
+        args = ["knowledge", "add", "--repo-id", "main", "--kind", "invariant",
+                "--claim", "Service updates keep one owner.",
+                "--reason", "A second owner previously caused divergent behavior.",
+                "--source", "repos/service.py", "--applies-to", "service.py", "--json"]
+    assert main(args) == 0
+    payload = _payload(capsys)
+    saved = payload["data"]["knowledge_closeout"] if operation == "finish" else payload["data"]
+    assert saved["graph_sync"]["status"] == "synced"
+    codes = {item["code"] for item in payload["warnings"]}
+    assert "completion_catalogue_hot_history_partial" in codes
+    assert "knowledge_graph_sync_failed" not in codes
+    record = json.loads((tmp_path / saved["record_path"]).read_text())
+    assert main(["knowledge", "query", "Service updates", "--repo-id", "main", "--json"]) == 0
+    assert _payload(capsys)["data"]["results"][0]["record"]["id"] == record["id"]
 
 
 def test_task_finish_stays_successful_when_derived_knowledge_sync_fails(

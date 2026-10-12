@@ -3874,6 +3874,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
                 "message": "Knowledge was saved; refresh Graph when needed",
                 "cause_code": problem.code,
             }
+            if problem.severity == "error" else problem.to_dict()
             for problem in graph_problems
         )
     else:
@@ -4597,6 +4598,8 @@ def _compact_graph_query_result(result: dict[str, Any], *, freshness: dict[str, 
         "component_crossings_truncated": bool(result.get("component_crossings_truncated"))
         or int(result.get("component_crossing_count") or 0) > 3,
         "paths": displayed_paths,
+        "path_count": len(ordered_paths),
+        "paths_truncated": len(displayed_paths) < len(ordered_paths),
         "continuations": displayed_continuations,
     }
     if not compact["paths"]:
@@ -5558,6 +5561,7 @@ def cmd_knowledge_add(args: argparse.Namespace) -> int:
             "message": "Knowledge was saved; refresh Graph when needed",
             "cause_code": problem.code,
         }
+        if problem.severity == "error" else problem.to_dict()
         for problem in graph_problems
     )
     payload = {

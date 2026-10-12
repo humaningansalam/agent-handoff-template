@@ -245,6 +245,8 @@ Default query JSON is compact:
 
 `matches` contains direct typed matches. `candidates` contains at most three exact path corrections or ambiguity choices. `relationship_candidates` contains explicitly non-authoritative structured possibilities. `paths` and `relations` contain confirmed evidence with assertion/provider, confidence, completeness, and freshness.
 
+Compact `path_count` and `paths_truncated` distinguish the available paths from the displayed subset; use `--full` when omitted callers or other paths matter.
+
 `result_digest` identifies the returned query projection. No later command must re-submit it, and repoctl does not store it as lifecycle state.
 
 `continuations` let clients traverse the compact result without parsing node IDs. They contain a typed selector, supported query types, and actions such as `graph.file`, `graph.callers_of`, `task.show`, `knowledge.show`, or `workspace.open`. A continuation is meaningful for the returned snapshot and may change after rebuild.

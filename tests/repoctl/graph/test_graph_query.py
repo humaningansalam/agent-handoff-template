@@ -13,6 +13,29 @@ from tests.repoctl.workspace.test_check import write_workspace
 from tests.repoctl.meta.test_meta_check import write_repometa
 from tests.repoctl.repository.test_repositories import init_repo
 
+def test_compact_callers_reports_omitted_paths_and_full_returns_them(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text(
+        "def target():\n    return 1\n\n"
+        + "\n".join(f"def caller_{i}():\n    return target()\n" for i in range(5))
+    )
+    _materialize(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    args = ["graph", "query", "--repo-id", "main", "--callers-of", "target", "--in-file", "app.py", "--json"]
+    assert main(args) == 0
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert len(compact["paths"]) == 3
+    assert compact["path_count"] == 5
+    assert compact["paths_truncated"] is True
+    assert main([*args, "--full"]) == 0
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
+    assert len(full["paths"]) == 5
+    assert {path["from"]["qualified_name"] for path in full["paths"]} == {f"caller_{i}" for i in range(5)}
+
+
 def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
