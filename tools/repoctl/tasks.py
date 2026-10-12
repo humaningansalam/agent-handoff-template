@@ -4076,7 +4076,7 @@ def repo_changes_since_task_start(
                 current_fingerprints, _fingerprint_state = _current_baseline_fingerprints(
                     root,
                     baseline=selected_baseline,
-                    paths=sorted(baseline_paths | current_paths),
+                    paths=sorted(baseline_paths),
                     target=matched,
                 )
                 if not _fingerprint_state.available:
@@ -4247,7 +4247,7 @@ def repo_changes_since_task_start(
     current_fingerprints, fingerprint_state = _current_baseline_fingerprints(
         root,
         baseline=baseline,
-        paths=sorted(baseline_paths | current_paths),
+        paths=sorted(baseline_paths),
         target=target,
     )
     if not fingerprint_state.available:

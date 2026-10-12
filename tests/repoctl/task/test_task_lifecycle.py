@@ -1229,6 +1229,51 @@ def test_parent_handoff_binding_tracks_direct_child_lifecycle(
     assert guidance["changed_inputs"] == ["direct_children"]
 
 
+@pytest.mark.parametrize("repo_id", ["", "main"])
+def test_baseline_comparison_does_not_hash_task_new_files(
+    tmp_path: Path, monkeypatch, capsys, repo_id: str,
+) -> None:
+    from tools.repoctl.tasks import repo_changes_since_task_start
+
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md",
+                   task_text(task_id).replace('repo_id: ""', f'repo_id: "{repo_id}"'))
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo)
+    old = repo / "old.txt"
+    old.write_text("preexisting\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    new = repo / "new.txt"
+    new.write_text("first\n")
+    hashes = []
+    run = subprocess.run
+
+    def observed_run(args, *positional, **kwargs):
+        if args[0] == "git" and "hash-object" in args:
+            hashes.append(args)
+        return run(args, *positional, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", observed_run)
+    delta = repo_changes_since_task_start(tmp_path, task_id)
+    assert delta["baseline_conflicts"] == []
+    assert delta["changes"] == [("untracked", "new.txt" if repo_id else "repos/new.txt", "")]
+    assert len(hashes) == 1
+    assert hashes[0][-1] == "old.txt"
+
+    _bind_handoff(capsys)
+    assert _show_resume_guidance(capsys)["status"] == "current"
+    new.write_text("second\n")
+    guidance = _show_resume_guidance(capsys)
+    assert guidance["status"] == "inactive"
+    assert "repository" in guidance["changed_inputs"]
+    old.unlink()
+    delta = repo_changes_since_task_start(tmp_path, task_id)
+    assert delta["baseline_conflicts"] == ["old.txt" if repo_id else "repos/old.txt"]
+
+
 def test_task_handoff_repository_digest_detects_same_head_content_drift_but_not_touch(
     tmp_path: Path,
     monkeypatch,
