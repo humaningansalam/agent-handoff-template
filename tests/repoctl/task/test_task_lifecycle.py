@@ -1545,3 +1545,87 @@ def test_compact_resume_does_not_select_ambiguous_fields(tmp_path: Path, monkeyp
         assert guidance["status"] == "inactive" and guidance["executable_handoff"] is None
     else:
         assert result == 0 and isinstance(guidance["executable_handoff"], dict)
+
+
+def test_untracked_fingerprint_batch_preserves_manifests_and_detects_staging(tmp_path, monkeypatch):
+    import tools.repoctl.git as git
+
+    write_workspace(tmp_path)
+    repo = tmp_path / 'repos'
+    init_committed_product_repo(repo, {'tracked.txt': 'before\n'})
+    (repo / 'tracked.txt').write_text('after\n')
+    paths = ['tracked.txt', 'space name.txt', '한글.txt', '[pattern].txt', 'link']
+    for path in paths[1:-1]:
+        (repo / path).write_text(path)
+    (repo / 'link').symlink_to('space name.txt')
+    paths += [f'cache-{i}.txt' for i in range(30)]
+    for path in paths[5:]:
+        (repo / path).write_text(path)
+    expected = {path: git._path_state_manifest_result(
+        repo, path, projection=git.ChangeFingerprintProjection.CURRENT,
+    ).manifest for path in paths}
+    calls = []
+    original = git._git_bytes_result
+
+    def capture(repo, args):
+        calls.append(args)
+        return original(repo, args)
+
+    monkeypatch.setattr(git, '_git_bytes_result', capture)
+    observed, state = git.repo_path_fingerprint_observations(tmp_path, paths)
+    assert state.available
+    assert {path: item.manifest for path, item in observed.items()} == expected
+    assert len(calls) <= 6  # two batch lists plus the tracked and pathspec cases
+    (repo / 'cache-0.txt').write_text('changed')
+    changed, state = git.repo_path_fingerprint_observations(tmp_path, paths)
+    assert state.available
+    assert changed['cache-0.txt'].manifest != observed['cache-0.txt'].manifest
+
+    reads = 0
+    def stage_during_observation(repo, args):
+        nonlocal reads
+        if args[:2] == ['ls-files', '--others']:
+            reads += 1
+            if reads == 2:
+                subprocess.run(['git', 'add', 'cache-0.txt'], cwd=repo, check=True)
+        return original(repo, args)
+
+    monkeypatch.setattr(git, '_git_bytes_result', stage_during_observation)
+    observed, state = git.repo_path_fingerprint_observations(tmp_path, paths)
+    assert observed == {}
+    assert state.problem_code == 'git_observation_changed'
+
+    monkeypatch.setattr(git, '_git_bytes_result', lambda repo, args:
+                        git._GitBytesResult(b'', git.GitObservationProblem.COMMAND_FAILED))
+    observed, state = git.repo_path_fingerprint_observations(tmp_path, paths)
+    assert observed == {} and not state.available
+    assert state.problem_code == 'git_observation_command_failed'
+
+
+def test_bind_remains_inactive_when_runtime_changes_after_binding(tmp_path, monkeypatch, capsys):
+    import tools.repoctl.tasks as tasks
+
+    write_workspace(tmp_path)
+    repo = tmp_path / 'repos'
+    init_committed_product_repo(repo, {'app.py': 'pass\n'})
+    tid = 'T-20260609184046Z'
+    add_board_task(tmp_path, f'{tid}--alpha.md', task_text(tid).replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr('tools.repoctl.cli.find_workspace_root', lambda: tmp_path)
+    assert main(['task', 'start', tid, '--json']) == 0
+    capsys.readouterr()
+    runtime = repo / 'runtime-cache'
+    runtime.write_text('before')
+    assert main(['task', 'handoff', 'bind', tid, '--json']) == 0
+    assert json.loads(capsys.readouterr().out)['data']['resume_guidance']['status'] == 'current'
+    original = tasks.atomic_write
+    def change_after_binding(path, content):
+        result = original(path, content)
+        if path.name == tid + '.json' and path.parent.name == 'resume':
+            runtime.write_text('after')
+        return result
+    monkeypatch.setattr(tasks, 'atomic_write', change_after_binding)
+    assert main(['task', 'handoff', 'bind', tid, '--json']) == 0
+    guidance = json.loads(capsys.readouterr().out)['data']['resume_guidance']
+    assert guidance['status'] == 'inactive'
+    assert 'repository_changed' in guidance['handoff']['reason_codes']
+    assert guidance['handoff']['active'] is False

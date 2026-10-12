@@ -789,16 +789,23 @@ def _path_state_manifest_result(
     path: str,
     *,
     projection: ChangeFingerprintProjection,
+    untracked: bool = False,
 ) -> _PathStateManifestResult:
     normalized = normalize_repo_path(path)
     if not normalized:
         return _PathStateManifestResult(None, GitObservationProblem.PATH_UNAVAILABLE)
     file_path = repo / normalized
-    status_result = _git_bytes_result(
-        repo,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", normalized],
-    )
-    index_result = _git_bytes_result(repo, ["ls-files", "--stage", "-z", "--", normalized])
+    # Plain untracked leaf paths have no index record. The caller checks the
+    # untracked set before and after this observation; content is still read.
+    if untracked and (file_path.is_symlink() or file_path.is_file()):
+        status_result = _GitBytesResult(b"?? " + os.fsencode(normalized) + b"\0")
+        index_result = _GitBytesResult(b"")
+    else:
+        status_result = _git_bytes_result(
+            repo,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", normalized],
+        )
+        index_result = _git_bytes_result(repo, ["ls-files", "--stage", "-z", "--", normalized])
     if status_result.problem is not None or index_result.problem is not None:
         return _PathStateManifestResult(None, GitObservationProblem.COMMAND_FAILED)
     manifest: dict[str, Any] = {
@@ -998,12 +1005,28 @@ def repo_path_fingerprint_observations(
                 )
             batch_generations[path] = token
 
+    untracked_paths: set[str] = set()
+    if projection is ChangeFingerprintProjection.CURRENT:
+        untracked_before = _git_bytes_result(
+            selected.root_path, ["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        if untracked_before.problem is not None:
+            return {}, RepoGitState(False, "cannot observe untracked paths", selected.id,
+                                    selected.display_path, untracked_before.problem.value)
+        requested_paths = set(normalized_paths)
+        untracked_paths = {
+            path for raw in untracked_before.data.split(b"\0")
+            if raw and (path := os.fsdecode(raw)) in requested_paths
+            and not path.startswith(":") and not any(char in path for char in "*?[]\\")
+        }
+
     observations: dict[str, PathFingerprintObservation] = {}
     for path in normalized_paths:
         manifest_result = _path_state_manifest_result(
             selected.root_path,
             path,
             projection=projection,
+            untracked=path in untracked_paths,
         )
         if manifest_result.problem is not None or manifest_result.manifest is None:
             problem = manifest_result.problem or GitObservationProblem.PATH_UNAVAILABLE
@@ -1056,6 +1079,15 @@ def repo_path_fingerprint_observations(
                 selected.display_path,
                 GitObservationProblem.OBSERVATION_CHANGED.value,
             )
+    if untracked_paths:
+        untracked_after = _git_bytes_result(
+            selected.root_path, ["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        remaining = {os.fsdecode(raw) for raw in untracked_after.data.split(b"\0") if raw}
+        if untracked_after.problem is not None or not untracked_paths <= remaining:
+            return {}, RepoGitState(False, "untracked paths changed during observation",
+                                    selected.id, selected.display_path,
+                                    (untracked_after.problem or GitObservationProblem.OBSERVATION_CHANGED).value)
     return observations, state
 
 
