@@ -217,7 +217,6 @@ Discovery commands are read-only helpers for task planning:
 
 - `repoctl meta query` returns files matching explicit metadata/default filters such as role, topic, area, or declared effect.
 - `repoctl meta suggest` returns non-authoritative candidate files from path, filename, policy defaults, and sparse annotation text. It preserves Unicode query tokens, but it is lexical search, not translation or semantic parsing.
-- Suggestions must be inspected before task creation or implementation. They do not define task scope, do not parse Backlog raw text, and do not replace repos/code reading.
 
 Use `repoctl meta init` to create the default `.repometa` policy for a selected product repo. It does not overwrite an existing policy. The first annotation or exclusion creates its deterministic shard; bootstrap does not materialize empty shards.
 

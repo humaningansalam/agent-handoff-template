@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.12.13",
+  "version": "0.12.14",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",

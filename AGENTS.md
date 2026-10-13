@@ -80,7 +80,7 @@ Backlog is deferred work only. Manage it with `repoctl backlog add/list/show/rem
 - Do not hand-edit lifecycle-managed frontmatter, start baselines, fingerprints, ownership decisions, Handoff bindings, completion receipts, catalogue state, or archive metadata.
 - Humans and agents own Goal, Chosen and Notes meaning, Execution Log, optional Verification notes, and Handoff meaning.
 
-The task-start repository selection is immutable. A `todo` task may record Chosen before start; a `doing` or `blocked` task may change it only with a current start baseline for the same repository. Every Chosen value must be a canonical workspace-relative path. Replace an existing set through `task discovery add --replace-chosen ... --reason ...`. Retired Discovery fields and outcome files are inactive. Preserve old Task prose and logs; the next scoped update writes the current Chosen/Notes form.
+The task-start repository selection is immutable. A `todo` task may record Chosen before start; a `doing` or `blocked` task may change it only with a current start baseline for the same repository. Every Chosen value must be a canonical workspace-relative path. Replace an existing set through `task discovery add --replace-chosen ... --reason ...`. Retired Discovery fields and outcome files are inactive. Use the current Chosen/Notes form for scoped updates.
 
 Pre-existing dirty product files remain outside task ownership. Finish and cancel preserve them or require explicit ownership resolution. A decomposition warning is advisory only; repoctl never infers semantic independence, splits a task, or rewrites scope automatically.
 
