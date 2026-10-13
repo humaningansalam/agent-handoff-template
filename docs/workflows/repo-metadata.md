@@ -56,7 +56,7 @@ Annotation shard routing is deterministic:
 sha256(repo_relative_path)[0]
 ```
 
-Use only 16 shards in v0. If scale requires more later, migrate deliberately; do not introduce semantic shard names.
+The current schema uses 16 hash shards.
 
 ## `policy.json`
 
@@ -204,7 +204,6 @@ Coverage does not override hard excludes.
 Read/status commands:
 
 ```bash
-repoctl meta init --json
 repoctl meta status --verbose --json
 repoctl meta status --changed --json
 repoctl meta query --topic <topic> --role <role> --area <area> --json
@@ -222,14 +221,7 @@ Discovery commands are read-only helpers for task planning:
 
 Use `repoctl meta init` to create the default `.repometa` policy for a selected product repo. It does not overwrite an existing policy. The first annotation or exclusion creates its deterministic shard; bootstrap does not materialize empty shards.
 
-After initialization, review the generated policy. Apply any project-specific policy changes described above, use `repoctl meta` for annotations and exclusions, and run `repoctl meta check --repo-id <id> --json`. The store is durable product-repo state, so commit it in that product repository before starting product changes. For the direct `main` layout:
-
-```bash
-cd repos
-git add .repometa
-git diff --cached -- .repometa
-git commit -m "Initialize repoctl metadata"
-```
+After initialization, review project-specific policy and check it with `repoctl meta check --repo-id <id> --json`. Metadata is versioned with the selected product repository.
 
 Mutation commands update `.repometa` through repoctl:
 
@@ -240,8 +232,6 @@ repoctl meta remove <path>
 repoctl meta move <old-path> <new-path>
 repoctl meta exclude <path> --reason ...
 ```
-
-Do not add migration or inline compatibility commands in v0.
 
 Status output keeps separate views for store presence, index coverage, semantic coverage, and annotation-gate activation. `semantic_coverage` reports `annotated`, `current`, and computed `possibly_stale`; these values are not written back to `.repometa` by read-only commands.
 
@@ -270,26 +260,9 @@ When there are no product repo changes and the selected product repo is a valid 
 
 If `repos/` exists but its git metadata is missing or unusable, changed-file metadata status/check and task finish must fail with `repo_git_unavailable`. Treat this as a repository configuration error, not as `no_repo_changes`.
 
-## Discovery Before Task Promotion
+## Optional Discovery
 
-Use `.repometa` discovery before promoting PRD-derived Backlog items or starting unfamiliar repo work.
-
-Recommended sequence:
-
-```bash
-repoctl meta query --topic <known-topic> --json
-repoctl meta suggest --text "<PRD phrase or feature name>" --json
-repoctl meta show <candidate-path> --json
-```
-
-Then inspect the candidate files directly in the selected product repo before creating or starting a task.
-
-Discovery output is evidence, not authority:
-
-- Good: inspect candidates directly, then record Chosen and a short scope reason only when it will help the next reader.
-- Required: for Backlog-origin tasks that change a product repo, fill the task's `## Discovery` section before `repoctl task finish`.
-- Bad: create a task or choose files solely because `meta suggest` returned them.
-- Forbidden: parse Backlog or PRD prose inside repoctl to infer area, files, validation, or task metadata.
+Use `meta query`, `meta suggest`, or `meta show` when metadata helps locate unfamiliar code. Inspect the relevant source before choosing files; record Chosen scope through the normal Task flow.
 
 ## Path Identity
 

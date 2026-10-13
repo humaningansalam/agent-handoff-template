@@ -75,4 +75,4 @@ this prose but does not parse, grade, hash, or require it for finish. -->
 - First command to run: `<command>`
 - Done when: <objective completion condition>
 
-<!-- Keep these four fields concrete enough for another agent to resume in about 30 seconds. Before pausing or transferring, review them and run `./scripts/repoctl task handoff bind T-... --json`. Context Packs are optional one-time views and are not part of the binding. -->
+<!-- Before pausing or transferring, review them and run `./scripts/repoctl task handoff bind T-... --json`. Context Packs are optional one-time views and are not part of the binding. -->

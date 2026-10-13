@@ -30,15 +30,7 @@ At session start and after compaction, resume the known live task with `./script
 - Board rows, task history, archived Handoffs, and `readable_handoff` are inspection evidence only.
 - Handoff freshness and lifecycle health are independent. A current Handoff is not executable while lifecycle health is unhealthy.
 
-Read only what the work needs, using this order when applicable. Resume already identifies live work; open the Board only for registry context, and Task/parent/Context Docs only for the selected work. A known small edit needs its affected source, applicable rules and relevant check, not a fresh project-wide tour or unrelated PRD/workflows.
-
-1. `AGENTS.md`
-2. `docs/BOARD.md`
-3. Assigned task file
-4. Parent task when `parent` is set
-5. Files under the task's `## Context Docs`
-6. `docs/PRD.md`, or the relevant authority under `docs/prd/`
-7. `docs/workflows/INDEX.md` for a reusable, repeated, or high-risk procedure
+Read only the selected Task, its relevant parent/Context Docs and applicable PRD authority. Resume identifies live work; open the Board for registry context when needed. A known small edit needs affected source, applicable rules and a relevant check. Use `docs/workflows/INDEX.md` for a reusable, repeated, or high-risk procedure.
 
 When no task is live, create one only for current product work. Never select archived history as live work. Use a root-only parent only to coordinate independently verifiable repo-scoped children.
 

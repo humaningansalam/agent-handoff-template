@@ -61,7 +61,7 @@ Search queries, opened files, ranked candidates, and result selections are not d
 
 1. Write the next step, first file, first command, and done condition.
 2. Bind that exact Handoff before a real pause or transfer.
-3. On the next session, run `task resume` and continue only from a current executable Handoff.
+3. On the next session, run `task resume` and use only a current executable Handoff as restart instructions.
 
 A Context Pack may be printed or exported for convenience. It is not bound to the Handoff and never controls freshness.
 
