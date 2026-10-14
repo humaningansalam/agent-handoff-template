@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.12.14",
+  "version": "0.12.15",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -18,7 +18,6 @@
     "CLAUDE.md",
     "README.md",
     "docs/README.md",
-    "docs/adr/.gitkeep",
     "docs/archive/README.md",
     "docs/contracts/repoctl-context-contract.md",
     "docs/contracts/repoctl-debug-contract.md",
@@ -108,7 +107,6 @@
     "docs/REPOS.md",
     "docs/archive/tasks/.gitkeep",
     "docs/archive/tasks/**",
-    "docs/knowledge/events/.gitkeep",
     "docs/knowledge/events/**",
     "docs/knowledge/records/.gitkeep",
     "docs/knowledge/records/**",

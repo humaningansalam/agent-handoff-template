@@ -10,9 +10,10 @@ Root `docs/**` contains the private workspace ledger, repoctl contracts and work
 - `contracts/` — repoctl JSON, Context, Graph, debug, and module contracts.
 - `workflows/` — reusable operating procedures.
 - `knowledge/records/` — reusable decisions, invariants, and failure modes.
-- `knowledge/events/` — preserved migration input from older releases; current commands do not interpret it.
 - `PRD.md` — adopter-owned project context seed.
 - `REPOS.md` — optional human repo map for multi-repository workspaces.
+
+An ADR folder is optional and created only for an actual decision document. Existing `knowledge/events/` contains legacy migration input; current commands neither create nor interpret it. Upgrades preserve existing project records in both locations.
 
 Keep product-public documentation in the relevant repository under `repos/**`. Large private project context may be split under root `docs/prd/` with `docs/PRD.md` as its index.
 

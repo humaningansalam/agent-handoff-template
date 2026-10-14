@@ -130,9 +130,9 @@ def test_release_archive_runs_public_commands(tmp_path: Path) -> None:
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
 
     assert (package_root / "tools/repoctl/repositories.py").is_file()
-    assert (package_root / "docs/adr/.gitkeep").is_file()
+    assert not (package_root / "docs/adr").exists()
     assert (package_root / "docs/archive/tasks/.gitkeep").is_file()
-    assert (package_root / "docs/knowledge/events/.gitkeep").is_file()
+    assert not (package_root / "docs/knowledge/events").exists()
     assert (package_root / "docs/knowledge/records/.gitkeep").is_file()
     assert (package_root / "tests/fixtures/context-benchmark/corpus.json").is_file()
     (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
