@@ -353,6 +353,22 @@ def test_task_finish_archives_without_verification_proof(tmp_path: Path, monkeyp
     assert receipt["repo_evidence"]["attribution"] == "none"
     assert receipt["repo_evidence"]["path_transitions"] == []
     assert receipt["repo_evidence"]["git_available"] is False
+
+    preserved = {path: path.read_bytes() for path in (
+        tmp_path / payload["data"]["new_path"],
+        tmp_path / payload["data"]["completion_receipt"],
+    )}
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)["data"]
+    handoff = shown["resume_guidance"]["handoff"]
+    assert handoff["status"] == "historical"
+    assert handoff["active"] is False
+    assert handoff["body"].strip() == archived.split("## Last Active Handoff\n", 1)[1].split("## Closure\n", 1)[0].strip()
+    assert handoff["body"].strip()
+    assert shown["health"]["executable"] is False
+    assert main(["task", "resume", "T-20260609184046Z", "--compact", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "task_not_live"
+    assert all(path.read_bytes() == content for path, content in preserved.items())
     assert receipt["repo_evidence"]["meta_gate"]["reason"] == "no_repo_directory"
     assert receipt["repo_evidence"]["delta"]["changed_count"] == 0
     assert "verification" not in receipt

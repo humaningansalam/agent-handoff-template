@@ -1482,7 +1482,7 @@ def test_task_show_rejects_missing_handoff_and_keeps_summary_inputs_bounded(
 
     text = task_path.read_text(encoding="utf-8")
     handoff_section = find_section(text, "Handoff")
-    task_path.write_text((text[: handoff_section.start] + text[handoff_section.end :]).rstrip() + "\n", encoding="utf-8")
+    task_path.write_text(text[: handoff_section.start] + "## Last Active Handoff\n\n" + text[handoff_section.body_start :], encoding="utf-8")
     assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False

@@ -1230,6 +1230,10 @@ def _normalized_task_section_body(task: Task, section_name: str) -> str | None:
 
 
 def task_handoff_body(task: Task) -> str | None:
+    if task.archived or task.status in NON_LIVE:
+        historical = _normalized_task_section_body(task, "Last Active Handoff")
+        if historical is not None:
+            return historical
     return _normalized_task_section_body(task, "Handoff")
 
 
