@@ -696,18 +696,38 @@ def test_unchanged_validation_closes_preserving_concurrent_work_and_rejects_own_
 def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"
-    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n"})
+    init_committed_product_repo(repo, {"app.py": "def run():\n    return 1\n", "login.py": "old\n", "other.py": "old\n"})
+    (repo / "other.py").write_text("inherited work\n")
     task = task_text("T-20260609184046Z", status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"')
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    assert main(["task", "start", "T-20260609184046Z", "--force-dirty", "--json"]) == 0
     capsys.readouterr()
     record_discovery(tmp_path, "T-20260609184046Z", chosen="repos/app.py")
+    (repo / "login.py").write_text("unrelated login commit\n")
+    subprocess.run(["git", "add", "login.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "other task"], cwd=repo, check=True, capture_output=True)
+    (repo / "other.py").write_text("later task dirty work\n")
+    (repo / "new.py").write_text("unrelated pending file\n")
     (repo / "app.py").write_text("def run():\n    return 2\n", encoding="utf-8")
     subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "change"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
 
+    preserved = {path.name: path.read_bytes() for path in repo.glob("*.py")}
+    baseline = tmp_path / "docs/tasks/.repoctl-state/T-20260609184046Z.json"
+    baseline_bytes = baseline.read_bytes()
+    for staged in (False, True):
+        (repo / "app.py").write_text("own drift\n")
+        if staged:
+            subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+            (repo / "app.py").write_bytes(preserved["app.py"])
+        assert main(["task", "doctor", "T-20260609184046Z", "--use-committed-diff", "--json"]) == 1
+        assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "repo_dirty_after_committed_diff"
+        assert main(["task", "finish", "T-20260609184046Z", "--use-committed-diff", "--json"]) == 2
+        capsys.readouterr()
+        subprocess.run(["git", "reset", "HEAD", "--", "app.py"], cwd=repo, check=True, capture_output=True)
+        (repo / "app.py").write_bytes(preserved["app.py"])
     assert main(["task", "doctor", "T-20260609184046Z", "--use-committed-diff", "--json"]) == 0
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["data"]["evidence_mode"] == "committed_range"
@@ -727,6 +747,11 @@ def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_pa
     receipt = json.loads((tmp_path / payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
     assert receipt["changed_entries"] == [{"change": "modified", "path": "app.py"}]
     assert receipt["repo_evidence"]["delta"]["changed_count"] == 1
+    assert {path.name: path.read_bytes() for path in repo.glob("*.py")} == preserved
+    assert baseline.read_bytes() == baseline_bytes
+    assert subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=repo) == b""
+    assert main(["task", "show", "T-20260609184046Z", "--summary", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["health"]["status"] == "historical"
 
 
 def test_task_finish_can_validate_first_commit_from_unborn_start(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1016,3 +1041,20 @@ def test_root_finish_acknowledges_standalone_completion_without_reassigning_it(t
     assert baseline_path.read_bytes() == baseline_bytes
     assert (repo / "app.py").read_text() == "value = 2\n"
     assert (repo / "preexisting.txt").read_text() == "retain me\n"
+
+def test_committed_rename_cannot_cross_chosen_boundary(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, task_id + "--alpha.md", task_text(task_id, status="todo").replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/app.py")
+    subprocess.run(["git", "mv", "app.py", "moved.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=repo, check=True, capture_output=True)
+    assert main(["task", "doctor", task_id, "--use-committed-diff", "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["problems"][0]["code"] == "actual_changes_outside_chosen"
+    assert result["data"]["action_inputs"]["unchosen_actual_paths"] == ["moved.py"]

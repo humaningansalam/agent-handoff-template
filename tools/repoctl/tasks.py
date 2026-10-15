@@ -2743,12 +2743,13 @@ def _current_baseline_fingerprints(
     return repo_path_fingerprints(root, paths, target)
 
 
-def task_chosen_matches_start(root: Path, task: Task, target: RepoTarget) -> bool:
-    """Prove zero scope drift without attributing concurrent repository changes."""
+def task_chosen_matches_start(root: Path, task: Task, target: RepoTarget, *, committed_paths: set[str] | None = None) -> bool:
+    """Prove unchanged Chosen paths not covered by committed evidence."""
     chosen, invalid = _task_chosen_path_projection(task, target=target)
     baseline = _read_repo_baseline(root, task.id)
     if not chosen or invalid or baseline is None:
         return False
+    chosen -= committed_paths or set()
     dirty = chosen & set(baseline["path_fingerprints"])
     if dirty:
         current, state = _current_baseline_fingerprints(root, baseline=baseline, paths=sorted(dirty), target=target)

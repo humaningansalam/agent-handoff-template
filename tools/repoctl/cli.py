@@ -23,7 +23,7 @@ from .context import build_context_bundle, compact_context_bundle, render_contex
 from .context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
 from .debug import begin_debug, bind_debug_command, debug_summary, finish_debug, observe_context, observe_envelope, observe_problem
-from .git import repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
+from .git import repo_changed_entries, repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
 from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph, materialize_graph
@@ -3311,31 +3311,28 @@ def _task_finish_repo_delta(
     committed_changes, range_state = repo_commit_range_entries(root, base=start_head, target=target)
     if not range_state.available:
         raise RepoctlError(f"committed diff finish cannot read task commit range: {range_state.reason}", code="repo_commit_range_unavailable", path=range_state.repo_path or target.display_path)
-    # An unchanged recorded scope is a zero-change closure, not ownership of
-    # concurrent work merely observed since this Task started.
-    scope = discovery_scope_delta(task, target, [*list(delta.get("changes") or []), *committed_changes])
-    chosen = set(scope["chosen_paths"])
+    observed_committed_changes = committed_changes
+    pending_task_changes = list(delta.get("changes") or [])
+    baseline_conflicts = list(delta.get("baseline_conflicts") or [])
     ownership = task_baseline_ownership_evidence(root, task.id)
-    owned = {path for path, decision in ownership.items() if decision.get("ownership") == "task"}
-    if (
-        delta.get("baseline_available")
-        and discovery_recorded(task, target)
-        and chosen
-        and not owned
-        and not chosen.intersection(scope["actual_paths"])
-        and not chosen.intersection(delta.get("baseline_conflicts") or [])
-        and task_chosen_matches_start(root, task, target)
-    ):
-        return {
-            **delta,
-            "changes": [],
-            "baseline_conflicts": [],
-            "ownership": ownership,
-            "observed_committed_changes": committed_changes,
-            "committed_range": {"base": start_head, "head": current_head},
-        }
+    scope = discovery_scope_delta(task, target, [])
+    chosen = set(scope["chosen_paths"])
+    if delta.get("baseline_available") and discovery_recorded(task, target) and chosen:
+        owned = {path for path, decision in ownership.items() if decision.get("ownership") == "task"}
+        scope_paths = chosen | owned
+        # Keep whole rename entries so crossing the scope boundary still fails
+        # the shared Chosen check. The rest is observed history, not Task work.
+        committed_changes = [entry for entry in committed_changes if scope_paths.intersection(_entry_mutation_paths([entry]))]
+        committed_paths = set(_entry_mutation_paths(committed_changes))
+        current, current_state = repo_changed_entries(root, target)
+        if not current_state.available:
+            raise RepoctlError(f"cannot inspect pending committed paths: {current_state.reason}", code="repo_git_unavailable", path=target.display_path)
+        pending_task_changes = [entry for entry in pending_task_changes if scope_paths.intersection(_entry_mutation_paths([entry]))]
+        pending_task_changes.extend(entry for entry in current if committed_paths.intersection(_entry_mutation_paths([entry])) and entry not in pending_task_changes)
+        baseline_conflicts = sorted(scope_paths.intersection(baseline_conflicts))
+        if not pending_task_changes and not task_chosen_matches_start(root, task, target, committed_paths=committed_paths):
+            raise RepoctlError("uncommitted Chosen paths differ from their task-start state", code="repo_dirty_after_committed_diff", path=task.rel_path)
 
-    pending_task_changes = delta.get("changes") or []
     if pending_task_changes:
         changed = ", ".join(str(entry[1]) for entry in pending_task_changes[:8])
         suffix = "" if len(pending_task_changes) <= 8 else f", ... +{len(pending_task_changes) - 8} more"
@@ -3347,11 +3344,12 @@ def _task_finish_repo_delta(
     committed_conflicts, ownership_evidence = committed_range_baseline_conflicts(root, task.id, committed_changes)
     return {
         "changes": committed_changes,
+        "observed_committed_changes": observed_committed_changes,
         "baseline_available": True,
         "baseline_count": int(delta.get("baseline_count") or 0),
         "current_count": int(delta.get("current_count") or 0),
         "preexisting_count": int(delta.get("preexisting_count") or 0),
-        "baseline_conflicts": sorted(set([*list(delta.get("baseline_conflicts") or []), *committed_conflicts])),
+        "baseline_conflicts": sorted(set([*baseline_conflicts, *committed_conflicts])),
         "initial_dirty_paths": list(delta.get("initial_dirty_paths") or []),
         "ownership": ownership_evidence or task_baseline_ownership_evidence(root, task.id),
         "repo_git": range_state,
