@@ -2743,6 +2743,26 @@ def _current_baseline_fingerprints(
     return repo_path_fingerprints(root, paths, target)
 
 
+def task_chosen_matches_start(root: Path, task: Task, target: RepoTarget) -> bool:
+    """Prove zero scope drift without attributing concurrent repository changes."""
+    chosen, invalid = _task_chosen_path_projection(task, target=target)
+    baseline = _read_repo_baseline(root, task.id)
+    if not chosen or invalid or baseline is None:
+        return False
+    dirty = chosen & set(baseline["path_fingerprints"])
+    if dirty:
+        current, state = _current_baseline_fingerprints(root, baseline=baseline, paths=sorted(dirty), target=target)
+        if not state.available or any(current.get(path) != baseline["path_fingerprints"][path] for path in dirty):
+            return False
+    clean = sorted(chosen - dirty)
+    if clean:
+        initial, initial_state = repo_path_stable_states(root, clean, target, revision=baseline["head"])
+        current, current_state = repo_path_stable_states(root, clean, target)
+        if not initial_state.available or not current_state.available or initial != current:
+            return False
+    return True
+
+
 def _build_task_path_transitions(
     root: Path,
     task: Task,

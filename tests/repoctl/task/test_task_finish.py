@@ -649,6 +649,50 @@ def test_task_finish_blocks_when_repo_head_changed_after_start_with_clean_worktr
     assert any(action["command"].startswith("./scripts/repoctl task finish T-20260609184046Z --use-committed-diff") for action in payload["next_actions"])
 
 
+def test_unchanged_validation_closes_preserving_concurrent_work_and_rejects_own_drift(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"peer.py": "original\n", "test_peer.py": "test\n", "other.py": "original\n", "login.py": "old\n"})
+    (repo / "peer.py").write_text("inherited peer\n")
+    (repo / "other.py").write_text("inherited other\n")
+    task_id = "T-20260609184046Z"
+    task = task_text(task_id, status="todo").replace('repo_id: ""', 'repo_id: "main"')
+    add_board_task(tmp_path, task_id + "--alpha.md", task)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/peer.py, repos/test_peer.py")
+    (repo / "login.py").write_text("separate login change\n")
+    subprocess.run(["git", "add", "login.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "separate login task"], cwd=repo, check=True, capture_output=True)
+    (repo / "other.py").write_text("successor task work\n")
+    (repo / "new.py").write_text("another task\n")
+    preserved = {p.name: p.read_bytes() for p in repo.glob("*.py")}
+    baseline = tmp_path / "docs/tasks/.repoctl-state" / (task_id + ".json")
+    original_baseline = baseline.read_bytes()
+
+    for path in ("peer.py", "test_peer.py"):
+        (repo / path).write_text("own scope drift\n")
+        assert main(["task", "doctor", task_id, "--use-committed-diff", "--json"]) == 1
+        assert json.loads(capsys.readouterr().out)["data"]["finish_ready"] is False
+        assert main(["task", "finish", task_id, "--use-committed-diff", "--json"]) == 2
+        capsys.readouterr()
+        (repo / path).write_bytes(preserved[path])
+    assert main(["task", "doctor", task_id, "--use-committed-diff", "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["data"]["finish_ready"] is True
+    assert doctor["data"]["repo_changes"]["task_new"] == 0
+    assert doctor["data"]["repo_changes"]["observed_committed_files"] == ["login.py"]
+    assert baseline.read_bytes() == original_baseline
+    assert main(["task", "finish", task_id, "--use-committed-diff", "--json"]) == 0
+    finished = json.loads(capsys.readouterr().out)
+    receipt = json.loads((tmp_path / finished["data"]["completion_receipt"]).read_text())
+    assert receipt["changed_entries"] == []
+    assert {p.name: p.read_bytes() for p in repo.glob("*.py")} == preserved
+    assert main(["task", "show", task_id, "--summary", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["health"]["status"] == "historical"
+
+
 def test_task_finish_can_validate_committed_diff_from_recorded_start_head(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     repo = tmp_path / "repos"

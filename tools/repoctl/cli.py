@@ -48,7 +48,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query
 from .markdown import find_section, parse_labeled_list_section
 from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -3293,15 +3293,6 @@ def _task_finish_repo_delta(
         delta["ownership"] = task_baseline_ownership_evidence(root, task.id)
         return delta
 
-    pending_task_changes = delta.get("changes") or []
-    if pending_task_changes:
-        changed = ", ".join(str(entry[1]) for entry in pending_task_changes[:8])
-        suffix = "" if len(pending_task_changes) <= 8 else f", ... +{len(pending_task_changes) - 8} more"
-        raise RepoctlError(
-            f"committed diff finish requires no uncommitted task changes after the commit: {changed}{suffix}",
-            code="repo_dirty_after_committed_diff",
-            path=str(pending_task_changes[0][1]),
-        )
     start_head = task_repo_head_at_start(root, task.id)
     if not start_head:
         raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
@@ -3320,6 +3311,39 @@ def _task_finish_repo_delta(
     committed_changes, range_state = repo_commit_range_entries(root, base=start_head, target=target)
     if not range_state.available:
         raise RepoctlError(f"committed diff finish cannot read task commit range: {range_state.reason}", code="repo_commit_range_unavailable", path=range_state.repo_path or target.display_path)
+    # An unchanged recorded scope is a zero-change closure, not ownership of
+    # concurrent work merely observed since this Task started.
+    scope = discovery_scope_delta(task, target, [*list(delta.get("changes") or []), *committed_changes])
+    chosen = set(scope["chosen_paths"])
+    ownership = task_baseline_ownership_evidence(root, task.id)
+    owned = {path for path, decision in ownership.items() if decision.get("ownership") == "task"}
+    if (
+        delta.get("baseline_available")
+        and discovery_recorded(task, target)
+        and chosen
+        and not owned
+        and not chosen.intersection(scope["actual_paths"])
+        and not chosen.intersection(delta.get("baseline_conflicts") or [])
+        and task_chosen_matches_start(root, task, target)
+    ):
+        return {
+            **delta,
+            "changes": [],
+            "baseline_conflicts": [],
+            "ownership": ownership,
+            "observed_committed_changes": committed_changes,
+            "committed_range": {"base": start_head, "head": current_head},
+        }
+
+    pending_task_changes = delta.get("changes") or []
+    if pending_task_changes:
+        changed = ", ".join(str(entry[1]) for entry in pending_task_changes[:8])
+        suffix = "" if len(pending_task_changes) <= 8 else f", ... +{len(pending_task_changes) - 8} more"
+        raise RepoctlError(
+            f"committed diff finish requires no uncommitted task changes after the commit: {changed}{suffix}",
+            code="repo_dirty_after_committed_diff",
+            path=str(pending_task_changes[0][1]),
+        )
     committed_conflicts, ownership_evidence = committed_range_baseline_conflicts(root, task.id, committed_changes)
     return {
         "changes": committed_changes,
