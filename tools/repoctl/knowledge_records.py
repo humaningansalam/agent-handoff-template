@@ -1592,12 +1592,18 @@ def _record_lifecycle_relations(record: dict[str, Any], records: list[dict[str, 
     return {key: value for key, value in relations.items() if value}
 
 
+def _source_search_text(record: dict[str, Any], resolved_source_refs: list[dict[str, Any]] | None) -> str:
+    refs = record.get("source_refs", [])
+    return "\n".join(
+        str(ref[key])
+        for ref in [*(refs if isinstance(refs, list) else []), *(resolved_source_refs or [])]
+        if isinstance(ref, dict)
+        for key in ("kind", "path", "declared_path", "resolved_path", "section", "task_id", "content_sha256")
+        if ref.get(key)
+    )
+
+
 def _record_search_body(record: dict[str, Any], *, resolved_source_refs: list[dict[str, Any]] | None = None) -> str:
-    source_refs = record.get("source_refs", [])
-    searchable_source_refs = [
-        *(source_refs if isinstance(source_refs, list) else []),
-        *(resolved_source_refs or []),
-    ]
     return "\n".join(
         [
             str(record.get("id") or ""),
@@ -1605,7 +1611,7 @@ def _record_search_body(record: dict[str, Any], *, resolved_source_refs: list[di
             str(record.get("title") or ""),
             str(record.get("claim") or ""),
             str(record.get("summary") or record.get("reason") or ""),
-            json.dumps(searchable_source_refs, ensure_ascii=False, sort_keys=True),
+            _source_search_text(record, resolved_source_refs),
         ]
     )
 
@@ -1621,12 +1627,7 @@ def _record_score(
     title_text = str(record.get("title") or record.get("claim") or "")
     claim_text = str(record.get("claim") or "")
     summary_text = str(record.get("summary") or record.get("reason") or "")
-    source_refs = record.get("source_refs", [])
-    source_text = json.dumps(
-        [*(source_refs if isinstance(source_refs, list) else []), *(resolved_source_refs or [])],
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    source_text = _source_search_text(record, resolved_source_refs)
     exact_identity = _exact_score(query, identity_text)
     exact_title = _exact_score(query, title_text)
     exact_claim = _exact_score(query, claim_text)

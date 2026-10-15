@@ -251,3 +251,19 @@ def test_task_finish_stays_successful_when_derived_knowledge_sync_fails(
         "knowledge_projection_sync_failed",
         "knowledge_graph_sync_failed",
     }
+
+
+def test_knowledge_search_matches_content_and_provenance_not_json_field_names(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    record = _add_knowledge_source(capsys, claim="Keep sensor forwarding distinct from virtual devices.")["data"]["record"]
+    for query in ("content", "declared", "resolution"):
+        assert main(["knowledge", "query", query, "--repo-id", "main", "--json"]) == 0
+        assert _payload(capsys)["data"]["results"] == []
+    for query in ("sensor forwarding", record["id"], record["source_refs"][0]["path"], record["source_refs"][0]["content_sha256"]):
+        assert main(["knowledge", "query", query, "--repo-id", "main", "--json"]) == 0
+        assert _payload(capsys)["data"]["results"][0]["record"]["id"] == record["id"]
+    content = _add_knowledge_source(capsys, claim="Keep content resolution separate from delivery.")["data"]["record"]
+    assert main(["knowledge", "query", "content resolution", "--repo-id", "main", "--json"]) == 0
+    assert [item["record"]["id"] for item in _payload(capsys)["data"]["results"]] == [content["id"]]
