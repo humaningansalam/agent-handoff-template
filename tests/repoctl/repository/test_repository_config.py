@@ -66,22 +66,37 @@ def test_config_rejects_duplicate_git_toplevel_aliases(tmp_path: Path) -> None:
         raise AssertionError("two repo_id values must not point at the same real git repository")
 
 
-def test_collection_rejects_unowned_direct_entries(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_collection_preserves_raw_inputs_and_starts_only_selected_git_repo(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     init_repo(tmp_path / "repos/web")
     init_repo(tmp_path / "repos/api")
     (tmp_path / "repos/shared.txt").write_text("loose\n", encoding="utf-8")
-    (tmp_path / "repos/shared").mkdir()
-    (tmp_path / "repos/shared/config.json").write_text("{}\n", encoding="utf-8")
+    raw_inputs = tmp_path / "repos/blackbox"
+    raw_inputs.mkdir()
+    original = raw_inputs / "original.avi"
+    original.write_bytes(b"original-input")
     write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}, {"id": "api", "path": "repos/api"}]})
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["repo", "check", "--json"]) == 1
+    assert main(["repo", "check", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["registry_ready"] is False
-    assert [problem["code"] for problem in payload["problems"]] == ["repository_unowned_product_path", "repository_unowned_product_path"]
-    assert {problem["path"] for problem in payload["problems"]} == {"repos/shared", "repos/shared.txt"}
+    assert payload["data"]["registry_ready"] is True
+    assert {target["path"] for target in payload["data"]["targets"]} == {"repos/web", "repos/api"}
+    assert payload["data"]["candidates"] == []
+    assert main(["task", "create", "Use existing input", "--slug", "use-existing-input", "--repo-id", "web", "--start", "--json"]) == 0
+    task = json.loads(capsys.readouterr().out)["data"]
+    assert task["status"] == "doing"
+    assert original.read_bytes() == b"original-input"
+    assert not (raw_inputs / ".git").exists()
+    assert (tmp_path / "repos/shared.txt").read_text() == "loose\n"
+
+    init_repo(tmp_path / "repos/extra")
+    assert main(["repo", "check", "--json"]) == 1
+    unbound = json.loads(capsys.readouterr().out)
+    assert unbound["data"]["registry_ready"] is False
+    assert [candidate["path"] for candidate in unbound["data"]["candidates"]] == ["repos/extra"]
+    assert any(problem["code"] == "repository_identity_unbound" for problem in unbound["problems"])
 
 
 def test_config_rejects_nested_git_root_under_product_repo(tmp_path: Path, monkeypatch, capsys) -> None:

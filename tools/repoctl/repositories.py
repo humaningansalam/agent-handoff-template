@@ -333,6 +333,8 @@ def _unowned_product_paths(root: Path, owned_paths: set[str]) -> tuple[dict[str,
         return ()
     problems: list[dict[str, str]] = []
     for child in sorted(repos_dir.iterdir()):
+        if not is_git_repo_root(child):
+            continue
         rel = f"repos/{child.name}"
         if rel in owned_paths:
             continue
