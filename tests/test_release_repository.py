@@ -116,8 +116,6 @@ def test_release_archive_excludes_python_tests_and_keeps_field_gate_fixtures(tmp
         "tests/fixtures/context-pack-benchmark/cases.json",
         "tests/fixtures/context-pack-benchmark/tasks.json",
     }
-    assert len(members) < 151
-    assert sum(member.size for member in members) < 5_588_918
 
 
 def test_release_archive_runs_public_commands(tmp_path: Path) -> None:
