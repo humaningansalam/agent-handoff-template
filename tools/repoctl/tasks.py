@@ -59,6 +59,7 @@ class _CompletionEvidenceMode(StrEnum):
 class BaselineOwnership(StrEnum):
     TASK = "task"
     PREEXISTING = "preexisting"
+    DELTA = "delta"
 
 
 class RepositoryLineageStatus(StrEnum):
@@ -1897,6 +1898,9 @@ def _validate_receipt_path_transitions(
         for path, decision in ownership.items()
         if decision["ownership"] == BaselineOwnership.TASK.value
     }
+    delta_paths = {path for path, decision in ownership.items() if decision["ownership"] == "delta"}
+    if not delta_paths <= changed_paths:
+        raise RepoctlError("task completion receipt omits an owned delta", code="invalid_completion_receipt", path=rel)
     if len(set(transition_paths)) != len(transition_paths) or not changed_paths <= set(transition_paths):
         raise RepoctlError(
             f"task completion receipt path transitions do not cover changed entries exactly: {rel}",
@@ -1905,6 +1909,15 @@ def _validate_receipt_path_transitions(
         )
     for transition in transitions:
         path = transition["path"]
+        decision = ownership.get(path, {})
+        if decision.get("ownership") == "delta" and (
+            path not in changed_paths
+            or stable_path_state_digest(transition["before"]) != decision["baseline_fingerprint"]
+            or stable_path_state_digest(transition["after"]) != decision["reviewed_fingerprint"]
+            or decision["final_fingerprint"] != decision["reviewed_fingerprint"]
+            or repo_evidence.get("mode") != "working_tree_diff"
+        ):
+            raise RepoctlError("task completion receipt has an invalid owned delta", code="invalid_completion_receipt", path=rel)
         expected_basis = sorted(
             {
                 *( ["observed_change"] if path in changed_paths else [] ),
@@ -2388,11 +2401,13 @@ def _canonical_baseline_ownership(
 ) -> dict[str, dict[str, str]]:
     if not isinstance(value, dict):
         raise ValueError("baseline ownership must be an object")
-    expected_fields = {"ownership", "decided_at"}
-    if include_fingerprints:
-        expected_fields.update({"baseline_fingerprint", "final_fingerprint"})
     decisions: dict[str, dict[str, str]] = {}
     for path, raw_decision in value.items():
+        expected_fields = {"ownership", "decided_at"}
+        if include_fingerprints:
+            expected_fields.update({"baseline_fingerprint", "final_fingerprint"})
+        if isinstance(raw_decision, dict) and raw_decision.get("ownership") == "delta":
+            expected_fields.add("reviewed_fingerprint")
         if (
             not isinstance(path, str)
             or normalize_repo_path(path) != path
@@ -2410,6 +2425,11 @@ def _canonical_baseline_ownership(
         if not isinstance(decided_at, str) or not _valid_utc_stamp(decided_at):
             raise ValueError("baseline ownership has an invalid decision timestamp")
         decision = {"ownership": owner.value, "decided_at": decided_at}
+        if owner is BaselineOwnership.DELTA:
+            reviewed = raw_decision.get("reviewed_fingerprint")
+            if not isinstance(reviewed, str) or not _valid_sha256(reviewed):
+                raise ValueError("delta ownership has an invalid reviewed fingerprint")
+            decision["reviewed_fingerprint"] = reviewed
         if include_fingerprints:
             baseline_fingerprint = raw_decision.get("baseline_fingerprint")
             final_fingerprint = raw_decision.get("final_fingerprint")
@@ -2907,8 +2927,8 @@ def resolve_task_baseline_ownerships(
     known_paths = {str(path) for path in baseline_fingerprints}
     normalized_resolutions: dict[str, str] = {}
     for path, ownership in resolutions:
-        if ownership not in {"task", "preexisting"}:
-            raise RepoctlError("baseline ownership must be task or preexisting", code="invalid_baseline_ownership", path=path)
+        if ownership not in {"task", "preexisting", "delta"}:
+            raise RepoctlError("baseline ownership must be task, preexisting or delta", code="invalid_baseline_ownership", path=path)
         resolution = resolve_repo_selector_path(
             path,
             repository_path=target.display_path,
@@ -2948,6 +2968,11 @@ def resolve_task_baseline_ownerships(
     for normalized, ownership in sorted(normalized_resolutions.items()):
         baseline_fingerprint = str(baseline_fingerprints.get(normalized) or "")
         final_fingerprint = str(current_fingerprints.get(normalized) or "")
+        if ownership == "delta":
+            if baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION or normalized not in baseline.get("path_states", {}):
+                raise RepoctlError("delta ownership requires a stable task-start path state", code="baseline_delta_evidence_missing", path=normalized)
+            if final_fingerprint == baseline_fingerprint:
+                raise RepoctlError("delta ownership requires a change from the initial dirty state", code="baseline_delta_empty", path=normalized)
         if ownership == "preexisting" and final_fingerprint != baseline_fingerprint:
             raise RepoctlError(
                 "preexisting ownership requires the path to be restored exactly to its initial dirty state",
@@ -2970,6 +2995,8 @@ def resolve_task_baseline_ownerships(
                 "ownership": item["ownership"],
                 "decided_at": decided_at,
             }
+            if item["ownership"] == "delta":
+                decision["reviewed_fingerprint"] = item["final_fingerprint"]
             if baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION:
                 decision.update(
                     {
@@ -3055,6 +3082,7 @@ def task_baseline_ownership_evidence(root: Path, task_id: str) -> dict[str, dict
             "decided_at": decision["decided_at"],
             "baseline_fingerprint": str(baseline_fingerprints.get(path) or ""),
             "final_fingerprint": str(current_fingerprints.get(path) or ""),
+            **({"reviewed_fingerprint": decision["reviewed_fingerprint"]} if decision["ownership"] == "delta" else {}),
         }
     return evidence
 
@@ -3920,9 +3948,13 @@ def _baseline_conflicting_paths(
     for path in baseline_paths:
         baseline_fingerprint = str(baseline_fingerprints.get(path) or "")
         current_fingerprint = str(current_fingerprints.get(path) or "")
+        decision = ownership.get(path, {})
+        if decision.get("ownership") == "delta":
+            if current_fingerprint != decision["reviewed_fingerprint"]:
+                conflicts.add(path)
+            continue
         if baseline_fingerprint and current_fingerprint == baseline_fingerprint:
             continue
-        decision = ownership.get(path, {})
         if decision.get("ownership") == BaselineOwnership.TASK.value:
             continue
         conflicts.add(path)
@@ -4326,7 +4358,9 @@ def repo_changes_since_task_start(
         "baseline_count": len(baseline_entries),
         "current_count": len(current),
         "preexisting_count": max(0, len(current) - len(raw_changes)),
-        "baseline_conflicts": sorted(baseline_only_conflicts | entry_conflicts),
+        "baseline_conflicts": sorted(baseline_only_conflicts | entry_conflicts | {
+            path for path in baseline_conflicts if ownership.get(path, {}).get("ownership") == "delta"
+        }),
         "initial_dirty_paths": sorted(baseline_paths),
         "ownership": ownership,
         "baseline_path_fingerprints": baseline_fingerprints,

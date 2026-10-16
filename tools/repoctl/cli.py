@@ -123,6 +123,7 @@ class NextActionKind(StrEnum):
 class BaselineOwnership(StrEnum):
     TASK = "task"
     PREEXISTING = "preexisting"
+    DELTA = "delta"
 
 
 class TaskScopeResolution(StrEnum):
@@ -646,7 +647,7 @@ def _task_next_actions(problems: list[Any], data: dict[str, Any]) -> list[dict[s
             add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
         elif code == "baseline_conflict":
             if _string_list(inputs.get("baseline_conflicts")):
-                add({"label": "Preview baseline ownership resolutions", "kind": NextActionKind.BASELINE_OWNERSHIP_RESOLUTION, "source": "data.action_inputs.baseline_conflicts", "choices": [BaselineOwnership.TASK, BaselineOwnership.PREEXISTING], "target_ref": "data.action_inputs.baseline_conflicts"})
+                add({"label": "Preview baseline ownership resolutions", "kind": NextActionKind.BASELINE_OWNERSHIP_RESOLUTION, "source": "data.action_inputs.baseline_conflicts", "choices": [BaselineOwnership.TASK, BaselineOwnership.PREEXISTING, BaselineOwnership.DELTA], "target_ref": "data.action_inputs.baseline_conflicts"})
             add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
         elif code == "workspace_baseline_conflict":
             if _string_list(inputs.get("baseline_conflicts")):
@@ -2658,9 +2659,9 @@ def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
         resolutions.extend((path, args.ownership) for path in args.path)
     for raw in args.resolution or []:
         path, separator, ownership = raw.rpartition("=")
-        if not separator or not path.strip() or ownership not in {"task", "preexisting"}:
+        if not separator or not path.strip() or ownership not in {"task", "preexisting", "delta"}:
             raise RepoctlError(
-                "--resolution must use PATH=task or PATH=preexisting",
+                "--resolution must use PATH=task, PATH=preexisting or PATH=delta",
                 code="invalid_baseline_resolution",
                 path=raw,
             )
@@ -6444,8 +6445,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_baseline_resolve = task_baseline_sub.add_parser("resolve")
     task_baseline_resolve.add_argument("task_id")
     task_baseline_resolve.add_argument("--path", action="append", default=[], help="baseline path to resolve; repeat for paths sharing --ownership")
-    task_baseline_resolve.add_argument("--ownership", choices=["task", "preexisting"])
-    task_baseline_resolve.add_argument("--resolution", action="append", default=[], help="mixed atomic resolution in PATH=task or PATH=preexisting form; repeat as needed")
+    task_baseline_resolve.add_argument("--ownership", choices=["task", "preexisting", "delta"], help="task adopts the path; preexisting restores the initial state; delta owns only the reviewed change from that state")
+    task_baseline_resolve.add_argument("--resolution", action="append", default=[], help="mixed atomic resolution in PATH=task, PATH=preexisting or PATH=delta form; repeat as needed")
     task_baseline_resolve.add_argument("--preview", action="store_true", help="validate and show every resolution without writing task state")
     task_baseline_resolve.add_argument("--json", action="store_true")
     task_baseline_resolve.set_defaults(func=cmd_task_baseline_resolve)

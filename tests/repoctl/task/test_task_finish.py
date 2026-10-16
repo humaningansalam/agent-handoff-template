@@ -1058,3 +1058,94 @@ def test_committed_rename_cannot_cross_chosen_boundary(tmp_path: Path, monkeypat
     result = json.loads(capsys.readouterr().out)
     assert result["problems"][0]["code"] == "actual_changes_outside_chosen"
     assert result["data"]["action_inputs"]["unchosen_actual_paths"] == ["moved.py"]
+
+
+def test_task_finishes_only_reviewed_delta_over_inherited_dirty_state(tmp_path: Path, monkeypatch, capsys) -> None:
+    """N04: own edits share two paths with inherited work; neither is adopted or reset."""
+    from tools.repoctl.tasks import _validate_completion_receipt
+    from tools.repoctl.io import RepoctlError
+    import pytest
+
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"a.py": "a = 1\n", "b.py": "b = 1\n", "other.py": "other = 1\n"})
+    inherited = {name: f"{name[0]} = 2\n" for name in ("a.py", "b.py", "other.py")}
+    for name, content in inherited.items():
+        (repo / name).write_text(content)
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/a.py, repos/b.py")
+    state_path = tmp_path / f"docs/tasks/.repoctl-state/{task_id}.json"
+    initial = json.loads(state_path.read_bytes())["initial"]
+    index = (repo / ".git/index").read_bytes()
+    own = {name: inherited[name] + "own_fix = True\n" for name in ("a.py", "b.py")}
+    for name, content in own.items():
+        (repo / name).write_text(content)
+
+    assert main(["task", "doctor", task_id, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+    command = ["task", "baseline", "resolve", task_id, "--path", "a.py", "--path", "b.py"]
+    assert main([*command, "--ownership", "preexisting", "--preview", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_not_restored"
+    before_preview = state_path.read_bytes()
+    assert main([*command, "--ownership", "delta", "--preview", "--json"]) == 0
+    capsys.readouterr()
+    assert state_path.read_bytes() == before_preview
+    assert main([*command, "--ownership", "delta", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "doctor", task_id, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["finish_ready"] is True
+
+    # A second writer, or undoing the reviewed fix, must not be silently claimed.
+    for drift in (own["a.py"] + "later = True\n", inherited["a.py"]):
+        (repo / "a.py").write_text(drift)
+        assert main(["task", "doctor", task_id, "--json"]) == 1
+        assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+        assert main(["task", "finish", task_id, "--json"]) == 2
+        assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+    (repo / "a.py").write_text(own["a.py"])
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    receipt_path = tmp_path / payload["data"]["completion_receipt"]
+    receipt = json.loads(receipt_path.read_bytes())
+    _validate_completion_receipt(receipt_path, tmp_path, receipt)
+    transitions = receipt["repo_evidence"]["path_transitions"]
+    assert {item["path"] for item in transitions} == set(own)
+    for item in transitions:
+        assert item["before"] == initial["dirty_path_states"][item["path"]]
+        assert item["before"] != item["after"]
+        decision = receipt["repo_evidence"]["ownership"][item["path"]]
+        assert decision["ownership"] == "delta"
+        assert decision["reviewed_fingerprint"] == decision["final_fingerprint"]
+    receipt["repo_evidence"]["ownership"]["a.py"]["reviewed_fingerprint"] = "sha256:" + "0" * 64
+    with pytest.raises(RepoctlError, match="invalid owned delta"):
+        _validate_completion_receipt(receipt_path, tmp_path, receipt)
+    assert json.loads(state_path.read_bytes())["initial"] == initial
+    assert (repo / ".git/index").read_bytes() == index
+    assert {name: (repo / name).read_text() for name in inherited} == {**inherited, **own}
+
+
+def test_delta_resolution_cannot_adopt_inherited_committed_changes(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"app.py": "value = 1\n"})
+    (repo / "app.py").write_text("value = 2\n")
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/app.py")
+    resolve = ["task", "baseline", "resolve", task_id, "--resolution", "app.py=delta", "--json"]
+    assert main(resolve) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_delta_empty"
+    (repo / "app.py").write_text("value = 2\nown_fix = True\n")
+    assert main(resolve) == 0
+    capsys.readouterr()
+    commit_all(repo)
+    # HEAD->commit contains the inherited edit as well; it is not our reviewed delta.
+    assert main(["task", "finish", task_id, "--use-committed-diff", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
