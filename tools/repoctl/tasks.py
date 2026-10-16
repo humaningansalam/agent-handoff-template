@@ -3107,18 +3107,21 @@ def _done_descendant_completion_receipts(
     layout: RepoLayout,
     acknowledge_completed: tuple[str, ...] = (),
 ) -> tuple[list[tuple[Task, dict[str, Any]]], list[Problem]]:
-    if _repo_scoped_task(task):
-        if acknowledge_completed:
-            raise RepoctlError("completion acknowledgement is only for root-only tasks", code="completion_acknowledgement_invalid", path=task.rel_path)
+    target = _target_for_task(root, task, layout=layout)
+    if target is not None and not acknowledge_completed:
         return [], []
     children = children_by_parent(load_tasks(root, include_archived=False))
-    stack = list(children.get(task.id, []))
+    stack = list(children.get(task.id, [])) if target is None else []
     for task_id in sorted(set(acknowledge_completed)):
         if not ID_RE.fullmatch(task_id):
             raise RepoctlError("acknowledgement requires an exact Task ID", code="completion_acknowledgement_invalid", path=task_id)
         completed = resolve_task(root, task_id)
-        if completed.status != "done" or not completed.archived or completed.parent or not _repo_scoped_task(completed):
-            raise RepoctlError("acknowledge only an archived standalone done product task", code="completion_acknowledgement_invalid", path=completed.rel_path)
+        if target is None:
+            eligible = completed.archived and not completed.parent and _repo_scoped_task(completed)
+        else:
+            eligible = bool(task.parent) and completed.parent == task.parent and completed.id != task.id and _target_for_task(root, completed, layout=layout) == target
+        if completed.status != "done" or not eligible:
+            raise RepoctlError("acknowledge an archived standalone product task from root work, or a done same-repository sibling from product work", code="completion_acknowledgement_invalid", path=completed.rel_path)
         if not _completion_receipt_path(root, completed.id).is_file():
             raise RepoctlError("acknowledged task has no completion receipt", code="completion_acknowledgement_invalid", path=completed.rel_path)
         stack.append(completed)
@@ -3138,7 +3141,8 @@ def _done_descendant_completion_receipts(
             )
             continue
         seen.add(child.id)
-        stack.extend(children.get(child.id, []))
+        if target is None:
+            stack.extend(children.get(child.id, []))
         if child.status != "done":
             continue
         receipt_path = _completion_receipt_path(root, child.id)
@@ -3194,6 +3198,14 @@ def _done_descendant_completion_receipts(
                 )
             )
             continue
+
+        if target is not None:
+            chosen, _invalid = _task_chosen_path_projection(task, target=target)
+            completed_paths = set(_entry_mutation_paths([
+                _receipt_changed_entry(entry, rel=receipt_rel) for entry in receipt.get("changed_entries", [])
+            ]))
+            if chosen & completed_paths:
+                raise RepoctlError("completed sibling paths overlap this task's Chosen scope", code="completion_acknowledgement_invalid", path=child.rel_path)
 
         child_repo_scoped = _repo_scoped_task(child)
         try:
@@ -3755,8 +3767,7 @@ def _parent_path_states(
         ]
     start_head = str(baseline.get("head") or baseline.get("start_head") or "")
     state_path = _baseline_path(root, "baseline")
-    raw_entries = baseline.get("entries") if "entries" in baseline else baseline.get("dirty_entries", [])
-    entries = _parse_baseline_entries(raw_entries, state_path, root)
+    entries = baseline["entries"] if "entries" in baseline else _parse_baseline_entries(baseline.get("dirty_entries", []), state_path, root)
     dirty_paths = set(_entry_mutation_paths(entries))
     raw_states = baseline.get("path_states")
     if raw_states is None:
@@ -4532,7 +4543,7 @@ def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = 
 
     text = task.path.read_text(encoding="utf-8")
     for acknowledged in (repo_delta or {}).get("acknowledged_completions", []):
-        text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: root closure acknowledged completed product task {acknowledged['task_id']}; receipt `{acknowledged['receipt_path']}` ({acknowledged['receipt_sha256']}); original ownership unchanged.")
+        text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: task closure acknowledged completed product task {acknowledged['task_id']}; receipt `{acknowledged['receipt_path']}` ({acknowledged['receipt_sha256']}); original ownership unchanged.")
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {copy['task_finished']}")
     text = replace_frontmatter_line(text, "status", "done")
 

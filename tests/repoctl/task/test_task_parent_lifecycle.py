@@ -1029,3 +1029,64 @@ def test_lineage_distinguishes_duplicate_observations_from_missing_edits(observa
     assert (problem.code if problem else None) == error
     if error is None:
         assert set(task_ids) == {claim.task_id for claim in claims}
+
+
+@pytest.mark.parametrize("lineage_gap", [False, True])
+def test_product_finishes_with_completed_sibling_delta(tmp_path: Path, monkeypatch, capsys, lineage_gap: bool) -> None:
+    parent, current, sibling = [f"T-2026060918404{i}Z" for i in range(6, 9)]
+    repo = _parent_child_repo_fixture(tmp_path, parent, [current, sibling])
+    # Both tasks inherit this dirty file; only the sibling owns its later delta.
+    (repo / "app.py").write_text("inherited = 1\n")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    def run(*args):
+        code = main(["task", *args, "--json"])
+        return code, json.loads(capsys.readouterr().out)
+
+    assert run("start", current, "--force-dirty")[0] == 0
+    record_discovery(tmp_path, current, chosen="repos/own.py")
+    (repo / "own.py").write_text("own = 2\n")
+    if lineage_gap:
+        (repo / "app.py").write_text("unaccounted = 2\n")
+    assert run("start", sibling, "--force-dirty")[0] == 0
+    record_discovery(tmp_path, sibling, chosen="repos/app.py")
+    (repo / "app.py").write_text("sibling = 3\n")
+    assert run("baseline", "resolve", sibling, "--path", "app.py", "--ownership", "delta")[0] == 0
+    assert run("finish", sibling)[0] == 0
+    state = tmp_path / "docs/tasks/.repoctl-state"
+    receipt = state / f"completions/{sibling}.json"
+    artifact = tmp_path / f"docs/tasks/{sibling}--child-2.md"
+    immutable = {p: p.read_bytes() for p in [receipt, artifact, state / f"{current}.json", state / f"{sibling}.json", repo / ".git/index"]}
+    ack = ("--acknowledge-completed", sibling)
+    assert run("doctor", current)[0] == 1
+    if lineage_gap:
+        code, payload = run("doctor", current, *ack)
+        assert code == 1 and "transition_lineage_gap" in payload["data"]["blocked_by"]
+        assert run("finish", current, *ack)[0] == 2
+        return
+    assert run("doctor", current, *ack)[1]["data"]["finish_ready"] is True
+    # Missing/altered authority, overlapping scope, and terminal drift cannot be excused.
+    receipt.unlink()
+    assert run("finish", current, *ack)[0] == 2
+    receipt.write_bytes(immutable[receipt])
+    for path, bad in [(artifact, immutable[artifact] + b"\naltered\n"),
+                      (receipt, immutable[receipt].replace(b'"repo_id": "main"', b'"repo_id": "other"')),
+                      (repo / "app.py", b"later drift = 4\n"),
+                      (repo / "extra.py", b"unowned = 4\n")]:
+        original = path.read_bytes() if path.exists() else None
+        path.write_bytes(bad)
+        assert run("doctor", current, *ack)[0] == 1
+        assert run("finish", current, *ack)[0] == 2
+        if original is None:
+            path.unlink()
+        else:
+            path.write_bytes(original)
+    record_discovery(tmp_path, current, chosen="repos/app.py")
+    assert run("finish", current, *ack)[0] == 2
+    record_discovery(tmp_path, current, chosen="repos/own.py")
+    assert run("doctor", current, "--acknowledge-completed", parent)[0] == 1
+    assert run("finish", current, *ack)[0] == 0
+    result = json.loads((state / f"completions/{current}.json").read_text())
+    assert result["changed_entries"] == [{"change": "untracked", "path": "own.py"}]
+    assert (repo / "app.py").read_text() == "sibling = 3\n"
+    assert all(p.read_bytes() == data for p, data in immutable.items())

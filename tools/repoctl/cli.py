@@ -2700,8 +2700,6 @@ def _task_doctor_payload(
     acknowledge_completed: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     task = resolve_task(root, task_id)
-    if acknowledge_completed and _repo_scoped_frontmatter(task):
-        raise RepoctlError("completion acknowledgement is only for root-only tasks", code="completion_acknowledgement_invalid", path=task.rel_path)
     related_tasks = load_tasks(root, include_archived=False)
     if task.archived:
         related_tasks.append(task)
@@ -2725,6 +2723,7 @@ def _task_doctor_payload(
                 task,
                 target,
                 use_committed_diff=use_committed_diff,
+                acknowledge_completed=acknowledge_completed,
             )
             if target is not None
             else repo_changes_since_task_start(root, task.id, acknowledge_completed=acknowledge_completed)
@@ -3270,8 +3269,9 @@ def _task_finish_repo_delta(
     target: RepoTarget,
     *,
     use_committed_diff: bool,
+    acknowledge_completed: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    delta = repo_changes_since_task_start(root, task.id)
+    delta = repo_changes_since_task_start(root, task.id, acknowledge_completed=acknowledge_completed)
     health = _task_health(root, task, delta=delta)
     if not health.executable:
         problem = health.problems[0]
@@ -3344,6 +3344,7 @@ def _task_finish_repo_delta(
         )
     committed_conflicts, ownership_evidence = committed_range_baseline_conflicts(root, task.id, committed_changes)
     return {
+        "acknowledged_completions": list(delta.get("acknowledged_completions") or []),
         "changes": committed_changes,
         "observed_committed_changes": observed_committed_changes,
         "baseline_available": True,
@@ -3369,8 +3370,6 @@ def _finish_meta_gate(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     task = resolve_task(root, task_id)
     target = _repo_target_for_task_command(root, task)
-    if acknowledge_completed and target is not None:
-        raise RepoctlError("completion acknowledgement is only for root-only tasks", code="completion_acknowledgement_invalid", path=task.rel_path)
     if use_committed_diff and target is None:
         raise RepoctlError("committed diff finish requires an explicit product repository target", code="repository_selector_required", path=task.rel_path)
     if target is None:
@@ -3423,6 +3422,7 @@ def _finish_meta_gate(
         task,
         target,
         use_committed_diff=use_committed_diff,
+        acknowledge_completed=acknowledge_completed,
     )
     _require_no_integrity_problems(delta)
     if delta.get("baseline_conflicts"):
@@ -6413,7 +6413,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness and lifecycle problems.")
     task_doctor.add_argument("task_id")
     task_doctor.add_argument("--use-committed-diff", action="store_true", help="preflight the recorded task-start HEAD through current HEAD")
-    task_doctor.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="root-only closure: validate an archived standalone product task receipt without changing its ownership; repeat for multiple tasks")
+    task_doctor.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="validate completed product work without taking ownership: an archived standalone task for root work, or a same-repository sibling for product work; repeat for multiple tasks")
     task_doctor.add_argument("--json", action="store_true")
     task_doctor.set_defaults(func=cmd_task_doctor)
     task_log = task_sub.add_parser("log", help="Manage task execution logs.")
@@ -6468,7 +6468,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_finish.add_argument("--knowledge-applies-to", action="append", default=[], help="current selected-repository file governed by the reusable claim; repeat as needed")
     task_finish.add_argument("--knowledge-replaces", action="append", default=[], help="prior Knowledge record explicitly corrected or replaced; repeat as needed")
     task_finish.add_argument("--knowledge-author", default="", help="known author; omit when unknown")
-    task_finish.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="root-only closure: validate an archived standalone product task receipt without changing its ownership; repeat for multiple tasks")
+    task_finish.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="validate completed product work without taking ownership: an archived standalone task for root work, or a same-repository sibling for product work; repeat for multiple tasks")
     task_finish.add_argument("--json", action="store_true")
     task_finish.set_defaults(func=cmd_task_finish)
     task_block = task_sub.add_parser("block", help="Block a live task with explicit transition intent.")
