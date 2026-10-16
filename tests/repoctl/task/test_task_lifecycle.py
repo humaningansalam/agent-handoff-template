@@ -545,7 +545,7 @@ def test_task_doctor_builds_one_typed_batch_action_for_all_baseline_conflicts(tm
     payload = json.loads(capsys.readouterr().out)
     action = next(action for action in payload["next_actions"] if action.get("kind") == "baseline_ownership_resolution")
     assert action["source"] == "data.action_inputs.baseline_conflicts"
-    assert action["choices"] == ["task", "preexisting", "delta"]
+    assert action["choices"] == ["task", "preexisting", "delta", "external"]
     assert action["target_ref"] == "data.action_inputs.baseline_conflicts"
     assert "targets" not in action
     assert payload["data"]["action_inputs"]["baseline_conflicts"] == ["a.py", "b.py"]

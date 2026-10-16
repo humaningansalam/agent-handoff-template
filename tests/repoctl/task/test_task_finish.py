@@ -1149,3 +1149,90 @@ def test_delta_resolution_cannot_adopt_inherited_committed_changes(tmp_path: Pat
     # HEAD->commit contains the inherited edit as well; it is not our reviewed delta.
     assert main(["task", "finish", task_id, "--use-committed-diff", "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+
+
+def test_external_resolution_preserves_unattributed_work_without_claiming_it(tmp_path: Path, monkeypatch, capsys) -> None:
+    from tools.repoctl.tasks import _validate_completion_receipt
+
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"own.txt": "base\n", "workflow.yml": "base\n", "review.py": "base\n", "other.yml": "base\n"})
+    for name in ("own.txt", "workflow.yml", "review.py"):
+        (repo / name).write_text("inherited\n")
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/own.txt, repos/workflow.yml, repos/review.py")
+    state_path = tmp_path / f"docs/tasks/.repoctl-state/{task_id}.json"
+    initial = json.loads(state_path.read_bytes())["initial"]
+    (repo / "own.txt").write_text("inherited\nowned fix\n")
+    assert main(["task", "baseline", "resolve", task_id, "--resolution", "own.txt=delta", "--json"]) == 0
+    capsys.readouterr()
+    external = {"workflow.yml": "unknown workflow edit\n", "review.py": "unknown review edit\n", "other.yml": "concurrent edit\n", "new.yml": "unknown new workflow\n", "cache.pyc": "opaque cache\n"}
+    for name, text in external.items():
+        (repo / name).write_text(text)
+    before = {name: (repo / name).read_bytes() for name in ["own.txt", *external]}
+    index = (repo / ".git/index").read_bytes()
+    head = (repo / ".git/HEAD").read_bytes()
+    assert main(["task", "doctor", task_id, "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+    resolve = ["task", "baseline", "resolve", task_id, "--json"]
+    for name in external:
+        resolve.extend(["--resolution", f"{name}=external"])
+    state_before_preview = state_path.read_bytes()
+    assert main([*resolve, "--preview"]) == 0
+    capsys.readouterr()
+    assert state_path.read_bytes() == state_before_preview
+    assert main(resolve) == 0
+    capsys.readouterr()
+    assert main(["task", "doctor", task_id, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["finish_ready"] is True
+    # The existing owned-delta check still detects our own post-review drift.
+    (repo / "own.txt").write_text("inherited\nowned fix\nunreviewed drift\n")
+    assert main(["task", "finish", task_id, "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+    (repo / "own.txt").write_bytes(before["own.txt"])
+    # A previously owned delta cannot be discarded via external classification.
+    assert main(["task", "baseline", "resolve", task_id, "--resolution", "own.txt=external", "--json"]) == 2
+    assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "external_change_owned"
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    finish = json.loads(capsys.readouterr().out)
+    receipt_path = tmp_path / finish["data"]["completion_receipt"]
+    receipt = json.loads(receipt_path.read_bytes())
+    _validate_completion_receipt(receipt_path, tmp_path, receipt)
+    assert {entry["path"] for entry in receipt["changed_entries"]} == {"own.txt"}
+    assert {item["path"] for item in receipt["repo_evidence"]["path_transitions"]} == {"own.txt"}
+    for name in external:
+        decision = receipt["repo_evidence"]["ownership"][name]
+        assert decision["ownership"] == "external"
+        assert decision["reviewed_fingerprint"] == decision["final_fingerprint"]
+    assert json.loads(state_path.read_bytes())["initial"] == initial
+    assert {name: (repo / name).read_bytes() for name in before} == before
+    assert (repo / ".git/index").read_bytes() == index
+    assert (repo / ".git/HEAD").read_bytes() == head
+
+
+def test_external_resolution_stays_pinned_for_finish_and_committed_finish(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"own.txt": "base\n", "outside.txt": "base\n"})
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo").replace('area: ""', 'area: "repo"').replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/own.txt")
+    (repo / "own.txt").write_text("own commit\n")
+    commit_all(repo)
+    (repo / "outside.txt").write_text("external reviewed\n")
+    assert main(["task", "baseline", "resolve", task_id, "--resolution", "outside.txt=external", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "doctor", task_id, "--use-committed-diff", "--json"]) == 0
+    capsys.readouterr()
+    (repo / "outside.txt").write_text("external changed again\n")
+    for command in ("doctor", "finish"):
+        for flags in ([], ["--use-committed-diff"]):
+            assert main(["task", command, task_id, *flags, "--json"]) != 0
+            assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"

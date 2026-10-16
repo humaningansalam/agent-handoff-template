@@ -60,6 +60,7 @@ class BaselineOwnership(StrEnum):
     TASK = "task"
     PREEXISTING = "preexisting"
     DELTA = "delta"
+    EXTERNAL = "external"
 
 
 class RepositoryLineageStatus(StrEnum):
@@ -1899,6 +1900,12 @@ def _validate_receipt_path_transitions(
         if decision["ownership"] == BaselineOwnership.TASK.value
     }
     delta_paths = {path for path, decision in ownership.items() if decision["ownership"] == "delta"}
+    for path, decision in ownership.items():
+        if decision["ownership"] == "external" and (
+            decision["final_fingerprint"] != decision["reviewed_fingerprint"]
+            or (repo_evidence.get("mode") == "working_tree_diff" and path in changed_paths)
+        ):
+            raise RepoctlError("task completion receipt claims a preserved external change", code="invalid_completion_receipt", path=rel)
     if not delta_paths <= changed_paths:
         raise RepoctlError("task completion receipt omits an owned delta", code="invalid_completion_receipt", path=rel)
     if len(set(transition_paths)) != len(transition_paths) or not changed_paths <= set(transition_paths):
@@ -2406,13 +2413,13 @@ def _canonical_baseline_ownership(
         expected_fields = {"ownership", "decided_at"}
         if include_fingerprints:
             expected_fields.update({"baseline_fingerprint", "final_fingerprint"})
-        if isinstance(raw_decision, dict) and raw_decision.get("ownership") == "delta":
+        if isinstance(raw_decision, dict) and raw_decision.get("ownership") in {"delta", "external"}:
             expected_fields.add("reviewed_fingerprint")
         if (
             not isinstance(path, str)
             or normalize_repo_path(path) != path
-            or (allowed_paths is not None and path not in allowed_paths)
             or not isinstance(raw_decision, dict)
+            or (allowed_paths is not None and path not in allowed_paths and raw_decision.get("ownership") != "external")
             or set(raw_decision) != expected_fields
         ):
             raise ValueError("baseline ownership decision has an invalid schema")
@@ -2425,10 +2432,10 @@ def _canonical_baseline_ownership(
         if not isinstance(decided_at, str) or not _valid_utc_stamp(decided_at):
             raise ValueError("baseline ownership has an invalid decision timestamp")
         decision = {"ownership": owner.value, "decided_at": decided_at}
-        if owner is BaselineOwnership.DELTA:
+        if owner in {BaselineOwnership.DELTA, BaselineOwnership.EXTERNAL}:
             reviewed = raw_decision.get("reviewed_fingerprint")
             if not isinstance(reviewed, str) or not _valid_sha256(reviewed):
-                raise ValueError("delta ownership has an invalid reviewed fingerprint")
+                raise ValueError("resolved path has an invalid reviewed fingerprint")
             decision["reviewed_fingerprint"] = reviewed
         if include_fingerprints:
             baseline_fingerprint = raw_decision.get("baseline_fingerprint")
@@ -2956,15 +2963,21 @@ def resolve_task_baseline_ownerships(
     if state is None or baseline is None:
         raise RepoctlError("task has no initial repo baseline", code="repo_head_missing_at_start", path=task.rel_path)
     baseline_fingerprints = baseline.get("path_fingerprints") if isinstance(baseline.get("path_fingerprints"), dict) else {}
+    current_paths: set[str] = set()
+    if any(owner == "external" for _, owner in resolutions):
+        current_entries, current_state = repo_changed_entries(root, target)
+        if not current_state.available:
+            raise RepoctlError("cannot observe repository changes", code="repo_git_unavailable", path=target.display_path)
+        current_paths = set(_entry_mutation_paths(current_entries))
     known_paths = {str(path) for path in baseline_fingerprints}
     normalized_resolutions: dict[str, str] = {}
     for path, ownership in resolutions:
-        if ownership not in {"task", "preexisting", "delta"}:
-            raise RepoctlError("baseline ownership must be task, preexisting or delta", code="invalid_baseline_ownership", path=path)
+        if ownership not in {"task", "preexisting", "delta", "external"}:
+            raise RepoctlError("baseline ownership must be task, preexisting, delta or external", code="invalid_baseline_ownership", path=path)
         resolution = resolve_repo_selector_path(
             path,
             repository_path=target.display_path,
-            known_paths=known_paths,
+            known_paths=known_paths | current_paths if ownership == "external" else known_paths,
         )
         if resolution.status == RepoSelectorStatus.INVALID:
             raise RepoctlError("baseline ownership path must be repo-relative", code="invalid_baseline_path", path=path)
@@ -2981,12 +2994,23 @@ def resolve_task_baseline_ownerships(
                 path=path,
             )
         normalized = resolution.path
+        if ownership == "external":
+            if normalized not in current_paths:
+                raise RepoctlError("external preservation requires an observed pending change", code="external_change_missing", path=normalized)
+            if baseline.get("ownership", {}).get(normalized, {}).get("ownership") in {"task", "delta"}:
+                raise RepoctlError("an owned task change cannot be reclassified as external", code="external_change_owned", path=normalized)
         previous = normalized_resolutions.get(normalized)
         if previous and previous != ownership:
             raise RepoctlError("one baseline path cannot receive conflicting ownership decisions", code="conflicting_baseline_resolution", path=normalized)
         normalized_resolutions[normalized] = ownership
     if not normalized_resolutions:
         raise RepoctlError("at least one baseline ownership resolution is required", code="missing_baseline_resolution", path=task.rel_path)
+    extra_paths = sorted(set(normalized_resolutions) - set(baseline_fingerprints))
+    if extra_paths:
+        initial_states, initial_state = repo_path_stable_states(root, extra_paths, target, revision=baseline["head"])
+        if not initial_state.available:
+            raise RepoctlError("cannot observe task-start path state", code="repo_git_unavailable", path=target.display_path)
+        baseline_fingerprints = {**baseline_fingerprints, **_stable_fingerprints(initial_states)}
     current_fingerprints, git_state = _current_baseline_fingerprints(
         root,
         baseline=baseline,
@@ -3027,7 +3051,7 @@ def resolve_task_baseline_ownerships(
                 "ownership": item["ownership"],
                 "decided_at": decided_at,
             }
-            if item["ownership"] == "delta":
+            if item["ownership"] in {"delta", "external"}:
                 decision["reviewed_fingerprint"] = item["final_fingerprint"]
             if baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION:
                 decision.update(
@@ -3100,6 +3124,12 @@ def task_baseline_ownership_evidence(root: Path, task_id: str) -> dict[str, dict
         else {}
     )
     paths = sorted(ownership)
+    extra_paths = sorted(set(paths) - set(baseline_fingerprints))
+    if extra_paths:
+        initial_states, initial_state = repo_path_stable_states(root, extra_paths, target, revision=baseline["head"])
+        if not initial_state.available:
+            raise RepoctlError("cannot observe task-start path state", code="repo_git_unavailable", path=target.display_path)
+        baseline_fingerprints = {**baseline_fingerprints, **_stable_fingerprints(initial_states)}
     current_fingerprints, _state = _current_baseline_fingerprints(
         root,
         baseline=baseline,
@@ -3114,7 +3144,7 @@ def task_baseline_ownership_evidence(root: Path, task_id: str) -> dict[str, dict
             "decided_at": decision["decided_at"],
             "baseline_fingerprint": str(baseline_fingerprints.get(path) or ""),
             "final_fingerprint": str(current_fingerprints.get(path) or ""),
-            **({"reviewed_fingerprint": decision["reviewed_fingerprint"]} if decision["ownership"] == "delta" else {}),
+            **({"reviewed_fingerprint": decision["reviewed_fingerprint"]} if decision["ownership"] in {"delta", "external"} else {}),
         }
     return evidence
 
@@ -4007,7 +4037,7 @@ def _baseline_conflicting_paths(
         baseline_fingerprint = str(baseline_fingerprints.get(path) or "")
         current_fingerprint = str(current_fingerprints.get(path) or "")
         decision = ownership.get(path, {})
-        if decision.get("ownership") == "delta":
+        if decision.get("ownership") in {"delta", "external"}:
             if current_fingerprint != decision["reviewed_fingerprint"]:
                 conflicts.add(path)
             continue
@@ -4366,11 +4396,13 @@ def repo_changes_since_task_start(
     baseline_entries = baseline["entries"]
     baseline_fingerprints = baseline["path_fingerprints"]
     baseline_paths = set(_entry_mutation_paths(baseline_entries))
+    ownership = baseline.get("ownership") if isinstance(baseline.get("ownership"), dict) else {}
+    external_paths = {path for path, decision in ownership.items() if decision["ownership"] == "external"}
     current_paths = set(_entry_mutation_paths(current))
     current_fingerprints, fingerprint_state = _current_baseline_fingerprints(
         root,
         baseline=baseline,
-        paths=sorted(baseline_paths),
+        paths=sorted(baseline_paths | external_paths),
         target=target,
     )
     if not fingerprint_state.available:
@@ -4382,10 +4414,13 @@ def repo_changes_since_task_start(
                 fingerprint_state.repo_path or target.display_path,
             )
         )
-    ownership = baseline.get("ownership") if isinstance(baseline.get("ownership"), dict) else {}
     changes: list[ChangedEntry] = []
     for entry in current:
         paths = set(_entry_mutation_paths([entry]))
+        if paths <= external_paths and all(
+            current_fingerprints.get(path) == ownership[path]["reviewed_fingerprint"] for path in paths
+        ):
+            continue
         overlap = paths & baseline_paths
         if not overlap:
             changes.append(entry)
@@ -4398,7 +4433,7 @@ def repo_changes_since_task_start(
             continue
         changes.append(entry)
     baseline_conflicts = _baseline_conflicting_paths(
-        baseline_paths=baseline_paths,
+        baseline_paths=baseline_paths | external_paths,
         baseline_fingerprints=baseline_fingerprints,
         current_fingerprints=current_fingerprints,
         ownership=ownership,
@@ -4425,7 +4460,7 @@ def repo_changes_since_task_start(
         "current_count": len(current),
         "preexisting_count": max(0, len(current) - len(raw_changes)),
         "baseline_conflicts": sorted(baseline_only_conflicts | entry_conflicts | {
-            path for path in baseline_conflicts if ownership.get(path, {}).get("ownership") == "delta"
+            path for path in baseline_conflicts if ownership.get(path, {}).get("ownership") in {"delta", "external"}
         }),
         "initial_dirty_paths": sorted(baseline_paths),
         "ownership": ownership,

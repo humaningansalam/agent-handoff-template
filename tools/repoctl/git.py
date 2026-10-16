@@ -1797,18 +1797,18 @@ def repo_evidence_fingerprint(
     ownership_items: list[dict[str, str]] = []
     for path, decision in sorted((ownership or {}).items()):
         expected_fields = {"ownership", "decided_at", "baseline_fingerprint", "final_fingerprint"}
-        if isinstance(decision, dict) and decision.get("ownership") == "delta":
+        if isinstance(decision, dict) and decision.get("ownership") in {"delta", "external"}:
             expected_fields.add("reviewed_fingerprint")
         if (
             not isinstance(path, str)
             or normalize_repo_path(path) != path
             or not isinstance(decision, dict)
             or set(decision) != expected_fields
-            or decision.get("ownership") not in {"task", "preexisting", "delta"}
+            or decision.get("ownership") not in {"task", "preexisting", "delta", "external"}
             or any(not isinstance(decision.get(field), str) for field in expected_fields)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", decision["baseline_fingerprint"])
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", decision["final_fingerprint"])
-            or (decision["ownership"] == "delta" and decision["reviewed_fingerprint"] != decision["final_fingerprint"])
+            or (decision["ownership"] in {"delta", "external"} and decision["reviewed_fingerprint"] != decision["final_fingerprint"])
         ):
             return {}, "", RepoGitState(
                 False,
@@ -1823,7 +1823,7 @@ def repo_evidence_fingerprint(
                 "ownership": decision["ownership"],
                 "baseline_fingerprint": decision["baseline_fingerprint"],
                 "final_fingerprint": decision["final_fingerprint"],
-                **({"reviewed_fingerprint": decision["reviewed_fingerprint"]} if decision["ownership"] == "delta" else {}),
+                **({"reviewed_fingerprint": decision["reviewed_fingerprint"]} if decision["ownership"] in {"delta", "external"} else {}),
             }
         )
     manifest: dict[str, Any] = {

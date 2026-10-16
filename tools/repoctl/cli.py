@@ -124,6 +124,7 @@ class BaselineOwnership(StrEnum):
     TASK = "task"
     PREEXISTING = "preexisting"
     DELTA = "delta"
+    EXTERNAL = "external"
 
 
 class TaskScopeResolution(StrEnum):
@@ -647,7 +648,7 @@ def _task_next_actions(problems: list[Any], data: dict[str, Any]) -> list[dict[s
             add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
         elif code == "baseline_conflict":
             if _string_list(inputs.get("baseline_conflicts")):
-                add({"label": "Preview baseline ownership resolutions", "kind": NextActionKind.BASELINE_OWNERSHIP_RESOLUTION, "source": "data.action_inputs.baseline_conflicts", "choices": [BaselineOwnership.TASK, BaselineOwnership.PREEXISTING, BaselineOwnership.DELTA], "target_ref": "data.action_inputs.baseline_conflicts"})
+                add({"label": "Preview baseline ownership resolutions", "kind": NextActionKind.BASELINE_OWNERSHIP_RESOLUTION, "source": "data.action_inputs.baseline_conflicts", "choices": list(BaselineOwnership), "target_ref": "data.action_inputs.baseline_conflicts"})
             add({"label": "Inspect task repo changes", "command": f"./scripts/repoctl task show {task_id} --summary --json"})
         elif code == "workspace_baseline_conflict":
             if _string_list(inputs.get("baseline_conflicts")):
@@ -2659,9 +2660,9 @@ def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
         resolutions.extend((path, args.ownership) for path in args.path)
     for raw in args.resolution or []:
         path, separator, ownership = raw.rpartition("=")
-        if not separator or not path.strip() or ownership not in {"task", "preexisting", "delta"}:
+        if not separator or not path.strip() or ownership not in {"task", "preexisting", "delta", "external"}:
             raise RepoctlError(
-                "--resolution must use PATH=task, PATH=preexisting or PATH=delta",
+                "--resolution must use PATH=task, PATH=preexisting, PATH=delta or PATH=external",
                 code="invalid_baseline_resolution",
                 path=raw,
             )
@@ -3272,6 +3273,9 @@ def _task_finish_repo_delta(
     acknowledge_completed: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     delta = repo_changes_since_task_start(root, task.id, acknowledge_completed=acknowledge_completed)
+    external_drift = [path for path in delta.get("baseline_conflicts", []) if delta.get("ownership", {}).get(path, {}).get("ownership") == "external"]
+    if external_drift:
+        raise RepoctlDataError("preserved external changes no longer match their reviewed state", code="baseline_conflict", path=external_drift[0], data={"action_inputs": _task_action_inputs(delta)})
     health = _task_health(root, task, delta=delta)
     if not health.executable:
         problem = health.problems[0]
@@ -3429,7 +3433,7 @@ def _finish_meta_gate(
         conflicts = ", ".join(str(path) for path in list(delta["baseline_conflicts"])[:8])
         suffix = "" if len(delta["baseline_conflicts"]) <= 8 else f", ... +{len(delta['baseline_conflicts']) - 8} more"
         raise RepoctlDataError(
-            f"task-start dirty paths no longer match their baseline: {conflicts}{suffix}; resolve each path with repoctl task baseline resolve",
+            f"repository paths no longer match task-start or reviewed state: {conflicts}{suffix}; resolve each path with repoctl task baseline resolve",
             code="baseline_conflict",
             path=str(delta["baseline_conflicts"][0]),
             data={"action_inputs": _task_action_inputs(delta)},
@@ -6445,8 +6449,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_baseline_resolve = task_baseline_sub.add_parser("resolve")
     task_baseline_resolve.add_argument("task_id")
     task_baseline_resolve.add_argument("--path", action="append", default=[], help="baseline path to resolve; repeat for paths sharing --ownership")
-    task_baseline_resolve.add_argument("--ownership", choices=["task", "preexisting", "delta"], help="task adopts the path; preexisting restores the initial state; delta owns only the reviewed change from that state")
-    task_baseline_resolve.add_argument("--resolution", action="append", default=[], help="mixed atomic resolution in PATH=task, PATH=preexisting or PATH=delta form; repeat as needed")
+    task_baseline_resolve.add_argument("--ownership", choices=list(BaselineOwnership), help="task adopts the path; preexisting restores the initial state; delta owns the reviewed change; external preserves reviewed pending work without claiming it")
+    task_baseline_resolve.add_argument("--resolution", action="append", default=[], help="mixed atomic resolution in PATH=task, PATH=preexisting, PATH=delta or PATH=external form; repeat as needed")
     task_baseline_resolve.add_argument("--preview", action="store_true", help="validate and show every resolution without writing task state")
     task_baseline_resolve.add_argument("--json", action="store_true")
     task_baseline_resolve.set_defaults(func=cmd_task_baseline_resolve)
