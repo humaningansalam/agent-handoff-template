@@ -21,6 +21,7 @@ REPO_REQUIRED_TASK_AREAS = frozenset({"repo", "backend", "frontend", "infra", "m
 
 
 class RepositoryIdentitySource(StrEnum):
+    WORKSPACE = "workspace"
     RESERVED = "reserved"
     PINNED = "pinned"
     UNBOUND = "unbound"
@@ -438,6 +439,15 @@ def _require_git_target(root: Path, target: RepoTarget) -> RepoTarget:
     return target
 
 
+def workspace_target(root: Path) -> RepoTarget:
+    """An evidence scope, never a registered or writable product repository."""
+    return RepoTarget("", root, ".", RepositoryIdentitySource.WORKSPACE)
+
+
+def evidence_target(root: Path, *, repo_id: str | None = None, workspace: bool = False) -> RepoTarget:
+    return workspace_target(root) if workspace else require_repo_target(root, repo_id=repo_id)
+
+
 def require_repo_target(root: Path, repo_id: str | None = None, *, layout: RepoLayout | None = None) -> RepoTarget:
     layout = layout or repo_layout(root)
     if not layout.registry_ready:
@@ -573,6 +583,8 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
             problems.append(_problem("error", "repository_state_invalid", "repository-scoped state must be a JSON object", path.relative_to(root).as_posix()))
             return
         raw_repo_id = payload.get("repo_id")
+        if source is RepositoryStateSource.KNOWLEDGE_RECORD and raw_repo_id == "" and payload.get("schema_version") == 2:
+            return
         if source is RepositoryStateSource.COMPLETION_RECEIPT and raw_repo_id == "":
             if _completion_receipt_task_scope(root, path, payload) is TaskRepositoryScope.WORKSPACE:
                 return
@@ -584,6 +596,13 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
         if not state_root.is_dir():
             continue
         for path in sorted(item for item in state_root.iterdir() if item.is_dir()):
+            if path.name == "_workspace":
+                try:
+                    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+                    if manifest.get("repository") == workspace_target(root).to_dict():
+                        continue
+                except (OSError, ValueError):
+                    pass
             if any(child.is_file() for child in path.rglob("*")):
                 add(path.name, source=source, path=path)
 

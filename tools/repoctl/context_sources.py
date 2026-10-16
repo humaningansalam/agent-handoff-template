@@ -426,14 +426,14 @@ def context_document_paths(root: Path, *, target: RepoTarget) -> list[Path]:
     paths: set[Path] = set()
     for pattern in DOCUMENT_PATTERNS:
         paths.update(path for path in root.glob(pattern) if path.is_file())
-    for pattern in PRODUCT_DOCUMENT_PATTERNS:
+    for pattern in PRODUCT_DOCUMENT_PATTERNS if target.id else []:
         paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
     return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
 
 
 def context_product_manifest_paths(root: Path, *, target: RepoTarget) -> list[Path]:
     paths: set[Path] = set()
-    for pattern in product_manifest_patterns():
+    for pattern in product_manifest_patterns() if target.id else []:
         paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
     return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
 

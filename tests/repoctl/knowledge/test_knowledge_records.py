@@ -267,3 +267,69 @@ def test_knowledge_search_matches_content_and_provenance_not_json_field_names(
     content = _add_knowledge_source(capsys, claim="Keep content resolution separate from delivery.")["data"]["record"]
     assert main(["knowledge", "query", "content resolution", "--repo-id", "main", "--json"]) == 0
     assert [item["record"]["id"] for item in _payload(capsys)["data"]["results"]] == [content["id"]]
+
+
+@pytest.mark.parametrize("operation", ["add", "finish"])
+def test_workspace_task_knowledge_is_searchable_and_linked_without_product(
+    tmp_path: Path, monkeypatch, capsys, operation: str,
+) -> None:
+    write_workspace(tmp_path)
+    monkeypatch.setattr(cli, "find_workspace_root", lambda: tmp_path)
+    task_id = "T-20260609184059Z"
+    add_task(tmp_path, f"{task_id}--workspace.md", task_text(task_id).replace('area: ""', 'area: "ops"'))
+    (tmp_path / "docs/BOARD.md").write_text(f"# BOARD\n\n## Board\n\n- docs/tasks/{task_id}--workspace.md\n\n## Backlog\n")
+    assert main(["task", "start", task_id, "--json"]) == 0
+    _payload(capsys)
+    knowledge_args = ["--kind", "failure_mode", "--claim", "Reviewed external paths retain baseline and ownership boundaries.",
+                      "--reason", "External dirty work must survive another task closing."]
+    if operation == "finish":
+        finish_args = [value.replace("--", "--knowledge-", 1) if value.startswith("--") else value for value in knowledge_args]
+        assert main(["task", "finish", task_id, *finish_args, "--json"]) == 0
+        result = _payload(capsys)
+        record_id = Path(result["data"]["knowledge_closeout"]["record_path"]).stem
+        sync = result["data"]["knowledge_closeout"]["graph_sync"]
+    else:
+        assert main(["task", "finish", task_id, "--json"]) == 0
+        _payload(capsys)
+        assert main(["knowledge", "add", "--workspace", *knowledge_args,
+                     "--source", f"docs/archive/tasks/{task_id}--workspace.md", "--json"]) == 0
+        result = _payload(capsys)
+        record_id = result["data"]["record"]["id"]
+        sync = result["data"]["graph_sync"]
+    assert result["ok"] is True
+    assert sync["status"] == "synced"
+    assert not [warning for warning in result["warnings"] if warning["code"] == "knowledge_graph_sync_failed"]
+    assert main(["knowledge", "query", "external paths", "--workspace", "--json"]) == 0
+    assert _payload(capsys)["data"]["results"][0]["record"]["id"] == record_id
+    assert main(["graph", "query", "--workspace", "--task", task_id, "--json"]) == 0
+    graph = _payload(capsys)
+    assert "KNOWLEDGE_SOURCED_FROM" in json.dumps(graph["data"])
+    assert record_id in json.dumps(graph["data"])
+    assert main(["repo", "list", "--json"]) == 0
+    assert _payload(capsys)["data"]["targets"] == []
+    assert main(["upgrade", "postflight", "--json"]) == 0
+    postflight = _payload(capsys)
+    assert not [problem for problem in postflight["problems"] if problem["severity"] == "error"]
+
+
+def test_workspace_knowledge_keeps_product_scope_separate(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = _setup_knowledge_workspace(tmp_path, monkeypatch)
+    source = repo / "service.py"
+    source.write_text("VALUE = 'external dirty work'\n")
+    before = source.read_bytes()
+    args = ["knowledge", "add", "--workspace", "--claim", "Use workspace source bundles.", "--reason", "Keep product scope separate."]
+    for path in ("repos/service.py", "docs/product-link.py"):
+        if path.startswith("docs/"):
+            (tmp_path / path).symlink_to(source)
+        assert main([*args, "--source", path, "--json"]) == 1
+        assert _payload(capsys)["problems"][0]["code"] == "knowledge_source_repo_required"
+    assert main([*args, "--source", "AGENTS.md", "--applies-to", "service.py", "--json"]) == 1
+    assert _payload(capsys)["problems"][0]["code"] == "knowledge_applies_to_invalid"
+    assert main([*args, "--source", "AGENTS.md", "--json"]) == 0
+    workspace_record = _payload(capsys)["data"]["record"]["id"]
+    product_record = _add_knowledge_source(capsys)["data"]["record"]["id"]
+    for scope, expected, excluded in ((["--workspace"], workspace_record, product_record), (["--repo-id", "main"], product_record, workspace_record)):
+        assert main(["knowledge", "query", "source bundles", *scope, "--json"]) == 0
+        ids = [item["record"]["id"] for item in _payload(capsys)["data"]["results"]]
+        assert expected in ids and excluded not in ids
+    assert source.read_bytes() == before

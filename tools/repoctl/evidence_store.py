@@ -62,7 +62,7 @@ def _evidence_index_schema_is_current(metadata: dict[str, Any]) -> bool:
 
 
 def _database_path(root: Path, target: RepoTarget, database_path: Path | None = None) -> Path:
-    return database_path or root / ".repoctl-state/graph" / target.id / "evidence.sqlite3"
+    return database_path or root / ".repoctl-state/graph" / (target.id or "_workspace") / "evidence.sqlite3"
 
 
 def _path_label(root: Path, path: Path) -> str:
@@ -252,7 +252,7 @@ def _static_chunks(
             )
         except (OSError, UnicodeDecodeError) as exc:
             problems.append(Problem("warning", "context_manifest_unreadable", str(exc), rel))
-    for hint in collect_verification_hints(target.root_path):
+    for hint in collect_verification_hints(target.root_path) if target.id else []:
         path = target.root_path / hint.source_path
         if not path.is_file():
             continue

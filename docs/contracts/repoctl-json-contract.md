@@ -135,6 +135,8 @@ Default Context JSON is a bounded working projection. `--full` adds raw evidence
 
 ## Knowledge output
 
+Knowledge commands select `--repo-id ID` or `--workspace`. Workspace records use explicit `repo_id: ""` and retain root Task/document provenance without registering a product repository. Root-only `task finish --knowledge-*` saves in the same scope.
+
 `knowledge add` saves a durable record in one operation and returns the record path plus derived projection status. A projection or Graph synchronization failure is a warning after the record is safely stored, with an explicit maintenance action.
 
 Knowledge queries may report source drift while continuing to return the saved conclusion. The projection contains current direct records only. `knowledge check` and upgrade postflight report preserved older records that require one-time agent migration.

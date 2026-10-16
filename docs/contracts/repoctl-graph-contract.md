@@ -13,6 +13,8 @@ Authoritative inputs remain the repository registry, product files, `.repometa`,
 ./scripts/repoctl history rebuild --repo-id main --json
 ```
 
+`graph build/query --workspace` selects root Task, document and Knowledge evidence without product inventory, Git or metadata requirements. Derived state uses `.repoctl-state/graph/_workspace`; it is not a repository registration. Exact workspace Task queries include saved Knowledge source edges to the validated completion artifact.
+
 Direct single-repository layouts may omit `--repo-id`. Configured multi-repository layouts must select one repository explicitly.
 
 The first build analyzes eligible files and writes a canonical snapshot, manifest, persistent SQLite evidence index, and one fixed result per semantic provider under `.repoctl-state/graph/<repo-id>/`. Later builds reuse unchanged provider results and update changed files plus semantic dependents. `--rebuild` discards reusable Graph/provider state. It does not scan or repair completion history.

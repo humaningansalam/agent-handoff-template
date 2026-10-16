@@ -46,7 +46,7 @@ from .knowledge_projection import (
 )
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
 from .markdown import find_section, parse_labeled_list_section
-from .repositories import RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
+from .repositories import evidence_target, workspace_target, RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
 from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
@@ -3823,12 +3823,6 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
         repo_id = str(receipt.get("repo_id") or "")
         if knowledge_request is not None:
-            if not repo_id:
-                raise RepoctlError(
-                    "knowledge closeout is available only for a repo-scoped completed task",
-                    code="knowledge_closeout_repo_required",
-                    path=result.get("old_path", ""),
-                )
             completion_receipt_path = result["receipt_path"].relative_to(root).as_posix()
             prepared_record, record_problems = prepare_knowledge_record(
                 root,
@@ -3871,7 +3865,7 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
     if prepared_record is not None:
         graph_sync, graph_problems = _sync_graph_after_knowledge_change(
             root,
-            target=require_repo_target(root, repo_id=repo_id),
+            target=evidence_target(root, repo_id=repo_id, workspace=not repo_id),
         )
         data["knowledge_closeout"] = {
             "status": "saved",
@@ -4184,7 +4178,7 @@ def cmd_index_code(args: argparse.Namespace) -> int:
 
 def cmd_graph_build(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    target = require_repo_target(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
     with repoctl_lock(root):
         snapshot, problems, meta = materialize_graph(root, target=target, rebuild=args.rebuild)
     summary = _graph_snapshot_summary(snapshot) if snapshot is not None else None
@@ -4405,7 +4399,7 @@ def _graph_candidate_actions(result: dict[str, Any] | None, *, repo_id: str) -> 
 
 def cmd_graph_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    target = require_repo_target(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
     snapshot, build_problems, meta = load_materialized_graph(root, target=target)
     if snapshot is None or _has_errors(build_problems):
         payload = {
@@ -5442,8 +5436,8 @@ def cmd_context_pack_benchmark_materialize(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_status(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data = knowledge_status(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
+    data = knowledge_status(root, repo_id=target.id)
     payload = {
         "ok": True,
         "command": "knowledge.status",
@@ -5465,7 +5459,7 @@ def cmd_knowledge_rebuild(args: argparse.Namespace) -> int:
     """Refresh the derived search projection from saved records."""
 
     root = find_workspace_root()
-    target = require_repo_target(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
     with repoctl_lock(root):
         projection, problems = rebuild_knowledge_projection(root, repo_id=target.id)
     path = knowledge_projection_path(root, repo_id=target.id)
@@ -5530,7 +5524,7 @@ def _sync_graph_after_knowledge_change(
 
 def cmd_knowledge_add(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    target = require_repo_target(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
     claim, claim_problems = _explicit_claim_input(
         root,
         claim=str(args.claim or ""),
@@ -5612,8 +5606,8 @@ def cmd_knowledge_add(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_show(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data, problems = show_knowledge_record(root, record_id=args.record_id, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
+    data, problems = show_knowledge_record(root, record_id=args.record_id, repo_id=target.id)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge.show",
@@ -5633,8 +5627,8 @@ def cmd_knowledge_show(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_check(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
-    data, problems = check_knowledge_records(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
+    data, problems = check_knowledge_records(root, repo_id=target.id)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge.check",
@@ -5653,10 +5647,10 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
-    require_repo_target(root, repo_id=args.repo_id)
+    target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
     data, problems, warnings = query_knowledge_records(
         root,
-        repo_id=args.repo_id,
+        repo_id=target.id,
         query=args.query,
         include_history=bool(args.include_history),
         limit=args.limit,
@@ -5668,7 +5662,7 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
                 "warning",
                 "knowledge_records_empty",
                 "no Knowledge records exist for this repository",
-                args.repo_id,
+                target.id,
             )
         )
     response_data = data if args.full else _compact_knowledge_query_data(data)
@@ -5767,11 +5761,12 @@ _KNOWLEDGE_RECORD_READ_CODES = {
 }
 def _knowledge_artifact_postflight_action(*, repo_id: str, problem: Problem) -> dict[str, str] | None:
     artifact_id = Path(problem.path or "").stem
+    scope_arg = f"--repo-id {repo_id}" if repo_id else "--workspace"
     if problem.code in _KNOWLEDGE_RECORD_READ_CODES and artifact_id.startswith("K-"):
         return {
             "kind": "knowledge_record_manual_review",
             "repo_id": repo_id,
-            "command": f"./scripts/repoctl knowledge show {artifact_id} --repo-id {repo_id} --json",
+            "command": f"./scripts/repoctl knowledge show {artifact_id} {scope_arg} --json",
         }
     if problem.code == "knowledge_record_migration_required":
         return {
@@ -5872,13 +5867,18 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                 "command": "./scripts/repoctl history rebuild --workspace --json",
             }
         )
-    for target in layout.targets:
-        metadata_problems = check_meta(root, target=target)
+    evidence_targets = list(layout.targets)
+    if knowledge_status(root, repo_id="")["record_count"] or (root / ".repoctl-state/graph/_workspace").exists():
+        evidence_targets.append(workspace_target(root))
+    for target in evidence_targets:
+        scope_arg = f"--repo-id {target.id}" if target.id else "--workspace"
+        metadata_problems = check_meta(root, target=target) if target.id else []
         completion_history_summary, completion_history_problems = _upgrade_completion_history_status(
             root,
             repo_id=target.id,
         )
-        completion_history.append(completion_history_summary)
+        if target.id:
+            completion_history.append(completion_history_summary)
         record_data, raw_record_problems = check_knowledge_records(root, repo_id=target.id)
         source_reference_codes = {
             "knowledge_source_digest_drift",
@@ -5995,13 +5995,13 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
             graph_recovery = {
                 "kind": "graph_rebuild",
                 "repo_id": target.id,
-                "command": f"./scripts/repoctl graph build --repo-id {target.id} --rebuild --json",
+                "command": f"./scripts/repoctl graph build {scope_arg} --rebuild --json",
             }
         elif str(freshness.get("status") or "") == "stale":
             graph_recovery = {
                 "kind": "graph_refresh",
                 "repo_id": target.id,
-                "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                "command": f"./scripts/repoctl graph build {scope_arg} --json",
             }
         if _has_errors(metadata_problems):
             metadata_codes = {problem.code for problem in metadata_problems}
@@ -6010,9 +6010,9 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                     "kind": "metadata_repair",
                     "repo_id": target.id,
                     "command": (
-                        f"./scripts/repoctl meta init --repo-id {target.id} --json"
+                        f"./scripts/repoctl meta init {scope_arg} --json"
                         if "missing_repometa_policy" in metadata_codes
-                        else f"./scripts/repoctl meta check --repo-id {target.id} --json"
+                        else f"./scripts/repoctl meta check {scope_arg} --json"
                     ),
                 }
             )
@@ -6021,28 +6021,28 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
                 {
                     "kind": "history_rebuild",
                     "repo_id": target.id,
-                    "command": f"./scripts/repoctl history rebuild --repo-id {target.id} --json",
+                    "command": f"./scripts/repoctl history rebuild {scope_arg} --json",
                 }
             )
             if graph_recovery is None and graph_status == "materialized":
                 graph_recovery = {
                     "kind": "graph_refresh",
                     "repo_id": target.id,
-                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                    "command": f"./scripts/repoctl graph build {scope_arg} --json",
                 }
         if _has_errors(projection_problems):
             maintenance_actions.append(
                 {
                     "kind": "knowledge_rebuild",
                     "repo_id": target.id,
-                    "command": f"./scripts/repoctl knowledge rebuild --repo-id {target.id} --json",
+                    "command": f"./scripts/repoctl knowledge rebuild {scope_arg} --json",
                 }
             )
             if graph_recovery is None and graph_status == "materialized":
                 graph_recovery = {
                     "kind": "graph_refresh",
                     "repo_id": target.id,
-                    "command": f"./scripts/repoctl graph build --repo-id {target.id} --json",
+                    "command": f"./scripts/repoctl graph build {scope_arg} --json",
                 }
         if graph_recovery is not None:
             maintenance_actions.append(graph_recovery)
@@ -6592,13 +6592,17 @@ def build_parser() -> argparse.ArgumentParser:
     graph = sub.add_parser("graph")
     graph_sub = graph.add_subparsers(dest="graph_command", required=True, parser_class=RepoctlArgumentParser)
     graph_build = graph_sub.add_parser("build")
-    graph_build.add_argument("--repo-id")
+    graph_build_scope = graph_build.add_mutually_exclusive_group()
+    graph_build_scope.add_argument("--repo-id")
+    graph_build_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     graph_build.add_argument("--rebuild", action="store_true", help="discard reusable provider materialization and rebuild all provider results")
     graph_build.add_argument("--full", action="store_true", help="include full nodes/edges snapshot; default JSON is compact summary")
     graph_build.add_argument("--json", action="store_true")
     graph_build.set_defaults(func=cmd_graph_build)
     graph_query = graph_sub.add_parser("query")
-    graph_query.add_argument("--repo-id")
+    graph_query_scope = graph_query.add_mutually_exclusive_group()
+    graph_query_scope.add_argument("--repo-id")
+    graph_query_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     graph_query.add_argument("--file", default="")
     graph_query.add_argument("--topic", default="")
     graph_query.add_argument("--import", dest="import_ref", default="")
@@ -6693,7 +6697,9 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_add = knowledge_sub.add_parser("add", help="Save one reusable decision, invariant, or failure mode.")
-    knowledge_add.add_argument("--repo-id", required=True)
+    knowledge_add_scope = knowledge_add.add_mutually_exclusive_group(required=True)
+    knowledge_add_scope.add_argument("--repo-id")
+    knowledge_add_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     knowledge_add.add_argument("--kind", choices=sorted(["decision", "failure_mode", "invariant"]), default="decision")
     knowledge_add_claim = knowledge_add.add_mutually_exclusive_group(required=True)
     knowledge_add_claim.add_argument("--claim")
@@ -6709,12 +6715,16 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_add.set_defaults(func=cmd_knowledge_add)
     knowledge_show = knowledge_sub.add_parser("show")
     knowledge_show.add_argument("record_id")
-    knowledge_show.add_argument("--repo-id", required=True)
+    knowledge_show_scope = knowledge_show.add_mutually_exclusive_group(required=True)
+    knowledge_show_scope.add_argument("--repo-id")
+    knowledge_show_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     knowledge_show.add_argument("--json", action="store_true")
     knowledge_show.set_defaults(func=cmd_knowledge_show)
     knowledge_query = knowledge_sub.add_parser("query")
     knowledge_query.add_argument("query")
-    knowledge_query.add_argument("--repo-id", required=True)
+    knowledge_query_scope = knowledge_query.add_mutually_exclusive_group(required=True)
+    knowledge_query_scope.add_argument("--repo-id")
+    knowledge_query_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     knowledge_query.add_argument("--include-history", action="store_true", help="also search replaced records")
     knowledge_query.add_argument("--explain", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
@@ -6722,15 +6732,21 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("--json", action="store_true")
     knowledge_query.set_defaults(func=cmd_knowledge_query)
     knowledge_status_parser = knowledge_sub.add_parser("status")
-    knowledge_status_parser.add_argument("--repo-id", required=True)
+    knowledge_status_parser_scope = knowledge_status_parser.add_mutually_exclusive_group(required=True)
+    knowledge_status_parser_scope.add_argument("--repo-id")
+    knowledge_status_parser_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     knowledge_status_parser.add_argument("--json", action="store_true")
     knowledge_status_parser.set_defaults(func=cmd_knowledge_status)
     knowledge_check = knowledge_sub.add_parser("check")
-    knowledge_check.add_argument("--repo-id", required=True)
+    knowledge_check_scope = knowledge_check.add_mutually_exclusive_group(required=True)
+    knowledge_check_scope.add_argument("--repo-id")
+    knowledge_check_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     knowledge_check.add_argument("--json", action="store_true")
     knowledge_check.set_defaults(func=cmd_knowledge_check)
     knowledge_rebuild = knowledge_sub.add_parser("rebuild", help="Refresh the derived Knowledge projection from saved records.")
-    knowledge_rebuild.add_argument("--repo-id", required=True)
+    knowledge_rebuild_scope = knowledge_rebuild.add_mutually_exclusive_group(required=True)
+    knowledge_rebuild_scope.add_argument("--repo-id")
+    knowledge_rebuild_scope.add_argument("--workspace", action="store_true", help="select workspace Task/document evidence without a product repository")
     knowledge_rebuild.add_argument("--json", action="store_true")
     knowledge_rebuild.set_defaults(func=cmd_knowledge_rebuild)
 

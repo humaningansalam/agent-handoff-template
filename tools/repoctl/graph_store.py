@@ -354,7 +354,7 @@ def _root_evidence_records(
 ) -> list[dict[str, object]]:
     previous = previous or {}
     records = [
-        *_tree_records(target.root_path / ".repometa", prefix=f"{target.display_path}/.repometa", previous=previous),
+        *(_tree_records(target.root_path / ".repometa", prefix=f"{target.display_path}/.repometa", previous=previous) if target.id else []),
     ]
     projection_path = knowledge_projection_path(root, repo_id=target.id)
     projection_rel = projection_path.relative_to(root).as_posix()
@@ -404,7 +404,7 @@ def _root_evidence_records(
                 )
     product_root = target.root_path.resolve()
     for path in context_document_paths(root, target=target):
-        if path.resolve().is_relative_to(product_root):
+        if target.id and path.resolve().is_relative_to(product_root):
             continue
         logical_path = path.relative_to(root).as_posix()
         records.append(_path_record(path, logical_path=logical_path, previous=previous.get(logical_path)))
@@ -445,17 +445,21 @@ def collect_graph_inputs(
     dict[str, Any],
 ]:
     previous_manifest = previous_manifest or {}
-    inventory, inventory_problems, inventory_meta = meta_inventory(root, changed=False, target=target)
-    inventory_problems, _metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
-    previous_file_records = previous_manifest.get("file_records") if isinstance(previous_manifest.get("file_records"), dict) else {}
-    file_records, git_state = repo_file_state_records(
-        root,
-        paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],
-        target=target,
-        previous={str(path): value for path, value in previous_file_records.items() if isinstance(value, dict)},
-    )
-    if not git_state.available:
-        inventory_problems = [*inventory_problems, Problem("error", "graph_git_unavailable", git_state.reason, target.display_path)]
+    if not target.id:
+        inventory, inventory_problems, inventory_meta = [], [], {"summary": {"truncated": False}}
+        file_records = {}
+    else:
+        inventory, inventory_problems, inventory_meta = meta_inventory(root, changed=False, target=target)
+        inventory_problems, _metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
+        previous_file_records = previous_manifest.get("file_records") if isinstance(previous_manifest.get("file_records"), dict) else {}
+        file_records, git_state = repo_file_state_records(
+            root,
+            paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],
+            target=target,
+            previous={str(path): value for path, value in previous_file_records.items() if isinstance(value, dict)},
+        )
+        if not git_state.available:
+            inventory_problems = [*inventory_problems, Problem("error", "graph_git_unavailable", git_state.reason, target.display_path)]
     file_fingerprints = {
         path: _file_record_fingerprint(record)
         for path, record in sorted(file_records.items())
@@ -577,7 +581,7 @@ def collect_graph_inputs(
 
 
 def _state_dir(root: Path, target: RepoTarget, *, state_root: Path | None = None) -> Path:
-    return (state_root or root / GRAPH_STATE_ROOT) / target.id
+    return (state_root or root / GRAPH_STATE_ROOT) / (target.id or "_workspace")
 
 
 def _state_path_label(root: Path, path: Path) -> str:
@@ -1187,20 +1191,23 @@ def _observed_graph_freshness(
     This is invocation-local reuse, never a cache across queries. Admission
     still validates repository/schema/digests/providers/index before entry.
     """
-    inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
-    inventory_problems, metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
-    previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}
-    current_records, git_state = repo_file_state_records(
-        root,
-        paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],
-        target=target,
-        previous={str(path): value for path, value in previous_records.items() if isinstance(value, dict)},
-    )
-    problems = list(inventory_problems)
-    if metadata_absent:
-        problems.append(Problem("warning", "graph_metadata_unavailable", "repository metadata is not initialized; Graph source relations remain available without metadata enrichment", f"{target.display_path}/.repometa/policy.json", "missing_repometa_policy"))
-    if not git_state.available:
-        problems.append(Problem("error", "graph_git_unavailable", git_state.reason, target.display_path))
+    if not target.id:
+        inventory, current_records, problems = [], {}, []
+    else:
+        inventory, inventory_problems, _inventory_meta = meta_inventory(root, changed=False, target=target)
+        inventory_problems, metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
+        previous_records = manifest.get("file_records") if isinstance(manifest.get("file_records"), dict) else {}
+        current_records, git_state = repo_file_state_records(
+            root,
+            paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],
+            target=target,
+            previous={str(path): value for path, value in previous_records.items() if isinstance(value, dict)},
+        )
+        problems = list(inventory_problems)
+        if metadata_absent:
+            problems.append(Problem("warning", "graph_metadata_unavailable", "repository metadata is not initialized; Graph source relations remain available without metadata enrichment", f"{target.display_path}/.repometa/policy.json", "missing_repometa_policy"))
+        if not git_state.available:
+            problems.append(Problem("error", "graph_git_unavailable", git_state.reason, target.display_path))
     current_fingerprints = {
         path: _file_record_fingerprint(record)
         for path, record in sorted(current_records.items())

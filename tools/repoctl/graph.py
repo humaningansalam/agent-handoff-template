@@ -304,7 +304,7 @@ def build_graph(
     include_historical_receipt_files: bool = False,
     include_knowledge: bool = True,
 ) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
-    entries, index_problems, index_meta = code_index_result or build_code_index(root, changed=False, limit=-1, target=target)
+    entries, index_problems, index_meta = code_index_result or (([], [], {"summary": {}}) if not target.id else build_code_index(root, changed=False, limit=-1, target=target))
     if _has_errors(index_problems):
         return None, index_problems, {"repository": target.to_dict()}
 
@@ -323,8 +323,11 @@ def build_graph(
             {"repository": target.to_dict(), "index": summary},
         )
 
-    metadata_facts, metadata_problems, metadata_meta = read_metadata_facts(root, target=target)
-    metadata_problems, metadata_absent = without_absent_repometa(metadata_problems, repo=target.root_path)
+    if not target.id:
+        metadata_facts, metadata_problems, metadata_meta, metadata_absent = [], [], {}, False
+    else:
+        metadata_facts, metadata_problems, metadata_meta = read_metadata_facts(root, target=target)
+        metadata_problems, metadata_absent = without_absent_repometa(metadata_problems, repo=target.root_path)
     problems = [*index_problems, *metadata_problems]
     if metadata_absent:
         problems.append(Problem("warning", "graph_metadata_unavailable", "repository metadata is not initialized; Graph source relations were materialized without metadata enrichment", f"{target.display_path}/.repometa/policy.json", "missing_repometa_policy"))
@@ -342,7 +345,7 @@ def build_graph(
     nodes: dict[str, GraphNode] = {
         repository_id(repo_id): GraphNode(
             id=repository_id(repo_id),
-            kind="repository",
+            kind="repository" if target.id else "workspace",
             identity=target.to_dict(),
         )
     }
@@ -567,7 +570,10 @@ def build_graph(
             path = str(ref.get("path") or "")
             if not path:
                 continue
-            source_node_id = document_id(path)
+            source_node_id = next(
+                (node.id for node in nodes.values() if node.kind == "artifact" and node.identity.get("path") == path),
+                document_id(path),
+            ) if not repo_id else document_id(path)
             nodes.setdefault(
                 source_node_id,
                 GraphNode(
@@ -2621,7 +2627,7 @@ def query_graph(
             cached_semantic_results=[],
             completion_inputs=(completion_input,),
             include_historical_receipt_files=True,
-            include_knowledge=False,
+            include_knowledge=not repo_id,
         )
         return history_snapshot, [
             problem
@@ -2661,8 +2667,10 @@ def query_graph(
             for edge in direct
             if edge.kind == "TASK_RECORDED_CHANGE" and edge.from_id == task_node_id
         }
+        artifact_ids = {edge.to_id for edge in direct if edge.kind == "TASK_VERIFIED_BY"}
         evidence_edges = [
             *direct,
+            *[edge for edge in history_snapshot.edges if edge.kind == "KNOWLEDGE_SOURCED_FROM" and edge.to_id in artifact_ids],
             *[
                 edge
                 for edge in history_snapshot.edges
@@ -2751,7 +2759,9 @@ def query_graph(
             for edge in snapshot.edges
             if edge.kind == "CHANGE_AFFECTED_FILE" and edge.from_id in change_ids
         ]
-        return [*direct, *affected]
+        artifact_ids = {edge.to_id for edge in direct if edge.kind == "TASK_VERIFIED_BY"}
+        knowledge = [edge for edge in snapshot.edges if edge.kind == "KNOWLEDGE_SOURCED_FROM" and edge.to_id in artifact_ids]
+        return [*direct, *affected, *knowledge]
 
     if selector_kind is GraphQuerySelectorKind.TASK:
         try:

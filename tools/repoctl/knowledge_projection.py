@@ -19,7 +19,7 @@ _RECORD_ID_RE = re.compile(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def knowledge_projection_path(root: Path, *, repo_id: str) -> Path:
-    return root / ".repoctl-state/knowledge" / repo_id / "current-head.json"
+    return root / ".repoctl-state/knowledge" / (repo_id or "_workspace") / "current-head.json"
 
 
 def initialize_empty_knowledge_projection(

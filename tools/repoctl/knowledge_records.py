@@ -19,7 +19,7 @@ from .knowledge_projection import (
     rebuild_knowledge_projection,
     verify_current_knowledge_projection,
 )
-from .repositories import RepoSelectorStatus, require_repo_target, resolve_repo_selector_path
+from .repositories import workspace_target, RepoSelectorStatus, require_repo_target, resolve_repo_selector_path
 from .tasks import Problem
 
 
@@ -137,7 +137,7 @@ def prepare_knowledge_record(
     )
     if path_problems:
         return None, path_problems
-    target = require_repo_target(root, repo_id=repo_id)
+    target = require_repo_target(root, repo_id=repo_id) if repo_id else workspace_target(root)
     source_refs: list[dict[str, str]] = []
     source_problems: list[Problem] = []
     for raw_source in sources:
@@ -299,6 +299,7 @@ def _direct_knowledge_source_ref(
     candidate = Path(value)
     if (
         not value
+        or not candidate.parts
         or candidate.is_absolute()
         or candidate.as_posix() != value
         or any(part in {"", ".", ".."} for part in candidate.parts)
@@ -334,6 +335,8 @@ def _direct_knowledge_source_ref(
             "knowledge source file is missing",
             value,
         )
+    if not target.id and (candidate.parts[0] == "repos" or resolved.relative_to(root_resolved).parts[0] == "repos"):
+        return {}, Problem("error", "knowledge_source_repo_required", "product sources require a selected repository", value)
     prefix = target.display_path.rstrip("/") + "/"
     if value.startswith(prefix):
         kind = KnowledgeSourceRefKind.CURRENT_SOURCE.value
@@ -959,6 +962,10 @@ def _knowledge_source_ref_boundary_problem(
         ref_kind = KnowledgeSourceRefKind(str(ref.get("kind") or ""))
     except ValueError:
         return Problem("error", "knowledge_source_kind_invalid", "knowledge source ref kind is invalid", rel)
+    if not repo_id:
+        _, problem = _direct_knowledge_source_ref(root, target=workspace_target(root), raw_source=rel, allow_pending=True)
+        if problem is not None:
+            return problem
     if ref_kind is KnowledgeSourceRefKind.AUTHORITY_DOCUMENT:
         return _validate_document_source(root, rel)
     if ref_kind is KnowledgeSourceRefKind.WORKSPACE_FILE:
@@ -1017,6 +1024,8 @@ def _validated_applicability_paths(
 ) -> tuple[list[str], list[Problem]]:
     if not values:
         return [], []
+    if not repo_id:
+        return [], [Problem("error", "knowledge_applies_to_invalid", "product applicability requires a selected repository")]
     target = require_repo_target(root, repo_id=repo_id)
     target_root = target.root_path.resolve()
     paths: list[str] = []
