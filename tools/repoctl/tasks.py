@@ -3819,16 +3819,29 @@ def _evaluate_path_lineage(
             return [], Problem("error", "transition_evidence_incomplete", "child transition lacks a valid execution interval", path)
     current_digest = stable_path_state_digest(root_state)
     ordered: list[_DescendantPathClaim] = []
+    transitions: list[_DescendantPathClaim] = []
     while remaining:
         compatible = [claim for claim in remaining if claim.before_digest == current_digest]
-        if not compatible:
+        # A longer task can observe the same start/end states as a shorter
+        # child. It confirms that state, rather than applying the edit twice.
+        confirmations = [
+            claim for claim in remaining
+            if claim.after_digest == current_digest and any(
+                claim.before_digest == previous.before_digest
+                and claim.after_digest == previous.after_digest
+                and claim.started_at <= previous.completed_at
+                and previous.started_at <= claim.completed_at
+                for previous in transitions
+            )
+        ]
+        candidates = compatible + confirmations
+        if not candidates:
             return [], Problem("error", "transition_lineage_gap", "child path states do not form one chain from the parent path state", path)
-        if len(compatible) > 1:
-            earliest_completion = min(claim.completed_at for claim in compatible)
-            compatible = [claim for claim in compatible if claim.completed_at == earliest_completion]
-            if len(compatible) != 1:
-                return [], Problem("error", "transition_order_ambiguous", "child path states and completion events do not determine one transition order", path)
-        selected = compatible[0]
+        earliest_completion = min(claim.completed_at for claim in candidates)
+        candidates = [claim for claim in candidates if claim.completed_at == earliest_completion]
+        if len({claim.after_digest for claim in candidates}) != 1:
+            return [], Problem("error", "transition_order_ambiguous", "child path states and completion events do not determine one transition order", path)
+        selected = min(candidates, key=lambda claim: claim.task_id)
         if ordered and selected.completed_at < ordered[-1].completed_at:
             return [], Problem(
                 "error",
@@ -3836,6 +3849,8 @@ def _evaluate_path_lineage(
                 "child completion observations contradict the selected path transition order",
                 path,
             )
+        if selected in compatible:
+            transitions.append(selected)
         ordered.append(selected)
         remaining.remove(selected)
         current_digest = selected.after_digest

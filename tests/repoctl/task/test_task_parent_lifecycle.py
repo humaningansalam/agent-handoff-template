@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tools.repoctl.cli import main
 from tools.repoctl.tasks import repo_changes_since_task_start
 from tests.repoctl.task_lifecycle_helpers import (
@@ -960,3 +962,70 @@ def test_parent_blocks_legacy_v2_transition_with_partial_staging(tmp_path: Path,
     problem = next(problem for problem in delta["integrity_problems"] if problem.path == "repos/app.py")
     assert problem.code == "transition_evidence_incomplete"
     assert problem.cause_code == "legacy_completion_receipt_v2"
+
+
+def test_parent_finishes_with_overlapping_duplicate_child_observations(tmp_path: Path, monkeypatch, capsys) -> None:
+    parent, integration, correction, following = [f"T-2026060918404{i}Z" for i in range(6, 10)]
+    repo = _parent_child_repo_fixture(tmp_path, parent, [integration, correction, following])
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    for task_id in (parent, integration, correction):
+        assert main(["task", "start", task_id, "--json"]) == 0
+        capsys.readouterr()
+    for task_id in (integration, correction, following):
+        record_discovery(tmp_path, task_id, chosen="repos/app.py")
+    (repo / "app.py").write_text("value = 2\n")
+    assert main(["task", "finish", correction, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", integration, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "start", following, "--force-dirty", "--json"]) == 0
+    capsys.readouterr()
+    (repo / "app.py").write_text("value = 3\n")
+    assert main(["task", "baseline", "resolve", following, "--path", "app.py", "--ownership", "delta", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", following, "--json"]) == 0
+    capsys.readouterr()
+    state_dir = tmp_path / "docs/tasks/.repoctl-state"
+    receipts = {p: p.read_bytes() for p in (state_dir / "completions").glob("*.json")}
+    baselines = {p: p.read_bytes() for p in state_dir.glob("T-*.json")}
+    index = (repo / ".git/index").read_bytes()
+
+    delta = repo_changes_since_task_start(tmp_path, parent)
+    assert delta["integrity_problems"] == ()
+    assert delta["changes"] == []
+    assert delta["child_attributed_changes"][0]["task_ids"] == sorted([integration, correction, following])
+    assert main(["task", "doctor", parent, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["finish_ready"] is True
+    assert main(["task", "finish", parent, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["archived"] is True
+    assert all(p.read_bytes() == b for p, b in {**receipts, **baselines}.items())
+    assert (repo / ".git/index").read_bytes() == index
+    assert (repo / "app.py").read_text() == "value = 3\n"
+
+
+@pytest.mark.parametrize(("observations", "terminal", "error"), [
+    ([("a", "b", 1, 6), ("a", "b", 2, 3), ("b", "c", 4, 8)], "c", None),
+    ([("a", "b", 1, 3), ("b", "a", 2, 4), ("a", "b", 1, 5)], "b", None),
+    ([("a", "b", 1, 2), ("a", "b", 1, 2)], "b", None),
+    ([("a", "b", 1, 2), ("a", "b", 3, 4)], "b", "transition_lineage_gap"),
+    ([("a", "b", 1, 2), ("a", "c", 1, 3)], "c", "transition_lineage_gap"),
+    ([("a", "b", 1, 2), ("a", "c", 1, 2)], "c", "transition_order_ambiguous"),
+    ([("a", "b", 1, 3), ("a", "b", 2, 6), ("a", "b", 4, 7)], "b", "transition_lineage_gap"),
+    ([("a", "b", 1, 4), ("a", "b", 2, 3)], "c", "terminal_evidence_drift"),
+])
+def test_lineage_distinguishes_duplicate_observations_from_missing_edits(observations, terminal, error) -> None:
+    from tools.repoctl.tasks import _DescendantPathClaim, _CompletionEvidenceMode, _evaluate_path_lineage
+
+    def state(value):
+        return {"kind": "file", "blob_oid": value * 40, "executable": False}
+
+    claims = [
+        _DescendantPathClaim(str(i), "receipt.json", "main", _CompletionEvidenceMode.WORKING_TREE_DIFF,
+                             "app.py", "write", ("observed_change",), state(before), state(after),
+                             f"2026-10-16T00:00:0{start}.000000Z", f"2026-10-16T00:00:0{end}.000000Z")
+        for i, (before, after, start, end) in enumerate(observations)
+    ]
+    task_ids, problem = _evaluate_path_lineage("app.py", list(reversed(claims)), root_state=state("a"), terminal_state=state(terminal))
+    assert (problem.code if problem else None) == error
+    if error is None:
+        assert set(task_ids) == {claim.task_id for claim in claims}
