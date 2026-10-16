@@ -50,7 +50,7 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     _materialize(tmp_path)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     target = require_repo_target(tmp_path, repo_id="main")
-    monkeypatch.setattr("tools.repoctl.cli.require_repo_target", lambda root, repo_id=None: target)
+    monkeypatch.setattr("tools.repoctl.repositories.require_repo_target", lambda root, repo_id=None: target)
     with reject_directory_enumeration(
         monkeypatch,
         repo / "src",
