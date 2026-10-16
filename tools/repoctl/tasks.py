@@ -2750,6 +2750,38 @@ def _root_baseline_repository_records(baseline: dict[str, Any] | None) -> list[d
     ]
 
 
+def _bootstrapped_repository_baseline(
+    root: Path,
+    *,
+    parent_baseline: dict[str, Any] | None,
+    target: RepoTarget,
+    descendant_receipts: list[tuple[Task, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    if not parent_baseline or parent_baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION:
+        return None
+    candidates = [(child, receipt) for child, receipt in descendant_receipts if receipt.get("repo_id") == target.id]
+    if not candidates:
+        return None
+    first_start = min(str(receipt.get("started_at") or "") for _child, receipt in candidates)
+    first = [(child, receipt) for child, receipt in candidates if receipt.get("started_at") == first_start]
+    if len(first) != 1 or first_start < str(parent_baseline.get("started_at") or ""):
+        return None
+    child, receipt = first[0]
+    baseline = _read_repo_baseline(root, child.id)
+    # Only a recorded empty Git history establishes a new repository's origin.
+    # Keep its inherited overlay; never manufacture a parent start snapshot.
+    if (
+        baseline is None
+        or baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION
+        or baseline.get("head") != "<unborn>"
+        or baseline.get("started_at") != first_start
+        or receipt.get("repo_evidence", {}).get("start_head") != "<unborn>"
+        or _repository_target_identity_problem(target=target, baseline=baseline) is not None
+    ):
+        return None
+    return _root_baseline_repository_records(baseline)[0]
+
+
 def _current_baseline_fingerprints(
     root: Path,
     *,
@@ -4078,6 +4110,15 @@ def repo_changes_since_task_start(
     if target is None:
         baseline = _read_repo_baseline(root, task_id)
         baseline_records = _root_baseline_repository_records(baseline)
+        current_targets = _root_task_product_surfaces(root, layout=layout)
+        for product_target in current_targets:
+            if any(record.get("repo_path") == product_target.display_path or record.get("repo_id") == product_target.id for record in baseline_records):
+                continue
+            origin = _bootstrapped_repository_baseline(
+                root, parent_baseline=baseline, target=product_target, descendant_receipts=descendant_receipts,
+            )
+            if origin is not None:
+                baseline_records.append(origin)
         if baseline_records:
             changes: list[ChangedEntry] = []
             attributed_changes: list[dict[str, str]] = []
@@ -4086,7 +4127,6 @@ def repo_changes_since_task_start(
             baseline_count = 0
             current_count = 0
             baseline_conflicts: list[str] = []
-            current_targets = _root_task_product_surfaces(root, layout=layout)
             matched_current_paths: set[str] = set()
             for record in baseline_records:
                 repo_id = str(record.get("repo_id") or "")
@@ -4253,7 +4293,7 @@ def repo_changes_since_task_start(
         changes: list[ChangedEntry] = []
         attributed_changes: list[dict[str, str]] = []
         current_count = 0
-        for product_target in _root_task_product_surfaces(root, layout=layout):
+        for product_target in current_targets:
             current, target_state = repo_changed_entries(root, product_target)
             if not target_state.available:
                 integrity_problems.append(

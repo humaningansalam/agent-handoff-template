@@ -12,6 +12,7 @@ from tools.repoctl.tasks import repo_changes_since_task_start
 from tests.repoctl.task_lifecycle_helpers import (
     add_task,
     init_committed_product_repo,
+    init_product_repo,
     record_discovery,
     task_text,
     write_repometa,
@@ -1090,3 +1091,71 @@ def test_product_finishes_with_completed_sibling_delta(tmp_path: Path, monkeypat
     assert result["changed_entries"] == [{"change": "untracked", "path": "own.py"}]
     assert (repo / "app.py").read_text() == "sibling = 3\n"
     assert all(p.read_bytes() == data for p, data in immutable.items())
+
+
+@pytest.mark.parametrize("existing_repository", [False, True])
+def test_parent_closes_repository_bootstrapped_by_child(tmp_path: Path, monkeypatch, capsys, existing_repository: bool) -> None:
+    parent, bootstrap, followup = [f"T-2026060918404{i}Z" for i in range(6, 9)]
+    write_workspace(tmp_path)
+    add_task(tmp_path, f"{parent}--parent.md", task_text(parent))
+    (tmp_path / "docs/BOARD.md").write_text(f"# BOARD\n\n## Board\n\n- docs/tasks/{parent}--parent.md\n\n## Backlog\n")
+    if existing_repository:
+        (tmp_path / "repos").mkdir()
+        init_committed_product_repo(tmp_path / "repos/web", {"keep.txt": "unchanged\n"})
+        write_settings(tmp_path, {"repositories": [{"id": "web", "path": "repos/web"}]})
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    def run(*args):
+        code = main(["task", *args, "--json"])
+        return code, json.loads(capsys.readouterr().out)
+
+    assert run("start", parent)[0] == 0
+    repo = tmp_path / "repos/main"
+    repo.parent.mkdir(exist_ok=True)
+    init_product_repo(repo)
+    (repo / "inherited.txt").write_text("preserved\n")
+    assert main(["repo", "adopt", "repos/main", "--id", "main", "--json"]) == 0
+    capsys.readouterr()
+    def add_child(task_id):
+        add_task(tmp_path, f"{task_id}--child.md", _repo_child_text(task_id, parent=parent))
+        (tmp_path / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n" + "".join(f"- docs/tasks/{p.name}\n" for p in sorted((tmp_path / "docs/tasks").glob("T-*.md"))) + "\n## Backlog\n")
+
+    add_child(bootstrap)
+    assert run("start", bootstrap, "--force-dirty")[0] == 0
+    record_discovery(tmp_path, bootstrap, chosen="repos/main/app.py")
+    (repo / "app.py").write_text("value = 1\n")
+    assert run("finish", bootstrap)[0] == 0
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "approved bootstrap"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    state = tmp_path / "docs/tasks/.repoctl-state"
+    immutable = {p: p.read_bytes() for p in [state / f"{parent}.json", state / f"{bootstrap}.json", state / f"completions/{bootstrap}.json"]}
+    code, payload = run("doctor", parent)
+    assert code == 0 and payload["data"]["finish_ready"] is True, payload
+    # The child's existing initial state is required; current files cannot invent it.
+    child_state = state / f"{bootstrap}.json"
+    child_state.unlink()
+    assert run("doctor", parent)[0] == 1
+    child_state.write_bytes(immutable[child_state])
+    for path in (repo / "inherited.txt", repo / "app.py"):
+        original = path.read_bytes()
+        path.write_text("unaccounted drift\n")
+        assert run("doctor", parent)[0] == 1
+        assert run("finish", parent)[0] == 2
+        path.write_bytes(original)
+    add_child(followup)
+    assert run("start", followup)[0] == 0
+    code, payload = run("doctor", parent)
+    assert code == 1 and "live_children_block_finish" in payload["data"]["blocked_by"]
+    record_discovery(tmp_path, followup, chosen="repos/main/app.py")
+    (repo / "app.py").write_text("value = 2\n")
+    code, payload = run("doctor", parent)
+    assert code == 1 and "terminal_evidence_drift" in payload["data"]["blocked_by"]
+    assert "root_evidence_incomplete" not in payload["data"]["blocked_by"]
+    assert run("finish", followup)[0] == 0
+    index = (repo / ".git/index").read_bytes()
+    assert run("doctor", parent)[1]["data"]["finish_ready"] is True
+    assert run("finish", parent)[0] == 0
+    assert all(p.read_bytes() == b for p, b in immutable.items())
+    assert (repo / "inherited.txt").read_text() == "preserved\n"
+    assert (repo / "app.py").read_text() == "value = 2\n"
+    assert (repo / ".git/index").read_bytes() == index
