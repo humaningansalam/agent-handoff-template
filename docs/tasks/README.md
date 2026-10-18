@@ -48,7 +48,7 @@ Finish directly after the work is ready:
 ./scripts/repoctl task finish T-... --json
 ```
 
-Finish checks repository selection, the task-start baseline, pre-existing dirty ownership, actual changes against Chosen, and metadata for changed files. It does not check whether Verification text exists or whether a test passed. If task changes were committed after start, use `task doctor --use-committed-diff` and finish with the same flag.
+Finish checks repository selection, the task-start baseline, pre-existing dirty ownership, actual changes against Chosen, and metadata for changed files. It does not check whether Verification text exists or whether a test passed. If task changes were committed after start, use `task doctor --use-committed-diff` and finish with the same flag. Unrelated descendant commits do not require that flag when their changed paths are disjoint from Chosen, owned paths, and current task changes; the original start baseline is retained.
 
 Block and cancel need explicit intent through `--reason` or `--reason-file`. Completed Tasks and completion receipts are immutable; create later work with `task create --follow-up-of T-old`. Receipt hashes bind lifecycle history to the stored Task artifact and do not represent test proof.
 

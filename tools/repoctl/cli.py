@@ -48,7 +48,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query
 from .markdown import find_section, parse_labeled_list_section
 from .repositories import evidence_target, workspace_target, RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_worktree_history_is_disjoint, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -3288,7 +3288,9 @@ def _task_finish_repo_delta(
     if _repo_scoped_frontmatter(task) and not use_committed_diff:
         start_head = task_repo_head_at_start(root, task.id)
         current_head, head_state = repo_git_head(root, target)
-        if start_head and head_state.available and current_head != start_head:
+        if start_head and head_state.available and current_head != start_head and not task_worktree_history_is_disjoint(
+            root, task, target, changes=list(delta.get("changes") or []), head=current_head,
+        ):
             raise RepoctlError(
                 "repo HEAD changed since task start; use --use-committed-diff only when the recorded start HEAD is an ancestor of the current HEAD",
                 code="repo_head_changed_since_start",

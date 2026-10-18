@@ -5,6 +5,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tools.repoctl.cli import main
 from tools.repoctl.meta import shard_for_path
 from tests.repoctl.task_lifecycle_helpers import (
@@ -1151,7 +1153,8 @@ def test_delta_resolution_cannot_adopt_inherited_committed_changes(tmp_path: Pat
     assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
 
 
-def test_external_resolution_preserves_unattributed_work_without_claiming_it(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("unrelated_commit", [False, True])
+def test_external_resolution_preserves_unattributed_work_without_claiming_it(tmp_path: Path, monkeypatch, capsys, unrelated_commit: bool) -> None:
     from tools.repoctl.tasks import _validate_completion_receipt
 
     write_workspace(tmp_path)
@@ -1187,6 +1190,13 @@ def test_external_resolution_preserves_unattributed_work_without_claiming_it(tmp
     assert state_path.read_bytes() == state_before_preview
     assert main(resolve) == 0
     capsys.readouterr()
+    baseline_before_finish = state_path.read_bytes()
+    if unrelated_commit:
+        (repo / "wp04.txt").write_text("separate task commit\n")
+        subprocess.run(["git", "add", "wp04.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "independent WP04"], cwd=repo, check=True, capture_output=True)
+        index = (repo / ".git/index").read_bytes()
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo)
     assert main(["task", "doctor", task_id, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["finish_ready"] is True
     # The existing owned-delta check still detects our own post-review drift.
@@ -1211,7 +1221,41 @@ def test_external_resolution_preserves_unattributed_work_without_claiming_it(tmp
     assert json.loads(state_path.read_bytes())["initial"] == initial
     assert {name: (repo / name).read_bytes() for name in before} == before
     assert (repo / ".git/index").read_bytes() == index
-    assert (repo / ".git/HEAD").read_bytes() == head
+    assert state_path.read_bytes() == baseline_before_finish
+    if unrelated_commit:
+        assert receipt["repo_evidence"]["mode"] == "working_tree_diff"
+        assert receipt["repo_evidence"]["attribution"] == "task_working_tree"
+        assert receipt["repo_evidence"]["start_head"] != receipt["repo_evidence"]["observed_head"]
+        assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo) == head
+    else:
+        assert (repo / ".git/HEAD").read_bytes() == head
+
+
+@pytest.mark.parametrize("commit_path", ["basis.txt", "rename"])
+def test_worktree_finish_rejects_committed_task_basis_overlap(tmp_path: Path, monkeypatch, capsys, commit_path: str) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_committed_product_repo(repo, {"own.txt": "base\n", "basis.txt": "base\n"})
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo").replace('repo_id: ""', 'repo_id: "main"'))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    record_discovery(tmp_path, task_id, chosen="repos/own.txt, repos/basis.txt")
+    (repo / "own.txt").write_text("uncommitted task work\n")
+    if commit_path == "rename":
+        subprocess.run(["git", "mv", "basis.txt", "elsewhere.txt"], cwd=repo, check=True)
+    else:
+        (repo / "basis.txt").write_text("committed task basis change\n")
+        subprocess.run(["git", "add", "basis.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "overlapping commit"], cwd=repo, check=True, capture_output=True)
+    state_path = tmp_path / f"docs/tasks/.repoctl-state/{task_id}.json"
+    before = state_path.read_bytes()
+    for command, code in (("doctor", 1), ("finish", 2)):
+        assert main(["task", command, task_id, "--json"]) == code
+        assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "repo_head_changed_since_start"
+    assert state_path.read_bytes() == before
+    assert (repo / "own.txt").read_text() == "uncommitted task work\n"
 
 
 def test_external_resolution_stays_pinned_for_finish_and_committed_finish(tmp_path: Path, monkeypatch, capsys) -> None:

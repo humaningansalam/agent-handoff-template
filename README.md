@@ -91,7 +91,7 @@ For a normal product change:
 
 Use repeated `--chosen` arguments for one coherent multi-file scope. Add `--note` only for a scope decision or source reference worth retaining. Replace scope explicitly with `--replace-chosen ... --reason ...`.
 
-Task finish checks repository identity, the start baseline, pre-existing dirty files, actual changes against Chosen, and changed-file `.repometa` requirements. It preserves optional `## Verification` text without interpreting it. If changes were committed after start, inspect with `task doctor --use-committed-diff` and finish with the same flag.
+Task finish checks repository identity, the start baseline, pre-existing dirty files, actual changes against Chosen, and changed-file `.repometa` requirements. It preserves optional `## Verification` text without interpreting it. If task changes were committed after start, inspect with `task doctor --use-committed-diff` and finish with the same flag.
 
 Before a real pause or transfer, write the four Handoff fields, remove the generated marker, and bind the reviewed restart state:
 

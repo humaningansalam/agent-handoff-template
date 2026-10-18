@@ -2823,6 +2823,24 @@ def task_chosen_matches_start(root: Path, task: Task, target: RepoTarget, *, com
     return True
 
 
+def task_worktree_history_is_disjoint(
+    root: Path, task: Task, target: RepoTarget, *, changes: list[ChangedEntry], head: str,
+) -> bool:
+    """Prove unrelated commits did not change the working-tree Task's basis."""
+    baseline = _read_repo_baseline(root, task.id)
+    chosen, invalid = _task_chosen_path_projection(task, target=target)
+    if not chosen or invalid or baseline is None or baseline.get("state_version") != TASK_STATE_SCHEMA_VERSION:
+        return False
+    observation = _repository_transition_observation(
+        root, target=target, baseline=baseline, worktree_changes=changes,
+    )
+    if observation.problems or observation.current_head != head or observation.lineage is not RepositoryLineageStatus.DESCENDANT:
+        return False
+    owned = {path for path, decision in baseline.get("ownership", {}).items() if decision["ownership"] in {"task", "delta"}}
+    task_paths = chosen | owned | set(_entry_mutation_paths(changes))
+    return not task_paths.intersection(_entry_mutation_paths(list(observation.committed_changes)))
+
+
 def _build_task_path_transitions(
     root: Path,
     task: Task,
@@ -4595,7 +4613,11 @@ def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = 
     if (repo_changed or repo_scoped) and current_head_state.available and meta_gate and meta_gate.get("reason") != "no_repo_directory":
         if not start_head:
             raise RepoctlError("task cannot finish because repo head at start was not recorded; restart the task with repoctl task start", code="repo_head_missing_at_start", path=task.rel_path)
-        if current_head != start_head and not allow_head_changed:
+        disjoint_worktree_history = (
+            current_head != start_head and not allow_head_changed
+            and task_worktree_history_is_disjoint(root, task, target, changes=list((repo_delta or {}).get("changes") or []), head=current_head)
+        )
+        if current_head != start_head and not allow_head_changed and not disjoint_worktree_history:
             raise RepoctlError("repo HEAD changed since task start; finish before committing repos/ changes so changed-file gates can validate the actual work", code="repo_head_changed_since_start", path=task.rel_path)
         if current_head != start_head and allow_head_changed and not (repo_delta or {}).get("committed_range"):
             raise RepoctlError("task finish with changed repo HEAD requires committed diff evidence from the recorded task start head", code="committed_diff_required", path=task.rel_path)
