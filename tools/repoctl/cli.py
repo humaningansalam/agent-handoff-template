@@ -45,7 +45,7 @@ from .knowledge_projection import (
     rebuild_knowledge_projection,
 )
 from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query, meta_status, meta_suggest, move_annotation, remove_annotation, set_annotation, show_annotation
-from .markdown import find_section, parse_labeled_list_section
+from .markdown import find_section, parse_labeled_list_section, section_ranges
 from .repositories import evidence_target, workspace_target, RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
 from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_worktree_history_is_disjoint, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
@@ -2208,6 +2208,17 @@ def build_task_resume_projection(
     if compact:
         # Preserve the complete reviewed section once; never rank prose by age.
         guidance["view"] = "compact"
+        # Exact source navigation, not an inferred summary or execution authority.
+        text = task.path.read_text(encoding="utf-8")
+        sections = section_ranges(text)
+        guidance["task_context"] = {
+            "path": task.rel_path,
+            "goal": next((text[section.body_start:section.end].strip() for section in sections if section.heading == "## Goal"), None),
+            "sections": [
+                {"name": section.heading[3:], "line": text.count("\n", 0, section.start) + 1}
+                for section in sections
+            ],
+        }
         guidance["handoff_source"] = {
             "path": task.rel_path,
             "section": "Handoff",
@@ -6413,7 +6424,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_show = task_sub.add_parser("show")
     task_show.add_argument("task_id")
     task_show.add_argument("--summary", action="store_true", help="omit task body and frontmatter from output")
-    task_show.add_argument("--section", choices=["Discovery", "Verification", "Handoff", "Closure"], help="return only one canonical task section")
+    task_show.add_argument("--section", help="return one named Task section without reading the full history")
     task_show.add_argument("--json", action="store_true")
     task_show.set_defaults(func=cmd_task_show)
     task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness and lifecycle problems.")

@@ -89,13 +89,19 @@ def _heading_ranges(text: str) -> list[tuple[str, int, int]]:
     return ranges
 
 
-def find_section(text: str, heading: str) -> SectionRange:
+def section_ranges(text: str) -> list[SectionRange]:
     headings = _heading_ranges(text)
+    return [
+        SectionRange(heading, start, body_start, headings[index + 1][1] if index + 1 < len(headings) else len(text))
+        for index, (heading, start, body_start) in enumerate(headings)
+    ]
+
+
+def find_section(text: str, heading: str) -> SectionRange:
     wanted = f"## {heading}" if not heading.startswith("## ") else heading
-    for index, (found, start, body_start) in enumerate(headings):
-        if found == wanted:
-            end = headings[index + 1][1] if index + 1 < len(headings) else len(text)
-            return SectionRange(wanted, start, body_start, end)
+    for section in section_ranges(text):
+        if section.heading == wanted:
+            return section
     raise RepoctlError(f"section missing: {wanted}", code="missing_section")
 
 

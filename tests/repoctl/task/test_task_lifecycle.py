@@ -1629,3 +1629,45 @@ def test_bind_remains_inactive_when_runtime_changes_after_binding(tmp_path, monk
     assert guidance['status'] == 'inactive'
     assert 'repository_changed' in guidance['handoff']['reason_codes']
     assert guidance['handoff']['active'] is False
+
+
+def test_compact_resume_locates_current_work_without_replaying_operational_history(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "create", "Complete the original runtime behavior", "--area", "ops", "--start", "--json"]) == 0
+    created = json.loads(capsys.readouterr().out)["data"]
+    tid = created["task_id"]
+    path = tmp_path / created["path"]
+    text = path.read_text(encoding="utf-8")
+    text = replace_section(text, "Goal", "Complete the original runtime behavior.\n")
+    text = replace_section(text, "Handoff", "- Next exact step: Collect the original trainer result.\n- First file to open: `docs/BOARD.md`\n- First command to run: `true`\n- Done when: Original output is verified.\n")
+    text = text.replace("## Execution Log", "## Current Outcome\n\nOriginal trainer remains active; collect its result.\n\n## Remaining Required AC\n\nVerify the actual output after that result.\n\n## Execution Log")
+    text = replace_section(text, "Execution Log", "- superseded connection receipt\n" * 100)
+    text = replace_section(text, "Verification", "```markdown\n## Not a Task section\n```\n")
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "handoff", "bind", tid, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    output = capsys.readouterr().out
+    guidance = json.loads(output)["data"]["resume_guidance"]
+    context = guidance["task_context"]
+    assert context["goal"] == "Complete the original runtime behavior."
+    locations = {section["name"]: section["line"] for section in context["sections"]}
+    assert "Not a Task section" not in locations
+    assert text.splitlines()[locations["Remaining Required AC"] - 1] == "## Remaining Required AC"
+    assert "superseded connection receipt" not in output
+    assert guidance["executable_handoff"] is not None
+    for section, expected in [("Current Outcome", "Original trainer remains active; collect its result."), ("Remaining Required AC", "Verify the actual output after that result.")]:
+        assert main(["task", "show", tid, "--section", section, "--json"]) == 0
+        selected = json.loads(capsys.readouterr().out)
+        assert selected["data"]["section"]["body"] == expected
+    # New outcome invalidates the old restart instructions, even though section
+    # navigation remains available. Reading context must not silently rebind it.
+    path = tmp_path / context["path"]
+    path.write_text(text.replace("Original trainer remains active; collect its result.", "Trainer completed; inspect the saved output."), encoding="utf-8")
+    before = path.read_bytes()
+    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert stale["executable_handoff"] is None
+    assert path.read_bytes() == before

@@ -32,7 +32,7 @@ Context, Graph, Git, metadata, and direct reads help decide scope. Their queries
 
 `## Verification` is optional free-form text. Keep a command or result only when it helps a future reader. Repoctl does not parse, grade, register, hash, or require it.
 
-Use `task log append` for short timestamped checkpoints. Before a real pause or transfer, replace the generated Handoff placeholder with four concrete fields, remove its marker, and bind it:
+Use `task log append` for meaningful timestamped checkpoints, not repeated waits or connection receipts. Keep current work and remaining acceptance criteria near Goal; consolidate superseded operational prose in live Tasks without losing decisions, failures or source references. Update Handoff when the next action changes. `task resume --compact` returns Goal and section locations alongside the reviewed Handoff; use `task show T-... --section "<heading>" --json` to read a relevant section without reopening the full history. Before a real pause or transfer, replace the generated Handoff placeholder with four concrete fields, remove its marker, and bind it:
 
 ```bash
 ./scripts/repoctl task handoff bind T-... --json

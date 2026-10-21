@@ -15,6 +15,7 @@ from tests.repoctl.task_lifecycle_helpers import (
     write_workspace,
 )
 from tools.repoctl.cli import main
+from tools.repoctl.markdown import find_section
 from tools.repoctl.tasks import completion_receipt_artifact_for_task, load_tasks
 
 
@@ -85,8 +86,10 @@ def test_generated_goal_and_scope_follow_the_task_contract(tmp_path: Path, monke
     assert main(args) == 0
     payload = json.loads(capsys.readouterr().out)
     text = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
-    goal = text.split("## Goal\n", 1)[1].split("## Scope", 1)[0]
-    scope = text.split("## Scope\n", 1)[1].split("## Execution Log", 1)[0]
+    goal_range = find_section(text, "Goal")
+    scope_range = find_section(text, "Scope")
+    goal = text[goal_range.body_start:goal_range.end]
+    scope = text[scope_range.body_start:scope_range.end]
     assert "Contract copy" in goal
     assert "handoff" not in goal.lower()
     assert len([line for line in scope.splitlines() if line.startswith("- ")]) == 1
