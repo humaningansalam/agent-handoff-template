@@ -35,6 +35,12 @@ def test_debug_mode_is_opt_in_and_preserves_normal_output(tmp_path: Path, monkey
     disabled = capsys.readouterr()
     assert not (tmp_path / DEBUG_EVENTS_REL).exists()
 
+    assert main(["debug", "summary", "--json"]) == 0
+    capture = json.loads(capsys.readouterr().out)["data"]["capture"]
+    assert capture["enabled"] is False
+    assert capture["configuration"] == "default_off"
+    assert capture["journal_exists"] is False
+
     write_settings(tmp_path, {"debug_mode": True})
     assert main(["task", "resume"]) == 0
     enabled = capsys.readouterr()
@@ -78,6 +84,8 @@ def test_debug_mode_records_failures_without_values_or_handoff_mutation(tmp_path
     assert resume["data"]["resume_guidance"]["status"] == "current"
     assert task_path.read_bytes() == task_before_resume
     assert _events(tmp_path)[-1]["target"]["task_id"] == task_id
+    assert _events(tmp_path)[-1]["result"]["status"] == "current"
+    assert _events(tmp_path)[-1]["result"]["executable"] is True
 
     other_id = "T-20260609184047Z"
     add_board_task(tmp_path, f"{other_id}--other.md", task_text(other_id, status="todo"))
@@ -114,6 +122,9 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
         encoding="utf-8",
     )
     (repo / "auth.py").write_text("def validate_token(token):\n    return bool(token)\n", encoding="utf-8")
+    workflow = tmp_path / "docs/workflows/route-contract.md"
+    workflow.parent.mkdir(exist_ok=True)
+    workflow.write_text("# Blue comet route\n\nPreserve validate_token error meaning across language boundaries.\n")
     commit_all(repo)
     write_settings(tmp_path, {"debug_mode": True})
     assert main(["graph", "query", "--repo-id", "main", "--file", "service.py", "--json"]) == 1
@@ -122,11 +133,19 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     capsys.readouterr()
     before_graph = _events(tmp_path)[-1]["context_sources"]["graph"]
     assert before_graph["available"] is False
-    _add_knowledge_source(
+    saved = _add_knowledge_source(
         capsys,
         claim="Blue comet routing owns settlement dispatch policy.",
         applies_to=["service.py"],
     )
+    knowledge_id = saved["data"]["record"]["id"]
+    assert _events(tmp_path)[-1]["result"]["references"] == [{"record_id": knowledge_id}]
+    assert main(["knowledge", "query", "blue comet", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert _events(tmp_path)[-1]["result"]["references"] == [{"record_id": knowledge_id}]
+    assert main(["knowledge", "query", "nonexistent-quasar", "--repo-id", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert _events(tmp_path)[-1]["result"]["status"] == "not_found"
     _write_completion_receipt(tmp_path)
     _rebuild_completion_history(tmp_path)
 
@@ -134,10 +153,19 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     capsys.readouterr()
     assert main(["graph", "query", "--repo-id", "main", "--file", "service.py", "--json"]) == 0
     capsys.readouterr()
+    graph_result = _events(tmp_path)[-1]["result"]
+    assert graph_result["status"] == "found"
+    assert {"path": "service.py"} in graph_result["references"]
+    assert {"record_id": knowledge_id} in graph_result["references"]
 
     query = "blue comet route validate_token"
     assert main(["context", "query", query, "--mode", "call-impact", "--repo-id", "main", "--full", "--json"]) == 0
     capsys.readouterr()
+    assert main(["context", "query", "blue comet error meaning across language boundaries", "--mode", "contract", "--repo-id", "main", "--full", "--json"]) == 0
+    context_result = json.loads(capsys.readouterr().out)
+    assert any(item["source_ref"]["path"] == "docs/workflows/route-contract.md"
+               for group in context_result["data"]["bundle"]["groups"].values() for item in group)
+    assert {"path": "docs/workflows/route-contract.md"} in _events(tmp_path)[-1]["result"]["references"]
 
     history_query = "validate_token token validation"
     assert main(
@@ -155,6 +183,8 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     assert main(["debug", "summary", "--json"]) == 0
     summary = json.loads(capsys.readouterr().out)["data"]
 
+    assert summary["capture"]["enabled"] is True
+    assert summary["commands"]["knowledge.query"]["result_statuses"] == {"found": 1, "not_found": 1}
     assert summary["commands"]["graph.query"]["later_same_shape_success_after_failure"] == 1
     assert summary["context_sources"]["graph"]["available"] > 0
     assert summary["context_sources"]["knowledge"]["returned"] > 0

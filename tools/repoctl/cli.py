@@ -22,7 +22,7 @@ from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCata
 from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
 from .context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
 from .context_task_pack import build_task_context_pack, compact_task_context_pack, materialize_task_context_pack_benchmark_tasks, render_task_context_pack_markdown, run_task_context_pack_benchmark
-from .debug import begin_debug, bind_debug_command, debug_summary, finish_debug, observe_context, observe_envelope, observe_problem
+from .debug import begin_debug, bind_debug_command, debug_capture, debug_summary, finish_debug, observe_context, observe_envelope, observe_problem
 from .git import repo_changed_entries, repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
 from .graph_model import digest_data
@@ -48,7 +48,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query
 from .markdown import find_section, parse_labeled_list_section, section_ranges
 from .repositories import evidence_target, workspace_target, RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_worktree_history_is_disjoint, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_discovery_values, task_worktree_history_is_disjoint, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -2158,6 +2158,7 @@ def build_task_resume_projection(
     if task is None:  # pragma: no cover - closed by TaskResumeSelectionStatus
         raise RepoctlError("single-live resume selection is missing its task", code="task_resume_selection_invalid")
     repository_observation_available = True
+    resume_delta = None
     try:
         layout = repo_layout(root)
     except RepoctlError as exc:
@@ -2166,7 +2167,7 @@ def build_task_resume_projection(
         health = _task_health(root, task, observation_error=exc)
         repository_observation_available = False
     else:
-        target, _delta, health = _task_lifecycle_observation(root, task, layout=layout)
+        target, resume_delta, health = _task_lifecycle_observation(root, task, layout=layout)
     guidance, warnings, guidance_problems = _task_resume_guidance(
         root,
         task,
@@ -2213,12 +2214,26 @@ def build_task_resume_projection(
         sections = section_ranges(text)
         guidance["task_context"] = {
             "path": task.rel_path,
-            "goal": next((text[section.body_start:section.end].strip() for section in sections if section.heading == "## Goal"), None),
+            **{
+                key: next((text[section.body_start:section.end].strip() for section in sections if section.heading == heading), None)
+                for key, heading in (("goal", "## Goal"), ("context_docs", "## Context Docs"))
+            },
             "sections": [
                 {"name": section.heading[3:], "line": text.count("\n", 0, section.start) + 1}
                 for section in sections
             ],
         }
+        chosen, chosen_count, chosen_truncated = _project_string_collection(
+            task_discovery_values(task).get("Chosen files", []), compact=not full,
+        )
+        guidance["task_context"]["scope"] = {
+            "chosen_files": chosen,
+            "chosen_file_count": chosen_count,
+            "chosen_files_truncated": chosen_truncated,
+            "details_command": f"./scripts/repoctl task show {task.id} --section Discovery --json",
+        }
+        if resume_delta is not None:
+            guidance["task_context"]["repository_changes"] = _repo_change_summary(resume_delta, compact=not full)
         guidance["handoff_source"] = {
             "path": task.rel_path,
             "section": "Handoff",
@@ -2527,6 +2542,12 @@ def cmd_task_show(args: argparse.Namespace) -> int:
         text = task.path.read_text(encoding="utf-8")
         section = find_section(text, args.section)
         body = text[section.body_start : section.end].strip()
+        # A section read already returns the requested prose. Keep freshness,
+        # but do not return the entire Handoff again with every source read.
+        summary["resume_guidance"] = {
+            **resume_guidance,
+            "handoff": {key: value for key, value in resume_guidance["handoff"].items() if key != "body"},
+        }
         payload = {
             "ok": not _has_errors(show_problems),
             "command": "task.show",
@@ -2603,6 +2624,9 @@ def cmd_task_handoff_bind(args: argparse.Namespace) -> int:
     guidance, warnings, guidance_problems = _task_resume_guidance(
         root, task, target=target
     )
+    if not args.full:
+        guidance["handoff"].pop("body", None)
+        guidance["handoff_source"] = {"path": task.rel_path, "section": "Handoff"}
     data = {**result, "resume_guidance": guidance}
     payload = {
         "ok": not _has_errors(guidance_problems),
@@ -3922,6 +3946,8 @@ def cmd_task_finish(args: argparse.Namespace) -> int:
         "warnings": warnings,
         "next_actions": next_actions,
     }
+    if not args.json:
+        observe_envelope(payload)
     if args.json:
         _json(payload)
     else:
@@ -5606,6 +5632,8 @@ def cmd_knowledge_add(args: argparse.Namespace) -> int:
         "warnings": warnings,
         "next_actions": [],
     }
+    if not args.json:
+        observe_envelope(payload)
     if args.json:
         _json(payload)
     else:
@@ -5628,6 +5656,8 @@ def cmd_knowledge_show(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems],
         "warnings": [],
     }
+    if not args.json:
+        observe_envelope(payload)
     if args.json:
         _json(payload)
     else:
@@ -5678,7 +5708,7 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
                 target.id,
             )
         )
-    response_data = data if args.full else _compact_knowledge_query_data(data)
+    response_data = data if args.full else _compact_knowledge_query_data(data, explain=args.explain)
     payload = {
         "ok": not _has_errors(problems),
         "command": "knowledge.query",
@@ -5697,7 +5727,7 @@ def cmd_knowledge_query(args: argparse.Namespace) -> int:
     return 1 if _has_errors(problems) else 0
 
 
-def _compact_knowledge_query_data(data: dict[str, Any]) -> dict[str, Any]:
+def _compact_knowledge_query_data(data: dict[str, Any], *, explain: bool = False) -> dict[str, Any]:
     compact = dict(data)
     results = data.get("results") if isinstance(data.get("results"), list) else []
     compact_results: list[dict[str, Any]] = []
@@ -5705,10 +5735,29 @@ def _compact_knowledge_query_data(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         compact_item = dict(item)
+        if not explain:
+            compact_item.pop("score_breakdown", None)
+            compact_item.pop("selection_reasons", None)
         record = item.get("record") if isinstance(item.get("record"), dict) else None
         if record is not None:
             compact_record = dict(record)
-            compact_record.pop("summary", None)
+            for key in ("record_digest", "resolved_source_refs", "source_resolutions", "explicit_path_refs"):
+                compact_record.pop(key, None)
+            if compact_record.get("summary") == compact_record.get("reason"):
+                compact_record.pop("summary", None)
+            if compact_record.get("title") == compact_record.get("claim"):
+                compact_record.pop("title", None)
+            compact_record["source_refs"] = [
+                {
+                    "path": source["declared_path"],
+                    "kind": source["kind"],
+                    "status": source["status"],
+                    **({"resolved_path": source["resolved_path"]} if source["resolved_path"] != source["declared_path"] else {}),
+                    **({"section": source["section"]} if source.get("section") else {}),
+                    **({"cause_code": source["cause_code"]} if source.get("cause_code") else {}),
+                }
+                for source in record.get("source_resolutions", [])
+            ]
             compact_item["record"] = compact_record
         compact_results.append(compact_item)
     compact["results"] = compact_results
@@ -6127,6 +6176,7 @@ def _upgrade_postflight(root: Path) -> tuple[dict[str, Any], list[Problem]]:
         "schema_version": 2,
         "status": status,
         "product_repository_runtime": "configured" if layout.targets else "not_initialized",
+        "debug_capture": debug_capture(root),
         "repository_layout": layout.to_dict(),
         "repository_state": {
             "namespaces": namespaces,
@@ -6444,6 +6494,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_handoff_sub = task_handoff.add_subparsers(dest="task_handoff_command", required=True, parser_class=RepoctlArgumentParser)
     task_handoff_bind = task_handoff_sub.add_parser("bind")
     task_handoff_bind.add_argument("task_id")
+    task_handoff_bind.add_argument("--full", action="store_true", help="also return the reviewed Handoff body")
     task_handoff_bind.add_argument("--json", action="store_true")
     task_handoff_bind.set_defaults(func=cmd_task_handoff_bind)
     task_discovery = task_sub.add_parser("discovery", help="Manage the Task-owned Chosen scope.")
@@ -6741,7 +6792,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_query.add_argument("--include-history", action="store_true", help="also search replaced records")
     knowledge_query.add_argument("--explain", action="store_true")
     knowledge_query.add_argument("--limit", type=int, default=10)
-    knowledge_query.add_argument("--full", action="store_true", help="include full Knowledge record summaries")
+    knowledge_query.add_argument("--full", action="store_true", help="include all Knowledge source digests and resolution diagnostics")
     knowledge_query.add_argument("--json", action="store_true")
     knowledge_query.set_defaults(func=cmd_knowledge_query)
     knowledge_status_parser = knowledge_sub.add_parser("status")

@@ -8,10 +8,11 @@ import stat
 from collections import Counter
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from .io import RepoctlError
+from .settings import debug_mode, load_repoctl_settings
 
 
 DEBUG_EVENTS_REL = Path("docs/tasks/.repoctl-state/debug/events.jsonl")
@@ -19,9 +20,11 @@ DEBUG_TRUNCATED_REL = DEBUG_EVENTS_REL.with_name("capture-truncated")
 DEBUG_EVENT_SCHEMA = "repoctl.debug.event"
 DEBUG_EVENT_SCHEMA_VERSION = 1
 _MAX_ITEMS = 100
+_MAX_REFERENCES = 32
 _MAX_EVENT_BYTES = 64 * 1024
 _MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 _TASK_ID_RE = re.compile(r"T-[0-9]{14}Z")
+_KNOWLEDGE_ID_RE = re.compile(r"K-[0-9]{14}Z--[a-z0-9-]{1,240}")
 _REPO_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _OPTION_RE = re.compile(r"--[a-z0-9][a-z0-9-]{0,63}")
 _COMMAND_RE = re.compile(r"(?:repoctl|[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*)")
@@ -82,6 +85,84 @@ def observe_envelope(envelope: Any) -> None:
     _record_id(trace["target"], "repo_id", task.get("repo_id"), _REPO_ID_RE)
     repository = data.get("repository") if isinstance(data.get("repository"), dict) else {}
     _record_id(trace["target"], "repo_id", repository.get("id"), _REPO_ID_RE)
+    command = envelope.get("command")
+    if command == "knowledge.query":
+        records = [item.get("record", {}) for item in data.get("results", []) if isinstance(item, dict)]
+        _observe_result("unavailable" if not envelope.get("ok") else "found" if records else "not_found", records)
+    elif command in {"knowledge.add", "knowledge.show"} and isinstance(data.get("record"), dict):
+        _observe_result("saved" if command == "knowledge.add" else "found", [data["record"]])
+    elif command == "task.finish" and data.get("knowledge_closeout", {}).get("status") == "saved":
+        _observe_result("saved", [data["knowledge_closeout"]])
+    elif command == "graph.query":
+        result = data.get("result") or {}
+        nodes = [*result.get("matches", [])]
+        for path in result.get("paths", []):
+            nodes.extend([path.get("from", {}), path.get("to", {})])
+        # Compact relations refer to endpoint summaries; full queries retain nodes.
+        for relation in result.get("relations", []):
+            nodes.extend([relation.get("from", {}), relation.get("to", {})])
+        _observe_result(str(data.get("query_status") or "unavailable"), nodes)
+        trace["result"]["freshness"] = str((data.get("freshness") or {}).get("status") or "unavailable")
+    elif command == "context.query" and isinstance(data.get("bundle"), dict):
+        groups = data["bundle"].get("groups", {})
+        items = [item for group in groups.values() for item in group if isinstance(item, dict)]
+        _observe_result("found" if items else "not_found", items)
+    elif command in {"task.resume", "task.handoff.bind"}:
+        guidance = data.get("resume_guidance") or {}
+        _observe_result(str(guidance.get("status") or data.get("selection", {}).get("status") or "unavailable"), [])
+        if command == "task.resume":
+            trace["result"]["executable"] = guidance.get("executable_handoff") is not None
+
+
+def _observe_result(status: str, items: list[Any]) -> None:
+    trace = _CURRENT.get()
+    if trace is None:
+        return
+    references: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        reference: dict[str, str] = {}
+        record_id = str(item.get("record_id") or item.get("task_id") or item.get("id") or "")
+        if _TASK_ID_RE.fullmatch(record_id) or _KNOWLEDGE_ID_RE.fullmatch(record_id):
+            reference["record_id"] = record_id
+        else:
+            source = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else item
+            path = str(source.get("path") or "")
+            if _reference_path(path):
+                reference["path"] = path
+        if reference:
+            identity = next(iter(reference.items()))
+            if identity not in seen:
+                seen.add(identity)
+                if len(references) < _MAX_REFERENCES:
+                    references.append(reference)
+    trace["result"] = {
+        "status": status,
+        "returned_reference_count": len(seen),
+        "references": references,
+        "references_truncated": len(seen) > len(references),
+    }
+
+
+def _reference_path(path: Any) -> bool:
+    return bool(
+        isinstance(path, str) and path and len(path) <= 1024
+        and not PurePosixPath(path).is_absolute()
+        and str(PurePosixPath(path)) == path
+        and ".." not in PurePosixPath(path).parts and "\\" not in path
+        and not any(ord(char) < 32 for char in path)
+    )
+
+
+def debug_capture(root: Path) -> dict[str, Any]:
+    return {
+        "enabled": debug_mode(root),
+        "configuration": "explicit" if "debug_mode" in load_repoctl_settings(root) else "default_off",
+        "journal_path": DEBUG_EVENTS_REL.as_posix(),
+        "journal_exists": (root / DEBUG_EVENTS_REL).is_file(),
+    }
 
 
 def observe_context(
@@ -141,7 +222,7 @@ def finish_debug(root: Path, token: Token[dict[str, Any] | None], *, exit_code: 
                 "warning_codes": sorted(trace["warning_codes"])[:_MAX_ITEMS],
             },
         }
-        for field in ("context_sources",):
+        for field in ("context_sources", "result"):
             if field in trace:
                 event[field] = trace[field]
         append_debug_event(root, event)
@@ -158,6 +239,7 @@ def debug_summary(root: Path) -> dict[str, Any]:
     timestamps = [event["timestamp"] for event in events]
     return {
         "capture": {
+            **debug_capture(root),
             "event_count": len(events),
             "invalid_event_count": invalid_count,
             "incomplete": incomplete,
@@ -176,8 +258,8 @@ def debug_summary(root: Path) -> dict[str, Any]:
     }
 
 
-def _command_summary(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    commands: dict[str, dict[str, int]] = {}
+def _command_summary(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    commands: dict[str, dict[str, Any]] = {}
     failed_shapes: set[tuple[Any, ...]] = set()
     for event in events:
         command = event["command"]
@@ -187,6 +269,10 @@ def _command_summary(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
         stats["succeeded" if ok else "failed"] += 1
         stats["total_duration_ms"] += duration
         stats["max_duration_ms"] = max(stats["max_duration_ms"], duration)
+        if isinstance(event.get("result"), dict):
+            statuses = stats.setdefault("result_statuses", {})
+            status = event["result"]["status"]
+            statuses[status] = statuses.get(status, 0) + 1
         if command == "task.resume":
             if "task_resume_ambiguous" in event["outcome"]["problem_codes"]:
                 stats["resume_ambiguous"] = stats.get("resume_ambiguous", 0) + 1
@@ -326,6 +412,7 @@ def _valid_event(value: Any) -> bool:
             and _valid_target(value.get("target"))
             and _valid_outcome(value.get("outcome"))
             and _valid_sources(value.get("context_sources"))
+            and _valid_result(value.get("result"))
         )
     except (KeyError, TypeError):
         return False
@@ -382,6 +469,27 @@ def _valid_sources(value: Any) -> bool:
         )
     except (KeyError, TypeError):
         return False
+
+
+def _valid_result(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or not isinstance(value.get("status"), str) or not _CODE_RE.fullmatch(value["status"]):
+        return False
+    refs, count = value.get("references"), value.get("returned_reference_count")
+    return bool(
+        isinstance(refs, list) and len(refs) <= _MAX_REFERENCES
+        and type(count) is int and count >= len(refs)
+        and value.get("references_truncated") is (count > len(refs))
+        and all(
+            isinstance(ref, dict) and len(ref) == 1 and (
+                _reference_path(ref.get("path"))
+                or isinstance(ref.get("record_id"), str)
+                and (_TASK_ID_RE.fullmatch(ref["record_id"]) or _KNOWLEDGE_ID_RE.fullmatch(ref["record_id"]))
+            )
+            for ref in refs
+        )
+    )
 
 
 def _request_shape(event: Mapping[str, Any]) -> tuple[Any, ...]:

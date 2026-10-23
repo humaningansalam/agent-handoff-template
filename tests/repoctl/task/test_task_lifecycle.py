@@ -299,6 +299,7 @@ def test_task_show_accepts_canonical_id_filename_and_path_with_section_projectio
         assert payload["data"]["task"]["id"] == "T-20260609184046Z"
         assert payload["data"]["section"]["name"] == "Handoff"
         assert "Next exact step" in payload["data"]["section"]["body"]
+        assert "body" not in payload["data"]["resume_guidance"]["handoff"]
 
 
 def test_task_command_aliases_emit_canonical_identity(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1132,8 +1133,13 @@ def test_task_handoff_is_readable_but_inactive_until_explicit_bind(tmp_path: Pat
 
     payload = _bind_handoff(capsys)
     assert payload["data"]["resume_guidance"]["status"] == "current"
+    assert "body" not in payload["data"]["resume_guidance"]["handoff"]
     assert receipt.is_file()
     assert task_path.read_bytes() == before
+
+    assert main(["task", "handoff", "bind", "T-20260609184046Z", "--full", "--json"]) == 0
+    expanded = json.loads(capsys.readouterr().out)
+    assert expanded["data"]["resume_guidance"]["handoff"]["body"] == guidance["handoff"]["body"]
 
     bound_receipt = receipt.read_bytes()
     assert main(["task", "block", "T-20260609184046Z", "--reason", "Waiting for an external decision.", "--json"]) == 0
@@ -1640,6 +1646,8 @@ def test_compact_resume_locates_current_work_without_replaying_operational_histo
     path = tmp_path / created["path"]
     text = path.read_text(encoding="utf-8")
     text = replace_section(text, "Goal", "Complete the original runtime behavior.\n")
+    text = replace_section(text, "Discovery", "- Chosen files: `docs/PRD.md`\n- Notes: Preserve the original trainer and inputs.\n")
+    text = replace_section(text, "Context Docs", "- `docs/workflows/code-quality.md`\n- `docs/PRD.md`\n")
     text = replace_section(text, "Handoff", "- Next exact step: Collect the original trainer result.\n- First file to open: `docs/BOARD.md`\n- First command to run: `true`\n- Done when: Original output is verified.\n")
     text = text.replace("## Execution Log", "## Current Outcome\n\nOriginal trainer remains active; collect its result.\n\n## Remaining Required AC\n\nVerify the actual output after that result.\n\n## Execution Log")
     text = replace_section(text, "Execution Log", "- superseded connection receipt\n" * 100)
@@ -1653,6 +1661,9 @@ def test_compact_resume_locates_current_work_without_replaying_operational_histo
     guidance = json.loads(output)["data"]["resume_guidance"]
     context = guidance["task_context"]
     assert context["goal"] == "Complete the original runtime behavior."
+    assert context["scope"]["chosen_files"] == ["docs/PRD.md"]
+    assert context["scope"]["chosen_files_truncated"] is False
+    assert context["context_docs"] == "- `docs/workflows/code-quality.md`\n- `docs/PRD.md`"
     locations = {section["name"]: section["line"] for section in context["sections"]}
     assert "Not a Task section" not in locations
     assert text.splitlines()[locations["Remaining Required AC"] - 1] == "## Remaining Required AC"

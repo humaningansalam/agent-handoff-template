@@ -103,9 +103,11 @@ Handoff freshness and lifecycle health are independent:
 - `blocked_by_health` is true when lifecycle state is not executable.
 - `executable_handoff` is non-null only when a current binding and lifecycle health both permit execution.
 
-`task resume --compact` includes `task_context` with the exact Goal body and source section names/line locations. It is navigation, not an inferred summary or executable authority. `task show --section "<heading>"` reads an existing named Task section, including project-specific current work or remaining AC.
+`task resume --compact` includes `task_context` with the exact Goal and Context Docs bodies, bounded Chosen paths and repository delta, and source section names/line locations. The scope includes total/truncation and the exact Discovery section command for all paths and Notes; `--full --compact` keeps complete scope/delta arrays. It is navigation, not an inferred summary or executable authority. `task show --section "<heading>"` reads an existing named Task section, including project-specific current work or remaining AC, without returning the Handoff body again.
 
 `task resume --compact` is an opt-in restart view; default and `--full` legacy consumers retain their string fields unchanged. The compact view keeps the complete reviewed section once in `readable_handoff`; a non-null `executable_handoff` contains `field_labels` (references to the four unique validated canonical labels in that section) and `reviewed_context_ref` pointing to that complete context. The fields are not a standalone authorization: preserve constraints and evidence in the reviewed context and cited sources. `handoff_source` provides the original section command. A current binding does not make historical prose current or settle conflicting instructions; no prose is ranked by position/date or removed. Invalid, unbound, stale or unhealthy instructions never acquire an executable projection. `--full --compact` adds full health details to this same view.
+
+`task handoff bind` returns binding freshness and the source location without echoing the just-reviewed body; `--full` includes it. The binding, invalidation inputs and execution rules are unchanged.
 
 `task discovery add` returns current `chosen_files`, `notes`, per-input update details, and counts. It does not return a query episode, Reviewed/Excluded disposition, selected result, or structured check state.
 
@@ -142,6 +144,8 @@ Knowledge commands select `--repo-id ID` or `--workspace`. Workspace records use
 `knowledge add` saves a durable record in one operation and returns the record path plus derived projection status. A projection or Graph synchronization failure is a warning after the record is safely stored, with an explicit maintenance action.
 
 Knowledge queries may report source drift while continuing to return the saved conclusion. The projection contains current direct records only. `knowledge check` and upgrade postflight report preserved older records that require one-time agent migration.
+
+Default Knowledge queries retain claims, reasons, applicability and one source view: `source_refs` carries the declared path, kind, current status, and a different resolved path when relocated. `--full` retains all source digests and resolution diagnostics; `--explain` retains ranking details. Query selection and source-drift warnings are identical across views.
 
 ## Compact projections
 

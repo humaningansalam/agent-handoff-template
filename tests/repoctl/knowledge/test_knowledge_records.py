@@ -18,6 +18,8 @@ from tests.repoctl.knowledge_test_helpers import (
     write_workspace,
 )
 from tests.repoctl.repository.test_repositories import commit_all
+from tests.repoctl.repository.test_repositories import write_settings
+from tools.repoctl.debug import DEBUG_EVENTS_REL
 
 
 def _payload(capsys) -> dict:
@@ -84,8 +86,23 @@ def test_knowledge_add_writes_one_record_and_source_change_is_advisory(
 
     assert main(["knowledge", "query", "source bundles", "--repo-id", "main", "--json"]) == 0
     query = _payload(capsys)
-    assert query["data"]["results"][0]["record"]["id"] == record["id"]
+    compact_record = query["data"]["results"][0]["record"]
+    assert compact_record["id"] == record["id"]
+    assert compact_record["claim"] == record["claim"]
+    assert compact_record["reason"] == record["reason"]
+    assert compact_record["source_refs"] == [{
+        "path": record["source_refs"][0]["path"],
+        "kind": record["source_refs"][0]["kind"],
+        "status": "digest_mismatch",
+    }]
     assert [item["code"] for item in query["warnings"]] == ["knowledge_source_changed"]
+
+    assert main(["knowledge", "query", "source bundles", "--repo-id", "main", "--full", "--json"]) == 0
+    full = _payload(capsys)
+    full_record = full["data"]["results"][0]["record"]
+    assert full_record["source_refs"] == record["source_refs"]
+    assert full_record["source_resolutions"][0]["digest_matches"] is False
+    assert len(json.dumps(query)) < len(json.dumps(full))
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
     check = _payload(capsys)
@@ -274,6 +291,7 @@ def test_workspace_task_knowledge_is_searchable_and_linked_without_product(
     tmp_path: Path, monkeypatch, capsys, operation: str,
 ) -> None:
     write_workspace(tmp_path)
+    write_settings(tmp_path, {"debug_mode": True})
     monkeypatch.setattr(cli, "find_workspace_root", lambda: tmp_path)
     task_id = "T-20260609184059Z"
     add_task(tmp_path, f"{task_id}--workspace.md", task_text(task_id).replace('area: ""', 'area: "ops"'))
@@ -298,6 +316,9 @@ def test_workspace_task_knowledge_is_searchable_and_linked_without_product(
         sync = result["data"]["graph_sync"]
     assert result["ok"] is True
     assert sync["status"] == "synced"
+    saved_event = json.loads((tmp_path / DEBUG_EVENTS_REL).read_text().splitlines()[-1])
+    assert saved_event["result"]["status"] == "saved"
+    assert saved_event["result"]["references"] == [{"record_id": record_id}]
     assert not [warning for warning in result["warnings"] if warning["code"] == "knowledge_graph_sync_failed"]
     assert main(["knowledge", "query", "external paths", "--workspace", "--json"]) == 0
     assert _payload(capsys)["data"]["results"][0]["record"]["id"] == record_id
