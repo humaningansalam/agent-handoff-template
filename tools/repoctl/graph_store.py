@@ -445,13 +445,13 @@ def collect_graph_inputs(
     dict[str, Any],
 ]:
     previous_manifest = previous_manifest or {}
+    previous_file_records = previous_manifest.get("file_records") if isinstance(previous_manifest.get("file_records"), dict) else {}
     if not target.id:
         inventory, inventory_problems, inventory_meta = [], [], {"summary": {"truncated": False}}
         file_records = {}
     else:
         inventory, inventory_problems, inventory_meta = meta_inventory(root, changed=False, target=target)
         inventory_problems, _metadata_absent = without_absent_repometa(inventory_problems, repo=target.root_path)
-        previous_file_records = previous_manifest.get("file_records") if isinstance(previous_manifest.get("file_records"), dict) else {}
         file_records, git_state = repo_file_state_records(
             root,
             paths=[item.path for item in inventory if item.classification not in {"orphan_annotation", "orphan_exclusion"}],

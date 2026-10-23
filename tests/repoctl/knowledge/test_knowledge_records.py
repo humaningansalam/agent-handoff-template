@@ -298,6 +298,8 @@ def test_workspace_task_knowledge_is_searchable_and_linked_without_product(
     (tmp_path / "docs/BOARD.md").write_text(f"# BOARD\n\n## Board\n\n- docs/tasks/{task_id}--workspace.md\n\n## Backlog\n")
     assert main(["task", "start", task_id, "--json"]) == 0
     _payload(capsys)
+    assert main(["graph", "build", "--workspace", "--json"]) == 0
+    _payload(capsys)
     knowledge_args = ["--kind", "failure_mode", "--claim", "Reviewed external paths retain baseline and ownership boundaries.",
                       "--reason", "External dirty work must survive another task closing."]
     if operation == "finish":
