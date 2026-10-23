@@ -13,6 +13,8 @@ Use a workflow for a reusable, repeated, or high-risk procedure; keep one-off no
 
 ### Quality / Review Workflows
 
+For changes spanning agents, languages, or shared interfaces, read [Code Quality](code-quality.md).
+
 For test changes, read [잘 작성된 테스트 코드](well-written-tests.md).
 
 | Workflow | Use When | Do Not Use When | Tags | Expected Output |
