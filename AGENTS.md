@@ -32,6 +32,8 @@ At session start and after compaction, resume the known live task with `./script
 
 Read only the selected Task, its relevant parent/Context Docs and applicable PRD authority. Resume identifies live work; open the Board for registry context when needed. A known small edit needs affected source, applicable rules and a relevant check. Use `docs/workflows/INDEX.md` for a reusable, repeated, or high-risk procedure.
 
+For long external work, use [External completion](docs/workflows/README.md#external-completion) to keep the original wait owner and deliver result references to the same Coordinator through the existing native queue.
+
 When no task is live, create one only for current product work. Never select archived history as live work. Use a root-only parent only to coordinate independently verifiable repo-scoped children.
 
 For project orientation, confirm the selected Git root from `docs/repoctl.json` or `repo list`, then read its README and existing AGENTS/CONTRIBUTING guidance. Read nested AGENTS guidance on the path to the files you will touch; do not pre-read unrelated descendants. Start project requirements at `docs/PRD.md`; when it is an index, follow only the links relevant to the current request and its stated active authority. Retrieval rank, historical tasks, and the template README do not establish the active product specification. Resolve conflicting versions from current authority before editing.
