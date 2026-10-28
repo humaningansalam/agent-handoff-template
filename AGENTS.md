@@ -44,6 +44,8 @@ For changes spanning agents, languages, or shared interfaces, read [Code Quality
 
 ## Product Work Loop
 
+Use [Product execution handoff](docs/workflows/README.md#product-execution-handoff) for implementation roles and ownership transitions.
+
 1. Explore without changing product files. Use compact `context query` for ambiguous intent, Git status/diff for a changed-set review, Graph or direct reads for a known file, `rg` for an exact identity, and explicit history or Knowledge queries for prior decisions.
 2. Create or resume the product task and run `task start` before the first product mutation. Read-only exploration is not gated on task creation or start.
 3. Once edit scope is concrete, record the canonical workspace-relative files in the Task's one Chosen set. Add a short Note only when the scope decision or source reference will help later.
