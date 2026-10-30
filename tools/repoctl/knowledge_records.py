@@ -804,6 +804,12 @@ def query_knowledge_records(
         )
     )
     returned = scored[: max(0, int(limit))]
+    returned_ids = {str(item["record"]["id"]) for item in returned}
+    warnings = [
+        warning
+        for warning in warnings
+        if warning.code != "knowledge_source_changed" or warning.path in returned_ids
+    ]
     returned_statuses: dict[str, int] = {}
     for item in returned:
         record = item.get("record") if isinstance(item.get("record"), dict) else {}

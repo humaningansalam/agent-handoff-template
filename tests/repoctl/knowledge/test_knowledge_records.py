@@ -112,6 +112,38 @@ def test_knowledge_add_writes_one_record_and_source_change_is_advisory(
     ]
 
 
+def test_knowledge_query_source_warnings_follow_selected_results(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    for index, claim in enumerate(("quartzlookup first", "quartzlookup second", "Unrelated routing", "freshanchor rule")):
+        source = tmp_path / f"docs/contracts/selection-{index}.md"
+        source.write_text("# Original source\n", encoding="utf-8")
+        _add_knowledge_source(capsys, source=source.relative_to(tmp_path).as_posix(), claim=claim)
+        if index < 3:
+            source.write_text("# Changed source\n", encoding="utf-8")
+
+    assert main(["knowledge", "query", "quartzlookup", "--repo-id", "main", "--limit", "1", "--json"]) == 0
+    selected = _payload(capsys)
+    assert len(selected["data"]["results"]) == 1
+    assert selected["data"]["lifecycle"]["source_changed_count"] == 3
+    assert [(item["code"], item["path"]) for item in selected["warnings"]] == [
+        ("knowledge_source_changed", selected["data"]["results"][0]["record"]["id"])
+    ]
+
+    for query in ("freshanchor", "absentmarker"):
+        assert main(["knowledge", "query", query, "--repo-id", "main", "--json"]) == 0
+        result = _payload(capsys)
+        assert result["warnings"] == []
+        assert result["data"]["lifecycle"]["source_changed_count"] == 3
+
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    catalog = _payload(capsys)
+    assert sum(item["code"] == "knowledge_source_changed" for item in catalog["problems"]) == 3
+
+
 def test_knowledge_replacement_and_optional_author_use_records_only(
     tmp_path: Path,
     monkeypatch,

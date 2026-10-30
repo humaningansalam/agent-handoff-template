@@ -145,7 +145,7 @@ Knowledge commands select `--repo-id ID` or `--workspace`. Workspace records use
 
 Knowledge queries may report source drift while continuing to return the saved conclusion. The projection contains current direct records only. `knowledge check` and upgrade postflight report preserved older records that require one-time agent migration.
 
-Default Knowledge queries retain claims, reasons, applicability and one source view: `source_refs` carries the declared path, kind, current status, and a different resolved path when relocated. `--full` retains all source digests and resolution diagnostics; `--explain` retains ranking details. Query selection and source-drift warnings are identical across views.
+Default Knowledge queries retain claims, reasons, applicability and one source view: `source_refs` carries the declared path, kind, current status, and a different resolved path when relocated. `--full` retains all source digests and resolution diagnostics; `--explain` retains ranking details. Query selection and source-drift warnings are identical across views. Source-drift warnings cover returned records only; `lifecycle.source_changed_count` still counts all examined records. Use `knowledge check` for catalog-wide diagnostics.
 
 ## Compact projections
 
