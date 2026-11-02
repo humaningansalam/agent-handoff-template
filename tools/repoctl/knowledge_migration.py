@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from .io import RepoctlError, atomic_write, repoctl_lock
-from .knowledge_records import _record_dir, prepare_knowledge_record
+from .knowledge_records import (
+    _record_dir, prepare_knowledge_record,
+    _knowledge_record_contract_problems,
+)
 from .knowledge_projection import KNOWLEDGE_RECORD_SCHEMA_VERSION, rebuild_knowledge_projection
 
 _ID = re.compile(r"K-[0-9]{14}Z--[a-z0-9]+(?:-[a-z0-9]+)*\Z")
@@ -43,6 +46,25 @@ def _proof_paths(root: Path, legacy_id: str) -> tuple[Path, Path]:
         raise ValueError("invalid legacy record id")
     base = root / "docs/tasks/.repoctl-state/knowledge-migrations" / legacy_id
     return base / "original.json", base / "migration.json"
+
+
+def _assert_safe_proof_path(root: Path, path: Path) -> None:
+    """Never create a supposedly ignored witness through a symlink parent."""
+    try:
+        components = path.relative_to(root).parts
+        ancestor = root
+        for part in components:
+            ancestor = ancestor / part
+            if ancestor.is_symlink():
+                raise RepoctlError(
+                    "Knowledge migration proof path contains a symlink",
+                    code="knowledge_migration_proof_path_unsafe", path=str(ancestor),
+                )
+    except ValueError as exc:
+        raise RepoctlError(
+            "Knowledge migration proof path escapes workspace",
+            code="knowledge_migration_proof_path_unsafe", path=str(path),
+        ) from exc
 
 
 def _regular_path_under(root: Path, path: Path) -> bool:
@@ -89,7 +111,7 @@ def preserved_legacy_migration_witness(root: Path, legacy: dict[str, Any]) -> bo
             or _ID.fullmatch(destination_id) is None
             or destination_id == legacy_id
             or manifest["original_witness_path"] != before_path.relative_to(root).as_posix()
-            or manifest["kind"] not in {"reuse_existing_v2", "create_v2"}
+            or manifest["kind"] not in {"reuse_existing_v2", "create_v2", "link_cited_current_v2"}
         ):
             return False
         destination = _record_dir(root) / f"{destination_id}.json"
@@ -102,13 +124,20 @@ def preserved_legacy_migration_witness(root: Path, legacy: dict[str, Any]) -> bo
         if _sha(destination.read_bytes()) != manifest["destination_sha256"]:
             return False
         actual_v2 = json.loads(destination.read_text(encoding="utf-8"))
-        return (
+        valid = (
             isinstance(actual_v2, dict)
             and actual_v2.get("schema") == "repoctl.knowledge.record"
             and actual_v2.get("schema_version") == KNOWLEDGE_RECORD_SCHEMA_VERSION
             and actual_v2.get("id") == destination_id
             and str(actual_v2.get("repo_id") or "") == str(legacy.get("repo_id") or "")
         )
+        if not valid:
+            return False
+        if manifest["kind"] == "link_cited_current_v2":
+            return _is_verified_cited_successor(
+                actual_v2, legacy, root=root, original_sha256=manifest["legacy_sha256"],
+            )
+        return True
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
         return False
 
@@ -141,6 +170,56 @@ def verified_preserved_legacy_ids(root: Path, *, repo_id: str, ids: set[str]) ->
         ):
             result.add(record_id)
     return result
+
+
+def _scope_paths(record: dict[str, Any]) -> list[str]:
+    applies_to = record.get("applies_to")
+    if not isinstance(applies_to, dict):
+        return []
+    raw = applies_to.get("paths")
+    return sorted({path for path in raw if isinstance(path, str) and path}) if isinstance(raw, list) else []
+
+
+def _is_verified_cited_successor(
+    current: dict[str, Any], legacy: dict[str, Any], *, root: Path,
+    original_sha256: str,
+) -> bool:
+    """An existing current record must explicitly cite this exact old JSON.
+
+    Claim/kind/repo identity and a cryptographic citation are all required.
+    Changed earlier Task sources are *not* rebound; their provenance remains
+    on the immutable v1 file for separate review. Existing v2 reason is used
+    only if it already exists, not invented by this converter.
+    """
+    if (
+        current.get("schema") != "repoctl.knowledge.record"
+        or current.get("schema_version") != KNOWLEDGE_RECORD_SCHEMA_VERSION
+        or current.get("repo_id") != legacy.get("repo_id")
+        or current.get("kind") != legacy.get("kind")
+        or " ".join(str(current.get("claim") or "").split()).casefold()
+        != " ".join(str(legacy.get("claim") or "").split()).casefold()
+        or not str(current.get("reason") or "").strip()
+    ):
+        return False
+    if _knowledge_record_contract_problems(
+        current, record_id=str(current.get("id") or ""),
+        repo_id=str(legacy.get("repo_id") or ""),
+    ):
+        return False
+    # A current successor may intentionally retire a historical file. Its
+    # current applicability must not silently expand the v1 invariant's
+    # scope, however: expansion requires an independently grounded review.
+    legacy_scope = set(_scope_paths(legacy))
+    current_scope = set(_scope_paths(current))
+    if not current_scope.issubset(legacy_scope):
+        return False
+    legacy_path = f"docs/knowledge/records/{legacy.get('id')}.json"
+    return any(
+        isinstance(ref, dict)
+        and ref.get("path") == legacy_path
+        and ref.get("content_sha256") == original_sha256
+        for ref in current.get("source_refs", [])
+    )
 
 
 def _record_identity(record: dict[str, Any]) -> tuple[Any, ...]:
@@ -209,8 +288,76 @@ def migrate_legacy_knowledge(
                 rows.append(row)
                 continue
             before_path, manifest_path = _proof_paths(root, legacy_id)
+            _assert_safe_proof_path(root, before_path)
+            _assert_safe_proof_path(root, manifest_path)
             if before_path.exists() or before_path.is_symlink() or manifest_path.exists() or manifest_path.is_symlink():
                 row.update(status="needs_proof_review", explanation="existing Knowledge migration witness is invalid or incomplete")
+                rows.append(row)
+                continue
+            # A trustworthy v2 successor can already exist and cite the
+            # original v1 as exact SHA-256 evidence. In that case, a stale
+            # historical Task or vanished applicability path is NOT a reason
+            # to re-hash original sources or fabricate another current claim.
+            # The proof explicitly records only the verified existing link.
+            cited_successors = [
+                candidate for candidate in current
+                if not reason_override and not sources_override
+                and _is_verified_cited_successor(
+                    candidate, record, root=root, original_sha256=_sha(raw),
+                )
+            ]
+            if len(cited_successors) > 1:
+                row.update(
+                    status="needs_equivalence_review",
+                    explanation="multiple current records cite this exact v1 claim; review successor identity",
+                )
+                rows.append(row)
+                continue
+            if len(cited_successors) == 1:
+                successor = cited_successors[0]
+                destination_path = directory / f"{successor['id']}.json"
+                destination_raw = destination_path.read_bytes()
+                row.update(
+                    status="link_cited_current_v2", destination_id=successor["id"],
+                    destination_path=destination_path.relative_to(root).as_posix(),
+                    legacy_source_unchanged=True,
+                    explanation="current v2 cites this exact old claim; historical scope and changed Task sources are retained, not rewritten",
+                    removed_historical_scope_paths=sorted(
+                        set(_scope_paths(record)) - set(_scope_paths(successor))
+                    ),
+                )
+                if apply:
+                    if path.read_bytes() != raw or destination_path.read_bytes() != destination_raw:
+                        raise RepoctlError(
+                            "Knowledge changed during preserved citation validation",
+                            code="knowledge_migration_concurrent_edit",
+                        )
+                    proof = {
+                        "schema": _PROOF_SCHEMA, "schema_version": _PROOF_VERSION,
+                        "legacy_id": legacy_id, "repo_id": repo_id,
+                        "destination_id": successor["id"],
+                        "legacy_sha256": _sha(raw), "destination_sha256": _sha(destination_raw),
+                        "original_witness_path": before_path.relative_to(root).as_posix(),
+                        "kind": "link_cited_current_v2",
+                    }
+                    written: list[Path] = []
+                    try:
+                        atomic_write(before_path, raw.decode("utf-8"))
+                        written.append(before_path)
+                        atomic_write(manifest_path, json.dumps(proof, indent=2, sort_keys=True) + "\n")
+                        written.append(manifest_path)
+                        if not preserved_legacy_migration_witness(root, record):
+                            raise RepoctlError(
+                                "cannot verify preserved current source citation",
+                                code="knowledge_migration_proof_invalid",
+                            )
+                    except Exception:
+                        for item in reversed(written):
+                            if item.exists() and not item.is_symlink():
+                                item.unlink()
+                        raise
+                    committed += 1
+                    row["status"] = "applied_link_cited_current_v2"
                 rows.append(row)
                 continue
             reason = reason_override.strip() or str(record.get("reason") or record.get("summary") or "").strip()

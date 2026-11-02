@@ -5398,3 +5398,39 @@ def test_resume_query_preserves_ambiguity_and_missing_task_errors(tmp_path: Path
     assert len(data["next_actions"]) == 2
     assert main(["graph", "search", "resume T-20260609184048Z", "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "task_not_found"
+
+
+def test_compact_context_adapts_excerpts_without_losing_source_refs(monkeypatch) -> None:
+    """Large real answers shorten excerpts, not the selected evidence set."""
+    from tools.repoctl import context as context_module
+
+    items = [
+        _compact_evidence_item(
+            "document",f"docs/contracts/decision-{index}.md",
+            "document",f"docs/contracts/decision-{index}.md",["workspace.open"],
+            excerpt="Meaningful exact source excerpt "*18,
+            selection_reason="Relevant documented rule with a direct reason",
+        ) for index in range(8)
+    ]
+    bundle = ContextBundle(
+        repository={"id":"main","path":"repos"},
+        query={"text":"inspect source evidence for this decision"},
+        source_snapshots={},completeness={},evidence=[],selection={},
+        groups={"must_read":items},
+    ).with_digest()
+    encoded=lambda data:len(json.dumps(data,ensure_ascii=False,separators=(",", ":")).encode("utf-8"))
+    monkeypatch.setattr(context_module,"MAX_COMPACT_CONTEXT_BYTES",1000000)
+    baseline=compact_context_bundle(bundle)
+    baseline_bytes=encoded(baseline)
+    monkeypatch.setattr(context_module,"MAX_COMPACT_CONTEXT_BYTES",baseline_bytes-85)
+    compact=compact_context_bundle(bundle)
+    assert encoded(compact)<=baseline_bytes-85
+    assert [item['source_ref'] for item in compact['groups']['must_read']]==[
+        item['source_ref'] for item in baseline['groups']['must_read']
+    ]
+    assert compact['continuations']==baseline['continuations']
+    assert compact['bundle_digest']==baseline['bundle_digest']
+    assert any(
+        len(item.get('excerpt','')) < len(original.get('excerpt',''))
+        for original,item in zip(baseline['groups']['must_read'],compact['groups']['must_read'])
+    )

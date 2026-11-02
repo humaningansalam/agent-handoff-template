@@ -1074,3 +1074,50 @@ def test_shipped_upgrade_seeds_or_preserves_adopter_operating_rules(tmp_path: Pa
     apply_upgrade(workspace, plan_file=plan_file)
     assert agents.read_bytes() == expected
     assert all(path.read_bytes() == raw for path, raw in protected.items())
+
+
+def test_upgrade_existing_locator_missing_original_archive_fails_with_receipt_hint(tmp_path: Path) -> None:
+    """Hither/HostSpan shape: dangling locator + archived Task receipt, no Task bytes.
+
+    Even when an old completion receipt declares an exact digest, source
+    upgrade cannot reconstruct the old body and must never auto-repair it.
+    """
+    import hashlib
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    write_workspace(workspace)
+    write_source(source)
+    archive, locator = add_legacy_follow_up(workspace)
+    original = archive.read_bytes()
+    locator.parent.mkdir(parents=True, exist_ok=True)
+    task_id = "T-20260608120000Z"
+    locator.write_text(
+        archive_locator_text(task_id, archive.relative_to(workspace).as_posix()),
+        encoding="utf-8",
+    )
+    receipt = workspace / "docs/tasks/.repoctl-state/completions" / f"{task_id}.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    digest = "sha256:" + hashlib.sha256(original).hexdigest()
+    receipt.write_text(json.dumps({
+        "schema":"repoctl.task.completion", "schema_version":5,
+        "task_id":task_id, "task_path_at_completion":archive.relative_to(workspace).as_posix(),
+        "content_sha256":digest,
+    }))
+    archive.unlink()
+    plan = plan_upgrade(workspace, source=source)
+    assert len(plan["conflicts"]) == 1
+    conflict=plan["conflicts"][0]
+    assert conflict["code"] == "archive_locator_migration_conflict"
+    assert conflict["path"] == archive.relative_to(workspace).as_posix()
+    assert "missing historical Task" in conflict["message"]
+    assert "CLAIMS original SHA-256 " + digest in conflict["message"]
+    assert "unverified" in conflict["message"]
+    assert not archive.exists()
+    assert locator.exists() and receipt.exists()
+    # A forged or merely claimed hash cannot turn a missing archive into an
+    # acceptable source for an automatic upgrade.
+    with pytest.raises(Exception):
+        plan_file=tmp_path/"bad-plan.json"
+        write_plan(plan_file,plan)
+        apply_upgrade(workspace,plan_file=plan_file)
+    assert not archive.exists()

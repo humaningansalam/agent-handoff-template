@@ -543,3 +543,86 @@ def create_app():
     assert any(edge['from']=='src/app.py' and edge['to']=='src/core/payments.py'
                and edge['relation']=='source' for edge in result['links'])
     assert result['status']=='partial'
+
+
+def test_benchmark_explicit_verified_refresh_from_stale_source_can_pass(tmp_path,monkeypatch,capsys) -> None:
+    """Only a real before/after materialization can satisfy refresh stage."""
+    repo=_workspace(tmp_path,monkeypatch)
+    _write(repo,'README.txt','initial repo\n')
+    _materialize(tmp_path)
+    _write(repo,'src/start.py','def start():\n    return 42\n')
+    fixture=tmp_path/'one-refresh-fixture.json'
+    fixture.write_text(json.dumps({
+        'schema':'repoctl.graph.workflow-benchmark',
+        'cases':[{ 'id':'stale-python', 'repo_id':'main',
+            'selector':{'symbol':'start','in_file':'src/start.py'},
+            'expected_paths':{'current_source':['src/start.py'],'implementation':['src/start.py']},
+            'expected_statuses':['partial'],
+            'required_stages':['current_source','refresh','implementation'],
+        }],
+    }),encoding='utf-8')
+    args=['graph','workflow-benchmark','--repo-id','main','--case-id','stale-python',
+          '--fixture',str(fixture),'--json']
+    assert main(args)==1
+    before=_payload(capsys)
+    assert before['data']['freshness']['status']=='stale'
+    assert before['data']['benchmark']['required_stages']['refresh']['precise'] is False
+    assert main([*args[:-1],'--verify-refresh','--json'])==0
+    after=_payload(capsys)
+    assert after['ok'] is True
+    assert after['data']['freshness']['status']=='current'
+    assert after['data']['benchmark']['task_navigation_complete'] is True
+    proof=after['data']['refresh']
+    assert proof['source_rechecked'] is True and proof['status']=='current'
+    assert proof['before_status']=='stale' and proof['after_status']=='current'
+    assert proof['before_snapshot_digest']!=proof['after_snapshot_digest']
+    assert 'src/start.py' in proof['changed_source_paths']
+    # A second call cannot invent another stale->current transition after
+    # this explicit rebuild has already finished.
+    assert main([*args[:-1],'--verify-refresh','--json'])==1
+    current=_payload(capsys)
+    assert current['data']['refresh']['status']=='not_evaluated'
+    assert current['data']['benchmark']['required_stages']['refresh']['precise'] is False
+
+
+def test_benchmark_verify_refresh_requires_refresh_contract(tmp_path,monkeypatch,capsys) -> None:
+    repo=_workspace(tmp_path,monkeypatch)
+    _write(repo,'src/start.py','def start():\n    return 42\n')
+    _materialize(tmp_path)
+    fixture=tmp_path/'no-refresh-fixture.json'
+    fixture.write_text(json.dumps({
+        'schema':'repoctl.graph.workflow-benchmark',
+        'cases':[{'id':'no-refresh','repo_id':'main','selector':{'symbol':'start'},
+            'expected_paths':{'implementation':['src/start.py']},
+            'expected_statuses':['partial'],'required_stages':['implementation']}],
+    }),encoding='utf-8')
+    assert main(['graph','workflow-benchmark','--repo-id','main','--case-id','no-refresh',
+        '--fixture',str(fixture),'--verify-refresh','--json'])==2
+    output=_payload(capsys)
+    assert output['problems'][0]['code']=='graph_benchmark_refresh_not_required'
+
+
+def test_explicit_dart_refresh_proves_change_without_fabricating_provider_precision(tmp_path,monkeypatch,capsys) -> None:
+    repo=_workspace(tmp_path,monkeypatch)
+    _write(repo,'README.txt','initial inventory\n')
+    _materialize(tmp_path)
+    _write(repo,'lib/main.dart','void main() {}\n')
+    fixture=tmp_path/'dart-refresh.json'
+    fixture.write_text(json.dumps({
+        'schema':'repoctl.graph.workflow-benchmark',
+        'cases':[{'id':'dart-current-rebuild','repo_id':'main',
+            'selector':{'symbol':'main','in_file':'lib/main.dart'},
+            'expected_paths':{'current_source':['lib/main.dart'],'implementation':['lib/main.dart']},
+            'expected_statuses':['partial'],
+            'required_stages':['current_source','refresh','implementation']}],
+    }),encoding='utf-8')
+    args=['graph','workflow-benchmark','--case-id','dart-current-rebuild',
+          '--fixture',str(fixture),'--repo-id','main','--verify-refresh','--json']
+    code=main(args)
+    data=_payload(capsys)['data']
+    assert data['refresh']['source_rechecked'] is True
+    assert data['freshness']['status']=='current'
+    assert data['benchmark']['required_stages']['refresh']['precise'] is True
+    implementation_status=data['benchmark']['required_stages']['implementation']['precise']
+    assert data['benchmark']['task_navigation_complete'] == implementation_status
+    assert code==(0 if implementation_status else 1)
