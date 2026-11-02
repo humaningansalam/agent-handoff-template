@@ -185,7 +185,7 @@ def parse_provider_semantics(
             raise ProviderOutputError("call anchor is outside the eligible analysis set")
         if caller not in symbol_ids or callee not in symbol_ids or language not in allowed_languages:
             raise ProviderOutputError("call identity is unbound or uses an unsupported language")
-        if scope not in {"same_file", "cross_file_import"}:
+        if scope not in {"same_file", "cross_file_import", "same_package"}:
             raise ProviderOutputError("call scope is missing or unsupported")
         key = (caller, callee, anchor.start_line, anchor.start_col)
         if key in seen:

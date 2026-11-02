@@ -824,8 +824,8 @@ def build_graph(
                 )
             )
 
-    # A tree-sitter Rust `mod name;` with one existing sibling module is a
-    # typed, source-anchored relation, unlike a lexical name coincidence.
+    # Exact AST-proven Rust module declarations and Java/Kotlin type imports
+    # are source-anchored edges, not lexical file-name coincidences.
     # Provider cache validates this tool payload as part of its source digest.
     for result in semantic_results:
         if result.provider != "tree_sitter_structural":
@@ -841,14 +841,19 @@ def build_graph(
             if (not from_path or not to_path or from_path == to_path or
                 from_node not in nodes or to_node not in nodes):
                 continue
+            match_kind = str(relation.get("kind") or "")
+            if match_kind not in {
+                "rust_mod_declaration", "java_exact_type_import", "kotlin_exact_type_import",
+            }:
+                continue
             add_edge(GraphEdge(
                 "IMPORTS_FILE", from_node, to_node, "resolved", result.provider,
-                {"match_kind": "rust_mod_declaration", "anchor": relation.get("anchor", {})},
+                {"match_kind": match_kind, "anchor": relation.get("anchor", {})},
             ))
             if is_test_path(from_path) and not is_test_path(to_path):
                 add_edge(GraphEdge(
                     "TESTS_FILE", from_node, to_node, "resolved", result.provider,
-                    {"evidence_type": "rust_mod_declared_by_test", "confidence": "high"},
+                    {"evidence_type": "exact_structural_import_by_test", "match_kind": match_kind, "confidence": "high"},
                 ))
 
     parse_error_count = int(summary.get("parse_error") or 0)

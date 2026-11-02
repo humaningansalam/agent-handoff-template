@@ -92,6 +92,104 @@ def _called_names(function: ast.AST) -> set[tuple[str, str]]:
     return calls
 
 
+def _python_test_exercises_operation(source: str, *, method: str, route: str) -> bool:
+    """Require a direct operation call inside a Python test; imports alone do not prove coverage."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    for test in ast.walk(tree):
+        if not isinstance(test, (ast.FunctionDef, ast.AsyncFunctionDef)) or not test.name.startswith("test_"):
+            continue
+        for node in ast.walk(test):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr == method:
+                return True
+            if (node.func.attr in {"get", "post", "put", "patch", "delete"}
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == route):
+                return True
+    return False
+
+
+def _flask_factory_attribute_wiring(
+    paths: list[str], source_read: Any, *, route_path: str, implementation_path: str,
+    receiver: str, method: str, blueprint_export: str, implementation_class: str,
+) -> dict[str, Any] | None:
+    """Verify an app factory's *source wiring*, not runtime type dispatch.
+
+    Flask's `current_app` is dynamic. Only report a current-source path when a
+    factory explicitly imports the expected implementation and blueprint,
+    constructs and assigns `app.<route_receiver_attribute>`, and registers the blueprint. This is a
+    useful work-path link, not a compiler-confirmed CALLS edge.
+    """
+    if (not receiver.startswith("current_app.") or receiver.count(".") != 1
+            or not implementation_path.endswith(".py") or not blueprint_export
+            or not implementation_class.isidentifier()):
+        return None
+    receiver_attribute = receiver.partition(".")[2]
+    if not receiver_attribute.isidentifier():
+        return None
+    manager_module = implementation_path[:-3].replace("/", ".")
+    blueprint_module = route_path[:-3].replace("/", ".")
+    for candidate in paths:
+        if not candidate.endswith(("/main.py", "/app.py", "/factory.py")):
+            continue
+        source = source_read(candidate)
+        if not source or receiver_attribute not in source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            continue
+        manager_names = {
+            alias.asname or alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == manager_module
+            for alias in node.names if alias.name == implementation_class
+        }
+        blueprint_names = {
+            alias.asname or alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == blueprint_module
+            for alias in node.names if alias.name == blueprint_export
+        }
+        if not manager_names or not blueprint_names:
+            continue
+        # These operations must happen inside the *same* app factory.
+        # Merely finding an assignment and an unrelated blueprint registration
+        # in two different functions is insufficient even for source wiring.
+        for factory in tree.body:
+            if not isinstance(factory, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            statements = [child for node in factory.body for child in ast.walk(node)]
+            factory_assignments = [
+                node for node in statements
+                if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name) and target.value.id == "app"
+                        and target.attr == receiver_attribute for target in node.targets)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id in manager_names
+            ]
+            registrations = [
+                node for node in statements
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "app" and node.func.attr == "register_blueprint"
+                and node.args and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in blueprint_names
+            ]
+            if factory_assignments and registrations:
+                return {
+                    "path": candidate,
+                    "line": factory_assignments[0].lineno,
+                    "evidence": "AST-verified Flask factory imported implementation, attribute assignment and blueprint registration; runtime dispatch unconfirmed",
+                    "method": method,
+                }
+    return None
+
+
 def _entry(path: str, *, relation: str, evidence: str, symbol: str = "", line: int = 0) -> dict[str, Any]:
     item: dict[str, Any] = {"path": path, "relation": relation, "evidence": evidence}
     if symbol:
@@ -246,8 +344,31 @@ def query_graph_workflow(
                 if len(matches) == 1:
                     sid, info = matches[0]
                     chosen_symbol_ids.add(sid)
-                    implementations.append(_entry(info["path"], relation="candidate", evidence="unresolved attribute call in route handler", symbol=info["name"]))
-                    links.append({"from": path, "to": info["path"], "relation": "candidate", "evidence": "unresolved attribute call"})
+                    blueprint_export = next((
+                        decorator.func.value.id
+                        for decorator in func.decorator_list
+                        if isinstance(decorator, ast.Call)
+                        and isinstance(decorator.func, ast.Attribute)
+                        and decorator.func.attr in _ROUTE_METHODS
+                        and isinstance(decorator.func.value, ast.Name)
+                    ), "")
+                    wiring = _flask_factory_attribute_wiring(
+                        bounded_files, source_read, route_path=path,
+                        implementation_path=info["path"], receiver=receiver,
+                        method=method, blueprint_export=blueprint_export,
+                        implementation_class=info["name"].split(".", 1)[0],
+                    )
+                    if wiring:
+                        implementations.append(_entry(
+                            info["path"], relation="source", evidence=wiring["evidence"], symbol=info["name"],
+                        ))
+                        links.extend([
+                            {"from": path, "to": wiring["path"], "relation": "source", "evidence": "Flask blueprint registration"},
+                            {"from": wiring["path"], "to": info["path"], "relation": "source", "evidence": "Imported implementation constructed and assigned to current_app receiver property", "line": wiring["line"]},
+                        ])
+                    else:
+                        implementations.append(_entry(info["path"], relation="candidate", evidence="unresolved attribute call in route handler", symbol=info["name"]))
+                        links.append({"from": path, "to": info["path"], "relation": "candidate", "evidence": "unresolved attribute call"})
     else:
         matches = [
             (sid, info) for sid, info in symbols.items()
@@ -354,11 +475,70 @@ def query_graph_workflow(
                 dependents.append(_entry(from_path, relation="confirmed", evidence="CALLS"))
         if edge.kind == "IMPORTS_FILE" and to_path in selected_files and from_path not in selected_files:
             if is_test_path(from_path):
+                if route and from_path.endswith(".py") and not _python_test_exercises_operation(
+                    source_read(from_path), method=route.strip("/").split("/")[-1], route=route,
+                ):
+                    continue
                 tests.append(_entry(from_path, relation="confirmed", evidence="IMPORTS_FILE"))
             else:
                 dependents.append(_entry(from_path, relation="confirmed", evidence="IMPORTS_FILE"))
         if edge.kind == "TESTS_FILE" and to_path in selected_files:
+            if route and from_path.endswith(".py") and not _python_test_exercises_operation(
+                source_read(from_path), method=route.strip("/").split("/")[-1], route=route,
+            ):
+                continue
             tests.append(_entry(from_path, relation="confirmed", evidence="TESTS_FILE"))
+    # Rust often embeds tests inside a production `lib.rs` rather than a
+    # separate tests/ file. A named #[test] function mentioning this exact
+    # component is useful *candidate* navigation, not a typed tested-by edge.
+    # Keep this independent of symbol lookup: a confirmed Rust `mod` import
+    # must not hide valid embedded test locations.
+    if symbol and any(item["path"].endswith(".rs") for item in implementations):
+        component = symbol.rsplit(".", 1)[-1]
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", component):
+            token = re.compile(r"(?<![A-Za-z0-9])" + re.escape(component) + r"(?![A-Za-z0-9])")
+            rust_test = re.compile(
+                r"(?m)#\[(?:[A-Za-z_][A-Za-z0-9_]*::)?test\]"
+                r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+            )
+            for candidate in bounded_files:
+                if not candidate.endswith(".rs") or candidate in stale:
+                    continue
+                content = source_read(candidate)
+                for found in rust_test.finditer(content):
+                    if not token.search(found.group(1)):
+                        continue
+                    tests.append(_entry(
+                        candidate, relation="candidate",
+                        evidence="Rust embedded #[test] name references component; test relation unconfirmed",
+                        symbol=found.group(1),
+                        line=content.count("\n", 0, found.start()) + 1,
+                    ))
+                    break
+
+    # A Dart test imports the owning library, which can include another
+    # physical file through a verified `part`/`part of` declaration. The
+    # two-hop test -> library -> part path is typed source evidence rather
+    # than a similar basename guess; do not claim individual assertions ran.
+    dart_part_owners: set[str] = set()
+    for edge in snapshot.edges:
+        if edge.kind != "IMPORTS_FILE" or edge.facts.get("match_kind") != "dart_part_directive":
+            continue
+        owner_node, part_node = nodes.get(edge.from_id), nodes.get(edge.to_id)
+        owner_path = str(owner_node.identity.get("path") or "") if owner_node else ""
+        part_path = str(part_node.identity.get("path") or "") if part_node else ""
+        if part_path in selected_files and owner_path and owner_path not in stale and part_path not in stale:
+            dart_part_owners.add(owner_path)
+    if dart_part_owners:
+        for edge in snapshot.edges:
+            if edge.kind != "TESTS_FILE":
+                continue
+            test_node, owner_node = nodes.get(edge.from_id), nodes.get(edge.to_id)
+            test_path = str(test_node.identity.get("path") or "") if test_node else ""
+            owner_path = str(owner_node.identity.get("path") or "") if owner_node else ""
+            if test_path and test_path not in stale and owner_path in dart_part_owners and is_test_path(test_path):
+                tests.append(_entry(test_path, relation="confirmed", evidence="TESTS_FILE through exact Dart library/part chain"))
+
     # Name-nearby test modules are navigation candidates, not confirmed
     # TESTS_FILE relations (particularly when the snapshot is stale).
     for item in implementations:
@@ -400,6 +580,8 @@ def query_graph_workflow(
         ]
         for path in direct_test_paths:
             text = source_read(path)
+            if not _python_test_exercises_operation(text, method=route_stem, route=route):
+                continue
             if route in text:
                 tests.append(_entry(path, relation="candidate", evidence="HTTP route literal in current test source"))
             elif implementation_stems and text and any(stem in Path(path).stem for stem in implementation_stems):
@@ -469,7 +651,8 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
     for stage in sorted(expected):
         values = expected[stage]
         expected_paths = sorted({str(value) for value in values if isinstance(value, str) and value}) if isinstance(values, list) else []
-        observations = [entry for entry in stages.get(stage, []) if isinstance(entry, dict)]
+        stage_key = aliases.get(stage, stage)
+        observations = [entry for entry in stages.get(stage_key, []) if isinstance(entry, dict)]
         matches = {str(entry.get("path") or ""): entry for entry in observations if entry.get("path")}
         hit_paths = sorted(set(expected_paths) & set(matches))
         confirmed_paths = sorted(
@@ -507,7 +690,7 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
             evidence = refresh_proof.get("source_rechecked") is True and refresh_proof.get("status") == "current"
             required_details[requested] = {"status": "verified" if evidence else "not_evaluated", "covered": evidence, "precise": evidence}
             continue
-        row = metrics.get(stage)
+        row = metrics.get(requested) or metrics.get(stage)
         if not row or row["expected_count"] == 0:
             required_details[requested] = {"status": "unscored_no_ground_truth", "covered": False, "precise": False}
             continue

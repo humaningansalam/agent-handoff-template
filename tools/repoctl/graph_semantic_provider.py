@@ -27,7 +27,7 @@ PROVIDER_INPUT_VERSIONS = {
     "typescript_compiler": 3,
     "dart_analyzer": 3,
     "csharp_roslyn": 2,
-    "tree_sitter_structural": 2,
+    "tree_sitter_structural": 3,
 }
 
 
