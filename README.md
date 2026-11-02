@@ -134,7 +134,7 @@ Most work needs only its archived Task. Save Knowledge when a decision, invarian
   --json
 ```
 
-Saving the record completes the action. `knowledge query` and Graph evidence searches can read it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files; legacy records require a one-time explicit conversion; runtime reads only the latest schema. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
+Saving the record completes the action. `knowledge query` and Graph evidence searches can read it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files; legacy records require an explicit one-time source-preserving conversion; normal query reads only v2, and referenced v1 original bytes are never rewritten. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
 
 When the reusable conclusion is ready during closeout, the corresponding `task finish --knowledge-kind --knowledge-claim --knowledge-reason` options save it atomically with task completion.
 

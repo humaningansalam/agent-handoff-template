@@ -25,7 +25,7 @@ def _out(capsys):
     return json.loads(capsys.readouterr().out)
 
 
-def test_one_time_migration_in_place_preserves_id_original_and_source(tmp_path, monkeypatch, capsys):
+def test_one_time_migration_preserves_original_source_and_creates_v2(tmp_path, monkeypatch, capsys):
     _setup_knowledge_workspace(tmp_path, monkeypatch)
     name = 'K-20260609184045Z--idempotence'
     source = 'docs/contracts/repoctl-evidence-contract.md'
@@ -33,21 +33,26 @@ def test_one_time_migration_in_place_preserves_id_original_and_source(tmp_path, 
     original = path.read_bytes()
     assert main(['knowledge','migrate','--repo-id','main','--json'])==0
     dry=_out(capsys)
-    assert dry['data']['records'][0]['status']=='convert_in_place'
+    assert dry['data']['records'][0]['status']=='create_v2'
     assert path.read_bytes()==original
     assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
     data=_out(capsys)
     assert data['data']['applied_count']==1
-    record=json.loads(path.read_text())
-    assert record['id']==name and record['schema_version']==2
+    assert path.read_bytes()==original
+    destination=data['data']['records'][0]['destination_id']
+    assert destination != name
+    record=json.loads((tmp_path/f'docs/knowledge/records/{destination}.json').read_text())
+    assert record['id']==destination and record['schema_version']==2
     assert record['reason']=='Duplicate notification would charge the account twice.'
     assert record['source_refs'][0]['path']==source
     witness=tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name
     assert (witness/'original.json').read_bytes()==original
     assert main(['knowledge','query','durable keys','--repo-id','main','--json'])==0
-    assert _out(capsys)['data']['results'][0]['record']['id']==name
+    assert _out(capsys)['data']['results'][0]['record']['id']==destination
     assert main(['knowledge','migrate','--repo-id','main','--json'])==0
-    assert _out(capsys)['data']['record_count']==0
+    assert _out(capsys)['data']['records'][0]['status']=='already_preserved'
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    assert _out(capsys)['data']['legacy_record_count']==0
 
 
 def test_missing_reason_or_source_requires_real_verified_input(tmp_path,monkeypatch,capsys):
@@ -63,10 +68,11 @@ def test_missing_reason_or_source_requires_real_verified_input(tmp_path,monkeypa
                  '--reason','Retries can repeat side effects.',
                  '--source','docs/contracts/repoctl-evidence-contract.md','--apply','--json'])==0
     assert _out(capsys)['data']['applied_count']==1
-    assert json.loads(path.read_text())['schema_version']==2
+    assert path.read_bytes()==original
+    assert any(json.loads(f.read_text()).get('schema_version')==2 for f in (tmp_path/'docs/knowledge/records').glob('K-*.json'))
 
 
-def test_equal_existing_current_collapses_only_without_historical_references(tmp_path,monkeypatch,capsys):
+def test_equivalent_current_keeps_legacy_original_as_historical_source(tmp_path,monkeypatch,capsys):
     _setup_knowledge_workspace(tmp_path, monkeypatch)
     current=_add_knowledge_source(capsys, claim='Keep durable keys on every retry.')['data']['record']
     name='K-20260609184045Z--equivalent'
@@ -75,7 +81,7 @@ def test_equal_existing_current_collapses_only_without_historical_references(tmp
     assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
     data=_out(capsys)
     assert data['data']['records'][0]['destination_id']==current['id']
-    assert not path.exists()
+    assert path.read_bytes()==original
     assert (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'original.json').read_bytes()==original
 
 
@@ -111,11 +117,15 @@ def test_equivalent_current_record_referencing_legacy_id_needs_review(tmp_path, 
     body['replaces']=[name]
     body['record_digest']=_knowledge_record_digest(body)
     curpath.write_text(json.dumps(body,sort_keys=True,indent=2)+'\n')
-    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--json'])==1
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--json'])==0
     output=_out(capsys)
-    assert output['data']['records'][0]['status']=='needs_reference_review'
-    assert curpath.relative_to(tmp_path).as_posix() in output['data']['records'][0]['references']
+    assert output['data']['records'][0]['status']=='reuse_existing_v2'
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
+    applied=_out(capsys)
+    assert applied['data']['records'][0]['status']=='applied_reuse_existing_v2'
     assert legacy.is_file()
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    assert _out(capsys)['data']['legacy_record_count']==0
 
 
 def test_different_current_claim_citing_legacy_original_blocks_in_place_mutation(tmp_path, monkeypatch, capsys):
@@ -142,13 +152,61 @@ def test_different_current_claim_citing_legacy_original_blocks_in_place_mutation
     existing = _out(capsys)['data']['record']
     source_ref = next(x for x in existing['source_refs'] if x['path'].endswith(name + '.json'))
     assert source_ref['content_sha256'] == _sha256_text(before.decode('utf-8'))
-    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--json']) == 1
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--json']) == 0
     preview = _out(capsys)['data']['records'][0]
-    assert preview['status'] == 'needs_reference_review'
-    assert f'docs/knowledge/records/{existing["id"]}.json' in preview['references']
-    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json']) == 1
+    assert preview['status'] == 'create_v2'
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json']) == 0
     applied = _out(capsys)
-    assert applied['data']['applied_count'] == 0
+    assert applied['data']['applied_count'] == 1
+    assert applied['data']['records'][0]['destination_id'] != name
     assert legacy.read_bytes() == before
     assert source_ref['content_sha256'] == _sha256_text(legacy.read_text())
-    assert not (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'original.json').exists()
+    assert (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'original.json').read_bytes() == before
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    checked=_out(capsys)
+    assert checked['data']['legacy_record_count'] == 0
+    assert not any(p['code']=='knowledge_source_changed' for p in checked['problems'])
+
+
+def test_tampered_preservation_proof_restores_migration_warning(tmp_path, monkeypatch, capsys) -> None:
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--proof-tamper'
+    path = _legacy(tmp_path, name, reason='Actual retry loop was observed.',
+                   sources=['docs/contracts/repoctl-evidence-contract.md'])
+    original = path.read_bytes()
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
+    _out(capsys)
+    proof=tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'migration.json'
+    before=json.loads(proof.read_text())
+    before['legacy_sha256']='sha256:'+'0'*64
+    proof.write_text(json.dumps(before)+'\n')
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    result=_out(capsys)
+    assert result['data']['legacy_record_count']==1
+    assert any(p['code']=='knowledge_record_migration_required' for p in result['problems'])
+    assert path.read_bytes()==original
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==1
+    assert _out(capsys)['data']['records'][0]['status']=='needs_proof_review'
+
+
+def test_migration_projection_rebuild_failure_is_not_reported_as_success(tmp_path, monkeypatch, capsys) -> None:
+    from tools.repoctl.tasks import Problem
+    from tools.repoctl import knowledge_migration
+
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--projection-failure'
+    path = _legacy(tmp_path, name, reason='A concrete saved explanation.',
+                   sources=['docs/contracts/repoctl-evidence-contract.md'])
+    original = path.read_bytes()
+    monkeypatch.setattr(
+        knowledge_migration, 'rebuild_knowledge_projection',
+        lambda *a, **k: ({}, [Problem('error','knowledge_projection_unavailable','simulated rebuild failure')]),
+    )
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json']) == 1
+    output = _out(capsys)
+    assert output['ok'] is False
+    assert output['data']['applied_count'] == 1
+    assert any(problem['code']=='knowledge_migration_projection_rebuild_failed' for problem in output['problems'])
+    assert path.read_bytes() == original
+    assert main(['knowledge','check','--repo-id','main','--json']) == 0
+    assert _out(capsys)['data']['legacy_record_count'] == 0

@@ -9,4 +9,4 @@ Use `TEMPLATE.md` when creating a new workflow.
 
 This common package does not prescribe agent roles, model or provider choices, team hierarchy, or external process orchestration. Keep those concerns in adopter-specific tooling and configuration.
 
-- [v0.14.0 one-time adopter transition](v0.14-rollout.md) — only the designated rollout owner applies this after source release
+- [v0.14.1 one-time adopter transition](v0.14-rollout.md) — only the designated rollout owner applies this after source release

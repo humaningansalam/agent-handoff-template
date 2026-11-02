@@ -285,3 +285,18 @@ def test_generated_knowledge_views_are_ignored_and_records_are_not_ignored() -> 
         check=False,
     )
     assert records.returncode == 1, records.stdout
+
+
+def test_current_manifest_preserves_adopter_authored_entry_docs_and_local_config() -> None:
+    root = next(parent for parent in Path(__file__).resolve().parents if (parent / 'repoctl-upgrade-manifest.json').is_file())
+    manifest = json.loads((root / 'repoctl-upgrade-manifest.json').read_text(encoding='utf-8'))
+    for path in (
+        'README.md','docs/README.md','docs/tasks/README.md','docs/knowledge/README.md',
+        'docs/archive/README.md','.gitignore','.ignore','CLAUDE.md',
+        '.claude/settings.json','.cursor/rules/00-agent-os.mdc',
+        '.devcontainer/Dockerfile','.devcontainer/devcontainer.json',
+    ):
+        assert path in manifest['create_paths'], path
+        assert path not in manifest['replace_paths'], path
+    assert 'tools/repoctl/knowledge_migration.py' in manifest['replace_paths']
+    assert 'tools/repoctl/graph_tree_sitter_provider.py' in manifest['replace_paths']

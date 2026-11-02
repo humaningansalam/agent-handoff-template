@@ -5841,15 +5841,24 @@ def cmd_knowledge_migrate(args: argparse.Namespace) -> int:
         sources_override=list(args.source or []),
     )
     pending = [item for item in result["records"] if item["status"].startswith("needs_")]
+    projection_errors = list(result.get("projection_problems") or [])
     payload = {
-        "ok": not pending,
+        "ok": not pending and not projection_errors,
         "command": "knowledge.migrate",
         "data": result,
-        "problems": [{
-            "severity": "warning", "code": "knowledge_migration_unresolved",
-            "message": item.get("explanation", "Knowledge record needs explicit review"),
-            "path": item["path"],
-        } for item in pending],
+        "problems": [
+            *[{
+                "severity": "warning", "code": "knowledge_migration_unresolved",
+                "message": item.get("explanation", "Knowledge record needs explicit review"),
+                "path": item["path"],
+            } for item in pending],
+            *[{
+                "severity": "error", "code": "knowledge_migration_projection_rebuild_failed",
+                "cause_code": code,
+                "message": "Original Knowledge evidence was preserved, but the derived projection did not rebuild; run knowledge rebuild",
+                "path": "",
+            } for code in projection_errors],
+        ],
         "warnings": [],
     }
     if args.json:
@@ -5858,7 +5867,7 @@ def cmd_knowledge_migrate(args: argparse.Namespace) -> int:
         print(f"knowledge migrate: mode={result['mode']} processed={result['record_count']} applied={result['applied_count']} unresolved={len(pending)}")
         for item in pending:
             print(f"- {item['id']}: {item.get('explanation', '')}")
-    return 0 if not pending and not result.get("projection_problems") else 1
+    return 0 if payload["ok"] else 1
 
 
 def cmd_knowledge_query(args: argparse.Namespace) -> int:

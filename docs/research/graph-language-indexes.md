@@ -17,3 +17,7 @@ The release reuses current confirmed Graph symbols, CALLS, IMPORTS_FILE, and TES
 ## Validated native-adapter scope (v0.14)
 
 The optional `tree-sitter-language-pack` adapter is implemented rather than only proposed. It supplies bounded, source-ranged syntax definitions, unique same-file unqualified call edges and Rust `mod` declarations, across Rust/Go/Java/Kotlin/Swift. It deliberately omits unproved cross-file dynamic/type-dispatched calls. Kinport's three real Rust source files exposed a segfault in recursive native `Node`/`Point` traversal; iterative indexed child walking and byte-offset line conversion resolve this case, with a large-source regression fixture. LSP and SCIP remain evaluated future adapter options, not installed runtime prerequisites. Compiler-grade precision is not claimed for languages without a verified compiler provider.
+
+## v0.14.1 false-positive controls
+
+Structural parsing is not type resolution: a same-name Rust/Go closure or parameter can shadow a global function, and an unqualified call may not target an unrelated `impl`/receiver method or a Java class's method. The v0.14.1 provider excludes these from confirmed CALLS and retains partial coverage rather than inferring a dispatch target. More complete language-level dispatch still requires a type-aware provider.

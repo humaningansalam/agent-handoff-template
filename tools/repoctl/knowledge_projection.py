@@ -72,7 +72,12 @@ def rebuild_knowledge_projection(
         for record_id in _record_supersedes(record)
     }
     known_ids = {str(record.get("id") or "") for record in records}
-    missing = sorted(superseded_ids - known_ids)
+    from .knowledge_migration import verified_preserved_legacy_ids
+
+    historical_ids = verified_preserved_legacy_ids(
+        root, repo_id=repo_id, ids=superseded_ids - known_ids,
+    )
+    missing = sorted(superseded_ids - known_ids - historical_ids)
     if missing:
         destination.unlink(missing_ok=True)
         return {}, [
@@ -88,7 +93,7 @@ def rebuild_knowledge_projection(
         checkpoint=checkpoint,
         lifecycle_counts={
             "current": len(heads),
-            "superseded": len(superseded_ids),
+            "superseded": len(superseded_ids & known_ids),
         },
     )
     atomic_write(destination, _json_text(data))
