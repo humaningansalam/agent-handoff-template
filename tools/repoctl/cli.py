@@ -4681,9 +4681,84 @@ def cmd_graph_workflow_benchmark(args: argparse.Namespace) -> int:
         _json(payload) if args.json else print("Graph freshness unavailable")
         return 1
     selector = case["selector"]
+    refresh_evidence: dict[str, Any] | None = None
+    if getattr(args, "verify_refresh", False):
+        if "refresh" not in (case.get("required_stages") or []):
+            raise RepoctlError(
+                "--verify-refresh requires an explicitly expected refresh stage",
+                code="graph_benchmark_refresh_not_required",
+            )
+        selector_file = str(selector.get("in_file") or "")
+        before_status = str(freshness.get("status") or "unknown")
+        changed_paths = {
+            str(path) for path in (freshness.get("changed_paths") or [])
+            if isinstance(path, str)
+        }
+        stale_paths = {
+            str(path) for path in (freshness.get("stale_paths") or [])
+            if isinstance(path, str)
+        }
+        source_changed = bool(
+            selector_file and (selector_file in changed_paths or selector_file in stale_paths)
+        )
+        before_digest = snapshot.snapshot_digest
+        refresh_evidence = {
+            "status": "not_evaluated",
+            "source_rechecked": False,
+            "source_path": selector_file,
+            "before_status": before_status,
+            "before_snapshot_digest": before_digest,
+            "mutates_derived_graph_only": False,
+        }
+        if before_status == "stale" and source_changed:
+            # This flag explicitly rebuilds only the selected workspace's
+            # ignored derived Graph cache; product source remains read-only.
+            rebuilt, rebuild_problems, rebuild_meta = materialize_graph(
+                root, target=target, rebuild=True,
+            )
+            refresh_evidence["mutates_derived_graph_only"] = True
+            fatal_rebuild = [p for p in rebuild_problems if p.severity == "error"]
+            if rebuilt is None or fatal_rebuild:
+                payload = {
+                    "ok": False, "command": "graph.workflow-benchmark",
+                    "data": {"case_id": args.case_id, "refresh": refresh_evidence},
+                    "problems": [p.to_dict() for p in fatal_rebuild] or [{
+                        "code": "graph_benchmark_refresh_failed",
+                        "message": "explicit Graph rebuild did not produce a valid snapshot",
+                    }], "warnings": [],
+                }
+                _json(payload) if args.json else print("Graph refresh failed")
+                return 1
+            after_fresh, after_problems = graph_materialization_freshness(
+                root, target=target, snapshot=rebuilt,
+            )
+            if any(p.severity == "error" for p in after_problems):
+                payload = {
+                    "ok": False, "command": "graph.workflow-benchmark",
+                    "data": {"case_id": args.case_id, "refresh": refresh_evidence},
+                    "problems": [p.to_dict() for p in after_problems if p.severity == "error"],
+                    "warnings": [],
+                }
+                _json(payload) if args.json else print("Graph refresh verification failed")
+                return 1
+            verified = bool(
+                str(after_fresh.get("status") or "") == "current"
+                and rebuilt.snapshot_digest != before_digest
+                and source_changed
+            )
+            refresh_evidence.update({
+                "status": "current" if verified else "not_verified",
+                "source_rechecked": verified,
+                "after_status": str(after_fresh.get("status") or "unknown"),
+                "after_snapshot_digest": rebuilt.snapshot_digest,
+                "changed_source_paths": sorted(changed_paths),
+            })
+            snapshot, freshness, meta = rebuilt, after_fresh, rebuild_meta
     result = query_graph_workflow(snapshot, root=root, target=target, route=str(selector.get("route") or ""),
                                   symbol=str(selector.get("symbol") or ""), in_file=str(selector.get("in_file") or ""),
                                   freshness=freshness)
+    if refresh_evidence is not None:
+        result["refresh"] = refresh_evidence
     measurement = evaluate_workflow_benchmark(result, case)
     min_recall = args.min_path_recall
     gated = min_recall is not None
@@ -4692,7 +4767,8 @@ def cmd_graph_workflow_benchmark(args: argparse.Namespace) -> int:
         "ok": bool(passed and measurement["status_expected"]),
         "command": "graph.workflow-benchmark",
         "data": {"benchmark": measurement, "repository": target.to_dict(),
-                 "freshness": compact_graph_freshness(freshness), "materialization": meta.get("materialization", {})},
+                 "freshness": compact_graph_freshness(freshness), "materialization": meta.get("materialization", {}),
+                 "refresh": refresh_evidence},
         "problems": ([] if passed and measurement["status_expected"] else [{
             "code": "graph_workflow_benchmark_missed_expected_paths",
             "message": "required stage, precision, first anchor, or recall has not met the work-path fixture",
@@ -6870,6 +6946,10 @@ def build_parser() -> argparse.ArgumentParser:
     graph_benchmark.add_argument("--case-id", required=True)
     graph_benchmark.add_argument("--repo-id", default=None)
     graph_benchmark.add_argument("--min-path-recall", type=float, default=None)
+    graph_benchmark.add_argument(
+        "--verify-refresh", action="store_true",
+        help="explicitly rebuild the selected workspace's derived Graph cache from stale source, then verify the exact before/after snapshot; does not modify product files",
+    )
     graph_benchmark.add_argument("--json", action="store_true")
     graph_benchmark.set_defaults(func=cmd_graph_workflow_benchmark)
     graph_query = graph_sub.add_parser("query")

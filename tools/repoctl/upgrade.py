@@ -459,7 +459,39 @@ def _existing_locator_binding(root: Path, task_id: str) -> tuple[str, str, str, 
         raise RepoctlError("archive locator is unreadable", code="archive_locator_migration_conflict", path=rel) from exc
     except ValueError as exc:
         raise RepoctlError("archive locator conflicts with archived task authority", code="archive_locator_migration_conflict", path=rel) from exc
-    archive_path = _assert_contained_path(root, archive_rel, code="archive_locator_migration_conflict", require_file=True)
+    archive_path = _assert_contained_path(root, archive_rel, code="archive_locator_migration_conflict")
+    if not archive_path.is_file():
+        # The locator is historical evidence, not permission to create a
+        # replacement Task. An existing completion receipt may show an exact
+        # expected digest, but without the archived bytes it is *not* a
+        # validated completion authority and cannot unblock upgrade.
+        receipt_rel = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
+        receipt_path = _assert_contained_path(root, receipt_rel, code="archive_locator_migration_conflict")
+        digest_hint = ""
+        if receipt_path.is_file() and not receipt_path.is_symlink():
+            try:
+                if receipt_path.stat().st_size <= 128 * 1024:
+                    claim = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    if (
+                        isinstance(claim, dict)
+                        and claim.get("schema") == "repoctl.task.completion"
+                        and claim.get("task_id") == task_id
+                        and claim.get("task_path_at_completion") == archive_rel
+                        and _is_sha256_digest(claim.get("content_sha256"))
+                    ):
+                        digest_hint = (
+                            "; existing completion receipt CLAIMS original SHA-256 "
+                            + str(claim["content_sha256"])
+                            + " (unverified until the exact archived bytes are restored)"
+                        )
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                pass
+        raise RepoctlError(
+            "archive locator refers to a missing historical Task; restore the exact original "
+            "from a trusted backup, then rerun read-only upgrade plan; never invent a Task "
+            "or rewrite a completion receipt" + digest_hint,
+            code="archive_locator_migration_conflict", path=archive_rel,
+        )
     validated_rel, archive_digest = _valid_archive_authority(archive_path, root, task_id)
     return "current", validated_rel, archive_digest, _sha256(_hash_bytes(text.encode("utf-8")))
 

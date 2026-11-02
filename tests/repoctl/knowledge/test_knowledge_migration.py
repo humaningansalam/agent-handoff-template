@@ -210,3 +210,166 @@ def test_migration_projection_rebuild_failure_is_not_reported_as_success(tmp_pat
     assert path.read_bytes() == original
     assert main(['knowledge','check','--repo-id','main','--json']) == 0
     assert _out(capsys)['data']['legacy_record_count'] == 0
+
+
+def test_existing_v2_exactly_citing_v1_claim_can_preserve_stale_historical_source(tmp_path, monkeypatch, capsys) -> None:
+    """Real Bible Simple shape: old archived Task digest drift; v2 cites intact v1.
+
+    This validates a pre-existing successor's own human-recorded reason rather
+    than rebinding v1 provenance or inventing a reason for an old artifact.
+    """
+    from tools.repoctl.knowledge_migration import preserved_legacy_migration_witness
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    old_id='K-20260609184045Z--legacy-source-changed'
+    old=_legacy(tmp_path,old_id)
+    body=json.loads(old.read_text())
+    body['summary']='Old invariant was recorded before archive reorganization.'
+    body['source_refs']=[{
+        'path':'docs/archive/tasks/T-20260609120000Z--historical-task.md',
+        'content_sha256':'sha256:'+'0'*64,
+    }]
+    old.write_text(json.dumps(body,indent=2,sort_keys=True)+'\n')
+    unchanged=old.read_bytes()
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+        '--claim',body['claim'],'--reason','A later verified incident makes this rule explicit.',
+        '--source',f'docs/knowledge/records/{old_id}.json','--json'])==0
+    current=_out(capsys)['data']['record']
+    assert current['id']!=old_id
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--json'])==0
+    preview=_out(capsys)['data']['records'][0]
+    assert preview['status']=='link_cited_current_v2'
+    assert preview['destination_id']==current['id']
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--apply','--json'])==0
+    applied=_out(capsys)['data']
+    assert applied['records'][0]['status']=='applied_link_cited_current_v2'
+    assert applied['projection_problems']==[]
+    assert old.read_bytes()==unchanged
+    assert preserved_legacy_migration_witness(tmp_path,json.loads(old.read_text()))
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    checked=_out(capsys)['data']
+    assert checked['legacy_record_count']==0
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--json'])==0
+    assert _out(capsys)['data']['records'][0]['status']=='already_preserved'
+    witness=tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/old_id/'original.json'
+    assert witness.read_bytes()==unchanged
+
+
+def test_multiple_current_v2_citing_old_claim_does_not_pick_arbitrary_successor(tmp_path,monkeypatch,capsys) -> None:
+    _setup_knowledge_workspace(tmp_path,monkeypatch)
+    old_id='K-20260609184045Z--ambiguous-history'
+    old=_legacy(tmp_path,old_id)
+    for index in (1,2):
+        assert main(['knowledge','add','--repo-id','main','--kind','decision',
+            '--claim','Keep durable keys on every retry.',
+            '--reason',f'Distinct evidence-backed reason {index}.',
+            '--source',f'docs/knowledge/records/{old_id}.json','--json'])==0
+        _out(capsys)
+    unchanged=old.read_bytes()
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--apply','--json'])==1
+    result=_out(capsys)['data']
+    assert result['records'][0]['status']=='needs_equivalence_review'
+    assert result['applied_count']==0
+    assert old.read_bytes()==unchanged
+    assert not (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/old_id/'migration.json').exists()
+
+
+def test_linked_v2_source_digest_mismatch_never_suppresses_legacy_warning(tmp_path,monkeypatch,capsys) -> None:
+    from tools.repoctl.knowledge_records import _knowledge_record_digest
+    _setup_knowledge_workspace(tmp_path,monkeypatch)
+    old_id='K-20260609184045Z--tampered-successor-source'
+    old=_legacy(tmp_path,old_id)
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+        '--claim','Keep durable keys on every retry.',
+        '--reason','Saved actual technical reason.',
+        '--source',f'docs/knowledge/records/{old_id}.json','--json'])==0
+    current=_out(capsys)['data']['record']
+    current_path=tmp_path/'docs/knowledge/records'/f'{current["id"]}.json'
+    data=json.loads(current_path.read_text())
+    data['source_refs'][0]['content_sha256']='sha256:'+'f'*64
+    data['record_digest']=_knowledge_record_digest(data)
+    current_path.write_text(json.dumps(data,sort_keys=True,indent=2)+'\n')
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--apply','--json'])==1
+    result=_out(capsys)['data']
+    assert result['records'][0]['status'].startswith('needs_')
+    assert result['applied_count']==0
+    assert old.is_file()
+
+
+def test_existing_v2_can_narrow_scope_but_migration_reports_original_paths(tmp_path,monkeypatch,capsys) -> None:
+    _setup_knowledge_workspace(tmp_path,monkeypatch)
+    (tmp_path/'repos/app.py').write_text('print("current product file")\n',encoding='utf-8')
+    old_id='K-20260609184045Z--retired-file-scope'
+    old=_legacy(tmp_path,old_id)
+    body=json.loads(old.read_text())
+    body['applies_to']={'paths':['app.py','old_deleted.py']}
+    old.write_text(json.dumps(body,sort_keys=True,indent=2)+'\n')
+    original=old.read_bytes()
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+        '--claim',body['claim'],'--reason','The existing application file is the current owned scope.',
+        '--source',f'docs/knowledge/records/{old_id}.json',
+        '--applies-to','app.py','--json'])==0
+    _out(capsys)
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--json'])==0
+    row=_out(capsys)['data']['records'][0]
+    assert row['status']=='link_cited_current_v2'
+    assert row['removed_historical_scope_paths']==['old_deleted.py']
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--apply','--json'])==0
+    _out(capsys)
+    assert old.read_bytes()==original
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    assert _out(capsys)['data']['legacy_record_count']==0
+
+
+def test_existing_v2_broadening_scope_requires_separate_review(tmp_path,monkeypatch,capsys) -> None:
+    _setup_knowledge_workspace(tmp_path,monkeypatch)
+    (tmp_path/'repos/app.py').write_text('print("current product file")\n',encoding='utf-8')
+    old_id='K-20260609184045Z--scope-broadening'
+    old=_legacy(tmp_path,old_id)
+    before=old.read_bytes()
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+        '--claim','Keep durable keys on every retry.',
+        '--reason','A separate current application now participates.',
+        '--source',f'docs/knowledge/records/{old_id}.json',
+        '--applies-to','app.py','--json'])==0
+    _out(capsys)
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--apply','--json'])==1
+    row=_out(capsys)['data']['records'][0]
+    assert row['status'].startswith('needs_')
+    assert old.read_bytes()==before
+    assert not (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/old_id/'migration.json').exists()
+
+
+def test_link_does_not_swallow_explicit_reason_override(tmp_path,monkeypatch,capsys) -> None:
+    _setup_knowledge_workspace(tmp_path,monkeypatch)
+    old_id='K-20260609184045Z--override-not-ignored'
+    old=_legacy(tmp_path,old_id)
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+        '--claim','Keep durable keys on every retry.',
+        '--reason','Previously authored reviewed reason.',
+        '--source',f'docs/knowledge/records/{old_id}.json','--json'])==0
+    _out(capsys)
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,
+        '--reason','Different independently supplied reason.',
+        '--source','docs/contracts/repoctl-evidence-contract.md','--json'])==0
+    rows=_out(capsys)['data']['records']
+    assert rows[0]['status']!='link_cited_current_v2'
+    assert rows[0]['status']=='create_v2'
+    assert old.is_file()
+
+
+def test_knowledge_migration_proof_parent_symlink_never_writes_external(tmp_path,monkeypatch,capsys) -> None:
+    from tools.repoctl.io import RepoctlError
+    from tools.repoctl.knowledge_migration import migrate_legacy_knowledge
+    _setup_knowledge_workspace(tmp_path,monkeypatch)
+    old_id='K-20260609184045Z--proof-symlink'
+    old=_legacy(tmp_path,old_id,reason='Actual technical evidence.',sources=['docs/contracts/repoctl-evidence-contract.md'])
+    raw=old.read_bytes()
+    outside=tmp_path.parent/(tmp_path.name+'-external-migration-proof-target')
+    outside.mkdir(exist_ok=True)
+    parent=tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'
+    parent.parent.mkdir(parents=True,exist_ok=True)
+    parent.symlink_to(outside,target_is_directory=True)
+    with pytest.raises(RepoctlError,match='symlink'):
+        migrate_legacy_knowledge(tmp_path,repo_id='main',record_id=old_id,apply=True)
+    assert old.read_bytes()==raw
+    assert not list(outside.glob('K-*'))

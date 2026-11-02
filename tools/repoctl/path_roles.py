@@ -13,6 +13,7 @@ class PathRole(StrEnum):
 TEST_DIRECTORIES = {"test", "tests", "__tests__"}
 TEST_SUFFIXES = (
     "_test.py",
+    "_test.go",
     ".test.js",
     ".test.jsx",
     ".test.mjs",

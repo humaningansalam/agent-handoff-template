@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import re
 from typing import Any
 
@@ -1625,8 +1626,14 @@ def render_context_text(bundle: ContextBundle) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+# Preserve every selected source ref and relationship; shorten only excerpts
+# when a large compact answer is near the release field-gate output ceiling.
+# This is a display budget, not a retrieval or evidence-selection threshold.
+MAX_COMPACT_CONTEXT_BYTES = 11920
+
+
 def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 58) -> dict[str, Any]:
-    """Return the default agent-facing view without full evidence diagnostics."""
+    """Return a bounded agent-facing view without full evidence diagnostics."""
     projection = _bundle_final_projection(
         bundle,
         max_group_items=max_group_items,
@@ -1636,7 +1643,7 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         for group, items in projection.groups.items()
     }
     relationship_candidate_projection = compact_relationship_candidates(bundle.relationship_candidates)
-    return {
+    payload = {
         "schema": bundle.schema,
         "schema_version": bundle.schema_version,
         "view": "compact",
@@ -1659,6 +1666,24 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "continuations": projection.continuations,
         "bundle_digest": bundle.bundle_digest,
     }
+    # One uncommon high-fanout query can exceed the compact-view budget even
+    # though paths, typed provenance and graph evidence are relevant. Shrink
+    # *only* human-readable excerpts; keep all sources, ordering, anchors,
+    # relation facts and continuations intact. Do not change benchmark gates
+    # or make a missing source appear resolved.
+    def serialized_bytes() -> int:
+        return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    if serialized_bytes() > MAX_COMPACT_CONTEXT_BYTES:
+        for excerpt_limit in (48, 40, 32, 24, 16, 8):
+            payload["groups"] = {
+                group: [_compact_group_item(item, excerpt_chars=min(excerpt_chars, excerpt_limit)) for item in items]
+                for group, items in projection.groups.items()
+            }
+            payload["guide"] = _context_query_guide(payload["groups"], query=bundle.query)
+            if serialized_bytes() <= MAX_COMPACT_CONTEXT_BYTES:
+                break
+    return payload
 
 
 def _context_query_guide(

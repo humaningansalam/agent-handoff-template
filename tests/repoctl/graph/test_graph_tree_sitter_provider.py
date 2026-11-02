@@ -167,3 +167,208 @@ def test_unqualified_call_does_not_resolve_to_method_in_another_scope(
     result=build_tree_sitter_semantics(target=target,entries=[entry])
     assert len(result.symbols) >= 2
     assert result.calls == (), 'Implicit member dispatch cannot be inferred from equal names alone'
+
+
+def test_go_calls_across_files_same_verified_package_and_directory(tmp_path: Path) -> None:
+    target = RepoTarget(id='main',root_path=tmp_path,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    parts = {
+        'src/main.go': 'package queue\nfunc Dispatch() { Run() }\n',
+        'src/handler.go': 'package queue\nfunc Run() {}\n',
+        'other/main.go': 'package other\nfunc Run() {}\n',
+    }
+    entries = []
+    for name, source in parts.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(source,encoding='utf-8')
+        entries.append(CodeIndexEntry(name, 'repos/'+name, 'go', 'source', [], [], [], [], []))
+    result = build_tree_sitter_semantics(target=target,entries=entries)
+    symbols = {item.provider_symbol_id:item for item in result.symbols}
+    assert result.symbol_failed_paths == ()
+    assert len(result.calls) == 1
+    call = result.calls[0]
+    assert call.scope == 'same_package' and call.path == 'src/main.go'
+    assert symbols[call.caller_provider_symbol_id].name == 'Dispatch'
+    assert symbols[call.callee_provider_symbol_id].path == 'src/handler.go'
+    assert call.anchor.start_line == 2
+
+
+def test_go_cross_file_call_shadowed_by_parameter_does_not_make_false_graph_edge(tmp_path: Path) -> None:
+    target=RepoTarget(id='main',root_path=tmp_path,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    parts={
+        'src/api.go':'package app\nfunc Dispatch(Run func()){Run()}\n',
+        'src/impl.go':'package app\nfunc Run(){}\n',
+    }
+    entries=[]
+    for name, source in parts.items():
+        file=tmp_path/name
+        file.parent.mkdir(parents=True,exist_ok=True)
+        file.write_text(source,encoding='utf-8')
+        entries.append(CodeIndexEntry(name,'repos/'+name,'go','source',[],[],[],[],[]))
+    result=build_tree_sitter_semantics(target=target,entries=entries)
+    assert result.symbol_failed_paths == ()
+    assert result.calls == ()
+
+
+@pytest.mark.parametrize('extension,lang,callee_source,import_source', [
+    ('java','java','package com.example;\npublic class Model {}\n',
+     'package com.other;\nimport com.example.Model;\nclass TestModel { Model model; }\n'),
+    ('kt','kotlin','package com.example\n\nclass Model {}\n',
+     'package com.other\n\nimport com.example.Model\n\nclass TestModel { val model: Model? = null\n}\n'),
+])
+def test_java_kotlin_only_explicit_exact_type_import_creates_proven_source_dependency(
+    tmp_path: Path, extension: str, lang: str, callee_source: str, import_source: str,
+) -> None:
+    target=RepoTarget(id='main',root_path=tmp_path,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    parts={f'src/Model.{extension}':callee_source,f'tests/TestModel.{extension}':import_source}
+    entries=[]
+    for name,content in parts.items():
+        file=tmp_path/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text(content,encoding='utf-8')
+        entries.append(CodeIndexEntry(name,'repos/'+name,'java','source',[],[],[],[],[]))
+    result=build_tree_sitter_semantics(target=target,entries=entries)
+    assert result.symbol_failed_paths == (),result.failures
+    links=result.tool['module_file_relations']
+    assert len(links)==1,links
+    assert links[0]['kind']==lang+'_exact_type_import'
+    assert links[0]['importer_path']==f'tests/TestModel.{extension}'
+    assert links[0]['target_path']==f'src/Model.{extension}'
+    assert links[0]['anchor']['start_line'] >= 2
+
+
+@pytest.mark.parametrize('import_expr', [
+    'import com.example.*;',
+    'import static com.example.Model.work;',
+    'import com.other.Model;',
+])
+def test_java_ambiguous_or_non_type_import_is_never_confirmed(tmp_path: Path,import_expr: str) -> None:
+    target=RepoTarget(id='main',root_path=tmp_path,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    parts={
+        'src/Model.java':'package com.example;\npublic class Model {}\n',
+        'tests/TestModel.java':f'package test;\n{import_expr}\nclass TestModel {{}}\n',
+    }
+    entries=[]
+    for name,content in parts.items():
+        file=tmp_path/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text(content,encoding='utf-8')
+        entries.append(CodeIndexEntry(name,'repos/'+name,'java','source',[],[],[],[],[]))
+    result=build_tree_sitter_semantics(target=target,entries=entries)
+    assert result.tool['module_file_relations']==[]
+
+
+def test_native_exact_java_import_materializes_test_to_production_relation(tmp_path,monkeypatch,capsys) -> None:
+    import json
+    from tests.repoctl.workspace.test_check import write_workspace
+    from tests.repoctl.meta.test_meta_check import write_repometa
+    from tests.repoctl.repository.test_repositories import init_repo
+    from tools.repoctl.cli import main
+
+    write_workspace(tmp_path)
+    repo=tmp_path/'repos';init_repo(repo);write_repometa(repo)
+    for name,content in {
+        'src/Model.java':'package com.example;\npublic class Model {}\n',
+        'tests/TestModel.java':'package com.other;\nimport com.example.Model;\nclass TestModel { Model model; }\n',
+    }.items():
+        file=repo/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text(content,encoding='utf-8')
+    monkeypatch.setattr('tools.repoctl.cli.find_workspace_root',lambda:tmp_path)
+    assert main(['graph','build','--repo-id','main','--full','--json'])==0
+    snapshot=json.loads(capsys.readouterr().out)['data']['snapshot']
+    native=[edge for edge in snapshot['edges'] if edge['source']=='tree_sitter_structural']
+    assert any(edge['kind']=='IMPORTS_FILE' and edge['facts']['match_kind']=='java_exact_type_import' for edge in native)
+    assert any(edge['kind']=='TESTS_FILE' and edge['facts']['evidence_type']=='exact_structural_import_by_test' for edge in native)
+    assert main(['graph','workflow','--symbol','Model','--in-file','src/Model.java','--repo-id','main','--json'])==0
+    result=json.loads(capsys.readouterr().out)['data']['result']
+    assert any(item['path']=='tests/TestModel.java' and item['relation']=='confirmed' for item in result['stages']['tests'])
+
+
+def test_go_same_package_graph_workflow_has_verified_caller_and_tests(tmp_path,monkeypatch,capsys) -> None:
+    import json
+    from tests.repoctl.workspace.test_check import write_workspace
+    from tests.repoctl.meta.test_meta_check import write_repometa
+    from tests.repoctl.repository.test_repositories import init_repo
+    from tools.repoctl.cli import main
+
+    write_workspace(tmp_path)
+    repo=tmp_path/'repos';init_repo(repo);write_repometa(repo)
+    for name,content in {
+        'src/handler.go':'package queue\nfunc Run() {}\n',
+        'src/main.go':'package queue\nfunc Dispatch() { Run() }\n',
+        'src/handler_test.go':'package queue\nimport "testing"\nfunc TestRun(t *testing.T) { Run() }\n',
+    }.items():
+        path=repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(content,encoding='utf-8')
+    monkeypatch.setattr('tools.repoctl.cli.find_workspace_root',lambda:tmp_path)
+    assert main(['graph','build','--repo-id','main','--full','--json'])==0
+    snapshot=json.loads(capsys.readouterr().out)['data']['snapshot']
+    edges=[edge for edge in snapshot['edges'] if edge['kind']=='CALLS' and edge['source']=='tree_sitter_structural']
+    assert len(edges)==2,edges
+    assert all(edge['facts']['scope']=='same_package' for edge in edges)
+    assert main(['graph','workflow','--symbol','Run','--in-file','src/handler.go','--repo-id','main','--json'])==0
+    result=json.loads(capsys.readouterr().out)['data']['result']
+    assert result['stages']['implementation'][0]['relation']=='confirmed'
+    assert any(item['path']=='src/main.go' and item['relation']=='confirmed'
+               for item in result['stages']['callers_or_dependents'])
+    assert any(item['path']=='src/handler_test.go' and item['relation']=='confirmed'
+               for item in result['stages']['tests'])
+
+
+def test_go_native_file_suffix_is_test_role() -> None:
+    from tools.repoctl.path_roles import is_test_path
+    assert is_test_path('src/handler_test.go')
+    assert not is_test_path('src/handler.go')
+
+
+def test_verified_rust_mod_direct_call_across_files_is_typed(tmp_path: Path) -> None:
+    root=tmp_path
+    from tools.repoctl.graph_tree_sitter_provider import build_tree_sitter_semantics
+    target=RepoTarget(id='main',root_path=root,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    sources={
+        'src/main.rs':'mod clock;\nfn main(){ clock::tick(); }\n',
+        'src/clock.rs':'pub fn tick(){}\n',
+    }
+    entries=[]
+    for path,text in sources.items():
+        file=root/path;file.parent.mkdir(parents=True,exist_ok=True);file.write_text(text)
+        entries.append(CodeIndexEntry(path,'repos/'+path,'rust','source',[],[],[],[],[]))
+    result=build_tree_sitter_semantics(target=target,entries=entries)
+    sym={item.provider_symbol_id:item for item in result.symbols}
+    calls=[item for item in result.calls if item.scope=='cross_file_import']
+    assert len(calls)==1
+    assert sym[calls[0].caller_provider_symbol_id].path=='src/main.rs'
+    assert sym[calls[0].callee_provider_symbol_id].path=='src/clock.rs'
+    assert calls[0].anchor.start_line==2
+
+
+def test_rust_mod_scoped_call_to_private_fn_stays_unconfirmed(tmp_path: Path) -> None:
+    root=tmp_path
+    target=RepoTarget(id='main',root_path=root,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    entries=[]
+    for path,text in {
+        'src/main.rs':'mod clock;\nfn main(){ clock::tick(); }\n',
+        'src/clock.rs':'fn tick(){}\n',
+    }.items():
+        file=root/path;file.parent.mkdir(parents=True,exist_ok=True);file.write_text(text)
+        entries.append(CodeIndexEntry(path,'repos/'+path,'rust','source',[],[],[],[],[]))
+    result=build_tree_sitter_semantics(target=target,entries=entries)
+    assert not result.calls
+
+
+def test_rust_scoped_module_call_graph_end_to_end(tmp_path,monkeypatch,capsys) -> None:
+    import json
+    from tests.repoctl.workspace.test_check import write_workspace
+    from tests.repoctl.meta.test_meta_check import write_repometa
+    from tests.repoctl.repository.test_repositories import init_repo
+    from tools.repoctl.cli import main
+    write_workspace(tmp_path)
+    repo=tmp_path/'repos';init_repo(repo);write_repometa(repo)
+    for path,text in {
+        'src/main.rs':'mod clock;\nfn main(){ clock::tick(); }\n',
+        'src/clock.rs':'pub fn tick(){}\n',
+    }.items():
+        f=repo/path;f.parent.mkdir(parents=True,exist_ok=True);f.write_text(text)
+    monkeypatch.setattr('tools.repoctl.cli.find_workspace_root',lambda:tmp_path)
+    assert main(['graph','build','--repo-id','main','--full','--json'])==0
+    snapshot=json.loads(capsys.readouterr().out)['data']['snapshot']
+    assert any(edge['kind']=='CALLS' and edge['source']=='tree_sitter_structural'
+               and edge['facts']['scope']=='cross_file_import' for edge in snapshot['edges'])
+    assert main(['graph','workflow','--symbol','tick','--in-file','src/clock.rs','--json'])==0
+    result=json.loads(capsys.readouterr().out)['data']['result']
+    assert any(item['path']=='src/main.rs' and item['relation']=='confirmed'
+               for item in result['stages']['callers_or_dependents'])

@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import defaultdict
 from bisect import bisect_right
 from pathlib import Path
+import re
 from typing import Any
 
 from .code_index import CodeIndexEntry
@@ -160,6 +161,66 @@ def _unqualified_call_target_is_provable(
     return False
 
 
+
+_PACKAGE_NAME = re.compile(r"^\s*package\s+([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*;?\s*$")
+_EXACT_TYPE_IMPORT = re.compile(r"^\s*import\s+([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)+)\s*;?\s*$")
+
+
+def _package_and_exact_imports(
+    root_node: Any, source: bytes, *, language: str, path: str, line_starts: list[int],
+) -> tuple[str, set[str], list[tuple[str, SourceAnchor]]]:
+    """Extract only parser-recognized package declarations and explicit type imports.
+
+    Glob/static imports, wildcard packages and Kotlin aliases are intentionally
+    not resolved by name or basename. A typed import is usable only if exactly
+    one source file declares that fully qualified top-level type.
+    """
+    package = ""
+    declared_types: set[str] = set()
+    imports: list[tuple[str, SourceAnchor]] = []
+    if language not in {"java", "kotlin", "go"}:
+        return package, declared_types, imports
+    for index in range(root_node.named_child_count):
+        child = root_node.named_child(index)
+        if child is None:
+            continue
+        if (language == "java" and child.type == "package_declaration") or (
+            language == "kotlin" and child.type == "package_header"
+        ) or (language == "go" and child.type == "package_clause"):
+            match = _PACKAGE_NAME.fullmatch(_node_text(source, child))
+            if match:
+                package = match.group(1)
+        if language in {"java", "kotlin"} and DEFINITION_KINDS[language].get(child.type) == "type":
+            name = _definition_name(child, source)
+            if name and re.fullmatch(r"[A-Za-z_]\w*", name):
+                declared_types.add(name)
+        declarations: list[Any] = []
+        if language == "java" and child.type == "import_declaration":
+            declarations = [child]
+        elif language == "kotlin" and child.type == "import_list":
+            declarations = [child.named_child(i) for i in range(child.named_child_count)]
+        for declaration in declarations:
+            if declaration is None or declaration.type not in {"import_declaration", "import_header"}:
+                continue
+            match = _EXACT_TYPE_IMPORT.fullmatch(_node_text(source, declaration))
+            if match:
+                imports.append((match.group(1), _anchor(path, declaration, line_starts)))
+    return package, declared_types, imports
+
+
+def _rust_module_call(node: Any, source: bytes) -> tuple[str, str] | None:
+    if node.type != "call_expression":
+        return None
+    function = node.child_by_field_name("function")
+    if function is None or function.type != "scoped_identifier":
+        return None
+    module = function.child_by_field_name("path")
+    name = function.child_by_field_name("name")
+    if module is None or name is None or module.type != "identifier" or name.type != "identifier":
+        return None
+    return _node_text(source, module), _node_text(source, name)
+
+
 def build_tree_sitter_semantics(
     *, target: RepoTarget, entries: list[CodeIndexEntry],
     analysis_paths: set[str] | None = None,
@@ -189,6 +250,12 @@ def build_tree_sitter_semantics(
     all_symbols: list[PreciseSymbol] = []
     all_calls: list[PreciseCall] = []
     module_relations: list[dict[str, object]] = []
+    language_packages: dict[str, tuple[str, str]] = {}
+    declared_package_types: dict[tuple[str, str], list[str]] = defaultdict(list)
+    exact_imports: list[tuple[str, str, str, SourceAnchor]] = []
+    go_calls: list[tuple[PreciseSymbol, str, SourceAnchor]] = []
+    rust_scoped_calls: list[tuple[PreciseSymbol, str, str, SourceAnchor]] = []
+    rust_public_functions: set[str] = set()
     eligible_paths = {entry.path for entry in eligible}
     for entry in eligible:
         path = entry.path
@@ -220,6 +287,7 @@ def build_tree_sitter_semantics(
         direct_calls: list[tuple[PreciseSymbol, Any, str]] = []
         local_bindings: dict[str, set[str]] = defaultdict(set)
         relation_offset = len(module_relations)
+        rust_call_offset = len(rust_scoped_calls)
         try:
             # Real Rust repositories contain many nested expressions. A
             # recursive walk through tree-sitter Node.named_children can
@@ -269,6 +337,11 @@ def build_tree_sitter_semantics(
                         qualified_name=qualified, anchor=_anchor(path, node, line_starts),
                     )
                     symbols.append(symbol)
+                    if (
+                        language == "rust" and kind == "function" and not scopes
+                        and source[node.start_byte:node.end_byte].lstrip().startswith(b"pub fn ")
+                    ):
+                        rust_public_functions.add(symbol.provider_symbol_id)
                     if kind in {"function", "method", "constructor"}:
                         discovered = symbol
                 if discovered is not None and node.type in _LOCAL_BINDING_NODES:
@@ -277,6 +350,12 @@ def build_tree_sitter_semantics(
                     target_name = _direct_target(node, source)
                     if target_name:
                         direct_calls.append((discovered, node, target_name))
+                    if language == "rust" and not inner_scopes:
+                        scoped = _rust_module_call(node, source)
+                        if scoped:
+                            rust_scoped_calls.append((
+                                discovered, scoped[0], scoped[1], _anchor(path, node, line_starts),
+                            ))
                 for index in range(node.named_child_count - 1, -1, -1):
                     child = node.named_child(index)
                     if child is not None:
@@ -285,10 +364,19 @@ def build_tree_sitter_semantics(
             # Discard this file's partial facts; an incomplete traversal is
             # never presented as precise source or call coverage.
             del module_relations[relation_offset:]
+            del rust_scoped_calls[rust_call_offset:]
             failed.append(path)
             continue
         analyzed.append(path)
         all_symbols.extend(symbols)
+        package, declared_types, imported = _package_and_exact_imports(
+            tree.root_node, source, language=language, path=path, line_starts=line_starts,
+        )
+        language_packages[path] = (language, package)
+        for declared_type in declared_types:
+            declared_package_types[(language, f"{package}.{declared_type}" if package else declared_type)].append(path)
+        for imported_type, anchor in imported:
+            exact_imports.append((path, language, imported_type, anchor))
         by_name: dict[str, list[PreciseSymbol]] = defaultdict(list)
         for item in symbols:
             if item.kind in {"function", "method", "constructor"}:
@@ -300,6 +388,8 @@ def build_tree_sitter_semantics(
             shadowed = local_bindings.get(caller.provider_symbol_id, set())
             if target_name in shadowed or "*" in shadowed:
                 continue
+            if language == "go":
+                go_calls.append((caller, target_name, _anchor(path, call_node, line_starts)))
             candidates = by_name.get(target_name, [])
             if (
                 len(candidates) == 1
@@ -313,6 +403,78 @@ def build_tree_sitter_semantics(
                     callee_provider_symbol_id=callee.provider_symbol_id,
                     language=language, scope="same_file", anchor=_anchor(path, call_node, line_starts),
                 ))
+    # Java/Kotlin `import package.Type` is a real file dependency only if
+    # that exact fully qualified top-level type is uniquely declared by one
+    # known AST-validated source. Glob imports and inferred packages are not
+    # promoted to confirmed Graph edges.
+    for importer, language, imported_type, anchor in exact_imports:
+        targets = declared_package_types.get((language, imported_type), [])
+        if len(targets) == 1 and targets[0] != importer:
+            module_relations.append({
+                "importer_path": importer,
+                "target_path": targets[0],
+                "anchor": anchor.to_dict(),
+                "kind": f"{language}_exact_type_import",
+            })
+
+    # In Go, free functions are visible across files in the *same directory
+    # and declared package*. Resolve only a unique top-level declaration
+    # (never a receiver method, external package, shadowed local, or a name
+    # found in text). Source AST analysis has already verified both endpoints.
+    go_functions: dict[tuple[str, str, str], list[PreciseSymbol]] = defaultdict(list)
+    for symbol in all_symbols:
+        package_info = language_packages.get(symbol.path)
+        if (
+            package_info is not None and package_info[0] == "go"
+            and package_info[1] and symbol.kind == "function"
+            and "." not in symbol.qualified_name
+        ):
+            go_functions[(str(Path(symbol.path).parent), package_info[1], symbol.name)].append(symbol)
+    for caller, name, anchor in go_calls:
+        caller_package = language_packages.get(caller.path)
+        if caller_package is None or caller_package[0] != "go" or not caller_package[1]:
+            continue
+        targets = go_functions.get((str(Path(caller.path).parent), caller_package[1], name), [])
+        if len(targets) == 1 and targets[0].path != caller.path:
+            all_calls.append(PreciseCall(
+                path=caller.path, provider=PROVIDER,
+                caller_provider_symbol_id=caller.provider_symbol_id,
+                callee_provider_symbol_id=targets[0].provider_symbol_id,
+                language="go", scope="same_package", anchor=anchor,
+            ))
+
+    # Rust `mod child;` binds exactly one sibling file. A direct call of the
+    # form `child::pub_fn()` is a typed, source-anchored cross-file relation
+    # only when that exact file declares one public top-level `fn pub_fn`.
+    # Trait methods, re-exports, aliases and associated dispatch remain partial.
+    rust_modules: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for relation in module_relations:
+        if relation.get("kind") != "rust_mod_declaration":
+            continue
+        target_path = str(relation["target_path"])
+        module_name = Path(target_path).parent.name if Path(target_path).name == "mod.rs" else Path(target_path).stem
+        rust_modules[(str(relation["importer_path"]), module_name)].append(target_path)
+    rust_public: dict[tuple[str, str], list[PreciseSymbol]] = defaultdict(list)
+    for symbol in all_symbols:
+        if (
+            symbol.language == "rust" and symbol.kind == "function"
+            and symbol.qualified_name == symbol.name
+            and symbol.provider_symbol_id in rust_public_functions
+        ):
+            rust_public[(symbol.path, symbol.name)].append(symbol)
+    for caller, module_name, function_name, anchor in rust_scoped_calls:
+        targets = rust_modules.get((caller.path, module_name), [])
+        if len(targets) != 1:
+            continue
+        candidates = rust_public.get((targets[0], function_name), [])
+        if len(candidates) == 1:
+            all_calls.append(PreciseCall(
+                path=caller.path, provider=PROVIDER,
+                caller_provider_symbol_id=caller.provider_symbol_id,
+                callee_provider_symbol_id=candidates[0].provider_symbol_id,
+                language="rust", scope="cross_file_import", anchor=anchor,
+            ))
+
     failure_paths = tuple(sorted(failed))
     return SemanticProviderResult(
         provider=PROVIDER, languages=tuple(sorted(LANGUAGE_IDS)),
@@ -324,5 +486,5 @@ def build_tree_sitter_semantics(
         call_coverage=CapabilityEvidence("conservative", ("cross_file_and_receiver_dispatch_unresolved",)),
         tool={"kind": "tree_sitter_language_pack", "parser_languages": sorted(LANGUAGE_IDS),
               "module_file_relations": sorted(module_relations, key=lambda item: (str(item["importer_path"]),str(item["target_path"]))),
-              "precision": "syntax_definitions_unambiguous_rust_module_edges_and_unique_unqualified_same_file_calls_only"},
+              "precision": "source_ranged_definitions_qualified_rust_mod_calls_go_package_calls_exact_java_kotlin_type_imports_conservative_no_dynamic_dispatch"},
     )
