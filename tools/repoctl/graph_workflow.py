@@ -413,8 +413,11 @@ def query_graph_workflow(
             needle = re.compile(r"(?<![A-Za-z0-9])" + re.escape(symbol.rsplit(".", 1)[-1]) + r"(?![A-Za-z0-9])")
             for path in seed_files:
                 suffix = Path(path).suffix.casefold()
-                if suffix not in _FALLBACK_SUFFIXES and not (
-                    str(freshness.get("status") or "current") != "current" and suffix in {".dart", ".py"}
+                # Dart can remain queryable as source evidence even on a
+                # machine without a Dart SDK/analyzer. Only the compiler
+                # provider may elevate a Dart symbol to `confirmed`.
+                if suffix not in _FALLBACK_SUFFIXES and suffix != ".dart" and not (
+                    str(freshness.get("status") or "current") != "current" and suffix == ".py"
                 ):
                     continue
                 source = source_read(path)
