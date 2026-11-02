@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package": "agent-workspace-control-plane",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "postflight_command": [
     "./scripts/repoctl",
     "upgrade",
@@ -123,6 +123,7 @@
     "docs/releases/v0.14.0.md",
     "docs/releases/v0.14.1.md",
     "docs/releases/v0.14.2.md",
+    "docs/releases/v0.14.3.md",
     "docs/research/graph-language-indexes.md",
     "docs/specs/graph/requirements.md",
     "docs/specs/knowledge/requirements.md",
