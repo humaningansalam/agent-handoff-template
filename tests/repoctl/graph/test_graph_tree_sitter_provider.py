@@ -132,3 +132,38 @@ def test_large_realistic_rust_ast_is_iterative_and_preserves_module_line_anchors
     assert result.tool['module_file_relations'][0]['target_path']=='crates/daemon/src/audio_clock.rs'
     assert result.tool['module_file_relations'][0]['anchor']['start_line']==1
     assert any(call.anchor.start_line>3100 for call in result.calls)
+
+
+@pytest.mark.parametrize('language,path,source', [
+    ('rust','src/lib.rs','fn work() {}\nfn main() { let work = || {}; work(); }\n'),
+    ('go','src/main.go','package main\nfunc work() {}\nfunc main() { work := func(){}; work() }\n'),
+    ('rust','src/lib.rs','fn work() {}\nfn caller(work: fn()) { work(); }\n'),
+    ('go','src/main.go','package main\nfunc work() {}\nfunc caller(work func()){work()}\n'),
+])
+def test_local_bindings_shadow_same_named_functions_not_confirmed(tmp_path: Path,language: str,path: str,source: str) -> None:
+    target=RepoTarget(id='main',root_path=tmp_path,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    file=tmp_path/path
+    file.parent.mkdir(parents=True,exist_ok=True)
+    file.write_text(source,encoding='utf-8')
+    entry=CodeIndexEntry(path,'repos/'+path,language,'source',[],[],[],[],[])
+    result=build_tree_sitter_semantics(target=target,entries=[entry])
+    assert len(result.symbols)>=2
+    assert result.calls == (), 'Shadowed local callable must not become a provider-confirmed CALLS edge'
+
+
+@pytest.mark.parametrize('language,path,source', [
+    ('rust','src/lib.rs','struct A; impl A { fn work(&self) {} } fn entry(){ work(); }'),
+    ('go','src/main.go','package main\ntype S struct{}\nfunc (s S) work() {}\nfunc entry(){work()}\n'),
+    ('java','src/Test.java','class A{void work(){}} class B{void entry(){work();}}'),
+])
+def test_unqualified_call_does_not_resolve_to_method_in_another_scope(
+    tmp_path: Path, language: str, path: str, source: str,
+) -> None:
+    target = RepoTarget(id='main',root_path=tmp_path,display_path='repos',identity_source=RepositoryIdentitySource.RESERVED)
+    f=tmp_path/path
+    f.parent.mkdir(parents=True,exist_ok=True)
+    f.write_text(source,encoding='utf-8')
+    entry=CodeIndexEntry(path,'repos/'+path,language,'source',[],[],[],[],[])
+    result=build_tree_sitter_semantics(target=target,entries=[entry])
+    assert len(result.symbols) >= 2
+    assert result.calls == (), 'Implicit member dispatch cannot be inferred from equal names alone'

@@ -116,3 +116,39 @@ def test_equivalent_current_record_referencing_legacy_id_needs_review(tmp_path, 
     assert output['data']['records'][0]['status']=='needs_reference_review'
     assert curpath.relative_to(tmp_path).as_posix() in output['data']['records'][0]['references']
     assert legacy.is_file()
+
+
+def test_different_current_claim_citing_legacy_original_blocks_in_place_mutation(tmp_path, monkeypatch, capsys):
+    """Real adopter regression: a v2 conclusion cites a v1 JSON by digest.
+
+    v1/v2 claims can differ while v2 explicitly treats v1's immutable bytes as
+    its source; a successful-looking in-place rewrite invalidates that proof.
+    """
+    from tools.repoctl.knowledge_records import _sha256_text
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--original-evidence'
+    legacy = _legacy(
+        tmp_path, name,
+        reason='The old runtime retries at least once.',
+        sources=['docs/contracts/repoctl-evidence-contract.md'],
+    )
+    before = legacy.read_bytes()
+    assert main([
+        'knowledge','add','--repo-id','main','--kind','decision',
+        '--claim','The new retry architecture must retain one idempotency key.',
+        '--reason','This decision depends on an original recorded invariant.',
+        '--source',f'docs/knowledge/records/{name}.json','--json',
+    ]) == 0
+    existing = _out(capsys)['data']['record']
+    source_ref = next(x for x in existing['source_refs'] if x['path'].endswith(name + '.json'))
+    assert source_ref['content_sha256'] == _sha256_text(before.decode('utf-8'))
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--json']) == 1
+    preview = _out(capsys)['data']['records'][0]
+    assert preview['status'] == 'needs_reference_review'
+    assert f'docs/knowledge/records/{existing["id"]}.json' in preview['references']
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json']) == 1
+    applied = _out(capsys)
+    assert applied['data']['applied_count'] == 0
+    assert legacy.read_bytes() == before
+    assert source_ref['content_sha256'] == _sha256_text(legacy.read_text())
+    assert not (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'original.json').exists()

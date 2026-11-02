@@ -85,6 +85,81 @@ def _direct_target(call: Any, source: bytes) -> str:
     return _node_text(source, function)
 
 
+# Local binding syntax is not a type/target resolution. A locally declared
+# callable may shadow a same-file top-level function name: such a call is NOT
+# provider-confirmed even if there is only one function of that name.
+_LOCAL_BINDING_NODES = frozenset({
+    "let_declaration", "short_var_declaration", "var_spec",
+    "parameter", "parameter_declaration", "formal_parameter",
+    "local_variable_declaration", "variable_declarator", "property_declaration",
+})
+
+
+def _local_binding_names(node: Any, source: bytes) -> set[str]:
+    """Conservatively collect identifiers on a declaration's binding side."""
+    if node.type not in _LOCAL_BINDING_NODES:
+        return set()
+    binding = (
+        node.child_by_field_name("pattern")
+        or node.child_by_field_name("left")
+        or node.child_by_field_name("name")
+    )
+    if binding is None:
+        # Rust `parameter` patterns and Java/Kotlin declarations may expose
+        # their binding as an unnamed field but a named child identifier.
+        for index in range(node.named_child_count):
+            child = node.named_child(index)
+            if child is not None and child.type in {
+                "identifier", "simple_identifier", "variable_declarator", "identifier_list",
+            }:
+                binding = child
+                break
+    if binding is None:
+        return set()
+    names: set[str] = set()
+    pending = [binding]
+    budget = 0
+    while pending:
+        current = pending.pop()
+        budget += 1
+        if budget > 256:
+            return {"*"}  # unknown binding shape: do not assert a local target
+        if current.type in {"identifier", "simple_identifier"}:
+            names.add(_node_text(source, current))
+            continue
+        for index in range(current.named_child_count - 1, -1, -1):
+            child = current.named_child(index)
+            if child is not None:
+                pending.append(child)
+    return names
+
+
+def _unqualified_call_target_is_provable(
+    caller: PreciseSymbol, callee: PreciseSymbol, language: str,
+) -> bool:
+    """Never resolve an implicit call across unrelated lexical scopes.
+
+    Native AST names alone do not prove implicit receiver dispatch. Rust/Go
+    member methods require explicit receiver syntax; Java/Kotlin/Swift
+    implicit member calls are restricted to the same lexical container.
+    """
+    callee_scope = callee.qualified_name.rpartition(".")[0]
+    caller_scope = caller.qualified_name.rpartition(".")[0]
+    if language in {"rust", "go"}:
+        # `fn work` at module root is callable as `work()`. `impl A::work`
+        # and Go `(a A) work` are not free functions. Inline module imports
+        # are deliberately unconfirmed without symbol scope resolution.
+        return callee.kind == "function" and not callee_scope and not caller_scope
+    if language == "java":
+        return bool(callee_scope) and caller_scope == callee_scope and callee.kind == "method"
+    if language in {"kotlin", "swift"}:
+        return (not callee_scope and callee.kind == "function") or (
+            bool(callee_scope) and caller_scope == callee_scope
+            and callee.kind in {"function", "method"}
+        )
+    return False
+
+
 def build_tree_sitter_semantics(
     *, target: RepoTarget, entries: list[CodeIndexEntry],
     analysis_paths: set[str] | None = None,
@@ -143,6 +218,7 @@ def build_tree_sitter_semantics(
             continue
         symbols: list[PreciseSymbol] = []
         direct_calls: list[tuple[PreciseSymbol, Any, str]] = []
+        local_bindings: dict[str, set[str]] = defaultdict(set)
         relation_offset = len(module_relations)
         try:
             # Real Rust repositories contain many nested expressions. A
@@ -195,6 +271,8 @@ def build_tree_sitter_semantics(
                     symbols.append(symbol)
                     if kind in {"function", "method", "constructor"}:
                         discovered = symbol
+                if discovered is not None and node.type in _LOCAL_BINDING_NODES:
+                    local_bindings[discovered.provider_symbol_id].update(_local_binding_names(node, source))
                 if node.type in CALL_NODES and discovered is not None:
                     target_name = _direct_target(node, source)
                     if target_name:
@@ -219,8 +297,15 @@ def build_tree_sitter_semantics(
         # Member calls, imported names, overloads and dynamic dispatch are
         # not made into precise Graph edges by name equality.
         for caller, call_node, target_name in direct_calls:
+            shadowed = local_bindings.get(caller.provider_symbol_id, set())
+            if target_name in shadowed or "*" in shadowed:
+                continue
             candidates = by_name.get(target_name, [])
-            if len(candidates) == 1 and caller.provider_symbol_id != candidates[0].provider_symbol_id:
+            if (
+                len(candidates) == 1
+                and caller.provider_symbol_id != candidates[0].provider_symbol_id
+                and _unqualified_call_target_is_provable(caller, candidates[0], language)
+            ):
                 callee = candidates[0]
                 all_calls.append(PreciseCall(
                     path=path, provider=PROVIDER,

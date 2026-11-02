@@ -139,10 +139,22 @@ def migrate_legacy_knowledge(
                             tuple(sorted((v.get('path'),v.get('content_sha256')) for v in x.get('source_refs',[]) if isinstance(v,dict))),
                         )
                     equivalents = [record for record in current if identity(record) == identity(new)]
-                    refs = _references_to_id(root, old_id) if equivalents else []
+                    # A *different* current claim can still cite the exact
+                    # bytes of this legacy JSON as its authoritative source.
+                    # Converting or deleting it in place would break that
+                    # record's source digest. Check references regardless of
+                    # whether an equivalent current claim exists.
+                    refs = _references_to_id(root, old_id)
                     if len(equivalents) > 1 or refs:
-                        row.update(status='needs_reference_review', explanation='duplicate current record with historical references or ambiguous matches',
-                                   references=refs)
+                        row.update(
+                            status='needs_reference_review',
+                            explanation=(
+                                'legacy original is referenced by current sources; '
+                                'review and relocate provenance before converting it'
+                                if refs else 'multiple current records match; choose an exact destination'
+                            ),
+                            references=refs,
+                        )
                     else:
                         duplicate = equivalents[0] if equivalents else None
                         if duplicate:
