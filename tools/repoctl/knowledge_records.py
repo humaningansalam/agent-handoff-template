@@ -24,9 +24,11 @@ from .tasks import Problem
 
 
 ALLOWED_KINDS = {"decision", "invariant", "failure_mode"}
-ALLOWED_SOURCE_PREFIXES = ("docs/adr/", "docs/contracts/", "docs/workflows/")
+ALLOWED_SOURCE_PREFIXES = ("docs/adr/", "docs/architecture/", "docs/contracts/", "docs/specs/", "docs/workflows/")
 EXCLUDED_SOURCE_PARTS = {".repoctl-state", "generated", "plans"}
 MAX_KNOWLEDGE_CLAIM_LENGTH = 300
+MAX_DIRECT_KNOWLEDGE_FALLBACK_RECORDS = 2048
+MAX_SOURCE_RELOCATION_CANDIDATES = 5000
 CLAIM_ORIGINS = {"explicit"}
 
 
@@ -372,6 +374,110 @@ def _unique_direct_record_id(root: Path, *, claim: str, reason: str) -> str:
     raise RepoctlError("could not allocate unique knowledge record id")
 
 
+def _legacy_source_identity(record: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    refs = record.get("source_refs") if isinstance(record.get("source_refs"), list) else []
+    values: list[tuple[str, str]] = []
+    for ref in refs:
+        if isinstance(ref, dict) and str(ref.get("path") or "").strip():
+            values.append((str(ref.get("path") or "").strip(), str(ref.get("content_sha256") or "")))
+    raw_sources = record.get("sources")
+    if isinstance(raw_sources, list):
+        values.extend((str(value).strip(), "") for value in raw_sources if str(value).strip())
+    elif isinstance(record.get("source"), str) and str(record.get("source") or "").strip():
+        values.append((str(record["source"]).strip(), ""))
+    return tuple(sorted(set(values)))
+
+
+def _legacy_record_has_current_equivalent(
+    legacy: dict[str, Any],
+    current_records: list[dict[str, Any]],
+) -> bool:
+    claim = " ".join(str(legacy.get("claim") or "").split()).casefold()
+    kind = str(legacy.get("kind") or "")
+    repo_id = str(legacy.get("repo_id") or "")
+    reason = " ".join(str(legacy.get("reason") or legacy.get("summary") or "").split()).casefold()
+    sources = _legacy_source_identity(legacy)
+    candidates = [
+        record
+        for record in current_records
+        if str(record.get("repo_id") or "") == repo_id
+        and str(record.get("kind") or "") == kind
+        and " ".join(str(record.get("claim") or "").split()).casefold() == claim
+    ]
+    if reason:
+        candidates = [
+            record for record in candidates
+            if " ".join(str(record.get("reason") or record.get("summary") or "").split()).casefold() == reason
+        ]
+    if sources:
+        candidates = [record for record in candidates if _legacy_source_identity(record) == sources]
+    return len(candidates) == 1
+
+
+def _legacy_records_requiring_migration(
+    artifacts: list[dict[str, Any]],
+    *,
+    repo_id: str,
+) -> list[dict[str, Any]]:
+    current_records = [
+        record for record in artifacts
+        if record.get("schema_version") == KNOWLEDGE_RECORD_SCHEMA_VERSION
+        and str(record.get("repo_id") or "") == repo_id
+    ]
+    return [
+        record for record in artifacts
+        if record.get("schema") == "repoctl.knowledge.record"
+        and record.get("schema_version") == 1
+        and str(record.get("repo_id") or "") == repo_id
+        and not _legacy_record_has_current_equivalent(record, current_records)
+    ]
+
+
+def _direct_knowledge_view(
+    root: Path,
+    *,
+    repo_id: str,
+) -> tuple[dict[str, Any], list[Problem]]:
+    paths = sorted(_record_dir(root).glob("K-*.json"))
+    if len(paths) > MAX_DIRECT_KNOWLEDGE_FALLBACK_RECORDS:
+        return {}, [
+            Problem(
+                "error",
+                "knowledge_direct_fallback_limit_exceeded",
+                f"direct Knowledge fallback is bounded to {MAX_DIRECT_KNOWLEDGE_FALLBACK_RECORDS} records; rebuild the projection",
+                repo_id,
+            )
+        ]
+    artifacts, read_problems = _read_knowledge_artifacts(root, paths)
+    if read_problems:
+        return {}, read_problems
+    records = [
+        record for record in artifacts
+        if record.get("schema_version") == KNOWLEDGE_RECORD_SCHEMA_VERSION
+        and str(record.get("repo_id") or "") == repo_id
+    ]
+    problems: list[Problem] = []
+    for record in records:
+        problems.extend(
+            _knowledge_record_contract_problems(
+                record,
+                record_id=str(record.get("id") or ""),
+                repo_id=repo_id,
+            )
+        )
+    problems.extend(_supersession_problems(records))
+    if problems:
+        return {}, problems
+    superseded_ids = _superseded_ids(records)
+    heads = [record for record in records if str(record.get("id") or "") not in superseded_ids]
+    return {
+        "heads": heads,
+        "records": records,
+        "lifecycle_counts": {"current": len(heads), "superseded": len(records) - len(heads)},
+        "record_count": len(records),
+    }, []
+
+
 def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
     artifacts = _load_record_artifacts(root)
     records = [
@@ -380,15 +486,8 @@ def knowledge_status(root: Path, *, repo_id: str) -> dict[str, Any]:
         if record.get("schema_version") == KNOWLEDGE_RECORD_SCHEMA_VERSION
         and str(record.get("repo_id") or "") == repo_id
     ]
-    legacy_record_count = len(
-        [
-            record
-            for record in artifacts
-            if record.get("schema") == "repoctl.knowledge.record"
-            and record.get("schema_version") == 1
-            and str(record.get("repo_id") or "") == repo_id
-        ]
-    )
+    legacy_records = _legacy_records_requiring_migration(artifacts, repo_id=repo_id)
+    legacy_record_count = len(legacy_records)
     superseded_ids = _superseded_ids(records)
     statuses: dict[str, int] = {}
     source_changed = 0
@@ -459,13 +558,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
         record_paths,
     )
     problems: list[Problem] = list(record_read_problems)
-    legacy = [
-        record
-        for record in records
-        if record.get("schema") == "repoctl.knowledge.record"
-        and record.get("schema_version") == 1
-        and str(record.get("repo_id") or "") == repo_id
-    ]
+    legacy = _legacy_records_requiring_migration(records, repo_id=repo_id)
     problems.extend(
         Problem(
             "warning",
@@ -546,6 +639,9 @@ def _empty_public_knowledge_query(*, repo_id: str, query: str) -> dict[str, Any]
             "excluded_statuses": {},
             "returned_statuses": {},
             "default_excludes": ["superseded"],
+            "status_semantics": {"reviewed": "current and not superseded; no human approval is implied"},
+            "projection_status": "unavailable",
+            "source_changed_count": 0,
         },
         "results": [],
         "result_count": 0,
@@ -674,6 +770,8 @@ def query_knowledge_records(
     }
     problems: list[Problem] = []
     warnings: list[Problem] = []
+    projection_status = "history" if include_history else "current"
+    lifecycle_counts: dict[str, int] = {}
 
     if include_history:
         records = [
@@ -696,6 +794,10 @@ def query_knowledge_records(
             return unavailable, problems, []
         available_record_count = len(records)
         superseded_ids = _superseded_ids(records)
+        lifecycle_counts = {
+            "current": len(records) - len(superseded_ids),
+            "superseded": len(superseded_ids),
+        }
     else:
         projection, projection_problems = load_knowledge_projection(
             root,
@@ -706,29 +808,46 @@ def query_knowledge_records(
             and problem.cause_code == "missing"
             for problem in projection_problems
         )
-        if projection_missing and not _load_records(root):
-            return _empty_public_knowledge_query(repo_id=repo_id, query=query), [], []
-        if projection_problems:
-            return (
-                _empty_public_knowledge_query(repo_id=repo_id, query=query),
-                projection_problems,
-                [],
+        if not projection_problems:
+            projection, projection_problems = verify_current_knowledge_projection(
+                root,
+                repo_id=repo_id,
+                projection=projection,
             )
-        projection, projection_problems = verify_current_knowledge_projection(
-            root,
-            repo_id=repo_id,
-            projection=projection,
-        )
         if projection_problems:
-            return (
-                _empty_public_knowledge_query(repo_id=repo_id, query=query),
-                projection_problems,
-                [],
+            direct, direct_problems = _direct_knowledge_view(root, repo_id=repo_id)
+            if direct_problems:
+                return (
+                    _empty_public_knowledge_query(repo_id=repo_id, query=query),
+                    direct_problems,
+                    [],
+                )
+            if not direct.get("records"):
+                if projection_missing:
+                    return _empty_public_knowledge_query(repo_id=repo_id, query=query), [], []
+                # A corrupt projection with no authoritative v2 source is not
+                # a successful direct-record recovery; report the damage.
+                return _empty_public_knowledge_query(repo_id=repo_id, query=query), projection_problems, []
+            records = list(direct.get("heads") or [])
+            lifecycle_counts = dict(direct.get("lifecycle_counts") or {})
+            available_record_count = int(direct.get("record_count") or 0)
+            superseded_ids = set()
+            projection_status = "degraded_direct"
+            warnings.extend(
+                Problem(
+                    "warning",
+                    "knowledge_projection_degraded",
+                    "Knowledge projection is unavailable or invalid; query used validated direct v2 records",
+                    problem.path or repo_id,
+                    cause_code=problem.code,
+                )
+                for problem in projection_problems
             )
-        records = list(projection["heads"])
-        lifecycle_counts = projection["lifecycle_counts"]
-        available_record_count = int(projection["checkpoint"]["record_count"])
-        superseded_ids = set()
+        else:
+            records = list(projection["heads"])
+            lifecycle_counts = dict(projection["lifecycle_counts"])
+            available_record_count = int(projection["checkpoint"]["record_count"])
+            superseded_ids = set()
         superseded_count = int(lifecycle_counts.get("superseded") or 0)
         if superseded_count:
             warnings.append(
@@ -789,8 +908,8 @@ def query_knowledge_records(
             scored.append(item)
 
     if not include_history:
-        current_count = int(projection["lifecycle_counts"].get("current") or 0)
-        superseded_count = int(projection["lifecycle_counts"].get("superseded") or 0)
+        current_count = int(lifecycle_counts.get("current") or 0)
+        superseded_count = int(lifecycle_counts.get("superseded") or 0)
         available_statuses = {}
         if current_count:
             available_statuses["reviewed"] = current_count
@@ -837,6 +956,8 @@ def query_knowledge_records(
             "returned_statuses": dict(sorted(returned_statuses.items())),
             "default_excludes": ["superseded"],
             "source_changed_count": source_changed_count,
+            "projection_status": projection_status,
+            "status_semantics": {"reviewed": "current and not superseded; no human approval is implied"},
         },
         "results": returned,
         "result_count": len(returned),
@@ -864,28 +985,39 @@ def knowledge_records_for_graph(
     repo_id: str,
 ) -> tuple[list[dict[str, Any]], list[Problem]]:
     projection, projection_problems = load_knowledge_projection(root, repo_id=repo_id)
-    if projection_problems:
-        return [], projection_problems
-    graph_record_ids = [
-        str(record.get("id") or "")
-        for record in projection.get("heads", [])
-        if isinstance(record, dict)
-    ]
-    projection, projection_problems = verify_current_knowledge_projection(
-        root,
-        repo_id=repo_id,
-        projection=projection,
-        record_ids=graph_record_ids,
-    )
-    if projection_problems:
-        return [], projection_problems
-    projected_current: list[dict[str, Any]] = []
-    records = list(projection["heads"])
-    for record in records:
-        source_resolutions = knowledge_source_ref_resolutions(
+    if not projection_problems:
+        graph_record_ids = [
+            str(record.get("id") or "")
+            for record in projection.get("heads", [])
+            if isinstance(record, dict)
+        ]
+        projection, projection_problems = verify_current_knowledge_projection(
             root,
-            record,
+            repo_id=repo_id,
+            projection=projection,
+            record_ids=graph_record_ids,
         )
+    if projection_problems:
+        direct, direct_problems = _direct_knowledge_view(root, repo_id=repo_id)
+        if direct_problems:
+            return [], direct_problems
+        records = list(direct.get("heads") or [])
+        advisory = [
+            Problem(
+                "warning",
+                "knowledge_projection_degraded",
+                "Knowledge projection is unavailable or invalid; Graph used validated direct v2 records",
+                problem.path or repo_id,
+                cause_code=problem.code,
+            )
+            for problem in projection_problems
+        ]
+    else:
+        records = list(projection["heads"])
+        advisory = []
+    projected_current: list[dict[str, Any]] = []
+    for record in records:
+        source_resolutions = knowledge_source_ref_resolutions(root, record)
         projected_current.append(
             _public_record(
                 root,
@@ -896,7 +1028,7 @@ def knowledge_records_for_graph(
                 resolved_source_refs=resolved_knowledge_source_refs(root, record, resolutions=source_resolutions),
             )
         )
-    return sorted(projected_current, key=lambda item: str(item.get("id") or "")), []
+    return sorted(projected_current, key=lambda item: str(item.get("id") or "")), advisory
 
 
 def _validate_document_source(root: Path, rel: str) -> Problem | None:
@@ -1319,6 +1451,90 @@ def _literal_source_resolution(root: Path, ref: dict[str, Any]) -> KnowledgeSour
     )
 
 
+def _source_relocation_roots(
+    root: Path,
+    *,
+    repo_id: str,
+    ref_kind: KnowledgeSourceRefKind,
+) -> list[Path]:
+    if ref_kind is KnowledgeSourceRefKind.CURRENT_SOURCE and repo_id:
+        try:
+            return [require_repo_target(root, repo_id=repo_id).root_path]
+        except RepoctlError:
+            return []
+    if ref_kind is KnowledgeSourceRefKind.AUTHORITY_DOCUMENT:
+        return [root / prefix.rstrip("/") for prefix in ALLOWED_SOURCE_PREFIXES]
+    if ref_kind is KnowledgeSourceRefKind.COMPLETION_RECEIPT:
+        return [root / "docs/archive/task-completions"]
+    if ref_kind is KnowledgeSourceRefKind.TASK_ARTIFACT:
+        return [root / "docs/tasks", root / "docs/archive/tasks"]
+    return [root]
+
+
+def _relocated_source_resolution(
+    root: Path,
+    *,
+    repo_id: str,
+    ref: dict[str, Any],
+) -> KnowledgeSourceResolution | None:
+    expected = str(ref.get("content_sha256") or "")
+    if not expected:
+        return None
+    try:
+        ref_kind = KnowledgeSourceRefKind(str(ref.get("kind") or ""))
+    except ValueError:
+        return None
+    candidates: list[str] = []
+    observed = 0
+    root_resolved = root.resolve()
+    for search_root in _source_relocation_roots(root, repo_id=repo_id, ref_kind=ref_kind):
+        if not search_root.is_dir():
+            continue
+        for path in sorted(search_root.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                resolved = path.resolve()
+                if root_resolved not in (resolved, *resolved.parents):
+                    continue
+                rel = resolved.relative_to(root_resolved).as_posix()
+            except (OSError, ValueError, RuntimeError):
+                continue
+            if set(Path(rel).parts) & {".git", ".repoctl-state", "node_modules", "target", "build"}:
+                continue
+            observed += 1
+            if observed > MAX_SOURCE_RELOCATION_CANDIDATES:
+                return _source_resolution(
+                    ref,
+                    KnowledgeSourceResolutionStatus.INVALID_IDENTITY,
+                    cause_code="source_relocation_scan_limit",
+                )
+            try:
+                actual = (
+                    "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+                    if ref_kind is KnowledgeSourceRefKind.COMPLETION_RECEIPT
+                    else _sha256_text(path.read_text(encoding="utf-8"))
+                )
+            except (OSError, UnicodeDecodeError):
+                continue
+            if actual == expected:
+                candidates.append(rel)
+                if len(candidates) > 1:
+                    return _source_resolution(
+                        ref,
+                        KnowledgeSourceResolutionStatus.INVALID_IDENTITY,
+                        cause_code="source_relocation_ambiguous",
+                    )
+    if len(candidates) == 1:
+        return _source_resolution(
+            ref,
+            KnowledgeSourceResolutionStatus.RELOCATED,
+            resolved_path=candidates[0],
+            actual_sha256=expected,
+        )
+    return None
+
+
 def knowledge_source_ref_resolutions(
     root: Path,
     data: dict[str, Any],
@@ -1336,8 +1552,26 @@ def knowledge_source_ref_resolutions(
             ref=ref,
         )
         if boundary_problem is None:
-            resolutions.append(_literal_source_resolution(root, ref))
+            literal = _literal_source_resolution(root, ref)
+            if literal.status is KnowledgeSourceResolutionStatus.MISSING:
+                relocated = _relocated_source_resolution(
+                    root,
+                    repo_id=str(data.get("repo_id") or ""),
+                    ref=ref,
+                )
+                resolutions.append(relocated or literal)
+            else:
+                resolutions.append(literal)
             continue
+        if boundary_problem.code == "knowledge_source_missing":
+            relocated = _relocated_source_resolution(
+                root,
+                repo_id=str(data.get("repo_id") or ""),
+                ref=ref,
+            )
+            if relocated is not None:
+                resolutions.append(relocated)
+                continue
         resolutions.append(
             _source_resolution(
                 ref,
@@ -1664,7 +1898,7 @@ def _record_score(
     if fts:
         reasons.append("SQLite FTS record match")
     if authority:
-        reasons.append("reviewed knowledge record")
+        reasons.append("current knowledge record")
     return score, {
         "exact_identity": exact_identity,
         "exact_title": exact_title,

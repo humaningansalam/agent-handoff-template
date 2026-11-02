@@ -990,6 +990,8 @@ def _admit_materialization(
     *,
     target: RepoTarget,
     state_root: Path | None = None,
+    require_provider_results: bool = True,
+    require_evidence_index: bool = True,
 ) -> tuple[_MaterializedGraph | None, list[Problem], str]:
     state_dir = _state_dir(root, target, state_root=state_root)
     manifest_data, manifest_status, manifest_problem = _read_materialization_json(root, state_dir / "manifest.json")
@@ -1041,6 +1043,7 @@ def _admit_materialization(
     if problem is not None:
         return None, [problem], status
 
+    component_problems: list[Problem] = []
     provider_results, provider_problems = _load_provider_results_strict(
         root,
         state_dir=state_dir,
@@ -1054,7 +1057,19 @@ def _admit_materialization(
             if any(problem.code == "graph_materialization_incomplete" for problem in provider_problems)
             else "invalid"
         )
-        return None, provider_problems, provider_status
+        if require_provider_results:
+            return None, provider_problems, provider_status
+        provider_results = {}
+        component_problems.extend(
+            Problem(
+                "warning",
+                "graph_provider_artifacts_unavailable",
+                "provider artifacts are unavailable; stored Graph relations remain readable but semantic freshness is partial",
+                problem.path,
+                cause_code=problem.code,
+            )
+            for problem in provider_problems
+        )
 
     evidence_metadata, evidence_problems = load_evidence_index_metadata(
         root,
@@ -1078,9 +1093,22 @@ def _admit_materialization(
             if any(problem.code == "evidence_index_missing" for problem in evidence_problems)
             else "invalid"
         )
-        return None, evidence_problems, evidence_status
+        if require_evidence_index:
+            return None, evidence_problems, evidence_status
+        evidence_metadata = {}
+        component_problems.extend(
+            Problem(
+                "warning",
+                "graph_evidence_index_unavailable",
+                "text/evidence index is unavailable; stored Graph relations remain readable",
+                problem.path,
+                cause_code=problem.code,
+            )
+            for problem in evidence_problems
+        )
 
-    return _MaterializedGraph(manifest_data, snapshot, provider_results, evidence_metadata), [], "materialized"
+    status = "materialized_degraded" if component_problems else "materialized"
+    return _MaterializedGraph(manifest_data, snapshot, provider_results, evidence_metadata), component_problems, status
 
 
 def load_materialized_graph(
@@ -1090,14 +1118,25 @@ def load_materialized_graph(
     state_root: Path | None = None,
     with_freshness: bool = False,
 ) -> tuple[GraphSnapshot | None, list[Problem], dict[str, Any]]:
-    materialized, problems, status = _admit_materialization(root, target=target, state_root=state_root)
+    materialized, problems, status = _admit_materialization(
+        root,
+        target=target,
+        state_root=state_root,
+        require_provider_results=False,
+        require_evidence_index=False,
+    )
     if materialized is None:
         return None, problems, {"repository": target.to_dict(), "materialization": {"status": status}}
     meta = {
         "repository": target.to_dict(),
         "materialization": {
-            "status": "materialized",
+            "status": status,
             "input_digest": str(materialized.manifest.get("input_digest") or ""),
+            "components": {
+                "relations": "available",
+                "provider_artifacts": "unavailable" if not materialized.provider_results else "available",
+                "evidence_index": "unavailable" if not materialized.evidence_metadata else "available",
+            },
         },
     }
     if with_freshness:
@@ -1111,7 +1150,7 @@ def load_materialized_graph(
         )
         meta["freshness"] = freshness
         meta["freshness_problems"] = [problem.to_dict() for problem in freshness_problems]
-    return materialized.snapshot, [], meta
+    return materialized.snapshot, problems, meta
 
 
 def graph_materialization_freshness(
@@ -1158,16 +1197,19 @@ def graph_materialization_freshness(
             state_dir=state_dir,
             manifest=manifest,
         )
-        if provider_problems:
-            provider_status = (
-                "unavailable"
-                if any(problem.code == "graph_materialization_unavailable" for problem in provider_problems)
-                else "incomplete"
-                if any(problem.code == "graph_materialization_incomplete" for problem in provider_problems)
-                else "invalid"
+        provider_advisories = [
+            Problem(
+                "warning",
+                "graph_provider_artifacts_unavailable",
+                "provider artifacts are unavailable; semantic relations are conservatively stale until Graph refresh",
+                problem.path,
+                cause_code=problem.code,
             )
-            return {"status": provider_status, "changed_paths": []}, provider_problems
-    return _observed_graph_freshness(
+            for problem in provider_problems
+        ]
+        if provider_problems:
+            provider_results = {}
+    freshness, observed_problems = _observed_graph_freshness(
         root,
         target=target,
         snapshot=snapshot,
@@ -1175,6 +1217,7 @@ def graph_materialization_freshness(
         provider_results=provider_results,
         component_manifest_registry=component_manifest_registry,
     )
+    return freshness, [*locals().get("provider_advisories", []), *observed_problems]
 
 
 def _observed_graph_freshness(
@@ -1241,8 +1284,16 @@ def _observed_graph_freshness(
     )
     previous_provider_states = manifest.get("providers") if isinstance(manifest.get("providers"), dict) else {}
     changed_provider_configs: dict[str, list[str]] = {}
-    provider_stale_paths: dict[str, list[str]] = {}
-    provider_state_changed = False
+    missing_provider_artifacts = sorted(set(PROVIDER_LANGUAGES) - set(provider_results))
+    provider_stale_paths: dict[str, list[str]] = {
+        provider: sorted(
+            item.path
+            for item in inventory
+            if str(language_for_path(item.path)) in set(PROVIDER_LANGUAGES[provider])
+        )
+        for provider in missing_provider_artifacts
+    }
+    provider_state_changed = bool(missing_provider_artifacts)
     for provider in PROVIDER_LANGUAGES:
         previous_state = previous_provider_states.get(provider) if isinstance(previous_provider_states.get(provider), dict) else {}
         current_config_files, current_config_digest = _provider_config_state(target, provider, inventory_records)
@@ -1257,17 +1308,27 @@ def _observed_graph_freshness(
         if config_changed or input_version_changed:
             provider_state_changed = True
             changed_provider_configs[provider] = config_paths
-            result = provider_results[provider]
-            provider_stale_paths[provider] = sorted(
-                {
-                    *result.symbol_analyzed_paths,
-                    *result.call_analyzed_paths,
-                    *result.rpc_analyzed_paths,
-                    *result.symbol_failed_paths,
-                    *result.call_failed_paths,
-                    *result.rpc_failed_paths,
-                }
-            )
+            result = provider_results.get(provider)
+            if result is not None:
+                provider_stale_paths[provider] = sorted(
+                    {
+                        *result.symbol_analyzed_paths,
+                        *result.call_analyzed_paths,
+                        *result.rpc_analyzed_paths,
+                        *result.symbol_failed_paths,
+                        *result.call_failed_paths,
+                        *result.rpc_failed_paths,
+                    }
+                )
+            else:
+                provider_stale_paths.setdefault(
+                    provider,
+                    sorted(
+                        item.path
+                        for item in inventory
+                        if str(language_for_path(item.path)) in set(PROVIDER_LANGUAGES[provider])
+                    ),
+                )
     graph_input_version_changed = (
         manifest.get("code_index_input_version") != CODE_INDEX_INPUT_VERSION
         or manifest.get("structured_relation_input_version") != STRUCTURED_RELATION_INPUT_VERSION
@@ -1364,6 +1425,7 @@ def _observed_graph_freshness(
         "changed_root_paths": changed_root_paths,
         "changed_root_path_count": len(changed_root_paths),
         "provider_state_changed": provider_state_changed,
+        "missing_provider_artifacts": missing_provider_artifacts,
         "changed_provider_configs": changed_provider_configs,
         "changed_provider_config_count": sum(len(paths) for paths in changed_provider_configs.values()),
         "provider_stale_paths": provider_stale_paths,

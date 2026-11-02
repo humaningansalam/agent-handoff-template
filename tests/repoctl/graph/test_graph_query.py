@@ -115,10 +115,12 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     provider_path = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
     removed_provider_path = provider_path.with_suffix(".removed")
     provider_path.rename(removed_provider_path)
-    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 1
+    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 0
     incomplete = json.loads(capsys.readouterr().out)
-    assert incomplete["data"]["materialization"]["status"] == "incomplete"
-    assert [problem["code"] for problem in incomplete["problems"]] == ["graph_materialization_incomplete"]
+    assert incomplete["data"]["materialization"]["status"] == "materialized_degraded"
+    assert incomplete["data"]["materialization"]["components"]["relations"] == "available"
+    assert incomplete["data"]["materialization"]["components"]["provider_artifacts"] == "unavailable"
+    assert any(warning["code"] == "graph_provider_artifacts_unavailable" for warning in incomplete["warnings"])
 
     removed_provider_path.rename(provider_path)
     provider_data = json.loads(provider_path.read_text(encoding="utf-8"))
@@ -129,10 +131,11 @@ def test_graph_query_file_returns_typed_subgraph(tmp_path: Path, monkeypatch, ca
     manifest["provider_result_digests"]["python_ast"] = digest_data(provider_data)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 1
+    assert main(["graph", "query", "--file", "src/app.py", "--json"]) == 0
     invalid_materialization = json.loads(capsys.readouterr().out)
-    assert invalid_materialization["data"]["materialization"]["status"] == "invalid"
-    assert [problem["code"] for problem in invalid_materialization["problems"]] == ["graph_materialization_invalid"]
+    assert invalid_materialization["data"]["materialization"]["status"] == "materialized_degraded"
+    assert invalid_materialization["data"]["query_status"] == "found"
+    assert any(warning["code"] == "graph_provider_artifacts_unavailable" for warning in invalid_materialization["warnings"])
 
 
 def test_graph_query_topic_returns_matching_files(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -305,3 +308,25 @@ def test_graph_shell_only_repo_reports_provider_coverage_as_unsupported(tmp_path
     assert completeness["capabilities"]["symbols"] == "unsupported"
     assert completeness["capabilities"]["calls"] == "unsupported"
     assert completeness["provider_coverage"]["symbols"]["unsupported_paths"] == ["run.sh"]
+
+
+def test_graph_relation_query_survives_missing_evidence_index(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    repo = tmp_path / "repos"
+    init_repo(repo)
+    write_repometa(repo)
+    (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    _materialize(tmp_path)
+    database = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
+    database.rename(database.with_suffix(".removed"))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["graph", "query", "--file", "app.py", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["data"]["query_status"] == "found"
+    assert result["data"]["materialization"]["components"] == {
+        "relations": "available",
+        "provider_artifacts": "available",
+        "evidence_index": "unavailable",
+    }
+    assert any(warning["code"] == "graph_evidence_index_unavailable" for warning in result["warnings"])

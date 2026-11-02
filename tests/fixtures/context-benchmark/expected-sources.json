@@ -6,14 +6,14 @@
         "section": "repoctl module boundaries"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/contracts/repoctl-graph-contract.md",
         "section": "repoctl Graph contract"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-002": {
     "acceptable": [
@@ -22,19 +22,17 @@
         "section": "Product model"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/contracts/repoctl-context-contract.md",
         "section": "Purpose"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-003": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/utils/tokens.py"
@@ -42,10 +40,20 @@
       {
         "path": "repos/handlers/login.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-004": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/handlers/session_tokens.py"
+      },
+      {
+        "path": "repos/handlers/session_login.py"
+      }
+    ],
     "noise": [
       {
         "path": "repos/test_render.py"
@@ -54,20 +62,10 @@
         "path": "repos/backend/test_reconcile.py"
       }
     ],
-    "required_knowledge_source_refs": [],
-    "must_find": [
-      {
-        "path": "repos/handlers/session_tokens.py"
-      },
-      {
-        "path": "repos/handlers/session_login.py"
-      }
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-005": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/frontend/src/api/tokens.ts"
@@ -75,10 +73,12 @@
       {
         "path": "repos/frontend/src/client.ts"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-006": {
-    "supporting": [
+    "must_find": [
       {
         "path": "repos/auth/flow.py"
       }
@@ -94,14 +94,14 @@
       }
     ],
     "required_knowledge_source_refs": [],
-    "must_find": [
+    "supporting": [
       {
         "path": "repos/auth/flow.py"
       }
     ]
   },
   "Q-007": {
-    "supporting": [
+    "must_find": [
       {
         "path": "repos/auth/method_flow.py"
       }
@@ -117,14 +117,14 @@
       }
     ],
     "required_knowledge_source_refs": [],
-    "must_find": [
+    "supporting": [
       {
         "path": "repos/auth/method_flow.py"
       }
     ]
   },
   "Q-008": {
-    "supporting": [
+    "must_find": [
       {
         "path": "repos/handlers/session_tokens.py"
       },
@@ -143,7 +143,7 @@
       }
     ],
     "required_knowledge_source_refs": [],
-    "must_find": [
+    "supporting": [
       {
         "path": "repos/handlers/session_tokens.py"
       },
@@ -159,14 +159,14 @@
         "section": "Purpose"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/contracts/repoctl-graph-contract.md",
         "section": "repoctl Graph contract"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-010": {
     "acceptable": [
@@ -175,14 +175,14 @@
         "section": "Project documents, history, and Knowledge"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/PRD.md",
-        "section": "Reuse a decision"
+        "section": "Reuse a conclusion"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-011": {
     "acceptable": [
@@ -191,60 +191,58 @@
         "section": "Boundaries"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
         "section": "Derived-layer rules"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-012": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "docs/contracts/repoctl-module-boundaries.md",
         "section": "Forbidden shortcuts"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-013": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/services/token_service.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-014": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/utils/tokens.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-015": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/auth/method_flow.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-016": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/frontend/src/api/tokens.ts"
@@ -252,12 +250,12 @@
       {
         "path": "repos/frontend/src/client.ts"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-017": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/handlers/session_tokens.py"
@@ -265,17 +263,19 @@
       {
         "path": "repos/handlers/session_login.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-018": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/auth/flow.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-019": {
     "acceptable": [
@@ -283,18 +283,16 @@
         "path": "repos/auth/flow.py"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/auth/flow.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-020": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/services/token_service.py"
@@ -302,27 +300,29 @@
       {
         "path": "repos/handlers/cross_login.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-021": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/utils/tokens.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-022": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/handlers/session_tokens.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-023": {
     "acceptable": [
@@ -333,18 +333,16 @@
         "path": "repos/auth/method_flow.py"
       }
     ],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/auth/flow.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-024": {
     "acceptable": [],
-    "noise": [],
-    "required_knowledge_source_refs": [],
     "must_find": [
       {
         "path": "repos/services/token_service.py"
@@ -355,12 +353,21 @@
       {
         "path": "repos/utils/tokens.py"
       }
-    ]
+    ],
+    "noise": [],
+    "required_knowledge_source_refs": []
   },
   "Q-025": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/compose.yml"
+      },
+      {
+        "path": "repos/Dockerfile"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -370,15 +377,19 @@
         "to": "repo:main:file:Dockerfile"
       }
     ],
-    "must_find": [
-      {"path": "repos/compose.yml"},
-      {"path": "repos/Dockerfile"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-026": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/.github/workflows/release.yml"
+      },
+      {
+        "path": "repos/scripts/start.sh"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -388,15 +399,19 @@
         "to": "repo:main:file:scripts%2Fstart.sh"
       }
     ],
-    "must_find": [
-      {"path": "repos/.github/workflows/release.yml"},
-      {"path": "repos/scripts/start.sh"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-027": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/scripts/start.sh"
+      },
+      {
+        "path": "repos/scripts/common.sh"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -406,15 +421,19 @@
         "to": "repo:main:file:scripts%2Fcommon.sh"
       }
     ],
-    "must_find": [
-      {"path": "repos/scripts/start.sh"},
-      {"path": "repos/scripts/common.sh"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-028": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/supabase/seed.sql"
+      },
+      {
+        "path": "repos/supabase/migrations/20240101000000_jobs.sql"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -424,15 +443,19 @@
         "to": "repo:main:file:supabase%2Fmigrations%2F20240101000000_jobs.sql"
       }
     ],
-    "must_find": [
-      {"path": "repos/supabase/seed.sql"},
-      {"path": "repos/supabase/migrations/20240101000000_jobs.sql"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-030": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/frontend/src/jobs.ts"
+      },
+      {
+        "path": "repos/supabase/migrations/20240201000000_claim_job.sql"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -442,15 +465,19 @@
         "to": "repo:main:file:supabase%2Fmigrations%2F20240201000000_claim_job.sql"
       }
     ],
-    "must_find": [
-      {"path": "repos/frontend/src/jobs.ts"},
-      {"path": "repos/supabase/migrations/20240201000000_claim_job.sql"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-031": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/Dockerfile"
+      },
+      {
+        "path": "repos/scripts/start.sh"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -460,15 +487,19 @@
         "to": "repo:main:file:scripts%2Fstart.sh"
       }
     ],
-    "must_find": [
-      {"path": "repos/Dockerfile"},
-      {"path": "repos/scripts/start.sh"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-032": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/compose.yml"
+      },
+      {
+        "path": "repos/config/runtime.env"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -478,39 +509,57 @@
         "to": "repo:main:file:config%2Fruntime.env"
       }
     ],
-    "must_find": [
-      {"path": "repos/compose.yml"},
-      {"path": "repos/config/runtime.env"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-033": {
     "acceptable": [
-      {"path": "repos/activity.py"}
+      {
+        "path": "repos/activity.py"
+      }
+    ],
+    "must_find": [
+      {
+        "path": "repos/render.py"
+      },
+      {
+        "path": "repos/test_render.py"
+      }
     ],
     "noise": [
-      {"path": "repos/types.py"}
+      {
+        "path": "repos/types.py"
+      }
     ],
-    "required_knowledge_source_refs": [],
-    "must_find": [
-      {"path": "repos/render.py"},
-      {"path": "repos/test_render.py"}
-    ]
+    "required_knowledge_source_refs": []
   },
   "Q-034": {
     "acceptable": [],
-    "noise": [
-      {"path": "repos/frontend/reconcile.ts"}
-    ],
-    "required_knowledge_source_refs": [],
     "must_find": [
-      {"path": "repos/backend/reconcile.py"},
-      {"path": "repos/backend/test_reconcile.py"}
-    ]
+      {
+        "path": "repos/backend/reconcile.py"
+      },
+      {
+        "path": "repos/backend/test_reconcile.py"
+      }
+    ],
+    "noise": [
+      {
+        "path": "repos/frontend/reconcile.ts"
+      }
+    ],
+    "required_knowledge_source_refs": []
   },
   "Q-035": {
     "acceptable": [],
+    "must_find": [
+      {
+        "path": "repos/routing/settlement_router.py"
+      },
+      {
+        "path": "repos/routing/audit_router.py"
+      }
+    ],
     "noise": [],
-    "required_knowledge_source_refs": [],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -520,22 +569,34 @@
         "to": "repo:main:file:routing%2Fleaf.py"
       }
     ],
+    "required_knowledge_source_refs": [],
     "supporting": [
-      {"path": "repos/routing/shared.py"},
-      {"path": "repos/routing/leaf.py"}
-    ],
-    "must_find": [
-      {"path": "repos/routing/settlement_router.py"},
-      {"path": "repos/routing/audit_router.py"}
+      {
+        "path": "repos/routing/shared.py"
+      },
+      {
+        "path": "repos/routing/leaf.py"
+      }
     ]
   },
   "Q-036": {
     "acceptable": [],
-    "noise": [
-      {"path": "repos/coherence/menu_order_models.py"},
-      {"path": "repos/packaged/operational_controls.py"}
+    "must_find": [
+      {
+        "path": "repos/coherence/operational_controls.py"
+      },
+      {
+        "path": "repos/coherence/test_operational_controls.py"
+      }
     ],
-    "required_knowledge_source_refs": [],
+    "noise": [
+      {
+        "path": "repos/coherence/menu_order_models.py"
+      },
+      {
+        "path": "repos/packaged/operational_controls.py"
+      }
+    ],
     "required_graph_edges": [
       {
         "assertion": "resolved",
@@ -545,9 +606,6 @@
         "to": "repo:main:file:coherence%2Foperational_controls.py"
       }
     ],
-    "must_find": [
-      {"path": "repos/coherence/operational_controls.py"},
-      {"path": "repos/coherence/test_operational_controls.py"}
-    ]
+    "required_knowledge_source_refs": []
   }
 }

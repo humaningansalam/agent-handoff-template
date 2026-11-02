@@ -49,10 +49,24 @@ def classify_document_role(path: str, *, repository_path: str = "") -> DocumentR
         return DocumentRole.PROCEDURE
     if local_path == "docs/board.md":
         return DocumentRole.REFERENCE
-    if local_path == "docs/prd.md" or local_path.startswith("docs/prd/"):
+    if local_path == "docs/prd.md":
         return DocumentRole.PRODUCT_AUTHORITY
-    if local_path.startswith(("docs/adr/", "docs/contracts/")):
+    if local_path.startswith("docs/prd/"):
+        # Legacy-compatible: most established PRD fragments remain authority, while
+        # research/future/benchmark material is not promoted by location alone.
+        if any(token in name for token in ("research", "benchmark", "hypothesis", "experiment", "future", "proposal", "draft")):
+            return DocumentRole.REFERENCE
+        return DocumentRole.PRODUCT_AUTHORITY
+    if local_path.startswith("docs/specs/"):
+        if name == "requirements.md":
+            return DocumentRole.PRODUCT_AUTHORITY
+        if name in {"design.md", "contracts.md", "algorithms.md", "data-model.md"}:
+            return DocumentRole.GOVERNANCE_AUTHORITY
+        return DocumentRole.REFERENCE
+    if local_path.startswith(("docs/architecture/", "docs/adr/", "docs/contracts/")):
         return DocumentRole.GOVERNANCE_AUTHORITY
+    if local_path.startswith("docs/research/"):
+        return DocumentRole.REFERENCE
     if local_path.startswith("docs/workflows/"):
         if name in {"index.md", "readme.md"}:
             return DocumentRole.REFERENCE

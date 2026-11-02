@@ -17,10 +17,10 @@ For changes spanning agents, languages, or shared interfaces, read [Code Quality
 
 For test changes, read [잘 작성된 테스트 코드](well-written-tests.md).
 
+Provider-, model-, role-, and orchestrator-specific procedures are adopter-local and do not belong in this common workflow index.
+
 | Workflow | Use When | Do Not Use When | Tags | Expected Output |
 | --- | --- | --- | --- | --- |
-| [Product execution handoff](README.md#product-execution-handoff) | Assigning product implementation or transferring live Expert/Worker ownership | Common-tool direct engineering | roles, worker, handoff, review | one Worker with current WP/AC and target, consumed results, Expert review and corrections |
-| [External completion](README.md#external-completion) | Waiting for an existing provider request, remote process, CI run or native agent | Starting another collector or treating unchanged output as a result | wait, continuation, native-queue | original execution/result references delivered to and consumed by the same Coordinator |
 | `prd-backlog-sequential.md` | Comparing PRD/external notes to repo, listing missing work, or solving Backlog items one at a time | One-off read-only questions, immediate single known-file fixes | prd, backlog, discovery, sequential | PRD gap Backlog items or one archived Task with explicit Chosen scope per promoted item |
 | `repo-metadata.md` | Creating/modifying graph-relevant files in `repos/`, or using `.repometa` to discover candidate files before task promotion | Root workspace files only, generated/vendor/build outputs | metadata, repo, graph, discovery | valid `repos/.repometa` policy/annotation state and inspected discovery candidates |
 | `repoctl-upgrade.md` | Updating an adopting workspace to a newer repoctl/control-plane release | Product repo changes, project-specific workflow edits, or Board/Backlog/task cleanup | upgrade, release, control-plane | dry-run plan, inspected apply result, and workspace health checks |

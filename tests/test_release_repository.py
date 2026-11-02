@@ -115,6 +115,7 @@ def test_release_archive_excludes_python_tests_and_keeps_field_gate_fixtures(tmp
         "tests/fixtures/context-benchmark/questions.jsonl",
         "tests/fixtures/context-pack-benchmark/cases.json",
         "tests/fixtures/context-pack-benchmark/tasks.json",
+        "tests/fixtures/graph-workflow-benchmark/cases.json",
     }
 
 
@@ -128,6 +129,7 @@ def test_release_archive_runs_public_commands(tmp_path: Path) -> None:
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
 
     assert (package_root / "tools/repoctl/repositories.py").is_file()
+    assert (package_root / "tools/repoctl/graph_workflow.py").is_file()
     assert not (package_root / "docs/adr").exists()
     assert (package_root / "docs/archive/tasks/.gitkeep").is_file()
     assert not (package_root / "docs/knowledge/events").exists()

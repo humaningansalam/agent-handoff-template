@@ -103,7 +103,7 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     binding = json.loads(
         (tmp_path / f"docs/tasks/.repoctl-state/resume/{first}.json").read_text(encoding="utf-8")
     )
-    assert binding["schema_version"] == 5
+    assert binding["schema_version"] == 6
     assert not (tmp_path / f"docs/tasks/.repoctl-state/handoff-origins/{first}.json").exists()
     assert main(["task", "resume", "--json"]) == 0
     current = json.loads(capsys.readouterr().out)["data"]
@@ -116,10 +116,10 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     assert main(["task", "log", "append", first, "changed the live task", "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "resume", "--json"]) == 0
-    stale = json.loads(capsys.readouterr().out)["data"]
-    assert stale["resume_guidance"]["status"] == "inactive"
-    assert stale["resume_guidance"]["readable_handoff"] is None
-    assert stale["resume_guidance"]["executable_handoff"] is None
+    after_log = json.loads(capsys.readouterr().out)["data"]
+    assert after_log["resume_guidance"]["status"] == "current"
+    assert after_log["resume_guidance"]["readable_handoff"] is not None
+    assert after_log["resume_guidance"]["executable_handoff"] is not None
 
     second = "T-20260609184047Z"
     second_path = tmp_path / f"docs/tasks/{second}--beta.md"
@@ -686,7 +686,8 @@ def test_task_discovery_replaces_chosen_scope_with_reason(tmp_path: Path, monkey
     }
     assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert "scope changed: removed repos/a.py; added repos/b.py; reason=implementation moved" in task_body
+    assert "scope changed: removed_count=1; added_count=1; reason=implementation moved; detail_ref=Discovery.Chosen" in task_body
+    assert "repos/a.py; added repos/b.py" not in task_body
 
 
 def test_task_discovery_rejects_existing_directories_but_allows_future_files(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1077,7 +1078,7 @@ def test_handoff_command_text_is_inert_across_resume_lifecycle(
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("old_version", (1, 2, 3, 4))
+@pytest.mark.parametrize("old_version", (1, 2, 3, 4, 5))
 def test_old_handoff_binding_is_ignored_until_rebound(
     tmp_path: Path,
     monkeypatch,
@@ -1097,7 +1098,7 @@ def test_old_handoff_binding_is_ignored_until_rebound(
 
     assert main(["task", "handoff", "bind", "T-20260609184046Z", "--json"]) == 0
     capsys.readouterr()
-    assert json.loads(receipt.read_text(encoding="utf-8"))["schema_version"] == 5
+    assert json.loads(receipt.read_text(encoding="utf-8"))["schema_version"] == 6
     assert task_path.is_file()
 
 
@@ -1148,7 +1149,7 @@ def test_task_handoff_is_readable_but_inactive_until_explicit_bind(tmp_path: Pat
     assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
     start_payload = json.loads(capsys.readouterr().out)
     assert receipt.read_bytes() == bound_receipt
-    assert start_payload["data"]["resume_guidance"]["status"] == "inactive"
+    assert start_payload["data"]["resume_guidance"]["status"] == "current"
 
 
 def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1182,11 +1183,11 @@ def test_task_handoff_binding_tracks_each_structured_task_input(tmp_path: Path, 
 
     assert main(["task", "log", "append", "T-20260609184046Z", "reviewed app owner", "--json"]) == 0
     capsys.readouterr()
-    assert_stale("execution_log")
+    assert _show_resume_guidance(capsys)["status"] == "current"
 
     text = task_path.read_text(encoding="utf-8")
     task_path.write_text(replace_section(text, "Verification", "- Command: pytest\n- Result: pass\n"), encoding="utf-8")
-    assert_stale("verification")
+    assert _show_resume_guidance(capsys)["status"] == "current"
 
     text = task_path.read_text(encoding="utf-8")
     task_path.write_text(replace_frontmatter_line(text, "status", "blocked"), encoding="utf-8")
@@ -1524,12 +1525,12 @@ def test_compact_resume_keeps_full_context_once_and_legacy_output(tmp_path: Path
     assert main(["task", "resume", tid, "--full", "--json"]) == 0
     full = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
     assert full["executable_handoff"] == old["executable_handoff"]
-    # Changed inputs still invalidate both projections; no cache bypass.
+    # Operational history does not invalidate current restart instructions.
     assert main(["task", "log", "append", tid, "new input", "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "resume", tid, "--compact", "--json"]) == 0
-    stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
-    assert stale["status"] == "inactive" and stale["executable_handoff"] is None
+    current = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
+    assert current["status"] == "current" and current["executable_handoff"] is not None
 
 
 @pytest.mark.parametrize("extra", ["", "- Next exact step: conflicting second instruction\n"])

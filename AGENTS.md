@@ -32,7 +32,7 @@ At session start and after compaction, resume the known live task with `./script
 
 Read only the selected Task, its relevant parent/Context Docs and applicable PRD authority. Resume identifies live work; open the Board for registry context when needed. A known small edit needs affected source, applicable rules and a relevant check. Use `docs/workflows/INDEX.md` for a reusable, repeated, or high-risk procedure.
 
-For long external work, use [External completion](docs/workflows/README.md#external-completion) to keep the original wait owner and deliver result references to the same Coordinator through the existing native queue.
+Agent roles, model or provider selection, team hierarchy, and external execution orchestration belong to the adopting environment, not this common workspace package.
 
 When no task is live, create one only for current product work. Never select archived history as live work. Use a root-only parent only to coordinate independently verifiable repo-scoped children.
 
@@ -43,8 +43,6 @@ Find implementation and dependencies in the selected repository's source, manife
 For changes spanning agents, languages, or shared interfaces, read [Code Quality](docs/workflows/code-quality.md). Before writing or changing tests, read [잘 작성된 테스트 코드](docs/workflows/well-written-tests.md).
 
 ## Product Work Loop
-
-Use [Product execution handoff](docs/workflows/README.md#product-execution-handoff) for implementation roles and ownership transitions.
 
 1. Explore without changing product files. Use compact `context query` for ambiguous intent, Git status/diff for a changed-set review, Graph or direct reads for a known file, `rg` for an exact identity, and explicit history or Knowledge queries for prior decisions.
 2. Create or resume the product task and run `task start` before the first product mutation. Read-only exploration is not gated on task creation or start.

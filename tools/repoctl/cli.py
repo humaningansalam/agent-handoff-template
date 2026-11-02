@@ -25,6 +25,7 @@ from .context_task_pack import build_task_context_pack, compact_task_context_pac
 from .debug import begin_debug, bind_debug_command, debug_capture, debug_summary, finish_debug, observe_context, observe_envelope, observe_problem
 from .git import repo_changed_entries, repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
 from .graph import compact_relationship_candidates, query_graph
+from .graph_workflow import query_graph_workflow, evaluate_workflow_benchmark
 from .graph_model import digest_data
 from .graph_store import compact_graph_freshness, graph_materialization_freshness, graph_stale_paths, load_materialized_graph, materialize_graph
 from .graph_structured_relations import STRUCTURED_EDGE_KIND
@@ -48,7 +49,7 @@ from .meta import check_meta, ensure_store, exclude_path, init_store, meta_query
 from .markdown import find_section, parse_labeled_list_section, section_ranges
 from .repositories import evidence_target, workspace_target, RepoLayout, RepoTarget, adopt_repositories, default_repo_target, repo_check_problems, repo_layout, repository_state_namespaces, require_repo_target, resolve_task_repo_target, unbound_repository_state_namespaces
 from .settings import debug_mode
-from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_baseline_ownership_evidence, task_chosen_matches_start, task_discovery_values, task_worktree_history_is_disjoint, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
+from .tasks import Problem, REPO_REQUIRED_AREAS, TaskResumeSelectionStatus, _entry_mutation_paths, _require_no_integrity_problems, append_task_log, bind_task_handoff, block_task, cancel_task, collect_completion_receipt_collection, committed_range_baseline_conflicts, create_task_file, discovery_recorded, discovery_scope_delta, finish_task, load_task_resume_binding, load_tasks, live_tasks, repo_changes_since_task_start, resolve_task, resolve_task_baseline_ownerships, select_task_for_resume, start_task, task_content_audit, migrate_task_slop_text, task_baseline_ownership_evidence, task_chosen_matches_start, task_discovery_values, task_worktree_history_is_disjoint, task_handoff_is_generated_template, task_handoff_observation, task_repo_head_at_start, update_task_discovery, validate_live_task_states, validate_tasks, validate_workspace_write_path
 from .upgrade import apply_upgrade, plan_upgrade, upgrade_status, write_plan
 
 
@@ -2291,7 +2292,8 @@ def cmd_task_resume(args: argparse.Namespace) -> int:
         else:
             print(f"task resume: {selection['status']} live_tasks={selection['live_task_count']}")
             for candidate in payload["data"]["candidates"]:
-                print(f"{candidate['id']} {candidate['status']} {candidate['path']}")
+                command = f"./scripts/repoctl task resume {candidate['id']} --json"
+                print(f"{candidate['id']} {candidate['status']} {candidate['path']} resume={command}")
     return 0 if payload["ok"] else 1
 
 
@@ -2728,6 +2730,124 @@ def cmd_task_baseline_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_audit_payload(
+    root: Path,
+    *,
+    task_id: str | None = None,
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    tasks = [resolve_task(root, task_id)] if task_id else load_tasks(root, include_archived=include_archived)
+    audits = [
+        {"task_id": task.id, "status": task.status, "path": task.rel_path, "archived": task.archived, **task_content_audit(task)}
+        for task in sorted(tasks, key=lambda item: item.rel_path)
+    ]
+    warnings = [finding for audit in audits for finding in audit["findings"]]
+    return {
+        "ok": True,
+        "command": "task.audit",
+        "data": {
+            "task_count": len(audits),
+            "finding_count": len(warnings),
+            "tasks": audits,
+        },
+        "problems": [],
+        "warnings": warnings,
+    }
+
+
+def cmd_task_audit(args: argparse.Namespace) -> int:
+    payload = _task_audit_payload(
+        find_workspace_root(),
+        task_id=args.task_id,
+        include_archived=bool(args.include_archived),
+    )
+    if args.json:
+        _json(payload)
+    else:
+        print(f"repoctl task audit: tasks={payload['data']['task_count']} findings={payload['data']['finding_count']}")
+        for warning in payload["warnings"]:
+            print(f"- {warning['path']}: {warning['code']} ({warning.get('count', 1)})")
+    return 0
+
+
+def _task_migrate_slop_payload(
+    root: Path,
+    *,
+    task_id: str | None = None,
+    include_archived: bool = False,
+    apply: bool = False,
+) -> dict[str, Any]:
+    tasks = [resolve_task(root, task_id)] if task_id else load_tasks(root, include_archived=include_archived)
+    plans: list[dict[str, Any]] = []
+    writes: list[tuple[Path, str]] = []
+    for task in sorted(tasks, key=lambda item: item.rel_path):
+        original = task.path.read_text(encoding="utf-8")
+        migrated, changes = migrate_task_slop_text(original)
+        if not changes:
+            continue
+        status = "planned"
+        if apply and task.archived:
+            status = "skipped_archived_immutable"
+        elif apply:
+            status = "applied"
+            writes.append((task.path, migrated))
+        plans.append(
+            {
+                "task_id": task.id,
+                "path": task.rel_path,
+                "archived": task.archived,
+                "status": status,
+                "change_count": len(changes),
+                "changes": changes,
+            }
+        )
+    if apply and writes:
+        with repoctl_lock(root):
+            for path, text in writes:
+                atomic_write(path, text)
+    skipped = [plan for plan in plans if plan["status"] == "skipped_archived_immutable"]
+    warnings = [
+        {
+            "severity": "warning",
+            "code": "task_slop_archive_requires_receipt_aware_migration",
+            "message": "archived Task was identified but not rewritten because its completion receipt and catalogue are immutable evidence",
+            "path": plan["path"],
+        }
+        for plan in skipped
+    ]
+    return {
+        "ok": True,
+        "command": "task.migrate-slop",
+        "data": {
+            "mode": "apply" if apply else "dry_run",
+            "candidate_task_count": len(plans),
+            "applied_task_count": len(writes),
+            "skipped_archived_count": len(skipped),
+            "tasks": plans,
+        },
+        "problems": [],
+        "warnings": warnings,
+    }
+
+
+def cmd_task_migrate_slop(args: argparse.Namespace) -> int:
+    payload = _task_migrate_slop_payload(
+        find_workspace_root(),
+        task_id=args.task_id,
+        include_archived=bool(args.include_archived),
+        apply=bool(args.apply),
+    )
+    if args.json:
+        _json(payload)
+    else:
+        data = payload["data"]
+        print(
+            f"repoctl task migrate-slop: mode={data['mode']} candidates={data['candidate_task_count']} "
+            f"applied={data['applied_task_count']} skipped_archived={data['skipped_archived_count']}"
+        )
+    return 0
+
+
 def _task_doctor_payload(
     root: Path,
     task_id: str,
@@ -2745,6 +2865,11 @@ def _task_doctor_payload(
             related_tasks, include_archived_warnings=True
         )
         if problem.path == task.rel_path
+    ]
+    content_audit = task_content_audit(task)
+    audit_problems = [
+        Problem("warning", finding["code"], finding["message"], finding["path"])
+        for finding in content_audit["findings"]
     ]
     doctor_problems: list[Problem] = []
     target: RepoTarget | None = None
@@ -2821,7 +2946,7 @@ def _task_doctor_payload(
         observation_error=delta_observation_error,
     )
     combined = _dedupe_problems(
-        [*task_problems, *doctor_problems, *health.problems]
+        [*task_problems, *audit_problems, *doctor_problems, *health.problems]
     )
     blockers = [
         problem.code for problem in combined if problem.severity == "error"
@@ -2831,6 +2956,7 @@ def _task_doctor_payload(
         "status": task.status,
         "path": task.rel_path,
         "health": health.to_dict(),
+        "content_audit": content_audit,
         "finish_ready": (
             task.status in {"doing", "todo", "blocked"}
             and not blockers
@@ -4436,6 +4562,127 @@ def _graph_candidate_actions(result: dict[str, Any] | None, *, repo_id: str) -> 
     return actions
 
 
+
+def cmd_graph_workflow(args: argparse.Namespace) -> int:
+    """Navigate a current code path from HTTP route or symbol to relevant tests."""
+    root = find_workspace_root()
+    target = evidence_target(root, repo_id=args.repo_id, workspace=False)
+    snapshot, admission_problems, meta = load_materialized_graph(root, target=target)
+    if snapshot is None:
+        payload = {
+            "ok": False, "command": "graph.workflow",
+            "data": {"result": None, **meta},
+            "problems": [problem.to_dict() for problem in admission_problems],
+            "warnings": [],
+        }
+        _json(payload) if args.json else print("Graph snapshot unavailable; build it before workflow navigation")
+        return 1
+    freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
+    fatal = [problem for problem in freshness_problems if problem.severity == "error"]
+    if fatal:
+        payload = {
+            "ok": False, "command": "graph.workflow",
+            "data": {"result": None, "repository": target.to_dict(), "materialization": meta.get("materialization", {})},
+            "problems": [problem.to_dict() for problem in fatal], "warnings": [],
+        }
+        _json(payload) if args.json else print("Graph repository freshness cannot be observed")
+        return 1
+    result = query_graph_workflow(
+        snapshot, root=root, target=target,
+        route=args.route or "", symbol=args.symbol or "", in_file=args.in_file or "",
+        freshness=freshness,
+    )
+    status = result.get("status")
+    payload = {
+        "ok": status in {"found", "partial", "not_found"},
+        "command": "graph.workflow",
+        "data": {
+            "result": result, "query_status": status, "repository": target.to_dict(),
+            "materialization": meta.get("materialization", {}),
+            "freshness": freshness if args.full else compact_graph_freshness(freshness),
+        },
+        "problems": ([{"code": "graph_workflow_invalid", "message": result.get("problem", "invalid workflow query")}] if status == "invalid" else []),
+        "warnings": [
+            *[problem.to_dict() for problem in admission_problems if problem.severity == "warning"],
+            *[problem.to_dict() for problem in freshness_problems if problem.severity == "warning"],
+            *[{"code": "graph_workflow_partial", "message": message} for message in result.get("warnings", [])],
+        ],
+        "next_actions": ([{"label": "Refresh Graph relations", "command": f"./scripts/repoctl graph build --repo-id {target.id} --json"}]
+                         if freshness.get("status") != "current" else []),
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"graph workflow status={status}")
+        for stage, items in (result.get("stages") or {}).items():
+            for item in items:
+                print(f"{stage}: {item['path']} ({item['relation']}: {item['evidence']})")
+        for warning in result.get("warnings", []):
+            print(f"warning: {warning}")
+    return 0 if payload["ok"] else 1
+
+
+
+def cmd_graph_workflow_benchmark(args: argparse.Namespace) -> int:
+    """Compare observable work-path stages to a bounded fixture of source paths."""
+    root = find_workspace_root()
+    fixture = Path(args.fixture)
+    fixture = fixture if fixture.is_absolute() else root / fixture
+    try:
+        if not fixture.is_file() or fixture.stat().st_size > 128 * 1024:
+            raise ValueError("fixture absent or oversized")
+        document = json.loads(fixture.read_text(encoding="utf-8"))
+        if document.get("schema") != "repoctl.graph.workflow-benchmark" or not isinstance(document.get("cases"), list):
+            raise ValueError("invalid benchmark fixture schema")
+        cases = [case for case in document["cases"] if isinstance(case, dict) and case.get("id") == args.case_id]
+        if len(cases) != 1 or not isinstance(cases[0].get("selector"), dict):
+            raise ValueError("benchmark case is missing, duplicate, or malformed")
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RepoctlError(f"Graph benchmark fixture cannot be read: {exc}", code="graph_benchmark_fixture_invalid") from exc
+    case = cases[0]
+    target = evidence_target(root, repo_id=args.repo_id or str(case.get("repo_id") or ""), workspace=False)
+    snapshot, admission, meta = load_materialized_graph(root, target=target)
+    if snapshot is None:
+        payload = {"ok": False, "command": "graph.workflow-benchmark", "data": {"case_id": args.case_id, **meta},
+                   "problems": [problem.to_dict() for problem in admission], "warnings": []}
+        _json(payload) if args.json else print("Graph snapshot unavailable")
+        return 1
+    freshness, freshness_problems = graph_materialization_freshness(root, target=target, snapshot=snapshot)
+    if any(problem.severity == "error" for problem in freshness_problems):
+        payload = {"ok": False, "command": "graph.workflow-benchmark", "data": {"case_id": args.case_id},
+                   "problems": [problem.to_dict() for problem in freshness_problems if problem.severity == "error"], "warnings": []}
+        _json(payload) if args.json else print("Graph freshness unavailable")
+        return 1
+    selector = case["selector"]
+    result = query_graph_workflow(snapshot, root=root, target=target, route=str(selector.get("route") or ""),
+                                  symbol=str(selector.get("symbol") or ""), in_file=str(selector.get("in_file") or ""),
+                                  freshness=freshness)
+    measurement = evaluate_workflow_benchmark(result, case)
+    min_recall = args.min_path_recall
+    gated = min_recall is not None
+    passed = (not gated or (measurement["path_recall"] is not None and measurement["path_recall"] >= min_recall))
+    payload = {
+        "ok": bool(passed and measurement["status_expected"]),
+        "command": "graph.workflow-benchmark",
+        "data": {"benchmark": measurement, "repository": target.to_dict(),
+                 "freshness": compact_graph_freshness(freshness), "materialization": meta.get("materialization", {})},
+        "problems": ([] if passed and measurement["status_expected"] else [{
+            "code": "graph_workflow_benchmark_missed_expected_paths",
+            "message": "observed work-path recall or query status did not meet the fixture expectation",
+        }]),
+        "warnings": [
+            *[problem.to_dict() for problem in admission if problem.severity == "warning"],
+            *[problem.to_dict() for problem in freshness_problems if problem.severity == "warning"],
+            {"code": "graph_workflow_benchmark_source_only", "message": "measures navigation path recall, not test execution or correctness"},
+        ],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(f"graph workflow benchmark {args.case_id}: path_recall={measurement['path_recall']} confirmed_recall={measurement['confirmed_path_recall']} status={measurement['query_status']}")
+    return 0 if payload["ok"] else 1
+
+
 def cmd_graph_query(args: argparse.Namespace) -> int:
     root = find_workspace_root()
     target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
@@ -4508,6 +4755,7 @@ def cmd_graph_query(args: argparse.Namespace) -> int:
             "repository": target.to_dict(),
             "snapshot_digest": snapshot.snapshot_digest,
             "freshness": freshness_data,
+            "materialization": meta.get("materialization", {}),
         },
         "problems": [problem.to_dict() for problem in query_problems],
         "warnings": [
@@ -6465,7 +6713,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_list = task_sub.add_parser("list")
     task_list.add_argument("--json", action="store_true")
     task_list.set_defaults(func=cmd_task_list)
-    task_resume = task_sub.add_parser("resume", help="Select resumable task state without mutation.")
+    task_resume = task_sub.add_parser("resume", help="Select resumable task state without mutation; pass the known Task id explicitly.")
     task_resume.add_argument("task_id", nargs="?", help="live task id to select when more than one task is resumable")
     task_resume.add_argument("--compact", action="store_true", help="show canonical restart fields with the complete reviewed context once; legacy output is unchanged without this flag")
     task_resume.add_argument("--full", action="store_true", help="include every repository lifecycle problem instead of the bounded code summary")
@@ -6477,7 +6725,18 @@ def build_parser() -> argparse.ArgumentParser:
     task_show.add_argument("--section", help="return one named Task section without reading the full history")
     task_show.add_argument("--json", action="store_true")
     task_show.set_defaults(func=cmd_task_show)
-    task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness and lifecycle problems.")
+    task_audit = task_sub.add_parser("audit", help="Read-only audit of Task size and known generated-slop patterns.")
+    task_audit.add_argument("task_id", nargs="?", help="specific Task id; omit to audit live Tasks")
+    task_audit.add_argument("--include-archived", action="store_true", help="also inspect archived Tasks without modifying them")
+    task_audit.add_argument("--json", action="store_true")
+    task_audit.set_defaults(func=cmd_task_audit)
+    task_migrate_slop = task_sub.add_parser("migrate-slop", help="Compact recognized legacy repoctl path dumps; dry-run by default.")
+    task_migrate_slop.add_argument("task_id", nargs="?", help="specific Task id; omit to scan live Tasks")
+    task_migrate_slop.add_argument("--include-archived", action="store_true", help="identify archived candidates; immutable archives are reported, not rewritten")
+    task_migrate_slop.add_argument("--apply", action="store_true", help="apply high-confidence rewrites to live Tasks")
+    task_migrate_slop.add_argument("--json", action="store_true")
+    task_migrate_slop.set_defaults(func=cmd_task_migrate_slop)
+    task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness, content hygiene, and lifecycle problems.")
     task_doctor.add_argument("task_id")
     task_doctor.add_argument("--use-committed-diff", action="store_true", help="preflight the recorded task-start HEAD through current HEAD")
     task_doctor.add_argument("--acknowledge-completed", action="append", default=[], metavar="TASK_ID", help="validate completed product work without taking ownership: an archived standalone task for root work, or a same-repository sibling for product work; repeat for multiple tasks")
@@ -6663,6 +6922,22 @@ def build_parser() -> argparse.ArgumentParser:
     graph_build.add_argument("--full", action="store_true", help="include full nodes/edges snapshot; default JSON is compact summary")
     graph_build.add_argument("--json", action="store_true")
     graph_build.set_defaults(func=cmd_graph_build)
+    graph_workflow = graph_sub.add_parser("workflow", help="Find source-anchored entrypoints, implementation, dependents, and tests.")
+    graph_workflow.add_argument("--repo-id", default=None)
+    route_or_symbol = graph_workflow.add_mutually_exclusive_group(required=True)
+    route_or_symbol.add_argument("--route", help="exact HTTP route literal (for Python route decorators)")
+    route_or_symbol.add_argument("--symbol", help="provider symbol name or conservative source term")
+    graph_workflow.add_argument("--in-file", default="", help="normalized repo-relative file to disambiguate an entrypoint")
+    graph_workflow.add_argument("--full", action="store_true", help="include full snapshot freshness diagnostics")
+    graph_workflow.add_argument("--json", action="store_true")
+    graph_workflow.set_defaults(func=cmd_graph_workflow)
+    graph_benchmark = graph_sub.add_parser("workflow-benchmark", help="Measure source-path recall for one real work question.")
+    graph_benchmark.add_argument("--fixture", default="tests/fixtures/graph-workflow-benchmark/cases.json")
+    graph_benchmark.add_argument("--case-id", required=True)
+    graph_benchmark.add_argument("--repo-id", default=None)
+    graph_benchmark.add_argument("--min-path-recall", type=float, default=None)
+    graph_benchmark.add_argument("--json", action="store_true")
+    graph_benchmark.set_defaults(func=cmd_graph_workflow_benchmark)
     graph_query = graph_sub.add_parser("query")
     graph_query_scope = graph_query.add_mutually_exclusive_group()
     graph_query_scope.add_argument("--repo-id")

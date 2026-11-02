@@ -246,7 +246,9 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
     cancel = json.loads(capsys.readouterr().out)
     assert cancel["data"]["cancel_gate"]["baseline_conflicts"] == ["repos/tracked.txt"]
     archived = (tmp_path / cancel["data"]["new_path"]).read_text(encoding="utf-8")
-    assert 'baseline_conflicts=["repos/tracked.txt"]' in archived
+    assert "baseline_conflict_count=1" in archived
+    assert "baseline_conflicts=[" not in archived
+    assert "detail_ref=task.cancel.data.cancel_gate" in archived
 
 
 def test_task_doctor_and_finish_share_baseline_conflict_preflight(tmp_path: Path, monkeypatch, capsys) -> None:

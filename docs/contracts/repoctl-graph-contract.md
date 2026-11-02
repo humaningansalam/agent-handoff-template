@@ -287,3 +287,9 @@ The same admitted inputs produce the same canonical snapshot digest:
 - the canonical body contains no generated timestamp
 
 Storage layout is not part of the public schema. A breaking identity or edge change increments the snapshot schema; the agent rebuilds derived Graph state with the current runtime.
+
+## Work-path navigation (v0.13)
+
+`graph workflow --route /predict --repo-id main --json` finds Python HTTP decorator entrypoints and reports implementation and test paths with source identity. `graph workflow --symbol audio_clock --repo-id main --json` uses confirmed provider symbols where available and bounded source matches for unsupported languages. Each path declares `relation` (`confirmed`, `source`, or `candidate`) and evidence, never promoting a lexical match to a confirmed call. `--in-file` narrows the seed, not the tests.
+
+`graph workflow-benchmark --case-id basic-ml-predict --repo-id main --json` reads `tests/fixtures/graph-workflow-benchmark/cases.json` and measures path recall and separately confirmed-path recall for representative work questions. A benchmark does not execute tests or prove correctness. Unsupported language precision and stale snapshots remain explicit partial results; `graph build` refreshes the derived Graph. Normal `graph query` remains a snapshot-only compatible interface, and an optional missing evidence index does not erase readable relations.

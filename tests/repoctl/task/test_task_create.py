@@ -79,6 +79,9 @@ def test_generated_goal_and_scope_follow_the_task_contract(tmp_path: Path, monke
     write_workspace(tmp_path)
     init_committed_product_repo(tmp_path / "repos", {"app.py": "value = 1\n"})
     (tmp_path / "docs/repoctl.json").write_text(json.dumps({"document_language": language}), encoding="utf-8")
+    template = tmp_path / "docs/tasks/TEMPLATE.md"
+    authored_scope = "Keep original source filenames and preserve existing recordings.\n"
+    template.write_text(template.read_text() + "\n## Scope\n\n" + authored_scope, encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     args = ["task", "create", "--start", "--area", area, "--slug", "contract-copy", "Contract copy", "--json"]
     if repo_id:
@@ -92,8 +95,7 @@ def test_generated_goal_and_scope_follow_the_task_contract(tmp_path: Path, monke
     scope = text[scope_range.body_start:scope_range.end]
     assert "Contract copy" in goal
     assert "handoff" not in goal.lower()
-    assert len([line for line in scope.splitlines() if line.startswith("- ")]) == 1
-    assert "meta check" not in scope
+    assert scope.strip() == authored_scope.strip()
     assert text.count("<!-- repoctl: generated-handoff -->") == 1
     assert f'repo_id: "{repo_id}"' in text
     if not repo_id:
@@ -260,6 +262,12 @@ def test_task_create_validates_board_before_writing_task_file(tmp_path: Path, mo
 
 def test_task_create_parent_uses_parent_template(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
+    template = tmp_path / "docs/tasks/PARENT_TEMPLATE.md"
+    authored_scope = "Integrate the existing importer without changing input data."
+    authored_decision = "Keep the importer output compatible with the existing consumer."
+    template_text = template.read_text().replace("- List concrete deliverables", authored_scope).replace("- Decision 1", authored_decision)
+    optional = find_section(template_text, "Integration Done When")
+    template.write_text(template_text[:optional.start] + template_text[optional.end:], encoding="utf-8")
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
     assert main(["task", "create", "--type", "parent", "--slug", "parent-task", "Parent Task", "--json"]) == 0
@@ -267,6 +275,12 @@ def test_task_create_parent_uses_parent_template(tmp_path: Path, monkeypatch, ca
     payload = json.loads(capsys.readouterr().out)
     text = (tmp_path / payload["data"]["path"]).read_text(encoding="utf-8")
     assert "## Live Child Tasks" in text
+    assert authored_decision in text
+    assert "## Integration Done When" not in text
+    scope = find_section(text, "In Scope")
+    assert authored_scope in text[scope.body_start:scope.end]
+    assert "## Out of Scope" not in text
+    assert "## Plan" not in text
     assert 'parent: ""' in text
     assert "T-YYYYMMDDHHMMSSZ--child-task.md" not in text
     assert "Child tasks are discovered from child frontmatter" in text

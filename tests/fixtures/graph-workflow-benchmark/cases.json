@@ -1,0 +1,117 @@
+{
+  "schema": "repoctl.graph.workflow-benchmark",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "basic-ml-predict",
+      "repository": "Basic ML API",
+      "question": "Trace /predict from HTTP entrypoint through ModelManager.predict to API and concurrency tests.",
+      "required_stages": [
+        "entrypoint",
+        "implementation",
+        "tests"
+      ],
+      "success": "All required stages have current source paths and typed provenance; missing tests is not reported as zero-impact.",
+      "repo_id": "main",
+      "selector": {
+        "route": "/predict"
+      },
+      "expected_paths": {
+        "entrypoints": [
+          "src/api/model_routes.py"
+        ],
+        "implementation": [
+          "src/core/model_manager.py"
+        ],
+        "tests": [
+          "tests/test_predict.py",
+          "tests/test_model_manager_concurrency.py"
+        ]
+      },
+      "expected_statuses": [
+        "partial",
+        "found"
+      ]
+    },
+    {
+      "id": "kinport-audio-clock",
+      "repository": "Kinport",
+      "question": "Locate audio_clock Rust definitions, dependents, and relevant tests.",
+      "required_stages": [
+        "implementation",
+        "callers_or_dependents",
+        "tests"
+      ],
+      "success": "Rust precision is explicit as precise or partial; unsupported precision is not a zero-impact result.",
+      "repo_id": "main",
+      "selector": {
+        "symbol": "audio_clock"
+      },
+      "expected_paths": {
+        "implementation": [
+          "crates/daemon/src/audio_clock.rs",
+          "crates/daemon/src/main.rs",
+          "crates/core/src/lib.rs"
+        ],
+        "tests": [
+          "crates/core/src/lib.rs"
+        ]
+      },
+      "expected_statuses": [
+        "partial"
+      ]
+    },
+    {
+      "id": "gakza-dart-precision",
+      "repository": "Gakza",
+      "question": "Preserve existing precise Dart/Flutter symbol and call relations while finding affected tests.",
+      "required_stages": [
+        "implementation",
+        "callers_or_dependents",
+        "tests"
+      ],
+      "success": "Existing provider-confirmed relations remain precise and current.",
+      "repo_id": "gakza-app",
+      "selector": {
+        "symbol": "LocalRestaurantOrderAuthority",
+        "in_file": "lib/runtime/local_store/local_restaurant_order_authority.dart"
+      },
+      "expected_paths": {
+        "implementation": [
+          "lib/runtime/local_store/local_restaurant_order_authority.dart"
+        ],
+        "tests": [
+          "test/local_restaurant_order_authority_test.dart"
+        ]
+      },
+      "expected_statuses": [
+        "partial",
+        "found"
+      ]
+    },
+    {
+      "id": "cops-and-robbers-stale-empty",
+      "repository": "Cops-and-Robbers",
+      "question": "Distinguish a stale empty snapshot from current code, then compare relations after refresh.",
+      "required_stages": [
+        "current_source",
+        "refresh",
+        "implementation"
+      ],
+      "success": "Before refresh the result is stale/partial rather than zero-impact; after refresh current relations are returned.",
+      "repo_id": "main",
+      "selector": {
+        "symbol": "main",
+        "in_file": "lib/main.dart"
+      },
+      "expected_paths": {
+        "implementation": [
+          "lib/main.dart"
+        ]
+      },
+      "expected_statuses": [
+        "partial"
+      ]
+    }
+  ]
+}

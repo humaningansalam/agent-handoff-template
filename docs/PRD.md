@@ -1,152 +1,96 @@
-# Product Requirements: Agent Workspace Control Plane
+# Product Requirements: Agent Handoff Workspace
 
-## Problem
+## Purpose
 
-Coding agents lose important state across sessions and tools. Chat history is incomplete, repository boundaries are easy to cross by accident, unstructured task prose drifts from actual files, and broad rediscovery wastes time in large repositories.
-
-The workspace needs a small durable model that helps an agent answer four questions:
-
-1. What am I working on now?
-2. What exact step should I take after a pause?
-3. What source material should I read?
-4. Which past conclusion and reason are worth reusing?
-
-It must answer those questions without turning normal development into evidence registration or approval administration.
+This workspace lets different agents, models, and sessions continue the same project work unit without relying on chat history. Product requirements and design are written first under `docs/`; independent Git repositories under `repos/` implement them; repoctl keeps the current work boundary legible and safe without owning agent execution, model placement, deployment, or delivery.
 
 ## Product model
 
-- **Task** is the current unit of work. Its frontmatter owns lifecycle state and its Chosen set owns intended product file scope.
-- **Handoff** is an explicitly reviewed four-field restart instruction.
-- **Context** is a bounded, source-linked read-only view over current code, project documents, Graph relations, task history, and Knowledge.
-- **Knowledge** is an optional reusable conclusion plus its reason and sources.
+The default operating layer is **Task, Board, and Workflows**.
 
-Supporting mechanisms stay narrow:
+- **Task** is the current execution record: Goal, actual current scope, current decisions or constraints, meaningful result or blocker, next action, completion condition, and links to source documents.
+- **Board** lists live work and deferred backlog. Task frontmatter remains lifecycle authority.
+- **Workflows** describe repeated, risky, or order-sensitive procedures.
+- **Handoff** is the four-field restart instruction inside a Task, not a history store or independent product plane.
 
-- product repositories have explicit identities under `repos/`
-- task start records a repository baseline and protects pre-existing dirty work
-- `.repometa` supplies sparse human file metadata and changed-file gates
-- Graph and the persistent evidence index accelerate navigation without becoming authority
-- completion history preserves finished Task and repository-change identity
+The understanding and reuse layer is **Graph and Knowledge**.
 
-## Users
+- **Graph** exposes current code structure, references, impact, entrypoints, implementations, dependents, and relevant tests with provenance, freshness, and explicit completeness.
+- **Knowledge** preserves only reusable claim/reason/source records. Current means not superseded and implies no human approval. Older public `reviewed` labels were compatibility terminology, not a separate review stage.
 
-- An agent resuming work without reliable chat history.
-- A human coordinating work across coding tools.
-- A team keeping private workspace state separate from product repositories.
-- An agent locating owners, tests, callers, contracts, or past decisions in a large repository.
+Context ranking and source-linking remain internal read-flow machinery. Context, Pack, and Capsule are not new durable user obligations or independent state planes.
+
+## Read map
+
+Read only the documents needed for the change:
+
+- [Architecture overview](architecture/overview.md) — workspace boundaries and data flow.
+- [Task requirements](specs/task/requirements.md) — Task, Handoff, resume, audit, and migration behavior.
+- [Knowledge requirements](specs/knowledge/requirements.md) — direct records, projection fallback, lifecycle, and source identity.
+- [Graph requirements](specs/graph/requirements.md) — relation queries, degradation, language support, and task-oriented results.
+- [Language-index research](research/graph-language-indexes.md) — non-authoritative comparison of LSP, SCIP, and tree-sitter reuse.
+- `docs/adr/` — important decisions and their outcomes.
+- `docs/workflows/` — procedures that are repeated, risky, or order-sensitive.
+
+Legacy `docs/prd/**` files remain readable for adopted workspaces, but placement there does not automatically promote research, benchmark, hypothesis, draft, or future material to current product authority.
 
 ## Primary flows
 
-### Small known change
+### Known change
 
-1. Create and start a product Task.
-2. Record the known file or coherent file set as Chosen.
-3. Edit and run the checks useful for the change.
-4. Optionally keep concise results in `## Verification`.
-5. Finish the Task.
+1. Read `docs/PRD.md` and the linked capability document needed for the change.
+2. Create and start one Task; record only the actual current Chosen files.
+3. Implement in the selected product repository and run useful checks.
+4. Keep only concise current results in the Task, then finish it.
 
-No Context, Graph, Pack, verification registration, or Knowledge action is required.
+No Graph, Knowledge, Context, Pack, or verification-registration action is mandatory.
 
-### Ambiguous change
+### Ambiguous or large-codebase change
 
-1. Query Context, inspect Git, use Graph, or search directly before mutation.
-2. Read the strongest source candidates and refine only when needed.
-3. Create and start a Task.
-4. Record Chosen and a Note only for a decision worth remembering.
-5. Implement and finish through the same normal flow.
-
-Search queries, opened files, ranked candidates, and result selections are not durable Task state.
+1. Use direct reads/search and Graph independently.
+2. Ask for the work path: entrypoint → implementation → dependencies/callers → relevant tests.
+3. Treat unsupported, partial, ambiguous, not-found, and zero-impact as different outcomes.
+4. Record only the chosen current scope in the Task; do not copy ranked candidates or full output into it.
 
 ### Pause and resume
 
-1. Write the next step, first file, first command, and done condition.
-2. Bind that exact Handoff before a real pause or transfer.
-3. On the next session, run `task resume` and use only a current executable Handoff as restart instructions.
+1. Keep exactly the next step, first file, first command, and done condition in Handoff.
+2. Bind after the current Task contract, Chosen/Notes, repository observation, child lifecycle, and Handoff are correct.
+3. Resume a known Task by explicit ID.
 
-A Context Pack may be printed or exported for convenience. It is not bound to the Handoff and never controls freshness.
+Execution Log additions and optional Verification prose do not alone make a Handoff stale. A failure that changes the next action must update Goal, constraints/Notes, or Handoff itself.
 
-### Reuse a decision
+### Reuse a conclusion
 
-1. Leave routine detail in archived Task history.
-2. When a conclusion is likely to matter across tasks, save one Knowledge record with its reason and sources.
-3. Query it directly or through explicit Context history modes later.
-4. Correct it by saving a replacement that names the old record.
-
-The save itself completes the operation. There is no new candidate, approval, refresh, or rendered-wiki lifecycle.
+1. Save a concise claim, technical reason, and sources only when the conclusion will matter again.
+2. Query valid direct records even when a derived projection is missing, stale, or invalid.
+3. Keep source drift visible without hiding the record; relocate a source only by unique identity evidence.
+4. Replace an obsolete record explicitly.
 
 ## Requirements
 
-### Task lifecycle
-
-- Keep live registry in `docs/BOARD.md` and authoritative lifecycle status in Task frontmatter.
-- Require `task start` before product mutation and keep the selected repository immutable for that execution.
-- Record one Task-owned Chosen set as the current scope source.
-- Compare actual changes with Chosen at doctor/finish.
-- Protect paths dirty before task start unless ownership is explicitly resolved.
-- Preserve optional Verification prose without parsing, grading, hashing, or requiring it.
-- Archive standalone finished/canceled Tasks and keep completion receipts immutable.
-- Use new follow-up Tasks rather than reopening completed identities.
-
-### Handoff
-
-- Preserve exactly four human-written fields.
-- Keep generated placeholders visibly inactive until reviewed and bound.
-- Report freshness separately from repository lifecycle health.
-- Invalidate a binding when its Task, Handoff, Chosen/Notes, log, optional Verification text, child state, or observed repository state changes.
-- Never parse or execute the stored first command.
-
-### Repository understanding
-
-- Keep direct reads, exact search, Context, and Graph as independent entry points.
-- Return source paths, locations, typed relations, provenance, freshness, completeness, and useful continuations.
-- Keep ranked lexical candidates separate from confirmed Graph relations.
-- Exclude stale Graph relations while allowing current-source overlays.
-- Keep ordinary query cost independent of completed-task count.
-- Never turn retrieval output or old task history into current scope, ownership, or authority.
-- Do not persist Context or Graph result receipts for later selection.
-- Keep Context Pack generation read-only and one-shot.
-
-### Knowledge
-
-- Store explicit decisions, invariants, and failure modes under `docs/knowledge/records/`.
-- Require a claim, concrete reason, repository, and at least one source.
-- Keep applicability, replacement links, and known author optional.
-- Make the record queryable immediately after one save.
-- Warn when a source changes while retaining the recorded historical reasoning.
-- Preserve older Knowledge files and report them for one-time agent migration; query only current records.
-
-### Repository and metadata boundaries
-
-- Keep root control state separate from product Git roots.
-- Require explicit repository identity when a workspace contains several product repositories.
-- Keep `.repometa` as the canonical sparse file metadata store and mutate it through repoctl.
-- Keep Graph/index state derived and rebuildable.
-- Treat stale Graph or Knowledge projection after upgrade as maintenance, unless source authority or repository identity is actually invalid.
+- Task creation, start, scope change, block, cancel, and finish must not copy full dirty/residue/path arrays, fixture inventories, command output, queue state, or role/request history into Markdown.
+- Task audit is read-only and warning-only. Migration defaults to dry-run and rewrites only recognized machine-generated dumps.
+- Existing product code and adopter-authored documents are preserved during upgrade.
+- Completed Task evidence is not rewritten or re-sealed as newly verified by a text migration.
+- A valid Graph snapshot remains queryable when optional provider cache or text/evidence index components are unavailable.
+- Current-source overlay and stale-relation exclusion remain intact.
+- Precise language support may reuse external LSP/SCIP/tree-sitter ecosystems through the common node/edge/source model; unsupported precision is reported honestly.
+- `docs/PRD.md` is the physical minimum. Additional documents are created only when real complexity requires them; empty folders and empty templates are not required.
+- repoctl supplies context and safe boundaries. It does not own external agents, queues, model/provider selection, deployment, or delivery.
+- MCP is a future external access layer, not part of this release.
 
 ## Success criteria
 
-- A new agent can recover current work and the next action from Task and Handoff without chat history.
-- A known small change needs only create/start, Chosen, ordinary implementation, and finish.
-- Missing Verification prose or an unrecorded test result never blocks finish.
-- Context returns a compact useful first reading set and does not create persistent query bookkeeping.
-- A Context Pack can be printed or exported without affecting any lifecycle state.
-- Saving reusable Knowledge is one operation and later queries keep the conclusion available after source drift with a warning.
-- Product work cannot silently consume pre-existing dirty files or cross a selected repository boundary.
-- Completion and history remain usable for follow-up inspection without becoming a test-proof system.
-- Upgrade preserves accumulated Task logs and older Knowledge files while reporting the one-time updates needed before they re-enter current execution or search.
-- Upgrade succeeds when authoritative state is healthy even if derived indexes need an explicit refresh.
+- A new agent can recover the current Goal, actual scope, constraints, next action, and source documents without reading operational history.
+- Normal Task lifecycle operations keep raw path arrays and bulk output out of Markdown.
+- A plain log or optional Verification addition does not invalidate an otherwise current Handoff.
+- Valid Knowledge records remain discoverable through projection failure with an explicit degraded warning.
+- Research documents are searchable but are not product authority by location.
+- Representative Graph queries return a useful work path, not merely a snapshot or edge count.
+- Derived Graph/Knowledge maintenance does not erase valid source authority.
+- Upgrade preserves repository boundaries, dirty baselines, lifecycle identities, adopter documents, and product code.
 
 ## Non-goals
 
-- Autonomous agent execution.
-- Commit, push, pull request, deployment, or delivery ownership.
-- Proof that a command or test ran.
-- Mandatory Context, Graph, Pack, Knowledge, or debug use.
-- Automatic task creation, scope inference, or Knowledge creation from PRD, Backlog, query, or Task prose.
-- Online learning from agent behavior.
-- A generated documentation or llmwiki subsystem.
-- Replacing source authority with metadata, Graph, Context, completion history, or Knowledge.
-
-## Adoption rule
-
-After copying the template, replace or remove this file. If private context grows, keep `docs/PRD.md` as a short index and put detailed authority under `docs/prd/`.
+Autonomous agent execution; model/provider routing; Coordinator/Expert/Worker hierarchies; external completion queues; deployment ownership; proof that a command ran; mandatory Graph or Knowledge usage; automatic scope inference; generated wiki/state systems; MCP implementation in this release.

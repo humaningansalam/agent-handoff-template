@@ -38,7 +38,7 @@ Use `task log append` for meaningful timestamped checkpoints, not repeated waits
 ./scripts/repoctl task handoff bind T-... --json
 ```
 
-The fields are Next exact step, First file to open, First command to run, and Done when. The command is inert text. A later Task, Handoff, Chosen/Notes, log, optional Verification, child, or repository change makes the binding inactive. Context Packs are one-time reference views and are not bindable.
+The fields are Next exact step, First file to open, First command to run, and Done when. The command is inert text. Meaningful Goal/Task contract, Handoff, Chosen/Notes, child, or repository changes invalidate binding. An appended log entry or optional Verification note alone does not; if a failed test changes the next action, explicitly revise current instructions. Context Packs are one-time reference views and are not bindable.
 
 ## Finish and history
 

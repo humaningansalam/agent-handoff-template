@@ -113,7 +113,10 @@ def test_task_cancel_allows_explicit_dirty_cancel_with_evidence(tmp_path: Path, 
     assert payload["data"]["cancel_gate"]["residue_paths"] == ["repos/new.py", "repos/old.py"]
     archived = (tmp_path / "docs/archive/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
     assert "task canceled: superseded" in archived
-    assert 'residue_paths=["repos/new.py", "repos/old.py"]' in archived
+    assert "residue_count=2" in archived
+    assert "baseline_conflict_count=0" in archived
+    assert "detail_ref=task.cancel.data.cancel_gate" in archived
+    assert "residue_paths=[" not in archived
     assert "task_new_changes=1" not in archived
     assert "docs/tasks/T-20260609184046Z--alpha.md" not in (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
 

@@ -1625,7 +1625,7 @@ def render_context_text(bundle: ContextBundle) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 120) -> dict[str, Any]:
+def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 58) -> dict[str, Any]:
     """Return the default agent-facing view without full evidence diagnostics."""
     projection = _bundle_final_projection(
         bundle,
@@ -1679,7 +1679,9 @@ def _context_query_guide(
         return {
             "status": status,
             "path": str(source_ref.get("path") or item.get("record_id") or ""),
-            "reason": str(item.get("selection_reason") or item.get("status") or ""),
+            # The group item preserves complete rationale; the guide is a
+            # bounded navigation hint, not a second copy of the explanation.
+            "reason": str(item.get("selection_reason") or item.get("status") or "")[:56],
         }
 
     implementation = first("likely_change_surface")

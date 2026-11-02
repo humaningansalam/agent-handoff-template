@@ -33,7 +33,7 @@ COMPLETION_RECEIPT_SCHEMA_VERSION = 5
 DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION = 4
 TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION = 2
-RESUME_BINDING_SCHEMA_VERSION = 5
+RESUME_BINDING_SCHEMA_VERSION = 6
 ARCHIVE_LOCATOR_SCHEMA_VERSION = 1
 HANDOFF_GENERATED_MARKER = "<!-- repoctl: generated-handoff -->"
 
@@ -214,46 +214,15 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "canceled_handoff_done": "Task remains archived or non-live as canceled according to repoctl check.",
         "blocked_handoff_done": "The blocker is resolved or the task remains explicitly blocked with current evidence.",
         "work_area_primary": "Identify the exact repo, docs, or workspace files during the first implementation pass; do not guess them from the title alone.",
+        "root_product_boundary": "Do not touch product files under `repos/`; product changes need a separate repo-scoped task.",
         "parent_goal": "Coordinate `{title}` by splitting the work into child tasks, keeping shared decisions current, and closing the integration.",
-        "parent_plan": [
-            "Inspect the likely repos/docs surfaces and decide whether child tasks are truly needed.",
-            "Create child tasks with explicit parent frontmatter for each independent surface.",
-            "Keep shared decisions and child status summaries current while treating child frontmatter as authoritative.",
-            "Finish only after all children are done/canceled and the integration is complete.",
-        ],
         "parent_handoff_next": "Inspect the work area and define the first child task for `{title}` if coordination is still warranted.",
         "parent_handoff_done": "Child tasks, shared decisions, and integration criteria are current enough for another agent to continue.",
         "live_child_summary": "<!-- Child tasks are discovered from child frontmatter `parent`, not this list. -->",
         "non_live_child_summary": "<!-- Non-live child summaries may be added here after children exist. -->",
-        "shared_decisions": "Record cross-child decisions here as they are made.",
-        "integration_done": "All child tasks are done or canceled and the integration is complete.",
         "task_goal": "Deliver `{title}` as the smallest coherent change.",
         "task_handoff_next": "Start the task, inspect `{repo_hint}`, and record Discovery before editing.",
         "task_handoff_done": "Chosen files match the actual changes and repoctl finish records the result.",
-        "task_scope": [
-            "Record only task-specific boundaries not already clear from Goal and Chosen.",
-        ],
-        "root_scope": [
-            "Do not touch product files under `repos/`; product changes need a separate repo-scoped task.",
-        ],
-        "in_scope": [
-            "Identify and record the concrete files/docs that define this task.",
-            "Make only the narrow changes needed for the stated goal.",
-            "Keep `repos/.repometa` annotations valid for any changed `repos/` files required by metadata coverage policy.",
-            "Keep Execution Log entries meaningful: creation, start, implementation decision, blocker, or finish.",
-            "Use `## Verification` for concise commands or results when they help the next agent.",
-        ],
-        "root_in_scope": [
-            "Identify and record the concrete workspace/docs files that define this task.",
-            "Make only the narrow changes needed for the stated goal.",
-            "Do not touch product files under `repos/` unless the task is intentionally converted into repo-scoped work.",
-            "Keep Execution Log entries meaningful: creation, start, implementation decision, blocker, or finish.",
-            "Use `## Verification` for concise commands or results when they help the next agent.",
-        ],
-        "out_of_scope": [
-            "Unrelated refactors or cleanup.",
-            "Branch, commit, PR, deploy, or release automation unless explicitly requested.",
-        ],
         "verification_pending": "Optional notes.",
         "context_docs": "<!-- Add only the minimum context docs needed for this task, or leave empty. -->",
         "discovery": ["Chosen files: none yet", "Notes: none yet"],
@@ -278,46 +247,15 @@ TASK_DOC_COPY: dict[str, dict[str, Any]] = {
         "canceled_handoff_done": "repoctl check 기준으로 작업이 canceled archive 또는 non-live 상태를 유지함.",
         "blocked_handoff_done": "blocker가 해결되었거나 작업이 최신 증거와 함께 명시적으로 blocked 상태임.",
         "work_area_primary": "첫 구현 단계에서 정확한 repo, docs, workspace 파일을 확인한다. 제목만 보고 추측하지 않는다.",
+        "root_product_boundary": "`repos/` 아래 제품 파일은 건드리지 않는다. 제품 변경에는 별도의 repo-scoped task가 필요하다.",
         "parent_goal": "`{title}`를 조율한다. 필요한 child task로 나누고, 공유 결정을 최신으로 유지하며, 통합을 마무리한다.",
-        "parent_plan": [
-            "관련 repos/docs 표면을 확인하고 child task가 정말 필요한지 판단한다.",
-            "독립적인 표면마다 명시적 parent frontmatter가 있는 child task를 만든다.",
-            "child frontmatter를 권위 source로 두고 공유 결정과 child 상태 요약을 최신으로 유지한다.",
-            "모든 child가 done/canceled가 되고 통합이 끝난 뒤에만 완료한다.",
-        ],
         "parent_handoff_next": "작업 영역을 확인하고, 조율이 여전히 필요하면 `{title}`의 첫 child task를 정의한다.",
         "parent_handoff_done": "child task, 공유 결정, 통합 기준이 다음 agent가 이어갈 만큼 최신 상태임.",
         "live_child_summary": "<!-- Child task는 이 목록이 아니라 child frontmatter `parent`에서 찾는다. -->",
         "non_live_child_summary": "<!-- Child가 생긴 뒤 non-live child 요약을 여기에 추가할 수 있다. -->",
-        "shared_decisions": "작업 중 생긴 cross-child 결정을 여기에 기록한다.",
-        "integration_done": "모든 child task가 done 또는 canceled이고 통합이 완료됨.",
         "task_goal": "`{title}`를 가장 작은 일관된 변경으로 완수한다.",
         "task_handoff_next": "작업을 시작하고 `{repo_hint}`를 확인한 뒤 편집 전에 Discovery를 기록한다.",
         "task_handoff_done": "Chosen files와 실제 변경이 일치하고 repoctl finish가 결과를 기록함.",
-        "task_scope": [
-            "Goal과 Chosen에서 이미 명확하지 않은 작업별 경계만 기록한다.",
-        ],
-        "root_scope": [
-            "root control-plane 파일만 변경한다. 제품 변경에는 별도의 repo-scoped task가 필요하다.",
-        ],
-        "in_scope": [
-            "이 작업을 정의하는 구체적인 파일/docs를 식별하고 기록한다.",
-            "명시된 목표에 필요한 좁은 변경만 수행한다.",
-            "metadata coverage policy가 요구하는 변경 `repos/` 파일의 `repos/.repometa` annotation을 유효하게 유지한다.",
-            "Execution Log에는 생성, 시작, 구현 결정, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "다음 agent에게 도움이 될 때만 명령이나 결과를 `## Verification`에 간결히 남긴다.",
-        ],
-        "root_in_scope": [
-            "이 작업을 정의하는 구체적인 workspace/docs 파일을 식별하고 기록한다.",
-            "명시된 목표에 필요한 좁은 변경만 수행한다.",
-            "작업을 의도적으로 repo-scoped로 전환하지 않는 한 `repos/` 제품 파일은 건드리지 않는다.",
-            "Execution Log에는 생성, 시작, 구현 결정, blocker, 완료처럼 의미 있는 항목만 남긴다.",
-            "다음 agent에게 도움이 될 때만 명령이나 결과를 `## Verification`에 간결히 남긴다.",
-        ],
-        "out_of_scope": [
-            "무관한 refactor 또는 cleanup.",
-            "명시적으로 요청되지 않은 branch, commit, PR, deploy, release 자동화.",
-        ],
         "verification_pending": "선택 메모.",
         "context_docs": "<!-- 이 작업에 필요한 최소 context docs만 추가한다. 없으면 비워 둔다. -->",
         "discovery": ["Chosen files: none yet", "Notes: none yet"],
@@ -585,16 +523,140 @@ def resolve_task(root: Path, task_id: str) -> Task:
     return load_task(archived, root, archived=True)
 
 
+TASK_SOURCE_WARNING_BYTES = 50 * 1024
+HANDOFF_WARNING_BYTES = 8 * 1024
+
+
+def _task_log_summary(message: str, *, field: str = "message") -> str:
+    """Keep operational summaries in Markdown and leave bulk evidence outside it."""
+
+    stripped = message.strip()
+    if not stripped:
+        raise RepoctlError(f"task log {field} is required")
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    joined = " ".join(lines)
+    known_dump = re.search(
+        r"(?:residue_paths|baseline_conflicts|changed_paths|dirty_paths)\s*=\s*\[",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    path_tokens = re.findall(
+        r"(?<![A-Za-z0-9_.-])(?:docs|repos|tests|tools|src|lib|app|packages)/[^\s,;]+",
+        stripped,
+    )
+    looks_like_output = (
+        "```" in stripped
+        or "Traceback (most recent call last)" in stripped
+        or (len(lines) >= 4 and sum("=" in line or ":" in line for line in lines) >= 3)
+        or len(path_tokens) >= 8
+    )
+    if known_dump or looks_like_output:
+        raise RepoctlError(
+            "bulk output and path arrays do not belong in a Task log; record a concise result and a source or artifact reference",
+            code="task_log_detail_requires_reference",
+        )
+    return joined
+
+
 def append_task_log(root: Path, task_id: str, message: str) -> dict[str, Any]:
     task = resolve_live_task(root, task_id)
     if task.status not in LIVE:
         raise RepoctlError("done or canceled tasks are immutable; create a follow-up task", code="task_not_live", path=task.rel_path)
-    if not message.strip():
-        raise RepoctlError("task log message is required")
+    summary = _task_log_summary(message)
     text = task.path.read_text(encoding="utf-8")
     timestamp = utc_stamp()
-    text = append_section_entry(text, "Execution Log", f"- {timestamp}: {message.strip()}")
+    text = append_section_entry(text, "Execution Log", f"- {timestamp}: {summary}")
     return {"task": task, "text": text, "timestamp": timestamp}
+
+
+def task_content_audit(task: Task) -> dict[str, Any]:
+    """Report size and known machine-generated slop without blocking authored work."""
+
+    text = task.path.read_text(encoding="utf-8")
+    encoded = text.encode("utf-8")
+    handoff = task_handoff_body(task) or ""
+    execution_log = _normalized_task_section_body(task, "Execution Log") or ""
+    findings: list[dict[str, Any]] = []
+
+    def add(code: str, message: str, *, count: int = 1) -> None:
+        findings.append({"severity": "warning", "code": code, "message": message, "path": task.rel_path, "count": count})
+
+    if len(encoded) > TASK_SOURCE_WARNING_BYTES:
+        add("task_source_large", "Task source exceeds the diagnostic 50 KiB review threshold; inspect for copied output or path dumps")
+    if len(handoff.encode("utf-8")) > HANDOFF_WARNING_BYTES or handoff.count("\n") + 1 > 80:
+        add("task_handoff_large", "Handoff is unusually large; keep only the four current restart instructions")
+    raw_cancel_dump_count = len(re.findall(r"(?:residue_paths|baseline_conflicts)=\[", execution_log))
+    if raw_cancel_dump_count:
+        add("task_log_raw_cancel_paths", "Execution Log contains legacy cancel path arrays", count=raw_cancel_dump_count)
+    raw_scope_count = len(re.findall(r"scope changed: removed (?!count=).+?; added .+?; reason=", execution_log))
+    if raw_scope_count:
+        add("task_log_raw_scope_paths", "Execution Log contains legacy Chosen replacement path lists", count=raw_scope_count)
+    oversized_line_count = sum(len(line.encode("utf-8")) > 8192 for line in execution_log.splitlines())
+    if oversized_line_count:
+        add("task_log_oversized_line", "Execution Log contains one or more oversized lines", count=oversized_line_count)
+    operational_handoff_count = len(re.findall(r"\b(?:ACK|collector|request queue|role transition|external completion|deleted file hash)\b", handoff, flags=re.IGNORECASE))
+    if operational_handoff_count:
+        add("task_handoff_operational_history", "Handoff appears to contain operational history instead of current restart instructions", count=operational_handoff_count)
+    chosen_count = len(task_discovery_values(task).get("Chosen files", []))
+    if chosen_count > 500:
+        add("task_chosen_scope_large", "Discovery has more than 500 Chosen files; verify that generated fixtures and artifacts were not copied into current scope")
+    return {
+        "bytes": len(encoded),
+        "line_count": text.count("\n") + 1,
+        "handoff_bytes": len(handoff.encode("utf-8")),
+        "handoff_line_count": handoff.count("\n") + (1 if handoff else 0),
+        "execution_log_bytes": len(execution_log.encode("utf-8")),
+        "chosen_file_count": chosen_count,
+        "findings": findings,
+    }
+
+
+def migrate_task_slop_text(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Compact only recognized repoctl-generated dumps; preserve all other prose."""
+
+    changes: list[dict[str, Any]] = []
+    output: list[str] = []
+    cancel_field = re.compile(r"; (residue_paths|baseline_conflicts)=(\[[^\n]*?\])")
+    scope_line = re.compile(r"^(?P<prefix>\s*- [^:]+: )scope changed: removed (?P<removed>.*?); added (?P<added>.*?); reason=(?P<reason>.*?)(?P<ending>\r?\n)?$")
+    for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
+        migrated = line
+        if "task canceled" in line and ("residue_paths=[" in line or "baseline_conflicts=[" in line):
+            counts: dict[str, int] = {}
+            valid = True
+            for match in cancel_field.finditer(line):
+                try:
+                    values = json.loads(match.group(2))
+                except json.JSONDecodeError:
+                    valid = False
+                    break
+                if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                    valid = False
+                    break
+                counts[match.group(1)] = len(values)
+            if valid and counts:
+                ending = "\n" if line.endswith("\n") else ""
+                body = cancel_field.sub("", line.rstrip("\r\n"))
+                suffixes = []
+                if "residue_paths" in counts:
+                    suffixes.append(f"residue_count={counts['residue_paths']}")
+                if "baseline_conflicts" in counts:
+                    suffixes.append(f"baseline_conflict_count={counts['baseline_conflicts']}")
+                suffixes.append("detail_ref=task.cancel.data.cancel_gate")
+                migrated = body + "; " + "; ".join(suffixes) + ending
+                changes.append({"line": line_number, "kind": "cancel_path_dump", "counts": counts})
+        match = scope_line.match(migrated)
+        if match:
+            def item_count(value: str) -> int:
+                stripped = value.strip()
+                return 0 if stripped in {"", "none", "(none)"} else len([item for item in stripped.split(",") if item.strip()])
+            removed_count = item_count(match.group("removed"))
+            added_count = item_count(match.group("added"))
+            migrated = (f"{match.group('prefix')}scope changed: removed_count={removed_count}; "
+                        f"added_count={added_count}; reason={match.group('reason')}; detail_ref=Discovery.Chosen"
+                        f"{match.group('ending') or ''}")
+            changes.append({"line": line_number, "kind": "scope_path_dump", "counts": {"removed": removed_count, "added": added_count}})
+        output.append(migrated)
+    return "".join(output), changes
 
 
 def _strip_ticks(value: str) -> str:
@@ -776,9 +838,9 @@ def update_task_discovery(
         updated_text = append_section_entry(
             updated_text,
             "Execution Log",
-            f"- {utc_stamp()}: scope changed: removed "
-            f"{', '.join(removed) or 'none'}; added {', '.join(added) or 'none'}; "
-            f"reason={reason.strip()}",
+            f"- {utc_stamp()}: scope changed: removed_count={len(removed)}; "
+            f"added_count={len(added)}; reason={_task_log_summary(reason, field='reason')}; "
+            "detail_ref=Discovery.Chosen",
         )
 
     return {
@@ -1414,14 +1476,9 @@ def task_resume_input_digests(
     *,
     layout: RepoLayout | None = None,
 ) -> dict[str, str]:
-    section_digests = {
-        "discovery": digest_data({"section": _normalized_task_section_body(task, "Discovery")}),
-        "execution_log": digest_data({"section": _normalized_task_section_body(task, "Execution Log")}),
-        "verification": digest_data({"section": _normalized_task_section_body(task, "Verification")}),
-    }
     return {
         "task_contract": _task_contract_digest(task),
-        **section_digests,
+        "discovery": digest_data({"section": _normalized_task_section_body(task, "Discovery")}),
         "repository": digest_data(_repository_resume_projection(root, task, layout=layout)),
         "direct_children": digest_data(_direct_child_lifecycle_projection(root, task)),
     }
@@ -1449,7 +1506,7 @@ def _validate_resume_binding_data(path: Path, task_id: str, data: dict[str, Any]
     if not _valid_sha256(str(data.get("handoff_digest") or "")):
         raise RepoctlError("task resume binding has invalid Handoff digest", code="task_resume_binding_invalid", path=rel)
     input_digests = data.get("input_digests")
-    expected_input_keys = {"task_contract", "discovery", "execution_log", "verification", "repository", "direct_children"}
+    expected_input_keys = {"task_contract", "discovery", "repository", "direct_children"}
     if not isinstance(input_digests, dict) or set(input_digests) != expected_input_keys:
         raise RepoctlError("task resume binding has invalid input digests", code="task_resume_binding_invalid", path=rel)
     if any(not _valid_sha256(str(value or "")) for value in input_digests.values()):
@@ -4777,10 +4834,10 @@ def cancel_task(root: Path, task_id: str, *, reason: str, residue_paths: list[st
         raise RepoctlError("cannot cancel parent task while live children remain")
 
     text = task.path.read_text(encoding="utf-8")
-    transition_entry = copy["task_canceled"].format(reason=reason) + "".join(
-        f"; {key}={json.dumps(paths, ensure_ascii=False)}"
-        for key, paths in (("residue_paths", residue_paths), ("baseline_conflicts", baseline_conflicts))
-        if paths
+    transition_entry = copy["task_canceled"].format(reason=_task_log_summary(reason, field="reason"))
+    transition_entry += (
+        f"; residue_count={len(residue_paths)}; baseline_conflict_count={len(baseline_conflicts)}; "
+        "detail_ref=task.cancel.data.cancel_gate"
     )
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {transition_entry}")
     text = replace_frontmatter_line(text, "status", "canceled")
@@ -4834,7 +4891,11 @@ def block_task(root: Path, task_id: str, *, reason: str) -> dict[str, Any]:
     if timestamp_problem:
         raise RepoctlError(f"task block would create non-monotonic Execution Log timestamps; {timestamp_problem}")
     text = task.path.read_text(encoding="utf-8")
-    text = append_section_entry(text, "Execution Log", f"- {block_timestamp}: {copy['task_blocked'].format(reason=reason)}")
+    text = append_section_entry(
+        text,
+        "Execution Log",
+        f"- {block_timestamp}: {copy['task_blocked'].format(reason=_task_log_summary(reason, field='reason'))}",
+    )
     text = replace_frontmatter_line(text, "status", "blocked")
     return {
         "task": task,
@@ -5076,7 +5137,11 @@ def _apply_creation_defaults(
     area_hint = area or copy["area_unspecified"]
     repo_scoped = bool(repo_id or area in REPO_REQUIRED_AREAS)
     repo_hint = repo_id or ("main" if repo_scoped else "none")
-    scope_line = f"- Repository: `{repo_hint}`\n" if repo_scoped else "- Product repository: none selected\n"
+    scope_line = (
+        f"- Repository: `{repo_hint}`\n"
+        if repo_scoped
+        else f"- Product repository: none selected\n- Boundary: {copy['root_product_boundary']}\n"
+    )
     work_area = (
         f"- Task record: `{rel_path.as_posix()}`\n"
         f"{scope_line}"
@@ -5087,7 +5152,6 @@ def _apply_creation_defaults(
         work_area += f"- Repo ref hint: `{repo_ref}`\n"
     if task_type == "parent":
         goal = copy["parent_goal"].format(title=title) + "\n"
-        plan = _bullet_lines(copy["parent_plan"])
         handoff = _render_created_handoff(
             copy=copy,
             task_type="parent",
@@ -5098,11 +5162,8 @@ def _apply_creation_defaults(
         )
         text = replace_section(text, "Live Child Tasks", f"{copy['live_child_summary']}\n")
         text = replace_section(text, "Non-Live Child Tasks", f"{copy['non_live_child_summary']}\n")
-        text = replace_section(text, "Shared Interfaces / Decisions", f"- {copy['shared_decisions']}\n")
-        text = replace_section(text, "Integration Done When", f"- {copy['integration_done']}\n")
     else:
         goal = copy["task_goal"].format(title=title) + "\n"
-        scope = _bullet_lines(copy["task_scope"] if repo_scoped else copy["root_scope"])
         handoff = _render_created_handoff(
             copy=copy,
             task_type="task",
@@ -5120,12 +5181,6 @@ def _apply_creation_defaults(
         text = replace_section(text, "Discovery", _bullet_lines(copy["discovery"]))
     text = replace_section(text, "Work Area", work_area)
     text = replace_section(text, "Goal", goal)
-    if task_type == "parent":
-        text = replace_section(text, "In Scope", _bullet_lines(copy["in_scope"] if repo_scoped else copy["root_in_scope"]))
-        text = replace_section(text, "Out of Scope", _bullet_lines(copy["out_of_scope"]))
-        text = replace_section(text, "Plan", plan)
-    else:
-        text = replace_section(text, "Scope", scope)
     text = replace_section(text, "Execution Log", f"- {created}: {copy['task_created']}\n")
     text = replace_section(text, "Verification", f"- {copy['verification_pending']}\n")
     text = replace_section(text, "Handoff", handoff)

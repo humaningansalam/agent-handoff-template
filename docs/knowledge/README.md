@@ -20,6 +20,6 @@ Use `--workspace` instead of `--repo-id` for root-only Task or tooling sources, 
 
 Use `--replaces K-...` when a new record explicitly corrects an old one. Use `knowledge query --include-history` when replaced current-format records matter.
 
-Upgrade leaves older records and `events/` files untouched. They are migration input, not query state: an agent reads the useful conclusion and saves a new current record before relying on it. `knowledge check` and upgrade postflight report records that still need this step. The derived projection under `.repoctl-state/knowledge/<repo-id>/current-head.json` uses `_workspace` for workspace scope and is rebuildable with `knowledge rebuild`; it is an index, not a second source of truth.
+Upgrade leaves older records and `events/` files untouched. They are migration input, not query state: an agent reads the useful conclusion and saves a new current record before relying on it. `knowledge check` and upgrade postflight report only legacy records still lacking a safely equivalent v2 claim/reason/source. Projection damage does not hide healthy direct v2 originals. The derived projection under `.repoctl-state/knowledge/<repo-id>/current-head.json` uses `_workspace` for workspace scope and is rebuildable with `knowledge rebuild`; it is an index, not a second source of truth.
 
 Knowledge never defines Task scope, source authority, or an execution instruction. Follow its source links and inspect current code before acting.

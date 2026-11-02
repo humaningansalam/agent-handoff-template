@@ -1,15 +1,18 @@
 # Agent Workspace Control Plane
 
-A repo-aware workspace substrate for Claude Code, Codex, Cursor, and other coding agents.
+A repo-aware shared workspace for coding agents, models, and sessions.
 
 It is not an autonomous agent runtime. It keeps current work, repository boundaries, restart instructions, and reusable project context stable while external agents do the reasoning and implementation.
 
 ## Core model
 
-- **Task** holds the current job and its explicit Chosen file set.
-- **Handoff** says exactly how to continue after a pause or transfer.
-- **Context** finds source-linked material worth reading.
-- **Knowledge** stores a reusable conclusion and why it matters.
+- **Task** holds the current goal, narrow Chosen scope, decisions, blockers, next action, and references.
+- **Board** lists live Tasks and deferred work; **Workflows** capture repeatable or risky procedures.
+- **Graph** finds implementation structure, callers, dependents, and tests, with explicit precision and freshness.
+- **Knowledge** stores a reusable claim, its reason, and its sources.
+- **Handoff** is the four-field current restart instruction inside a Task, not a history store.
+
+Context retrieval and ranking are read-flow compatibility mechanisms, not an additional durable product plane or mandatory user action.
 
 The workspace root owns private control state and documentation. Product Git repositories live under `repos/`. Sparse file metadata lives inside each product repository under `.repometa/`. Graph and the persistent evidence index are derived navigation layers.
 
@@ -60,7 +63,7 @@ Build Graph only when typed code navigation would help:
 ./scripts/repoctl graph build --repo-id main --json
 ```
 
-`docs/PRD.md` is an adopter-owned seed. Replace it, delete it, or keep it as an index to private documents under `docs/prd/`.
+`docs/PRD.md` is the adopter-owned fixed entrypoint. Rewrite its content for the product and link to the needed `docs/architecture/`, `docs/specs/`, `docs/adr/`, and `docs/research/` documents. Do not create empty folders or boilerplate-only documents. Legacy `docs/prd/**` remains readable.
 
 ## Daily work
 
@@ -99,7 +102,7 @@ Before a real pause or transfer, write the four Handoff fields, remove the gener
 ./scripts/repoctl task handoff bind T-... --json
 ```
 
-A later task, Chosen, log, Verification note, child, Handoff, or repository change makes the binding inactive. Repoctl never executes the stored command or infers a replacement instruction.
+Meaningful changes to Goal/Task contract, Chosen/Notes, child lifecycle, Handoff, or repository observation invalidate binding. Routine Execution Log additions and optional Verification prose do not. When a failed check changes the next step or a constraint, update the current Task/Handoff explicitly. Repoctl never executes the stored command.
 
 ## Finding code and context
 
@@ -108,9 +111,11 @@ Use direct reads, `rg`, or Graph when the identity is already known. For ambiguo
 ```bash
 ./scripts/repoctl context query "where is invoice retry decided" --repo-id main --json
 ./scripts/repoctl graph query --repo-id main --callers-of retry_invoice --in-file billing/retry.py --json
+./scripts/repoctl graph workflow --repo-id main --route /predict --json
+./scripts/repoctl graph workflow --repo-id main --symbol audio_clock --json
 ```
 
-Context can combine current source, project authority, procedures, task history, Knowledge, and materialized Graph relations. It marks missing or stale derived data and never turns a ranked result into edit scope. Graph queries read the last materialized snapshot; refresh explicitly with `graph build` after relevant source changes.
+Context remains a compatible read-only way to combine current source, documents, history, Knowledge, and Graph. It does not create edit scope. `graph query` reads typed materialized relations; `graph workflow` adds bounded live-source hints for route and source navigation, explicitly labeling non-confirmed links as candidates. Refresh explicitly with `graph build` after source changes; a stale snapshot never proves zero impact.
 
 A Task Context Pack is an optional one-time view or export:
 
@@ -136,7 +141,7 @@ Most work needs only its archived Task. Save Knowledge when a decision, invarian
   --json
 ```
 
-Saving the record completes the action. `knowledge query` and Context can use it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files and reports them for one-time agent migration; current queries use current records only.
+Saving the record completes the action. `knowledge query` and Context can use it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files; migration warnings apply only to legacy records without a safely matching current claim, reason, and source identity. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
 
 When the reusable conclusion is ready during closeout, the corresponding `task finish --knowledge-kind --knowledge-claim --knowledge-reason` options save it atomically with task completion.
 
@@ -148,8 +153,12 @@ When the reusable conclusion is ready during closeout, the corresponding `task f
 |-- README.md
 |-- docs/
 |   |-- BOARD.md
-|   |-- PRD.md
-|   |-- tasks/
+|   |-- PRD.md             # fixed entry + read map
+|   |-- architecture/       # when an overall design is needed
+|   |-- specs/              # requirements and design by capability
+|   |-- adr/                # consequential decisions
+|   |-- research/           # evidence, not product authority
+|   |-- tasks/              # current execution, not source specs
 |   |-- archive/tasks/
 |   |-- contracts/
 |   |-- workflows/

@@ -15,7 +15,7 @@ Root `docs/**` contains the private workspace ledger, repoctl contracts and work
 
 An ADR folder is optional and created only for an actual decision document. Existing `knowledge/events/` contains legacy migration input; current commands neither create nor interpret it. Upgrades preserve existing project records in both locations.
 
-Keep product-public documentation in the relevant repository under `repos/**`. Large private project context may be split under root `docs/prd/` with `docs/PRD.md` as its index.
+Keep product-public documentation in the relevant repository under `repos/**`. Root `docs/PRD.md` remains the product direction/read-map entry; add private `docs/architecture/overview.md`, `docs/specs/<capability>/requirements.md` and `design.md`, `docs/adr/`, and `docs/research/` only when useful. Continue reading legacy `docs/prd/**` without treating all its contents as current authority.
 
 For project understanding, follow the entry route in `AGENTS.md`: repository identity, selected product README/local guidance, active PRD index, then the source and checks relevant to the request. The command examples below are alternatives, not a checklist. Product build/test/runtime commands belong to the product contribution guide, manifests and CI; repoctl checks validate the control plane.
 

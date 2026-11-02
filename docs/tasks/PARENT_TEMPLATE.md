@@ -1,7 +1,7 @@
 ---
 id: T-YYYYMMDDHHMMSSZ
 title: "Replace with parent task title"
-# canonical values: todo | doing | blocked | done | canceled (see AGENTS.md)
+# canonical values: todo | doing | blocked | done | canceled
 status: todo
 owner: "unassigned"
 # root-only parent tasks must leave this empty
@@ -32,13 +32,6 @@ State the cross-cutting outcome in one clear sentence.
 - First command to run: `rg "^parent:" docs/tasks/`
 - Done when: The parent task reflects the latest child state (including non-live tasks) and the next agent can continue without guessing.
 
-<!--
-Use this template only when the work needs a root-only coordinating parent across multiple independently verifiable repo-scoped child tasks.
-Child tasks should use `docs/tasks/TEMPLATE.md` with `parent: "T-..."` filled in.
-The child's `parent` field is the authoritative link; this file's child lists are convenience summaries.
-Before pausing or transferring the parent, review its four Handoff fields and run `./scripts/repoctl task handoff bind T-... --json`.
--->
-
 ## Context Docs
 
 <!-- List only the minimum context docs needed for this task.
@@ -60,25 +53,8 @@ Example:
 - List concrete deliverables
 - Keep items testable
 
-## Out of Scope
-
-- List explicit non-goals
-- Prevent scope drift
-
-## Plan
-
-- Step 1
-- Step 2
-- Step 3
-
 ## Live Child Tasks
 
-<!--
-This list is a coordination summary, NOT the authoritative source.
-The child's `parent` frontmatter field is the authoritative link.
-If this list conflicts with a child's frontmatter, the child wins.
-Update on a best-effort basis; omissions are not rule violations.
--->
 - `docs/tasks/T-YYYYMMDDHHMMSSZ--child-task.md`
 
 ## Non-Live Child Tasks
@@ -100,6 +76,3 @@ Update on a best-effort basis; omissions are not rule violations.
 ## Verification
 
 - Optional notes: none.
-
-<!-- Keep only commands or results useful to a future reader. Repoctl preserves
-this prose but does not parse, grade, hash, or require it for finish. -->

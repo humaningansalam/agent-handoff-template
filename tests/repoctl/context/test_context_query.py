@@ -3870,12 +3870,27 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "./scripts/repoctl context query brand_new_overlay_token --repo-id main --json"
         )
 
+    def assert_degraded_evidence_index(payload: dict, dependency_code: str) -> None:
+        assert payload["ok"] is True
+        assert payload["data"]["bundle"] is not None
+        assert payload["data"]["bundle"]["completeness"]["graph_available"] is True
+        assert any(
+            problem["code"] == "graph_evidence_index_unavailable"
+            and problem.get("cause_code") == dependency_code
+            for problem in payload["problems"]
+        )
+        assert any(
+            item.get("source_ref", {}).get("path") == "repos/app.py"
+            for items in payload["data"]["bundle"]["groups"].values()
+            for item in items
+        )
+
     index_path = tmp_path / ".repoctl-state/graph/main/evidence.sqlite3"
     saved_index = index_path.with_suffix(".sqlite3.saved")
     index_path.rename(saved_index)
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     missing = json.loads(capsys.readouterr().out)
-    assert_invalid_graph(missing, "evidence_index_missing")
+    assert_degraded_evidence_index(missing, "evidence_index_missing")
     assert main(["graph", "build", "--repo-id", "main", "--json"]) == 1
     missing_build = json.loads(capsys.readouterr().out)
     assert [problem["code"] for problem in missing_build["problems"]] == ["evidence_index_missing"]
@@ -3891,9 +3906,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
                 "UPDATE metadata SET value = ? WHERE key = ?",
                 (json.dumps(invalid_value), key),
             )
-        assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+        assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
         invalid_schema = json.loads(capsys.readouterr().out)
-        assert_invalid_graph(invalid_schema, "evidence_index_schema_invalid")
+        assert_degraded_evidence_index(invalid_schema, "evidence_index_schema_invalid")
         with sqlite3.connect(index_path) as connection:
             connection.execute("UPDATE metadata SET value = ? WHERE key = ?", (original_value, key))
 
@@ -3903,9 +3918,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "UPDATE metadata SET value = ? WHERE key = 'snapshot_digest'",
             (json.dumps("sha256:mismatched-snapshot"),),
         )
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     mismatched = json.loads(capsys.readouterr().out)
-    assert_invalid_graph(mismatched, "evidence_index_snapshot_mismatch")
+    assert_degraded_evidence_index(mismatched, "evidence_index_snapshot_mismatch")
     with sqlite3.connect(index_path) as connection:
         connection.execute(
             "UPDATE metadata SET value = ? WHERE key = 'snapshot_digest'",
@@ -3918,9 +3933,9 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
             "UPDATE metadata SET value = ? WHERE key = 'graph_input_digest'",
             (json.dumps("sha256:mismatched-input"),),
         )
-    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 1
+    assert main(["context", "query", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
     mismatched_input = json.loads(capsys.readouterr().out)
-    assert_invalid_graph(mismatched_input, "evidence_index_input_mismatch")
+    assert_degraded_evidence_index(mismatched_input, "evidence_index_input_mismatch")
     with sqlite3.connect(index_path) as connection:
         connection.execute(
             "UPDATE metadata SET value = ? WHERE key = 'graph_input_digest'",
@@ -5351,14 +5366,16 @@ def test_context_reuses_admitted_artifacts_only_within_current_query(
     expected, _ = graph_materialization_freshness(tmp_path, target=target, snapshot=legacy[0])
     assert "app.py" in expected["changed_paths"]
     assert "docs/PRD.md" in expected["changed_root_paths"]
-    # Corruption on the next query must still fail admission; there is no
-    # persistent trusted-provider cache that can hide the modification.
+    # Provider cache corruption must be visible, but it cannot erase a valid
+    # snapshot's source-linked relations. The next query rereads provider
+    # artifacts and reports the degraded semantic freshness explicitly.
     provider = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
     provider.write_text("{}")
     bundle, problems, _ = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode)
-    assert any(p.code == "graph_materialization_invalid" for p in problems)
+    assert any(p.code == "graph_provider_artifacts_unavailable" for p in problems)
     assert bundle is not None
-    assert bundle.completeness["graph_available"] is False
+    assert bundle.completeness["graph_available"] is True
+    assert not any(p.severity == "error" for p in problems)
 
 
 @pytest.mark.parametrize("query", [
@@ -5388,8 +5405,9 @@ def test_explicit_resume_query_uses_task_authority_not_retrieval(tmp_path: Path,
     assert main(["task", "log", "append", tid, "changed input", "--json"]) == 0
     capsys.readouterr()
     assert main(["context", "query", query, "--json"]) == 0
-    stale = json.loads(capsys.readouterr().out)["data"]["task_resume"]["resume_guidance"]
-    assert stale["status"] == "inactive" and stale["executable_handoff"] is None
+    still_current = json.loads(capsys.readouterr().out)["data"]["task_resume"]["resume_guidance"]
+    assert still_current["status"] == "current"
+    assert isinstance(still_current["executable_handoff"], dict)
 
 
 def test_resume_query_preserves_ambiguity_and_missing_task_errors(tmp_path: Path, monkeypatch, capsys) -> None:
