@@ -36,7 +36,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify tests
-        run: uv run pytest -q
+        run: uv run --extra structural pytest -q
 
       - name: Verify workspace contracts
         run: |

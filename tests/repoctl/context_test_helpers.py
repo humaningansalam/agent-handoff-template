@@ -24,7 +24,7 @@ def _write_context_docs(root: Path) -> None:
         "# repoctl Graph contract\n\nGraph is a read-only derived evidence snapshot. Source authorities remain repo registry, code index, repometa, and task completion receipts.\n",
         encoding="utf-8",
     )
-    (root / "docs/contracts/repoctl-context-contract.md").write_text(
+    (root / "docs/contracts/repoctl-evidence-contract.md").write_text(
         "# repoctl Context contract\n\nContext retrieval returns read-only source bundles and source authorities remain separate after retrieval. Context retrieval is read-only and non-authoritative. It does not replace Graph, task, Board, Backlog, or repometa authority.\n",
         encoding="utf-8",
     )
@@ -38,7 +38,7 @@ def _write_context_docs(root: Path) -> None:
 def _write_context_benchmark_docs(root: Path) -> None:
     """Benchmark the shipped contracts instead of obsolete synthetic prose."""
     source_root = Path(__file__).resolve().parents[2]
-    for rel in ("docs/PRD.md", "docs/contracts/repoctl-context-contract.md", "docs/contracts/repoctl-graph-contract.md", "docs/contracts/repoctl-module-boundaries.md"):
+    for rel in ("docs/PRD.md", "docs/contracts/repoctl-evidence-contract.md", "docs/contracts/repoctl-graph-contract.md", "docs/contracts/repoctl-module-boundaries.md"):
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((source_root / rel).read_text(encoding="utf-8"), encoding="utf-8")
@@ -135,11 +135,11 @@ def _write_context_pack_task(
     title: str,
     goal: str,
     status: str = "doing",
-    context_doc: str = "docs/contracts/repoctl-context-contract.md",
+    context_doc: str = "docs/contracts/repoctl-evidence-contract.md",
     chosen: str = "repos/app.py",
     first_command: str | None = None,
 ) -> None:
-    first_command = first_command or f"./scripts/repoctl context pack --task {task_id} --repo-id main --json"
+    first_command = first_command or f"./scripts/repoctl graph search 'current implementation and tests' --repo-id main --json"
     execution_log = ""
     if status == "todo":
         created_stamp = (
@@ -180,7 +180,7 @@ depends_on: []
 
 ## Handoff
 
-- Next exact step: inspect context pack evidence.
+- Next exact step: inspect current graph source evidence.
 - First file to open: `{context_doc}`
 - First command to run: `{first_command}`
 - Done when: required context evidence is visible.

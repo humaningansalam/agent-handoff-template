@@ -20,12 +20,14 @@ PROVIDER_LANGUAGES = {
     "typescript_compiler": frozenset({"javascript", "typescript"}),
     "dart_analyzer": frozenset({"dart"}),
     "csharp_roslyn": frozenset({"csharp"}),
+    "tree_sitter_structural": frozenset({"rust", "go", "java", "kotlin", "swift"}),
 }
 PROVIDER_INPUT_VERSIONS = {
     "python_ast": PYTHON_PROVIDER_INPUT_VERSION,
     "typescript_compiler": 3,
     "dart_analyzer": 3,
     "csharp_roslyn": 2,
+    "tree_sitter_structural": 2,
 }
 
 
@@ -126,6 +128,9 @@ def build_semantic_provider(
         from .graph_csharp_provider import build_csharp_semantics
 
         return build_csharp_semantics(target=target, entries=entries, analysis_paths=analysis_paths)
+    if provider == "tree_sitter_structural":
+        from .graph_tree_sitter_provider import build_tree_sitter_semantics
+        return build_tree_sitter_semantics(target=target, entries=entries, analysis_paths=analysis_paths)
     raise ValueError(f"unknown semantic provider: {provider}")
 
 

@@ -113,8 +113,6 @@ def test_release_archive_excludes_python_tests_and_keeps_field_gate_fixtures(tmp
         "tests/fixtures/context-benchmark/corpus.json",
         "tests/fixtures/context-benchmark/expected-sources.json",
         "tests/fixtures/context-benchmark/questions.jsonl",
-        "tests/fixtures/context-pack-benchmark/cases.json",
-        "tests/fixtures/context-pack-benchmark/tasks.json",
         "tests/fixtures/graph-workflow-benchmark/cases.json",
     }
 
@@ -150,7 +148,7 @@ def test_release_archive_runs_public_commands(tmp_path: Path) -> None:
     assert json.loads(repository_list.stdout)["command"] == "repo.list"
 
     checks = [
-        (["./scripts/repoctl", "context", "--help"], "query"),
+        (["./scripts/repoctl", "graph", "search", "--help"], "query"),
         (["./scripts/repoctl", "graph", "--help"], "query"),
         (["./scripts/repoctl", "knowledge", "--help"], "add"),
         (["./scripts/repoctl", "knowledge", "add", "--help"], "--reason"),

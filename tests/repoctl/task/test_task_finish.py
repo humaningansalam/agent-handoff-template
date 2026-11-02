@@ -248,7 +248,7 @@ def test_workspace_task_blocks_finish_and_cancel_when_dirty_baseline_path_is_los
     archived = (tmp_path / cancel["data"]["new_path"]).read_text(encoding="utf-8")
     assert "baseline_conflict_count=1" in archived
     assert "baseline_conflicts=[" not in archived
-    assert "detail_ref=task.cancel.data.cancel_gate" in archived
+    assert "detail_ref=task.cancel.data.cancel_gate" not in archived
 
 
 def test_task_doctor_and_finish_share_baseline_conflict_preflight(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -370,7 +370,7 @@ def test_task_finish_archives_without_verification_proof(tmp_path: Path, monkeyp
     assert handoff["body"].strip() == archived.split("## Last Active Handoff\n", 1)[1].split("## Closure\n", 1)[0].strip()
     assert handoff["body"].strip()
     assert shown["health"]["executable"] is False
-    assert main(["task", "resume", "T-20260609184046Z", "--compact", "--json"]) == 2
+    assert main(["task", "resume", "T-20260609184046Z", "--json"]) == 2
     assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "task_not_live"
     assert all(path.read_bytes() == content for path, content in preserved.items())
     assert receipt["repo_evidence"]["meta_gate"]["reason"] == "no_repo_directory"

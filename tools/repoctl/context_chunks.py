@@ -52,7 +52,7 @@ def chunk_markdown_text(
     kind: str = "document",
     document_role: DocumentRole = DocumentRole.UNSPECIFIED,
 ) -> list[DocumentChunk]:
-    role = source_document_role(kind=kind, path=rel, assigned=document_role)
+    role = source_document_role(kind=kind, path=rel, assigned=document_role, text=text)
     digest = sha256_text(text)
     lines = text.splitlines()
     chunks: list[DocumentChunk] = []

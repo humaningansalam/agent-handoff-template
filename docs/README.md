@@ -15,7 +15,7 @@ Root `docs/**` contains the private workspace ledger, repoctl contracts and work
 
 An ADR folder is optional and created only for an actual decision document. Existing `knowledge/events/` contains legacy migration input; current commands neither create nor interpret it. Upgrades preserve existing project records in both locations.
 
-Keep product-public documentation in the relevant repository under `repos/**`. Root `docs/PRD.md` remains the product direction/read-map entry; add private `docs/architecture/overview.md`, `docs/specs/<capability>/requirements.md` and `design.md`, `docs/adr/`, and `docs/research/` only when useful. Continue reading legacy `docs/prd/**` without treating all its contents as current authority.
+Keep product-public documentation in the relevant repository under `repos/**`. Root `docs/PRD.md` remains the product direction/read-map entry; add private `docs/architecture/overview.md`, `docs/specs/<capability>/requirements.md` and `design.md`, `docs/adr/`, and `docs/research/` only when useful. Move adopted material from earlier `docs/prd/**` into the latest documented structure before using it as authority.
 
 For project understanding, follow the entry route in `AGENTS.md`: repository identity, selected product README/local guidance, active PRD index, then the source and checks relevant to the request. The command examples below are alternatives, not a checklist. Product build/test/runtime commands belong to the product contribution guide, manifests and CI; repoctl checks validate the control plane.
 
@@ -41,8 +41,8 @@ For project understanding, follow the entry route in `AGENTS.md`: repository ide
 ./scripts/repoctl meta check --repo-id main --json
 ./scripts/repoctl graph build --repo-id main --json
 ./scripts/repoctl graph query --repo-id main --file path --json
-./scripts/repoctl context query "question" --repo-id main --json
-./scripts/repoctl context pack --task T-... --repo-id main --json
+./scripts/repoctl graph search "question" --repo-id main --json
+./scripts/repoctl graph search "current implementation and tests" --repo-id main --json
 
 # Reusable reasoning
 ./scripts/repoctl knowledge add --repo-id main --kind decision \
@@ -59,7 +59,7 @@ For project understanding, follow the entry route in `AGENTS.md`: repository ide
 ./scripts/repoctl upgrade status --json
 ```
 
-Use `/tmp` for disposable Context Pack exports, review notes, and other temporary files. A saved Pack is still reference material and is never bound to Task or Handoff state.
+Use `/tmp` for disposable investigation notes. Graph/Knowledge results are read-only evidence and never bind to Task or Handoff state.
 
 `## Verification` is optional free-form Task text. There is no verification registration command or external verification-file finish input. Run useful checks as ordinary development work and keep only the notes a future reader needs.
 
@@ -75,7 +75,7 @@ Run any leaf with `--help` for exact inputs.
 | Tasks | `task create`, `task list`, `task resume`, `task show`, `task doctor`, `task log append`, `task handoff bind`, `task discovery add`, `task baseline resolve`, `task start`, `task finish`, `task block`, `task cancel` |
 | Backlog | `backlog add`, `backlog list`, `backlog show`, `backlog remove` |
 | Metadata | `meta init`, `meta check`, `meta status`, `meta show`, `meta query`, `meta suggest`, `meta set`, `meta remove`, `meta move`, `meta exclude` |
-| Evidence | `index code`, `graph build`, `graph query`, `history rebuild`, `context query`, `context pack` |
+| Evidence | `index code`, `graph build`, `graph query`, `history rebuild`, `graph search`, `graph workflow` |
 | Knowledge | `knowledge add`, `knowledge show`, `knowledge query`, `knowledge status`, `knowledge check`, `knowledge rebuild` |
 | Upgrade | `upgrade status`, `upgrade plan`, `upgrade postflight`, `upgrade apply` |
 

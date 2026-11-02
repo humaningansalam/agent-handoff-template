@@ -110,15 +110,15 @@ def test_task_resume_exposes_only_one_current_live_handoff(tmp_path: Path, monke
     assert current["resume_guidance"]["status"] == "current"
     assert current["resume_guidance"]["handoff"]["active"] is True
     assert current["resume_guidance"]["blocked_by_health"] is False
-    assert "Next exact step" in current["resume_guidance"]["readable_handoff"]
-    assert current["resume_guidance"]["executable_handoff"] == current["resume_guidance"]["readable_handoff"]
+    assert current["resume_guidance"]["readable_handoff"] is None
+    assert set(current["resume_guidance"]["executable_handoff"]) == {"Next exact step", "First file to open", "First command to run", "Done when"}
 
     assert main(["task", "log", "append", first, "changed the live task", "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "resume", "--json"]) == 0
     after_log = json.loads(capsys.readouterr().out)["data"]
     assert after_log["resume_guidance"]["status"] == "current"
-    assert after_log["resume_guidance"]["readable_handoff"] is not None
+    assert after_log["resume_guidance"]["readable_handoff"] is None
     assert after_log["resume_guidance"]["executable_handoff"] is not None
 
     second = "T-20260609184047Z"
@@ -686,7 +686,7 @@ def test_task_discovery_replaces_chosen_scope_with_reason(tmp_path: Path, monkey
     }
     assert any(action["command"] == "./scripts/repoctl task doctor T-20260609184046Z --json" for action in payload["next_actions"])
     task_body = (tmp_path / "docs/tasks/T-20260609184046Z--alpha.md").read_text(encoding="utf-8")
-    assert "scope changed: removed_count=1; added_count=1; reason=implementation moved; detail_ref=Discovery.Chosen" in task_body
+    assert "scope changed: removed_count=1; added_count=1; reason=implementation moved" in task_body
     assert "repos/a.py; added repos/b.py" not in task_body
 
 
@@ -1330,7 +1330,7 @@ def test_current_handoff_is_readable_but_not_executable_when_repository_lineage_
     binding["input_digests"] = task_resume_input_digests(tmp_path, current_task)
     binding_path.write_text(json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    assert main(["task", "resume", *(["--compact"] if compact else []), "--json"]) == 1
+    assert main(["task", "resume", *(["--full"] if compact else []), "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     guidance = payload["data"]["resume_guidance"]
     assert guidance["status"] == "current"
@@ -1338,7 +1338,8 @@ def test_current_handoff_is_readable_but_not_executable_when_repository_lineage_
     assert guidance["health"]["status"] == "unhealthy"
     assert guidance["health"]["codes"]
     assert guidance["blocked_by_health"] is True
-    assert "Next exact step" in guidance["readable_handoff"]
+    assert guidance["readable_handoff"] is None
+    assert guidance["handoff_source"]["section"] == "Handoff"
     assert guidance["executable_handoff"] is None
 
     assert binding_path.read_bytes() == (json.dumps(binding, indent=2, sort_keys=True) + "\n").encode()
@@ -1448,7 +1449,7 @@ def test_task_show_rejects_strictly_malformed_resume_receipts(tmp_path: Path, mo
 
     noncanonical_pack_path = dict(valid)
     noncanonical_pack_path["context_pack"] = {
-        "path": "./.repoctl-state/context-pack/pack.json",
+        "path": "./.repoctl-state/temporary-evidence/result.json",
         "artifact_sha256": "sha256:" + "1" * 64,
         "input_digest": "sha256:" + "2" * 64,
     }
@@ -1497,7 +1498,7 @@ def test_task_show_rejects_missing_handoff_and_keeps_summary_inputs_bounded(
     assert payload["data"]["resume_guidance"]["status"] == "inactive"
 
 
-def test_compact_resume_keeps_full_context_once_and_legacy_output(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_default_resume_exposes_one_current_four_field_instruction_without_history_duplication(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     tid = "T-20260609184046Z"
     text = task_text(tid, status="doing")
@@ -1508,27 +1509,22 @@ def test_compact_resume_keeps_full_context_once_and_legacy_output(tmp_path: Path
     assert main(["task", "handoff", "bind", tid, "--json"]) == 0
     capsys.readouterr()
     assert main(["task", "resume", tid, "--json"]) == 0
-    legacy = json.loads(capsys.readouterr().out)
-    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
     output = capsys.readouterr().out
-    compact = json.loads(output)
-    old = legacy["data"]["resume_guidance"]
-    new = compact["data"]["resume_guidance"]
-    assert new["readable_handoff"] == old["readable_handoff"] == old["executable_handoff"]
-    assert history in new["readable_handoff"]
-    assert output.count("Historical transition") == 1
-    assert len(output.encode()) < len(json.dumps(legacy, indent=2).encode())
-    assert set(new["executable_handoff"]["field_labels"]) == {"Next exact step", "First file to open", "First command to run", "Done when"}
-    assert new["executable_handoff"]["reviewed_context_ref"] == "data.resume_guidance.readable_handoff"
-    assert new["health"] == old["health"] and new["handoff"] == old["handoff"]
-    assert "historical prose is not made current" in new["handoff_interpretation"]
+    guidance = json.loads(output)["data"]["resume_guidance"]
+    assert guidance["readable_handoff"] is None
+    assert "Historical transition" not in output
+    assert guidance["view"] == "compact"
+    assert set(guidance["executable_handoff"]) == {
+        "Next exact step", "First file to open", "First command to run", "Done when",
+    }
+    assert guidance["handoff_source"]["section"] == "Handoff"
+    assert "historical prose is not made current" in guidance["handoff_interpretation"]
     assert main(["task", "resume", tid, "--full", "--json"]) == 0
     full = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
-    assert full["executable_handoff"] == old["executable_handoff"]
-    # Operational history does not invalidate current restart instructions.
+    assert full["executable_handoff"] == guidance["executable_handoff"]
     assert main(["task", "log", "append", tid, "new input", "--json"]) == 0
     capsys.readouterr()
-    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    assert main(["task", "resume", tid, "--json"]) == 0
     current = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
     assert current["status"] == "current" and current["executable_handoff"] is not None
 
@@ -1545,7 +1541,7 @@ def test_compact_resume_does_not_select_ambiguous_fields(tmp_path: Path, monkeyp
     path = tmp_path / f"docs/tasks/{tid}--alpha.md"
     if extra:
         path.write_text(path.read_text() + extra)
-    result = main(["task", "resume", tid, "--compact", "--json"])
+    result = main(["task", "resume", tid, "--json"])
     guidance = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
     if extra:
         assert result == 1
@@ -1657,7 +1653,7 @@ def test_compact_resume_locates_current_work_without_replaying_operational_histo
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     assert main(["task", "handoff", "bind", tid, "--json"]) == 0
     capsys.readouterr()
-    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    assert main(["task", "resume", tid, "--json"]) == 0
     output = capsys.readouterr().out
     guidance = json.loads(output)["data"]["resume_guidance"]
     context = guidance["task_context"]
@@ -1679,7 +1675,7 @@ def test_compact_resume_locates_current_work_without_replaying_operational_histo
     path = tmp_path / context["path"]
     path.write_text(text.replace("Original trainer remains active; collect its result.", "Trainer completed; inspect the saved output."), encoding="utf-8")
     before = path.read_bytes()
-    assert main(["task", "resume", tid, "--compact", "--json"]) == 0
+    assert main(["task", "resume", tid, "--json"]) == 0
     stale = json.loads(capsys.readouterr().out)["data"]["resume_guidance"]
     assert stale["executable_handoff"] is None
     assert path.read_bytes() == before

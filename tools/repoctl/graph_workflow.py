@@ -51,6 +51,7 @@ def _node_path_index(snapshot: GraphSnapshot) -> tuple[dict[str, str], dict[str,
         node.id: {
             "name": str((node.facts.get("provider") or {}).get("qualified_name") or ""),
             "path": owner.get(node.id, ""),
+            "kind": str((node.facts.get("provider") or {}).get("kind") or ""),
         }
         for node in snapshot.nodes
         if node.kind == "symbol" and isinstance(node.facts.get("provider"), dict)
@@ -100,7 +101,7 @@ def _entry(path: str, *, relation: str, evidence: str, symbol: str = "", line: i
     return item
 
 
-def _dedupe_entries(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _dedupe_entries(entries: list[dict[str, Any]], *, preferred_symbol: str = "") -> tuple[list[dict[str, Any]], int]:
     # Multiple relevant tests in one file should not create one item per test.
     merged: dict[str, dict[str, Any]] = {}
     for item in entries:
@@ -108,7 +109,14 @@ def _dedupe_entries(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
         previous = merged.get(key)
         if previous is None or (previous["relation"] == "candidate" and item["relation"] != "candidate"):
             merged[key] = item
-    result = [merged[key] for key in sorted(merged)]
+    # Keep the queried symbol ahead of tangential matches. A route's primary
+    # implementation is the first navigation action, not alphabetic filename.
+    result = list(merged.values())
+    result.sort(key=lambda item: (
+        0 if item.get("symbol", "").rsplit(".", 1)[-1] == preferred_symbol else 1,
+        0 if item["relation"] == "confirmed" else 1,
+        item["path"],
+    ))
     return result[:MAX_WORKFLOW_STAGE_ENTRIES], len(result)
 
 
@@ -137,12 +145,19 @@ def query_graph_workflow(
     }
     changed = {str(path) for path in freshness.get("changed_paths") or [] if isinstance(path, str)}
     # A stale, nearly empty Graph can still point at changed current files.
-    files = sorted(graph_files | changed)
+    all_files = sorted(graph_files | changed)
+    # Honor an explicit file before global file count, byte or sort order.
+    # A current file missing from a stale Graph is still a valid exact seed.
+    if in_file:
+        if not (target.root_path / in_file).is_file() or (target.root_path / in_file).is_symlink():
+            return {"status": "not_found", "query": {"in_file": in_file},
+                    "warnings": ["Exact file does not exist in the selected repository"]}
+        files = [in_file, *(path for path in all_files if path != in_file)]
+    else:
+        files = all_files
     bounded_files = files[:MAX_WORKFLOW_SOURCE_FILES]
     incomplete_inventory = len(files) > len(bounded_files)
-    # --in-file selects the entrypoint/implementation, not the dependent or
-    # test source corpus; otherwise an exact seed loses relevant tests.
-    seed_files = [path for path in bounded_files if not in_file or path == in_file]
+    seed_files = [in_file] if in_file else bounded_files
     source_cache: dict[str, str] = {}
     read_bytes = 0
     scan_exhausted = False
@@ -189,14 +204,37 @@ def query_graph_workflow(
         if entrypoint_source:
             path, _name, func = entrypoint_source[0]
             method_names = _called_names(func)
+            primary_name = route.strip("/").split("/")[-1]
             for method, receiver in sorted(method_names):
+                # A route answer starts with the operation requested, not
+                # every metrics/logging/helper side effect in the handler.
+                if method != primary_name:
+                    continue
                 matches = [
                     (sid, info) for sid, info in symbols.items()
                     if info["path"] and info["path"] != path
                     and info["name"].endswith("." + method)
                     and not is_test_path(info["path"])
-                    and info["path"] not in stale
                 ]
+                # Stale symbol bytes cannot establish a call. For a source
+                # candidate we require the current file to still define that
+                # qualified function before suggesting it.
+                def has_current_method(info: dict[str, str]) -> bool:
+                    current_text = source_read(info["path"])
+                    if not current_text:
+                        return False
+                    try:
+                        parsed = ast.parse(current_text)
+                    except (SyntaxError, ValueError):
+                        return False
+                    class_name = info["name"].split(".", 1)[0]
+                    return any(
+                        isinstance(cls, ast.ClassDef) and cls.name == class_name
+                        and any(isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == method
+                                for member in cls.body)
+                        for cls in ast.walk(parsed)
+                    )
+                matches = [(sid, info) for sid, info in matches if has_current_method(info)]
                 if receiver:
                     receiver_norm = re.sub(r"[^a-z0-9]", "", receiver.casefold())
                     refined = [
@@ -226,6 +264,24 @@ def query_graph_workflow(
                 ], "warnings": ["Multiple precise symbols match; pass a qualified name and --in-file"],
             }
         for sid, info in matches:
+            # Rust `mod audio_clock;` declares the module file, rather than
+            # implementing the code inside the declaring main.rs.
+            if info.get("kind") == "module":
+                linked_paths = {
+                    str(nodes[edge.to_id].identity.get("path") or "")
+                    for edge in snapshot.edges
+                    if edge.kind == "IMPORTS_FILE" and edge.source == "tree_sitter_structural"
+                    and edge.from_id in nodes and edge.to_id in nodes
+                    and str(nodes[edge.from_id].identity.get("path") or "") == info["path"]
+                    and (
+                        Path(str(nodes[edge.to_id].identity.get("path") or "")).stem == symbol
+                        or str(nodes[edge.to_id].identity.get("path") or "").endswith("/"+symbol+"/mod.rs")
+                    )
+                }
+                if len(linked_paths) == 1:
+                    implementations.append(_entry(next(iter(linked_paths)), relation="confirmed",
+                                                  evidence="resolved Rust mod file", symbol=info["name"]))
+                    continue
             chosen_symbol_ids.add(sid)
             implementations.append(_entry(info["path"], relation="confirmed", evidence="provider symbol", symbol=info["name"]))
         if not matches and symbol:
@@ -243,10 +299,36 @@ def query_graph_workflow(
                 source = source_read(path)
                 matched_line = next((i for i, line in enumerate(source.splitlines(), 1) if needle.search(line)), 0)
                 if matched_line or symbol.casefold() in Path(path).stem.casefold():
-                    implementations.append(_entry(
-                        path, relation="candidate", symbol=symbol, line=matched_line,
-                        evidence="current source text or module filename; no provider-confirmed relation",
-                    ))
+                    if suffix == ".rs" and re.search(
+                        r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:mod\s+" + re.escape(symbol.rsplit(".", 1)[-1])
+                        + r"\s*;|use\s+[^;]*\b" + re.escape(symbol.rsplit(".", 1)[-1]) + r"\s*::)",
+                        source,
+                    ) and Path(path).stem != symbol.rsplit(".", 1)[-1]:
+                        dependents.append(_entry(path, relation="source", evidence="Rust module/use declaration", symbol=symbol, line=matched_line))
+                    elif not is_test_path(path):
+                        # A matched basename is not a Rust module for other
+                        # languages. Dart `void main()` can be proven by
+                        # current source syntax, but a filename match alone
+                        # is merely a candidate, never a verified call edge.
+                        main_name = symbol.rsplit(".", 1)[-1]
+                        rust_module = suffix == ".rs" and Path(path).stem == main_name
+                        dart_top_level = (
+                            suffix == ".dart"
+                            and bool(re.search(
+                                r"(?m)^(?:(?:Future\s*<\s*void\s*>|void|dynamic|int|String)\s+)"
+                                + re.escape(main_name) + r"\s*\(", source,
+                            ))
+                        )
+                        implementations.append(_entry(
+                            path,
+                            relation="source" if rust_module or dart_top_level else "candidate",
+                            symbol=symbol, line=matched_line,
+                            evidence=(
+                                "Rust module source file" if rust_module
+                                else "Dart top-level function declaration" if dart_top_level
+                                else "current source text or module name; semantic relation unconfirmed"
+                            ),
+                        ))
                     if suffix == ".rs" and re.search(
                         r"#\[(?:tokio::)?test\]\s*(?:async\s+)?fn\s+[A-Za-z0-9_]*"
                         + re.escape(symbol.rsplit(".", 1)[-1]), source,
@@ -286,15 +368,49 @@ def query_graph_workflow(
             for test_path in bounded_files:
                 if is_test_path(test_path) and Path(test_path).stem == expected_stem:
                     tests.append(_entry(test_path, relation="candidate", evidence="matching Dart test module name"))
+    # Verify direct Dart importers from current sibling source, including when
+    # the snapshot's stored import edge is stale. This is a source-proven
+    # module dependency, not an invented precise function CALLS edge.
+    for implementation in implementations:
+        implementation_path = str(implementation.get("path") or "")
+        if not implementation_path.endswith(".dart"):
+            continue
+        module_name = Path(implementation_path).name
+        parent = Path(implementation_path).parent
+        for candidate in bounded_files:
+            if candidate == implementation_path or Path(candidate).suffix != ".dart":
+                continue
+            if Path(candidate).parent != parent or is_test_path(candidate):
+                continue
+            text = source_read(candidate)
+            pattern = r"(?m)^\s*(?:import|export|part)\s+['\"][^'\"]*" + re.escape(module_name) + r"['\"]"
+            if re.search(pattern, text):
+                dependents.append(_entry(candidate, relation="source", evidence="current Dart module import/export literal"))
     if route:
-        # Tests posting a literal route need not import its handler; this is a
-        # useful source-matched *candidate*, not a proven test-to-file edge.
-        for path in bounded_files:
-            if is_test_path(path) and path.endswith(".py") and route in source_read(path):
-                tests.append(_entry(path, relation="candidate", evidence="HTTP route literal in test source"))
+        # Check likely test locations first, including tests that exercise a
+        # manager under concurrency without embedding the HTTP route literal.
+        route_stem = route.strip("/").split("/")[-1]
+        implementation_stems = {
+            Path(item["path"]).stem for item in implementations if item.get("path")
+        }
+        direct_test_paths = [
+            path for path in bounded_files
+            if is_test_path(path) and path.endswith(".py")
+            and (route_stem in Path(path).stem or any(stem in Path(path).stem for stem in implementation_stems))
+        ]
+        for path in direct_test_paths:
+            text = source_read(path)
+            if route in text:
+                tests.append(_entry(path, relation="candidate", evidence="HTTP route literal in current test source"))
+            elif implementation_stems and text and any(stem in Path(path).stem for stem in implementation_stems):
+                tests.append(_entry(path, relation="candidate", evidence="test module name matches current implementation; inspect assertions"))
+        # A small workflow should not scan every unrelated test source by
+        # default; missing tests are explicitly partial rather than zero.
 
     entrypoints, entry_count = _dedupe_entries(entrypoints)
-    implementations, implementation_count = _dedupe_entries(implementations)
+    implementations, implementation_count = _dedupe_entries(
+        implementations, preferred_symbol=route.strip("/").split("/")[-1] if route else symbol.rsplit(".", 1)[-1]
+    )
     dependents, dependent_count = _dedupe_entries(dependents)
     tests, test_count = _dedupe_entries(tests)
     any_found = bool(entrypoints or implementations)
@@ -339,35 +455,95 @@ def query_graph_workflow(
 
 
 def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
-    """Measure source-path recall and confirmed recall, not edge counts/bytes."""
+    """Score required stages, false positives, provenance, and first source.
+
+    Path recall is diagnostic only. A string candidate or a fabricated empty
+    caller answer cannot meet a required compiler-confirmed relation stage.
+    """
     expected = case.get("expected_paths") if isinstance(case.get("expected_paths"), dict) else {}
     stages = result.get("stages") if isinstance(result.get("stages"), dict) else {}
+    aliases = {"entrypoint": "entrypoints", "current_source": "implementation"}
+    required = case.get("required_stages") if isinstance(case.get("required_stages"), list) else []
     metrics: dict[str, Any] = {}
-    total = hits = confirmed_hits = 0
+    total = hits = confirmed_hits = output_count = false_positive_count = 0
     for stage in sorted(expected):
-        expected_paths = sorted({str(value) for value in expected[stage] if isinstance(value, str)})
+        values = expected[stage]
+        expected_paths = sorted({str(value) for value in values if isinstance(value, str) and value}) if isinstance(values, list) else []
         observations = [entry for entry in stages.get(stage, []) if isinstance(entry, dict)]
-        matches = {str(entry.get("path") or ""): entry for entry in observations}
+        matches = {str(entry.get("path") or ""): entry for entry in observations if entry.get("path")}
         hit_paths = sorted(set(expected_paths) & set(matches))
-        confirmed_paths = [path for path in hit_paths if matches[path].get("relation") == "confirmed"]
+        confirmed_paths = sorted(
+            path for path in hit_paths if matches[path].get("relation") == "confirmed"
+        )
+        structural_paths = sorted(
+            path for path in hit_paths if matches[path].get("relation") in {"source", "confirmed"}
+        )
+        false_positive_paths = sorted(set(matches) - set(expected_paths))
         total += len(expected_paths)
         hits += len(hit_paths)
         confirmed_hits += len(confirmed_paths)
+        output_count += len(matches)
+        false_positive_count += len(false_positive_paths)
+        first_observed = str(observations[0].get("path") or "") if observations else ""
         metrics[stage] = {
             "expected_count": len(expected_paths),
             "found_count": len(hit_paths),
             "confirmed_count": len(confirmed_paths),
+            "structural_count": len(structural_paths),
             "missing_paths": sorted(set(expected_paths) - set(matches)),
+            "false_positive_paths": false_positive_paths[:MAX_WORKFLOW_STAGE_ENTRIES],
+            "false_positive_count": len(false_positive_paths),
+            "first_expected_path": expected_paths[0] if expected_paths else "",
+            "first_observed_path": first_observed,
+            "first_path_correct": bool(expected_paths and first_observed in expected_paths),
             "path_recall": round(len(hit_paths) / len(expected_paths), 4) if expected_paths else None,
+            "path_precision": round(len(hit_paths) / len(matches), 4) if matches else None,
         }
+    required_details: dict[str, dict[str, Any]] = {}
+    for requested in required:
+        stage = aliases.get(requested, requested)
+        if stage == "refresh":
+            refresh_proof = result.get("refresh") if isinstance(result.get("refresh"), dict) else {}
+            evidence = refresh_proof.get("source_rechecked") is True and refresh_proof.get("status") == "current"
+            required_details[requested] = {"status": "verified" if evidence else "not_evaluated", "covered": evidence, "precise": evidence}
+            continue
+        row = metrics.get(stage)
+        if not row or row["expected_count"] == 0:
+            required_details[requested] = {"status": "unscored_no_ground_truth", "covered": False, "precise": False}
+            continue
+        covered = row["found_count"] == row["expected_count"]
+        # The concrete route decorator is a source-anchored entrypoint. For
+        # implementation, callers and tests, source matches are not semantic
+        # compiler-confirmed relations.
+        precise = covered and (
+            row["structural_count"] == row["expected_count"] if stage == "entrypoints"
+            else row["confirmed_count"] == row["expected_count"]
+        )
+        required_details[requested] = {
+            "status": "precise" if precise else "candidate_only" if covered else "missing",
+            "covered": covered, "precise": precise,
+        }
+    all_covered = bool(required) and all(row["covered"] for row in required_details.values())
+    all_precise = bool(required) and all(row["precise"] for row in required_details.values())
     allowed = case.get("expected_statuses") if isinstance(case.get("expected_statuses"), list) else []
+    status_expected = result.get("status") in allowed
+    primary_stage = "entrypoints" if "entrypoints" in expected else "implementation"
+    primary_row = metrics.get(primary_stage) or {}
+    first_path_correct = bool(primary_row.get("first_path_correct"))
     return {
         "case_id": str(case.get("id") or ""),
         "query_status": result.get("status") or "unavailable",
-        "status_expected": result.get("status") in allowed,
+        "status_expected": status_expected,
+        "required_stages": required_details,
+        "required_stages_covered": all_covered,
+        "required_stages_precise": all_precise,
+        "first_path_correct": first_path_correct,
+        "task_navigation_complete": status_expected and all_covered and all_precise and first_path_correct,
         "expected_path_count": total,
         "found_path_count": hits,
         "confirmed_path_count": confirmed_hits,
+        "false_positive_count": false_positive_count,
+        "false_positive_rate": round(false_positive_count / output_count, 4) if output_count else None,
         "path_recall": round(hits / total, 4) if total else None,
         "confirmed_path_recall": round(confirmed_hits / total, 4) if total else None,
         "stages": metrics,

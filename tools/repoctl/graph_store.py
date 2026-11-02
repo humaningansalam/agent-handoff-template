@@ -89,6 +89,11 @@ PROVIDER_CONFIG_PATTERNS = {
         "**/pubspec.lock",
     ),
     "csharp_roslyn": ("*.csproj", "*.asmdef", "**/*.csproj", "**/*.asmdef"),
+    "tree_sitter_structural": (
+        "Cargo.toml", "**/Cargo.toml", "go.mod", "**/go.mod",
+        "pom.xml", "**/pom.xml", "build.gradle*", "**/build.gradle*",
+        "Package.swift", "**/Package.swift",
+    ),
 }
 
 

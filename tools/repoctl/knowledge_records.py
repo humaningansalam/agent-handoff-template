@@ -388,49 +388,14 @@ def _legacy_source_identity(record: dict[str, Any]) -> tuple[tuple[str, str], ..
     return tuple(sorted(set(values)))
 
 
-def _legacy_record_has_current_equivalent(
-    legacy: dict[str, Any],
-    current_records: list[dict[str, Any]],
-) -> bool:
-    claim = " ".join(str(legacy.get("claim") or "").split()).casefold()
-    kind = str(legacy.get("kind") or "")
-    repo_id = str(legacy.get("repo_id") or "")
-    reason = " ".join(str(legacy.get("reason") or legacy.get("summary") or "").split()).casefold()
-    sources = _legacy_source_identity(legacy)
-    candidates = [
-        record
-        for record in current_records
-        if str(record.get("repo_id") or "") == repo_id
-        and str(record.get("kind") or "") == kind
-        and " ".join(str(record.get("claim") or "").split()).casefold() == claim
-    ]
-    if reason:
-        candidates = [
-            record for record in candidates
-            if " ".join(str(record.get("reason") or record.get("summary") or "").split()).casefold() == reason
-        ]
-    if sources:
-        candidates = [record for record in candidates if _legacy_source_identity(record) == sources]
-    return len(candidates) == 1
+def _legacy_records_requiring_migration(artifacts: list[dict[str, Any]], *, repo_id: str) -> list[dict[str, Any]]:
+    """Report only physical v1 artifacts; there is no perpetual dual-schema equivalence reader.
 
-
-def _legacy_records_requiring_migration(
-    artifacts: list[dict[str, Any]],
-    *,
-    repo_id: str,
-) -> list[dict[str, Any]]:
-    current_records = [
-        record for record in artifacts
-        if record.get("schema_version") == KNOWLEDGE_RECORD_SCHEMA_VERSION
-        and str(record.get("repo_id") or "") == repo_id
-    ]
-    return [
-        record for record in artifacts
-        if record.get("schema") == "repoctl.knowledge.record"
-        and record.get("schema_version") == 1
-        and str(record.get("repo_id") or "") == repo_id
-        and not _legacy_record_has_current_equivalent(record, current_records)
-    ]
+    An explicit `knowledge migrate` either converts the record or requires
+    grounded human source/reason input. A claim match never hides old sources.
+    """
+    return [record for record in artifacts if record.get("schema") == "repoctl.knowledge.record"
+            and record.get("schema_version") == 1 and str(record.get("repo_id") or "") == repo_id]
 
 
 def _direct_knowledge_view(
@@ -639,7 +604,7 @@ def _empty_public_knowledge_query(*, repo_id: str, query: str) -> dict[str, Any]
             "excluded_statuses": {},
             "returned_statuses": {},
             "default_excludes": ["superseded"],
-            "status_semantics": {"reviewed": "current and not superseded; no human approval is implied"},
+            "status_semantics": {"current": "not superseded; no human approval is implied"},
             "projection_status": "unavailable",
             "source_changed_count": 0,
         },
@@ -912,7 +877,7 @@ def query_knowledge_records(
         superseded_count = int(lifecycle_counts.get("superseded") or 0)
         available_statuses = {}
         if current_count:
-            available_statuses["reviewed"] = current_count
+            available_statuses["current"] = current_count
         if superseded_count:
             available_statuses["superseded"] = superseded_count
 
@@ -957,7 +922,7 @@ def query_knowledge_records(
             "default_excludes": ["superseded"],
             "source_changed_count": source_changed_count,
             "projection_status": projection_status,
-            "status_semantics": {"reviewed": "current and not superseded; no human approval is implied"},
+            "status_semantics": {"current": "not superseded; no human approval is implied"},
         },
         "results": returned,
         "result_count": len(returned),
@@ -1022,7 +987,7 @@ def knowledge_records_for_graph(
             _public_record(
                 root,
                 record,
-                status="reviewed",
+                status="current",
                 lifecycle_relations=_record_lifecycle_relations(record, records),
                 source_resolutions=source_resolutions,
                 resolved_source_refs=resolved_knowledge_source_refs(root, record, resolutions=source_resolutions),
@@ -1390,7 +1355,7 @@ def _derived_status(
     return (
         "superseded"
         if str(record.get("id") or "") in superseded_ids
-        else "reviewed"
+        else "current"
     )
 
 

@@ -99,13 +99,13 @@ Handoff freshness and lifecycle health are independent:
 - `data.resume_guidance.status` is `current | inactive | historical`.
 - `task show` exposes lifecycle health at `data.health`.
 - `task resume` exposes it at `data.resume_guidance.health`.
-- `readable_handoff` preserves prose for inspection.
+- `readable_handoff` is null in the default response; the complete current Task section is available by explicit `task show --section Handoff` when inspection is necessary.
 - `blocked_by_health` is true when lifecycle state is not executable.
 - `executable_handoff` is non-null only when a current binding and lifecycle health both permit execution.
 
-`task resume --compact` includes `task_context` with the exact Goal and Context Docs bodies, bounded Chosen paths and repository delta, and source section names/line locations. The scope includes total/truncation and the exact Discovery section command for all paths and Notes; `--full --compact` keeps complete scope/delta arrays. It is navigation, not an inferred summary or executable authority. `task show --section "<heading>"` reads an existing named Task section, including project-specific current work or remaining AC, without returning the Handoff body again.
+`task resume` includes `task_context` with the exact Goal and Context Docs bodies, bounded Chosen paths and repository delta, and source section names/line locations. The scope includes total/truncation and the exact Discovery section command for all paths and Notes; `--full` keeps complete scope/delta arrays. It is navigation, not an inferred summary or executable authority. `task show --section "<heading>"` reads an existing named Task section, including project-specific current work or remaining AC, without returning the Handoff body again.
 
-`task resume --compact` is an opt-in restart view; default and `--full` legacy consumers retain their string fields unchanged. The compact view keeps the complete reviewed section once in `readable_handoff`; a non-null `executable_handoff` contains `field_labels` (references to the four unique validated canonical labels in that section) and `reviewed_context_ref` pointing to that complete context. The fields are not a standalone authorization: preserve constraints and evidence in the reviewed context and cited sources. `handoff_source` provides the original section command. A current binding does not make historical prose current or settle conflicting instructions; no prose is ranked by position/date or removed. Invalid, unbound, stale or unhealthy instructions never acquire an executable projection. `--full --compact` adds full health details to this same view.
+`task resume` always emits the single current-state view, not separate default/compact representations. A valid `executable_handoff` is exactly the four user-authored canonical fields and their values; it is non-null only when binding and repository health are current. Older operational prose is not echoed as another instruction. `handoff_source` names the precise source file/section. Constraints remain in the live Task and linked current authority, not in generated summaries. An invalid, unbound or stale Handoff does not gain executable instructions. `--full` changes health diagnostics only, never the restart field contract.
 
 `task handoff bind` returns binding freshness and the source location without echoing the just-reviewed body; `--full` includes it. The binding, invalidation inputs and execution rules are unchanged.
 
@@ -129,13 +129,12 @@ Receipt and task-artifact hashes protect lifecycle-history identity. They do not
 
 ## Context, Graph, and Pack output
 
-`context query` and `graph query` return their evidence directly. Repeating either command creates no persistent result-receipt cache or selectable-result state. Stable source refs, typed relations, repository identity, completeness, freshness, and continuations remain in the command payload.
+`graph search` and `graph query` return their evidence directly. Repeating either command creates no persistent result-receipt cache or selectable-result state. Stable source refs, typed relations, repository identity, completeness, freshness, and continuations remain in the command payload.
 
-An explicit `resume [TASK_ID]` or `task resume [TASK_ID]` query (optionally followed by a colon and the question) routes to the existing read-only compact Task resume projection before repository candidate retrieval. `data.bundle` is null and `data.task_resume` contains that projection; selection, freshness, lifecycle errors and warnings are preserved. An explicit conflicting repository selector is rejected. General implementation queries retain ordinary Context behavior.
+An explicit `resume [TASK_ID]` or `task resume [TASK_ID]` query (optionally followed by a colon and the question) routes to the existing read-only current Task resume projection before repository candidate retrieval. `data.bundle` is null and `data.task_resume` contains that projection; selection, freshness, lifecycle errors and warnings are preserved. An explicit conflicting repository selector is rejected. General implementation searches use Graph source navigation.
 
 Default Context JSON is a bounded working projection. `--full` adds raw evidence and diagnostics without changing the meaning of visible members. Graph `--full` likewise adds raw nodes, edges, and provider diagnostics.
 
-`context pack` returns one bounded Task view and optionally writes the same requested representation to `--output`. Its input projection is based on current Task, Chosen/Notes, Context Docs, repository observation, source identities, and Graph state. It has no binding or current/stale lifecycle status and writes no Task/Handoff state.
 
 ## Knowledge output
 

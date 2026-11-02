@@ -863,8 +863,7 @@ def test_graph_and_context_follow_typescript_barrel_calls_inside_anonymous_callb
 
     assert main(
         [
-            "context",
-            "query",
+            "graph", "search",
             "atomic event batch projection invalid rollback no partial state",
             "--repo-id",
             "main",
@@ -917,7 +916,7 @@ def test_graph_and_context_prioritize_owner_source_and_direct_test(tmp_path: Pat
     )
     assert any(item["selector"] == {"kind": "file", "value": "tests/test_auth.py"} for item in graph_result["continuations"])
 
-    assert main(["context", "query", "validate_token", "--repo-id", "main", "--json"]) == 0
+    assert main(["graph", "search", "validate_token", "--repo-id", "main", "--json"]) == 0
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == "repos/auth.py"
     assert bundle["groups"]["tests_and_verification"][0]["source_ref"]["path"] == "repos/tests/test_auth.py"

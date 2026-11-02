@@ -124,7 +124,7 @@ def test_graph_resolves_structured_file_relations_from_explicit_syntax(tmp_path:
     }
     assert any(item["selector"] == {"kind": "file", "value": "supabase/migrations/20240101000000_initial.sql"} for item in compact["continuations"])
 
-    assert main(["context", "query", "src/jobs.ts", "--repo-id", "main", "--json"]) == 0
+    assert main(["graph", "search", "src/jobs.ts", "--repo-id", "main", "--json"]) == 0
     bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     visible_paths = {
         item.get("source_ref", {}).get("path")

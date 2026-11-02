@@ -1,9 +1,14 @@
 [project]
 name = "agent-handoff-template-workspace"
-version = "0.13.0"
+version = "0.14.0"
 description = "Workspace control-plane tooling for the agent handoff template"
 requires-python = ">=3.11"
 dependencies = []
+
+[project.optional-dependencies]
+# AST navigation is a plug-in enhancement; core Task/Knowledge/Graph reads
+# continue without a compiled language parser installed.
+structural = ["tree-sitter-language-pack>=0.12,<1"]
 
 [tool.uv]
 package = false

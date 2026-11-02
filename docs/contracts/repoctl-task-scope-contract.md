@@ -49,7 +49,7 @@ Chosen describes scope. It is not proof that a file was read, reviewed, tested, 
 
 Context, Graph, Git, metadata queries, and direct source reads help an agent choose files. Their output stays read-only. Querying them creates no Task-owned result receipt, episode, candidate disposition, or future ranking signal.
 
-A Context Pack projects current Task material when requested. It reads Chosen and Notes directly from the Task. The Pack does not write Discovery state and is not a scope authority.
+Graph search and Knowledge can cite current Task files without creating or redefining Discovery scope.
 
 Fields from retired Discovery workflows and files under `docs/tasks/.repoctl-state/discovery-outcomes/` are ignored. On the next `task discovery add`, the Task section is rewritten with Chosen and Notes only; Goal, Execution Log, Verification prose, and other Task history stay intact. An older Handoff binding is inactive until the agent reviews and binds the current Task once.
 

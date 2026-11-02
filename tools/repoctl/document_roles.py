@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+import re
 from pathlib import PurePosixPath
 
 
@@ -51,12 +52,6 @@ def classify_document_role(path: str, *, repository_path: str = "") -> DocumentR
         return DocumentRole.REFERENCE
     if local_path == "docs/prd.md":
         return DocumentRole.PRODUCT_AUTHORITY
-    if local_path.startswith("docs/prd/"):
-        # Legacy-compatible: most established PRD fragments remain authority, while
-        # research/future/benchmark material is not promoted by location alone.
-        if any(token in name for token in ("research", "benchmark", "hypothesis", "experiment", "future", "proposal", "draft")):
-            return DocumentRole.REFERENCE
-        return DocumentRole.PRODUCT_AUTHORITY
     if local_path.startswith("docs/specs/"):
         if name == "requirements.md":
             return DocumentRole.PRODUCT_AUTHORITY
@@ -76,15 +71,34 @@ def classify_document_role(path: str, *, repository_path: str = "") -> DocumentR
     return DocumentRole.UNSPECIFIED
 
 
+
+_NOT_ADOPTED = re.compile(
+    r"(?im)^(?:status|decision status|adoption status)\s*:\s*(?:draft|proposed|research|experimental|superseded|rejected|retired)\b"
+)
+
+
+def declared_document_role(text: str, *, path: str, repository_path: str = "") -> DocumentRole:
+    """Do not promote an explicitly unadopted proposal because of its path.
+
+    Files lacking a status keep the conventional path role. This is a source
+    annotation, not a new external approval database or lifecycle gate.
+    """
+    role = classify_document_role(path, repository_path=repository_path)
+    if role in AUTHORITY_DOCUMENT_ROLES and _NOT_ADOPTED.search("\n".join(text.splitlines()[:32])):
+        return DocumentRole.REFERENCE
+    return role
+
+
 def source_document_role(
     *,
     kind: str,
     path: str,
     repository_path: str = "",
     assigned: DocumentRole = DocumentRole.UNSPECIFIED,
+    text: str | None = None,
 ) -> DocumentRole:
     if assigned != DocumentRole.UNSPECIFIED:
         return assigned
     if kind != "document":
         return DocumentRole.UNSPECIFIED
-    return classify_document_role(path, repository_path=repository_path)
+    return declared_document_role(text, path=path, repository_path=repository_path) if text is not None else classify_document_role(path, repository_path=repository_path)

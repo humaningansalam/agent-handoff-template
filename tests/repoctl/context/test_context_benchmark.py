@@ -42,15 +42,14 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
 ) -> None:
     fixture = _setup_benchmark_workspace(tmp_path, monkeypatch)
 
-    assert main(["context", "benchmark-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
+    assert main(["graph", "evidence-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
     materialized = json.loads(capsys.readouterr().out)
     assert materialized["data"]["totals"]["created"] >= 10
     assert materialized["data"]["totals"]["conflict"] == 0
 
     assert main(
         [
-            "context",
-            "benchmark",
+            "graph", "evidence-benchmark",
             "--fixture",
             fixture.as_posix(),
             "--repo-id",
@@ -95,8 +94,7 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
     assert payload["problems"] == []
     assert main(
         [
-            "context",
-            "query",
+            "graph", "search",
             "packaged/operational_controls.py",
             "--repo-id",
             "main",
@@ -123,8 +121,7 @@ def test_context_benchmark_keeps_multirepo_results_isolated(
 
     assert main(
         [
-            "context",
-            "benchmark",
+            "graph", "evidence-benchmark",
             "--fixture",
             fixture.as_posix(),
             "--require-fixture-corpus",

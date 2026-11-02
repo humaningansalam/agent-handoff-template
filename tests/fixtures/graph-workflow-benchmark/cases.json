@@ -49,12 +49,13 @@
       },
       "expected_paths": {
         "implementation": [
-          "crates/daemon/src/audio_clock.rs",
-          "crates/daemon/src/main.rs",
-          "crates/core/src/lib.rs"
+          "crates/daemon/src/audio_clock.rs"
         ],
         "tests": [
           "crates/core/src/lib.rs"
+        ],
+        "callers_or_dependents": [
+          "crates/daemon/src/main.rs"
         ]
       },
       "expected_statuses": [
@@ -82,6 +83,9 @@
         ],
         "tests": [
           "test/local_restaurant_order_authority_test.dart"
+        ],
+        "callers_or_dependents": [
+          "lib/runtime/local_store/local_waitlist_authority.dart"
         ]
       },
       "expected_statuses": [
@@ -98,7 +102,7 @@
         "refresh",
         "implementation"
       ],
-      "success": "Before refresh the result is stale/partial rather than zero-impact; after refresh current relations are returned.",
+      "success": "Stale source is discoverable, but refresh must be independently verified against current source; no empty snapshot may score as a complete relation query.",
       "repo_id": "main",
       "selector": {
         "symbol": "main",
@@ -106,6 +110,9 @@
       },
       "expected_paths": {
         "implementation": [
+          "lib/main.dart"
+        ],
+        "current_source": [
           "lib/main.dart"
         ]
       },

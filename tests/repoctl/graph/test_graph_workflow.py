@@ -137,12 +137,110 @@ def test_workflow_benchmark_measures_paths_and_provenance_not_edges(tmp_path, mo
                                'implementation': ['src/core/model_manager.py'],
                                'tests': ['tests/test_predict.py', 'tests/test_model_manager_concurrency.py']},
             'expected_statuses': ['partial'],
+            'required_stages': ['entrypoint', 'implementation', 'tests'],
         }],
     }), encoding='utf-8')
-    assert main(['graph', 'workflow-benchmark', '--case-id', 'real-route', '--fixture', str(fixture), '--min-path-recall', '1', '--json']) == 0
+    assert main(['graph', 'workflow-benchmark', '--case-id', 'real-route', '--fixture', str(fixture), '--min-path-recall', '1', '--json']) == 1
     result = _payload(capsys)['data']['benchmark']
     assert result['path_recall'] == 1.0
     assert result['confirmed_path_recall'] < result['path_recall']
     assert result['status_expected'] is True
     assert result['stages']['tests']['found_count'] == 2
     assert result['stages']['tests']['confirmed_count'] >= 1
+    assert result['required_stages_covered'] is True
+    assert result['required_stages_precise'] is False
+    assert result['task_navigation_complete'] is False
+
+
+def test_workflow_exact_file_precedes_two_thousand_other_entries(tmp_path, monkeypatch) -> None:
+    from tools.repoctl.graph_model import GraphNode, GraphSnapshot, file_id
+    from tools.repoctl.graph_workflow import query_graph_workflow
+    from tools.repoctl.repositories import require_repo_target
+
+    repo = _workspace(tmp_path, monkeypatch)
+    _write(repo, 'z_special.py', "@router.post('/predict')\ndef predict():\n    return 'ok'\n")
+    files = [f'a/file{i:04}.py' for i in range(2048)] + ['z_special.py']
+    snap = GraphSnapshot(repository={'id': 'main', 'path': 'repos'}, sources=[], completeness={},
+        nodes=[GraphNode(file_id('main', path), 'file', {'path': path}) for path in files], edges=[])
+    target = require_repo_target(tmp_path, repo_id='main')
+    result = query_graph_workflow(snap, root=tmp_path, target=target,
+        route='/predict', in_file='z_special.py', freshness={'status': 'stale'})
+    assert result['stages']['entrypoints'][0]['path'] == 'z_special.py'
+    assert result['completeness']['files_scanned'] == 1
+    assert result['completeness']['source_scan_bounded'] is False
+
+
+def test_workflow_unscored_caller_fails_even_with_full_path_recall() -> None:
+    from tools.repoctl.graph_workflow import evaluate_workflow_benchmark
+    result = {'status': 'partial', 'stages': {
+        'entrypoints': [{'path': 'entry.py', 'relation': 'source'}],
+        'implementation': [{'path': 'engine.py', 'relation': 'confirmed'}],
+        'tests': [{'path': 'test_engine.py', 'relation': 'confirmed'}],
+        'callers_or_dependents': [],
+    }}
+    case = {'id':'unscored-caller', 'expected_statuses':['partial'],
+        'required_stages':['entrypoint','implementation','callers_or_dependents','tests'],
+        'expected_paths': {'entrypoints':['entry.py'], 'implementation':['engine.py'], 'tests':['test_engine.py']}}
+    score = evaluate_workflow_benchmark(result, case)
+    assert score['path_recall'] == 1.0
+    assert score['required_stages']['callers_or_dependents']['status'] == 'unscored_no_ground_truth'
+    assert score['required_stages_covered'] is False
+    assert score['task_navigation_complete'] is False
+
+
+def test_workflow_full_required_relation_evidence_can_pass() -> None:
+    from tools.repoctl.graph_workflow import evaluate_workflow_benchmark
+    result = {'status':'found', 'stages': {
+        'entrypoints': [{'path':'route.py','relation':'source'}],
+        'implementation':[{'path':'engine.py','relation':'confirmed'}],
+        'callers_or_dependents':[{'path':'caller.py','relation':'confirmed'}],
+        'tests':[{'path':'test_engine.py','relation':'confirmed'}],
+    }}
+    case = {'id':'verified', 'expected_statuses':['found'],
+        'required_stages':['entrypoint','implementation','callers_or_dependents','tests'],
+        'expected_paths': {'entrypoints':['route.py'], 'implementation':['engine.py'],
+                           'callers_or_dependents':['caller.py'], 'tests':['test_engine.py']}}
+    score = evaluate_workflow_benchmark(result, case)
+    assert score['task_navigation_complete'] is True
+    assert score['required_stages_precise'] is True
+    assert score['false_positive_count'] == 0
+    assert score['confirmed_path_recall'] == 0.75
+
+
+def test_dart_exact_seed_recovers_live_sibling_importer_without_inventing_a_call(tmp_path, monkeypatch) -> None:
+    from tools.repoctl.graph_model import GraphNode, GraphSnapshot, file_id
+    from tools.repoctl.graph_workflow import query_graph_workflow
+    from tools.repoctl.repositories import require_repo_target
+
+    repo = _workspace(tmp_path, monkeypatch)
+    owner = 'lib/runtime/local_store/local_restaurant_order_authority.dart'
+    consumer = 'lib/runtime/local_store/local_waitlist_authority.dart'
+    _write(repo, owner, 'extension LocalRestaurantOrderAuthority on LocalWaitlistAuthority {}\n')
+    _write(repo, consumer, "import 'local_restaurant_order_authority.dart';\nclass LocalWaitlistAuthority {}\n")
+    files = [owner, consumer]
+    snapshot = GraphSnapshot(repository={'id': 'main', 'path': 'repos'}, sources=[], completeness={},
+        nodes=[GraphNode(file_id('main', path), 'file', {'path': path}) for path in files], edges=[])
+    result = query_graph_workflow(snapshot, root=tmp_path, target=require_repo_target(tmp_path, repo_id='main'),
+        symbol='LocalRestaurantOrderAuthority', in_file=owner,
+        freshness={'status':'stale', 'changed_paths':files})
+    assert result['status'] == 'partial'
+    assert result['stages']['implementation'][0]['path'] == owner
+    assert any(item['path'] == consumer and item['relation'] == 'source'
+               and item['evidence'] == 'current Dart module import/export literal'
+               for item in result['stages']['callers_or_dependents'])
+    assert not any(edge['relation'] == 'confirmed' for edge in result['links'])
+
+
+def test_stale_dart_entrypoint_has_dart_source_provenance_not_rust(tmp_path, monkeypatch, capsys) -> None:
+    repo = _workspace(tmp_path, monkeypatch)
+    _write(repo, 'README.txt', 'empty initial repo\n')
+    _materialize(tmp_path)
+    _write(repo, 'lib/main.dart', 'void main() => boot();\nvoid boot() {}\n')
+    assert main(['graph', 'workflow', '--symbol', 'main', '--in-file', 'lib/main.dart', '--json']) == 0
+    result = _payload(capsys)['data']['result']
+    assert result['status'] == 'partial'
+    impl = next(item for item in result['stages']['implementation'] if item['path'] == 'lib/main.dart')
+    assert impl['relation'] == 'source'
+    assert impl['evidence'] == 'Dart top-level function declaration'
+    assert 'Rust' not in impl['evidence']
+    assert result['stages']['tests'] == []

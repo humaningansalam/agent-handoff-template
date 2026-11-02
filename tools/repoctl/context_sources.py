@@ -19,7 +19,6 @@ DOCUMENT_PATTERNS = (
     "docs/README.md",
     "docs/BOARD.md",
     "docs/PRD.md",
-    "docs/prd/**/*.md",
     "docs/architecture/**/*.md",
     "docs/specs/**/*.md",
     "docs/research/**/*.md",
@@ -32,7 +31,14 @@ PRODUCT_DOCUMENT_PATTERNS = (
     "CONTRIBUTING.md",
     "README.md",
     "README.*.md",
-    "docs/**/*.md",
+    "docs/README.md",
+    "docs/PRD.md",
+    "docs/architecture/**/*.md",
+    "docs/specs/**/*.md",
+    "docs/adr/**/*.md",
+    "docs/research/**/*.md",
+    "docs/contracts/**/*.md",
+    "docs/workflows/**/*.md",
 )
 EXCLUDED_PARTS = {".repoctl-state", "generated", ".next", ".nuxt", ".svelte-kit", ".turbo", ".firebase", ".dart_tool", "Library", "Temp", "Obj", "obj", "Build", "Builds", "Logs", "UserSettings", "node_modules", "dist", "build", "target"}
 MAX_CONTEXT_SOURCE_BYTES = 1024 * 1024
@@ -431,7 +437,10 @@ def context_document_paths(root: Path, *, target: RepoTarget) -> list[Path]:
         paths.update(path for path in root.glob(pattern) if path.is_file())
     for pattern in PRODUCT_DOCUMENT_PATTERNS if target.id else []:
         paths.update(path for path in target.root_path.glob(pattern) if path.is_file())
-    return sorted(path for path in paths if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts))
+    return sorted(
+        path for path in paths
+        if not any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts)
+    )
 
 
 def context_product_manifest_paths(root: Path, *, target: RepoTarget) -> list[Path]:

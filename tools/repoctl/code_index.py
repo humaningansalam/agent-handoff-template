@@ -90,7 +90,14 @@ def semantic_provider_entries(entries: list[CodeIndexEntry]) -> list[CodeIndexEn
     return [
         entry
         for entry in entries
-        if entry.classification != "excluded" and entry.parse_status == "ok"
+        if entry.classification != "excluded"
+        and (
+            entry.parse_status == "ok"
+            # The syntax provider intentionally handles languages that the
+            # old lexical CodeIndex marks as unparsed/skipped; do not pretend
+            # their lexical fields were parsed by that index.
+            or (entry.parse_status == "skipped" and entry.language in {"rust", "go", "java", "swift"})
+        )
     ]
 
 

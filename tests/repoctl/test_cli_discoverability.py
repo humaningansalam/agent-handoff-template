@@ -45,16 +45,15 @@ def test_upgrade_status_guides_to_plan(tmp_path: Path, monkeypatch, capsys) -> N
     assert payload["data"]["next_command"] == "./scripts/repoctl upgrade plan --help"
 
 
-def test_format_json_is_rejected_in_favor_of_json_switch(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_retired_pack_has_no_parser_or_help_entry(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_context_workspace(tmp_path, monkeypatch)
-
-    assert main(["context", "pack", "--task", "T-20260101000000Z", "--repo-id", "main", "--format", "json", "--json"]) == 2
-
+    assert main(["context", "pack", "--task", "T-20260101000000Z", "--repo-id", "main", "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["command"] == "context.pack"
     assert payload["problems"][0]["code"] == "argparse_error"
-    assert payload["next_actions"] == [{"label": "Show command help", "command": "./scripts/repoctl context pack --help"}]
+    with pytest.raises(Exception, match="invalid choice"):
+        build_parser().parse_args(["context", "pack", "--help"])
+    assert not hasattr(build_parser().parse_args(["graph", "search", "search"]), "context_command")
 
 
 def test_command_identity_is_stable_across_success_domain_and_parse_failures(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -79,10 +78,10 @@ def test_command_identity_is_stable_across_success_domain_and_parse_failures(tmp
     assert trailing["command"] == "repo.show"
     assert trailing["next_actions"] == [{"label": "Show command help", "command": "./scripts/repoctl repo show --help"}]
 
-    assert main(["context", "nope", "--json"]) == 2
+    assert main(["graph", "nope", "--json"]) == 2
     hidden = json.loads(capsys.readouterr().out)
-    assert hidden["command"] == "context"
-    assert "benchmark" not in hidden["problems"][0]["message"]
+    assert hidden["command"] == "graph"
+    assert "evidence-benchmark" not in hidden["problems"][0]["message"]
 
 
 def test_registered_command_help_executes_and_visible_commands_describe_required_arguments() -> None:
@@ -184,7 +183,7 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
             "knowledge",
             "add",
             "--source",
-            "docs/contracts/repoctl-context-contract.md",
+            "docs/contracts/repoctl-evidence-contract.md",
             "--repo-id",
             "main",
             "--kind",
@@ -212,7 +211,7 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
                         "graph_anchor": {
                             "identity_coverage": {
                                 "recovery_selectors": [
-                                    {"kind": "file", "value": "docs/contracts/repoctl-context-contract.md"},
+                                    {"kind": "file", "value": "docs/contracts/repoctl-evidence-contract.md"},
                                     {"kind": "symbol", "value": "build_context_bundle", "in_file": "tools/repoctl/context.py"},
                                 ]
                             }
@@ -221,7 +220,7 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
                 }
             },
         )
-    assert graph_actions[-1]["command"] == "./scripts/repoctl context query 'where is context' --mode past-decision --repo-id main --json"
+    assert graph_actions[-1]["command"] == "./scripts/repoctl graph search 'where is context' --mode past-decision --repo-id main --json"
     exercise(graph_actions)
     caused_graph_actions = _next_actions_for_problems(
         [{"code": "context_graph_unavailable", "cause_code": "graph_snapshot_missing"}],

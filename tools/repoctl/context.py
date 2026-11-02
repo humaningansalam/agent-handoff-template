@@ -69,7 +69,7 @@ CONTEXT_GROUPS = (
     "likely_change_surface",
     "callers_and_dependents",
     "tests_and_verification",
-    "reviewed_knowledge",
+    "knowledge_records",
     "related_history",
     "supporting_evidence",
     "warnings_and_completeness",
@@ -443,7 +443,7 @@ def build_context_bundle(
         knowledge_results = knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else []
         problems.extend(knowledge_problems)
         problems.extend(knowledge_warnings)
-        knowledge_path_resolutions = _resolve_reviewed_knowledge_paths(
+        knowledge_path_resolutions = _resolve_knowledge_records_paths(
             target=target,
             knowledge_results=knowledge_results,
             known_paths=_known_context_product_paths(
@@ -455,7 +455,7 @@ def build_context_bundle(
             ),
         )
         knowledge_paths_resolved = True
-        knowledge_path_candidates, knowledge_path_problems = _reviewed_knowledge_path_candidates(
+        knowledge_path_candidates, knowledge_path_problems = _knowledge_records_path_candidates(
             root,
             target=target,
             query=query,
@@ -775,7 +775,7 @@ def build_context_bundle(
         problems.extend(knowledge_warnings)
     knowledge_results = knowledge_data.get("results", []) if isinstance(knowledge_data.get("results"), list) else []
     if not knowledge_paths_resolved:
-        _resolve_reviewed_knowledge_paths(
+        _resolve_knowledge_records_paths(
             target=target,
             knowledge_results=knowledge_results,
             known_paths=_known_context_product_paths(
@@ -871,8 +871,8 @@ def build_context_bundle(
         evidence=evidence,
         groups=groups,
         completeness=completeness,
-        reviewed_knowledge=knowledge_data,
-        reviewed_knowledge_queried=knowledge_queried,
+        knowledge_records=knowledge_data,
+        knowledge_records_queried=knowledge_queried,
     )
     bundle = ContextBundle(
         repository=target.to_dict(),
@@ -1157,8 +1157,8 @@ def _project_knowledge_summary(
     evidence: list[ContextCandidate],
     groups: dict[str, list[dict[str, Any]]],
     completeness: dict[str, Any],
-    reviewed_knowledge: dict[str, Any],
-    reviewed_knowledge_queried: bool,
+    knowledge_records: dict[str, Any],
+    knowledge_records_queried: bool,
 ) -> dict[str, Any]:
     document_kinds = {"document", "product_manifest", "verification_hint"}
     document_paths = {
@@ -1172,7 +1172,7 @@ def _project_knowledge_summary(
         if isinstance(item, dict)
     }
     task_refs.discard("")
-    lifecycle = reviewed_knowledge.get("lifecycle") if isinstance(reviewed_knowledge.get("lifecycle"), dict) else {}
+    lifecycle = knowledge_records.get("lifecycle") if isinstance(knowledge_records.get("lifecycle"), dict) else {}
     return {
         "documents": {
             "loaded": True,
@@ -1187,15 +1187,15 @@ def _project_knowledge_summary(
             else None,
             "result_count": len(task_refs) if completeness.get("history_loaded") else None,
         },
-        "reviewed_records": {
-            "queried": reviewed_knowledge_queried,
-            "available_record_count": int(reviewed_knowledge.get("available_record_count") or 0)
-            if reviewed_knowledge_queried
+        "knowledge_records": {
+            "queried": knowledge_records_queried,
+            "available_record_count": int(knowledge_records.get("available_record_count") or 0)
+            if knowledge_records_queried
             else None,
-            "result_count": int(reviewed_knowledge.get("result_count") or 0)
-            if reviewed_knowledge_queried
+            "result_count": int(knowledge_records.get("result_count") or 0)
+            if knowledge_records_queried
             else None,
-            "lifecycle": lifecycle if reviewed_knowledge_queried else None,
+            "lifecycle": lifecycle if knowledge_records_queried else None,
         },
     }
 
@@ -1439,7 +1439,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     rule = guide.get("relevant_rule", {})
     prior = guide.get("prior_reason", {})
     lines = [
-        "# Context Bundle",
+        "# Graph Source Evidence",
         "",
         f"- Current intent: {guide.get('current_intent', query.get('text', ''))}",
         f"- First implementation file: `{implementation.get('path', '')}` — {implementation.get('reason', '') or implementation.get('status', '')}",
@@ -1478,7 +1478,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
         "likely_change_surface": "Likely Change Surface",
         "callers_and_dependents": "Callers And Dependents",
         "tests_and_verification": "Tests And Verification",
-        "reviewed_knowledge": "Reviewed Knowledge",
+        "knowledge_records": "Knowledge",
         "related_history": "Related History",
         "supporting_evidence": "Supporting Evidence",
         "warnings_and_completeness": "Warnings And Completeness",
@@ -1592,7 +1592,7 @@ def render_context_text(bundle: ContextBundle) -> str:
         "tests_and_verification",
         "callers_and_dependents",
         "must_read",
-        "reviewed_knowledge",
+        "knowledge_records",
         "related_history",
         "warnings_and_completeness",
     ):
@@ -1690,7 +1690,7 @@ def _context_query_guide(
     edge_kinds = test_provenance.get("edge_kinds") if isinstance(test_provenance.get("edge_kinds"), list) else []
     test_status = "confirmed_direct_test" if "TESTS_FILE" in edge_kinds else "candidate" if test is not None else "unconfirmed"
     rule = first("must_read")
-    prior = first("reviewed_knowledge") or first("related_history")
+    prior = first("knowledge_records") or first("related_history")
     implementation_summary = summary(implementation, status="candidate")
     first_path = implementation_summary["path"]
     next_action = (
@@ -2629,7 +2629,7 @@ def _compact_projection(
         "likely_change_surface": 2,
         "callers_and_dependents": 1,
         "tests_and_verification": 1,
-        "reviewed_knowledge": 1,
+        "knowledge_records": 1,
         "related_history": 1,
         "supporting_evidence": 1,
         "warnings_and_completeness": 1,
@@ -3209,8 +3209,8 @@ def _compact_bundle_projection(
         key=lambda item: warning_priority.get(str(item.get("code") or ""), 99),
     )[:1]
 
-    code_first = ["likely_change_surface", "tests_and_verification", "callers_and_dependents", "must_read", "reviewed_knowledge", "related_history", "supporting_evidence"]
-    authority_first = ["must_read", "reviewed_knowledge", "related_history", "likely_change_surface", "tests_and_verification", "callers_and_dependents", "supporting_evidence"]
+    code_first = ["likely_change_surface", "tests_and_verification", "callers_and_dependents", "must_read", "knowledge_records", "related_history", "supporting_evidence"]
+    authority_first = ["must_read", "knowledge_records", "related_history", "likely_change_surface", "tests_and_verification", "callers_and_dependents", "supporting_evidence"]
     lane_order = authority_first if mode in {"startup_reading", "authority_or_contract", "past_decision", "invariant", "failure_mode"} else code_first
     projection_groups = {
         group: [
@@ -3466,7 +3466,7 @@ def _current_product_selector_paths(*, target: RepoTarget, value: str) -> set[st
     return current
 
 
-def _resolve_reviewed_knowledge_paths(
+def _resolve_knowledge_records_paths(
     *,
     target: RepoTarget,
     knowledge_results: list[dict[str, Any]],
@@ -3478,7 +3478,7 @@ def _resolve_reviewed_knowledge_paths(
         explicit_resolutions: list[dict[str, Any]] = []
         applicability_resolutions: list[dict[str, Any]] = []
         resolved_applicability_paths: list[str] = []
-        if str(record.get("status") or "") == "reviewed":
+        if str(record.get("status") or "") == "current":
             explicit_refs = record.get("explicit_path_refs") if isinstance(record.get("explicit_path_refs"), list) else []
             for path_ref in explicit_refs:
                 if not isinstance(path_ref, dict):
@@ -3530,7 +3530,7 @@ def _resolve_reviewed_knowledge_paths(
     return resolutions_by_record
 
 
-def _reviewed_knowledge_path_candidates(
+def _knowledge_records_path_candidates(
     root: Path,
     *,
     target: RepoTarget,
@@ -3547,7 +3547,7 @@ def _reviewed_knowledge_path_candidates(
     problems: list[Problem] = []
     for result in knowledge_results:
         record = result.get("record") if isinstance(result.get("record"), dict) else {}
-        if str(record.get("status") or "") != "reviewed":
+        if str(record.get("status") or "") != "current":
             continue
         match_strength = str(result.get("query_match_strength") or KnowledgeQueryMatchStrength.NONE.value)
         if match_strength not in {
@@ -3650,7 +3650,7 @@ def _reviewed_knowledge_path_candidates(
                 score=30.0,
                 score_breakdown={"knowledge_path": 1.0},
                 selection_reasons=[f"reviewed Knowledge explicit path: {', '.join(sorted(record_ids))}"],
-                evidence_kinds=(ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH,),
+                evidence_kinds=(ContextEvidenceKind.KNOWLEDGE_RECORDS_PATH,),
                 anchor_strength=ContextAnchorStrength.EXPLICIT,
                 related_record_ids=tuple(sorted(record_ids)),
             )
@@ -3996,13 +3996,13 @@ def _resolve_graph_anchors(
             diagnostic_pairs.append((candidate, graph_candidate))
             continue
         if (
-            ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH in evidence_kinds
+            ContextEvidenceKind.KNOWLEDGE_RECORDS_PATH in evidence_kinds
             and candidate.anchor_strength == ContextAnchorStrength.EXPLICIT
         ):
             graph_candidate = _context_graph_anchor_candidate(
                 [candidate],
                 target=target,
-                provenance=ContextGraphAnchorProvenance.REVIEWED_KNOWLEDGE,
+                provenance=ContextGraphAnchorProvenance.KNOWLEDGE_RECORDS,
             )
             knowledge_pairs.append((candidate, graph_candidate))
             diagnostic_pairs.append((candidate, graph_candidate))
@@ -5866,7 +5866,7 @@ def _anchor_selection_coverage(
             "coverage_identity_required": candidate.anchor_provenance
             in {
                 ContextGraphAnchorProvenance.EXACT_IDENTITY,
-                ContextGraphAnchorProvenance.REVIEWED_KNOWLEDGE,
+                ContextGraphAnchorProvenance.KNOWLEDGE_RECORDS,
             },
             "anchor_strength": candidate.anchor_strength.value,
             "graph_support": candidate.graph_support,
@@ -6229,11 +6229,11 @@ def _context_groups(
     for result in knowledge_results:
         record = result.get("record") if isinstance(result.get("record"), dict) else {}
         matched_paths = result.get("matched_paths") if isinstance(result.get("matched_paths"), list) else []
-        groups["reviewed_knowledge"].append(
+        groups["knowledge_records"].append(
             {
                 "repo_id": repo_id,
                 "record_id": record.get("id", ""),
-                "status": result.get("status") or record.get("status") or "reviewed",
+                "status": result.get("status") or record.get("status") or "current",
                 "selection_reason": f"reviewed knowledge linked to {', '.join(str(path) for path in matched_paths)}" if matched_paths else "reviewed knowledge match",
                 "score_breakdown": result.get("score_breakdown", {}),
                 "excerpt": record.get("claim") or record.get("summary") or "",
@@ -6580,7 +6580,7 @@ def _candidate_evidence_roles(candidate: ContextCandidate, *, target: RepoTarget
             roles.add("configuration")
         elif ref.kind == ContextSourceKind.STRUCTURED_DATA.value:
             roles.add("structured_data")
-        if ContextEvidenceKind.REVIEWED_KNOWLEDGE_PATH in candidate.evidence_kinds:
+        if ContextEvidenceKind.KNOWLEDGE_RECORDS_PATH in candidate.evidence_kinds:
             roles.add("knowledge_linked_test" if is_test else "knowledge_linked_source")
         elif _has_direct_query_evidence(candidate):
             roles.add("test_candidate" if is_test else "change_candidate")

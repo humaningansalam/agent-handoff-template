@@ -18,7 +18,7 @@ def _write_knowledge_docs(root: Path) -> None:
     (root / "docs/adr").mkdir(parents=True, exist_ok=True)
     (root / "docs/contracts").mkdir(parents=True, exist_ok=True)
     (root / ".repoctl-state/knowledge").mkdir(parents=True, exist_ok=True)
-    (root / "docs/contracts/repoctl-context-contract.md").write_text(
+    (root / "docs/contracts/repoctl-evidence-contract.md").write_text(
         "# repoctl Context contract\n\n## Decision\n\nContext returns source bundles but does not create authoritative knowledge.\n\n## Authority Rules\n\nSaved Knowledge requires an explicit claim, reason, and source.\n",
         encoding="utf-8",
     )
@@ -52,7 +52,7 @@ def _setup_knowledge_multirepo_workspace(root: Path, monkeypatch) -> None:
 def _add_knowledge_source(
     capsys,
     *,
-    source: str = "docs/contracts/repoctl-context-contract.md",
+    source: str = "docs/contracts/repoctl-evidence-contract.md",
     repo_id: str = "main",
     claim: str = "Context returns source bundles but does not create authoritative knowledge.",
     kind: str = "decision",

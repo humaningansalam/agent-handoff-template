@@ -12,11 +12,11 @@ It is not an autonomous agent runtime. It keeps current work, repository boundar
 - **Knowledge** stores a reusable claim, its reason, and its sources.
 - **Handoff** is the four-field current restart instruction inside a Task, not a history store.
 
-Context retrieval and ranking are read-flow compatibility mechanisms, not an additional durable product plane or mandatory user action.
+Source retrieval and ranking are internal Graph/Knowledge read helpers, not additional durable product planes or mandatory user actions.
 
 The workspace root owns private control state and documentation. Product Git repositories live under `repos/`. Sparse file metadata lives inside each product repository under `.repometa/`. Graph and the persistent evidence index are derived navigation layers.
 
-Repoctl deliberately does not create proof that tests ran. `## Verification` is an optional Task note. Context and Graph queries do not create selection receipts, Context Packs do not bind to Handoffs, and saving Knowledge does not start an approval lifecycle.
+Repoctl deliberately does not create proof that tests ran. `## Verification` is an optional Task note. Graph search and Knowledge lookup do not create selection receipts, and saving Knowledge does not start an approval lifecycle.
 
 ## Compared with adjacent tools
 
@@ -63,7 +63,7 @@ Build Graph only when typed code navigation would help:
 ./scripts/repoctl graph build --repo-id main --json
 ```
 
-`docs/PRD.md` is the adopter-owned fixed entrypoint. Rewrite its content for the product and link to the needed `docs/architecture/`, `docs/specs/`, `docs/adr/`, and `docs/research/` documents. Do not create empty folders or boilerplate-only documents. Legacy `docs/prd/**` remains readable.
+`docs/PRD.md` is the adopter-owned fixed entrypoint. Rewrite its content for the product and link to the needed `docs/architecture/`, `docs/specs/`, `docs/adr/`, and `docs/research/` documents. Do not create empty folders or boilerplate-only documents. Older `docs/prd/**` is not part of the current read contract; migrate its useful contents to the documented structure before adoption.
 
 ## Daily work
 
@@ -106,25 +106,18 @@ Meaningful changes to Goal/Task contract, Chosen/Notes, child lifecycle, Handoff
 
 ## Finding code and context
 
-Use direct reads, `rg`, or Graph when the identity is already known. For ambiguous work, ask Context for a bounded source-linked working set:
+Use direct reads, `rg`, or Graph when the identity is already known. For ambiguous work, use Graph source search for a bounded cited working set:
 
 ```bash
-./scripts/repoctl context query "where is invoice retry decided" --repo-id main --json
+./scripts/repoctl graph search "where is invoice retry decided" --repo-id main --json
 ./scripts/repoctl graph query --repo-id main --callers-of retry_invoice --in-file billing/retry.py --json
 ./scripts/repoctl graph workflow --repo-id main --route /predict --json
 ./scripts/repoctl graph workflow --repo-id main --symbol audio_clock --json
 ```
 
-Context remains a compatible read-only way to combine current source, documents, history, Knowledge, and Graph. It does not create edit scope. `graph query` reads typed materialized relations; `graph workflow` adds bounded live-source hints for route and source navigation, explicitly labeling non-confirmed links as candidates. Refresh explicitly with `graph build` after source changes; a stale snapshot never proves zero impact.
+Graph source search combines current source, documents, history, Knowledge, and Graph. It does not create edit scope. `graph query` reads typed materialized relations; `graph workflow` adds bounded live-source hints for route and source navigation, explicitly labeling non-confirmed links as candidates. Refresh explicitly with `graph build` after source changes; a stale snapshot never proves zero impact.
 
-A Task Context Pack is an optional one-time view or export:
-
-```bash
-./scripts/repoctl context pack --task T-... --repo-id main --format markdown
-./scripts/repoctl context pack --task T-... --repo-id main --output /tmp/T-context.md --format markdown
-```
-
-The Pack is reference material. It does not become Task state, a Handoff binding, or a finish requirement.
+No Pack/export registration step is part of the current Task lifecycle. Keep current reasoning in Task and reusable conclusions in Knowledge; open named source files directly.
 
 ## Reusing decisions
 
@@ -141,7 +134,7 @@ Most work needs only its archived Task. Save Knowledge when a decision, invarian
   --json
 ```
 
-Saving the record completes the action. `knowledge query` and Context can use it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files; migration warnings apply only to legacy records without a safely matching current claim, reason, and source identity. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
+Saving the record completes the action. `knowledge query` and Graph evidence searches can read it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files; legacy records require a one-time explicit conversion; runtime reads only the latest schema. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
 
 When the reusable conclusion is ready during closeout, the corresponding `task finish --knowledge-kind --knowledge-claim --knowledge-reason` options save it atomically with task completion.
 
@@ -172,7 +165,7 @@ When the reusable conclusion is ready during closeout, the corresponding `task f
 Key contracts:
 
 - [JSON output](docs/contracts/repoctl-json-contract.md)
-- [Context and Task Packs](docs/contracts/repoctl-context-contract.md)
+- [Context and Task Packs](docs/contracts/repoctl-evidence-contract.md)
 - [Graph](docs/contracts/repoctl-graph-contract.md)
 - [Task Chosen scope](docs/contracts/repoctl-task-scope-contract.md)
 - [Module boundaries](docs/contracts/repoctl-module-boundaries.md)

@@ -646,7 +646,7 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
     assert len(full_graph_result["relationship_candidates"]) == 4
     assert full_graph_result["relationship_candidates_truncated"] is False
 
-    assert main(["context", "query", "linked rpc", "--mode", "code-location", "--json"]) == 0
+    assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
     context_bundle = context_payload["data"]["bundle"]
     assert context_bundle["relationship_candidate_count"] == 1
@@ -729,7 +729,7 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
     assert provider_stale_graph_payload["data"]["result"]["relationship_candidate_count"] == 0
     assert any(action["kind"] == "graph_refresh" for action in provider_stale_graph_payload["next_actions"])
 
-    assert main(["context", "query", "linked rpc", "--mode", "code-location", "--json"]) == 0
+    assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     provider_stale_context_payload = json.loads(capsys.readouterr().out)
     assert provider_stale_context_payload["data"]["bundle"]["relationship_candidates"] == []
     assert provider_stale_context_payload["data"]["bundle"]["relationship_candidate_count"] == 0
@@ -776,7 +776,7 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
     assert source_stale_payload["data"]["result"]["relationship_candidate_count"] == 0
     assert any(action["kind"] == "graph_refresh" for action in source_stale_payload["next_actions"])
 
-    assert main(["context", "query", "linked rpc", "--mode", "code-location", "--json"]) == 0
+    assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     stale_context_payload = json.loads(capsys.readouterr().out)
     assert stale_context_payload["data"]["bundle"]["relationship_candidates"] == []
     assert stale_context_payload["data"]["bundle"]["relationship_candidate_count"] == 0
@@ -845,7 +845,7 @@ def test_repometa_eligibility_change_invalidates_materialized_rpc_evidence(tmp_p
     assert graph_payload["data"]["result"]["relationship_candidate_count"] == 0
     assert any(action["kind"] == "graph_refresh" for action in graph_payload["next_actions"])
 
-    assert main(["context", "query", "linked rpc", "--mode", "code-location", "--json"]) == 0
+    assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
     bundle = context_payload["data"]["bundle"]
     assert bundle["relationship_candidates"] == []
@@ -901,7 +901,7 @@ def test_context_exact_rpc_identity_selects_one_same_line_source_fact(tmp_path: 
 
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     for routine in ("alpha", "beta"):
-        assert main(["context", "query", routine, "--mode", "code-location", "--full", "--json"]) == 0
+        assert main(["graph", "search", routine, "--mode", "code-location", "--full", "--json"]) == 0
         bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
         assert bundle["relationship_candidate_count"] == 1
         assert [item["source"]["runtime_identity"]["value"] for item in bundle["relationship_candidates"]] == [routine]
@@ -913,7 +913,7 @@ def test_context_exact_rpc_identity_selects_one_same_line_source_fact(tmp_path: 
         )
         assert exact_source["source_ref"]["source_fact_id"] == bundle["relationship_candidates"][0]["candidate_id"]
 
-    assert main(["context", "query", "lib/client.dart", "--mode", "code-location", "--json"]) == 0
+    assert main(["graph", "search", "lib/client.dart", "--mode", "code-location", "--json"]) == 0
     file_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
     assert file_bundle["relationship_candidate_count"] == 2
     assert {

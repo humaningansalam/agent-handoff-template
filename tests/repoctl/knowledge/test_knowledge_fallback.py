@@ -68,8 +68,16 @@ def test_equivalent_legacy_record_does_not_repeat_migration_warning(tmp_path: Pa
 
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
     result = payload(capsys)
-    assert result["data"]["legacy_record_count"] == 0
-    assert not any(item["code"] == "knowledge_record_migration_required" for item in result["problems"])
+    assert result["data"]["legacy_record_count"] == 1
+    assert any(item["code"] == "knowledge_record_migration_required" for item in result["problems"])
+    # Only an explicit one-time conversion retires the legacy artifact.
+    assert main(["knowledge", "migrate", "--repo-id", "main", "--record-id", legacy_id,
+                 "--reason", current["reason"], "--source", current["source_refs"][0]["path"],
+                 "--apply", "--json"]) == 0
+    payload(capsys)
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    migrated = payload(capsys)
+    assert migrated["data"]["legacy_record_count"] == 0
 
 
 def test_same_claim_with_different_reason_is_not_silently_deduplicated(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -97,7 +105,7 @@ def test_same_claim_with_different_reason_is_not_silently_deduplicated(tmp_path:
 
 def test_source_relocation_is_unique_and_digest_bound(tmp_path: Path, monkeypatch, capsys) -> None:
     _setup_knowledge_workspace(tmp_path, monkeypatch)
-    old = tmp_path / "docs/contracts/repoctl-context-contract.md"
+    old = tmp_path / "docs/contracts/repoctl-evidence-contract.md"
     record = _add_knowledge_source(capsys, claim="Moved sources retain identity by digest.")["data"]["record"]
     moved = tmp_path / "docs/contracts/moved-context-contract.md"
     old.rename(moved)

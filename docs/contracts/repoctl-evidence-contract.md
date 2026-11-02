@@ -1,0 +1,125 @@
+# repoctl Graph evidence Contract
+
+## Purpose
+
+Graph evidence answers an agent's immediate reading question with a bounded, source-linked working set. It combines current source, project authority, procedures, Task history, Knowledge, and already-materialized Graph relations without turning any result into edit scope or authority.
+
+Use it for ambiguous intent:
+
+```bash
+./scripts/repoctl graph search "where is invoice retry decided" --repo-id main --json
+```
+
+For a known file or exact identity, direct reads, `rg`, and `graph query` remain first-class entry points. There is no mandatory tool order.
+
+## Query modes
+
+Public modes are:
+
+```text
+auto
+startup-reading
+code-location
+call-impact
+file-impact
+authority
+contract
+past-decision
+failure-mode
+invariant
+```
+
+Mode selection changes bounded ranking and Graph traversal policy. It never changes source authority or Task scope.
+
+`startup-reading` preserves project entry sources ahead of incidental lexical matches and suggests orientation before implementation. Product-root `AGENTS.md` and `CONTRIBUTING.md` are collected when present; rules in ancestor directories still need direct inspection for a chosen file. Manifest verification hints respect a recognized declared package manager, but require review of local guidance, working directory and runtime prerequisites before execution. Retrieval benchmarks measure source visibility and navigation coverage, not an agent's understanding or product acceptance.
+
+## Evidence model
+
+A Graph evidence item carries a `source_ref` with repository-aware path identity and, when available, section, lines, source fact, provider symbol, and content digest. Full output may also expose evidence kinds, anchor strength, field matches, score diagnostics, and document role.
+
+Current source classification is closed and shared by persistent indexing and live overlays:
+
+- `current_source`
+- `config`
+- `structured_data`
+
+Generated or ignored control artifacts are excluded. Shared documents keep one semantic role through collection, indexing, retrieval, so consumers do not reinterpret them from folder names.
+
+The public working groups are:
+
+```text
+must_read
+likely_change_surface
+tests_and_verification
+callers_and_dependents
+knowledge_records
+related_history
+supporting_evidence
+warnings_and_completeness
+```
+
+The stable `knowledge_records` group contains current direct Knowledge records. Earlier schema versions enter the current read model only after an explicit one-time, source-verified migration. `tests_and_verification` contains source/test relationships and runnable project hints; it does not claim a check ran or create verification state.
+
+Compact selection prefers distinct useful paths before repeating sections from one file. Source relevance may propose a member but cannot prove semantic ownership. Confirmed Graph relations and compatible unresolved `relationship_candidates` remain separate lanes.
+
+## Graph integration
+
+Graph evidence consumes the last materialized Graph through typed internal objects. It does not parse Graph stdout, invoke providers during a query, or pass free-form tokens into Graph selectors.
+
+Anchor provenance is one of:
+
+- `exact_identity`
+- `provider_symbol`
+- `knowledge_records`
+- `lexical_file`
+
+`resolved` means the typed Graph identity exists. It does not mean the file owns the behavior. A provider-symbol anchor restricts symbol-level call traversal; file-level imports and direct test relations remain separately typed.
+
+Default traversal remains bounded:
+
+```text
+auto          direct call/import/structured/test relations, depth 1
+code_location outgoing callees/imports/structured dependencies and direct tests, depth 1
+call_impact   incoming/outgoing calls through depth 2 and direct tests
+file_impact   imports/structured-file relations through depth 2, direct calls/tests at depth 1
+```
+
+Top-level `graph_seed_refs` preserve source-bound continuation inputs. `completeness.graph_anchor` explains identity and selection coverage. Explicit `graph query` stays available for iterative file, symbol, import, topic, task, artifact, caller, callee, and impact traversal.
+
+When product source changes after materialization, Graph evidence overlays current text and excludes stale Graph relations whose endpoints are stale. A stale query-explicit Graph identity remains unresolved; Graph evidence does not silently substitute a weaker anchor to regain traversal. Provider/configuration drift requires an explicit `graph build`.
+
+## Project documents, history, and Knowledge
+
+`project_knowledge` reports project documents, Task history, and reusable Knowledge as distinct lanes. A lane not loaded reports `null` rather than a misleading zero.
+
+Ordinary modes rank independently retrieved current material. Completed Tasks appear only through explicit `past_decision` and `failure_mode` history lookup or exact Graph task/artifact selection. Cold history cannot add or reorder current candidates, seed Graph traversal, or define Chosen.
+
+Knowledge qualifies through a query match or explicit current path/source relation. `applies_to` may provide a bounded navigation continuation. That continuation never becomes source evidence, a Graph seed, ranking boost, or scope. Replaced current-format records appear only when history is explicitly requested.
+
+Source drift on a Knowledge record produces a warning while the saved conclusion remains visible. The source link tells the agent what current material to recheck.
+
+## Output and completeness
+
+Default JSON is a bounded projection. `--full --json` adds raw evidence and diagnostics without changing the identity or meaning of visible members. Text and Markdown preserve source links and useful continuations but may omit JSON-only topology details.
+
+Completeness accounts separately for:
+
+- source/index availability
+- Graph availability and freshness
+- anchor identity resolution
+- Graph traversal selection coverage
+- visible working-set coverage
+- project document, Task-history, and Knowledge lanes
+
+Warnings are typed. Missing Graph can still yield lexical source, documents, Tasks, and Knowledge. A valid persistent evidence index is reused; changed paths are overlaid rather than forcing an unchanged-source rescan.
+
+Graph evidence and Graph queries are read-only. They do not create persistent result receipts, selection manifests, Discovery episodes, Task mutations, or future feedback state. Repeating a query may refresh only ordinary derived search/index state already owned by Graph evidence; it does not create a per-query ledger.
+
+## Human output
+
+`--format markdown` presents the same selected bundle in a readable order: interpretation, must-read authority, likely change surface, tests, callers/dependents, Knowledge/history, and warnings. Rendered output is a view and must not be re-ingested as a new source of authority.
+
+
+## Product interface
+
+`graph search QUERY --repo-id ID` exposes bounded, source-linked navigation derived from the selected repository, current workspace documents, and Knowledge. It does not create a Task scope, permission, completion assertion, or a reusable export. `graph query` and `graph workflow` provide typed Graph relationships; `knowledge query` reads current reusable claims.

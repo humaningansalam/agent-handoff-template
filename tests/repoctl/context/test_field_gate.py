@@ -14,7 +14,6 @@ from tests.repoctl.knowledge_test_helpers import _add_knowledge_source
 def _copy_release_fixtures(root: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     shutil.copytree(source_root / "tests/fixtures/context-benchmark", root / "tests/fixtures/context-benchmark")
-    shutil.copytree(source_root / "tests/fixtures/context-pack-benchmark", root / "tests/fixtures/context-pack-benchmark")
 
 
 def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_state(
@@ -49,11 +48,11 @@ def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_
     assert payload["data"]["applicability"] == "repoctl_release"
     assert payload["data"]["product_readiness"] == "not_evaluated"
     assert payload["data"]["failed_count"] == 0
-    assert "reviewed_knowledge_check" in gates
+    assert "knowledge_records_check" in gates
     assert gates["context_benchmark"]["ok"] is True
     assert "knowledge_result_questions" not in gates["context_benchmark"]["summary"]
     assert "by_category" not in gates["context_benchmark"]["summary"]
-    assert gates["context_pack_benchmark"]["summary"]["mean_must_read_recall"] == 1.0
+    assert not any("pack" in gate for gate in gates)
     artifact_output = output.read_text(encoding="utf-8")
     artifact = json.loads(artifact_output)
     assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/repoctl-release.json"

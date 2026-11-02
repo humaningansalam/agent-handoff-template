@@ -103,7 +103,7 @@ def observe_envelope(envelope: Any) -> None:
             nodes.extend([relation.get("from", {}), relation.get("to", {})])
         _observe_result(str(data.get("query_status") or "unavailable"), nodes)
         trace["result"]["freshness"] = str((data.get("freshness") or {}).get("status") or "unavailable")
-    elif command == "context.query" and isinstance(data.get("bundle"), dict):
+    elif command == "graph.search" and isinstance(data.get("bundle"), dict):
         groups = data["bundle"].get("groups", {})
         items = [item for group in groups.values() for item in group if isinstance(item, dict)]
         _observe_result("found" if items else "not_found", items)
@@ -179,7 +179,7 @@ def observe_context(
         bundle.get("completeness") if isinstance(bundle.get("completeness"), Mapping) else {}
     )
     project = completeness.get("project_knowledge") if isinstance(completeness.get("project_knowledge"), Mapping) else {}
-    reviewed = project.get("reviewed_records") if isinstance(project.get("reviewed_records"), Mapping) else {}
+    reviewed = project.get("knowledge_records") if isinstance(project.get("knowledge_records"), Mapping) else {}
     history = project.get("task_history") if isinstance(project.get("task_history"), Mapping) else {}
     anchor = completeness.get("graph_anchor") if isinstance(completeness.get("graph_anchor"), Mapping) else {}
     explicit_history = completeness.get("explicit_task_history") if isinstance(completeness.get("explicit_task_history"), Mapping) else {}

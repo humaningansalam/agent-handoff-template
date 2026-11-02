@@ -129,7 +129,7 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     write_settings(tmp_path, {"debug_mode": True})
     assert main(["graph", "query", "--repo-id", "main", "--file", "service.py", "--json"]) == 1
     capsys.readouterr()
-    assert main(["context", "query", "blue comet route", "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(["graph", "search", "blue comet route", "--repo-id", "main", "--full", "--json"]) == 0
     capsys.readouterr()
     before_graph = _events(tmp_path)[-1]["context_sources"]["graph"]
     assert before_graph["available"] is False
@@ -159,9 +159,9 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     assert {"record_id": knowledge_id} in graph_result["references"]
 
     query = "blue comet route validate_token"
-    assert main(["context", "query", query, "--mode", "call-impact", "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(["graph", "search", query, "--mode", "call-impact", "--repo-id", "main", "--full", "--json"]) == 0
     capsys.readouterr()
-    assert main(["context", "query", "blue comet error meaning across language boundaries", "--mode", "contract", "--repo-id", "main", "--full", "--json"]) == 0
+    assert main(["graph", "search", "blue comet error meaning across language boundaries", "--mode", "contract", "--repo-id", "main", "--full", "--json"]) == 0
     context_result = json.loads(capsys.readouterr().out)
     assert any(item["source_ref"]["path"] == "docs/workflows/route-contract.md"
                for group in context_result["data"]["bundle"]["groups"].values() for item in group)
@@ -169,14 +169,14 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
 
     history_query = "validate_token token validation"
     assert main(
-        ["context", "query", history_query, "--mode", "past-decision", "--repo-id", "main", "--json"]
+        ["graph", "search", history_query, "--mode", "past-decision", "--repo-id", "main", "--json"]
     ) == 0
     capsys.readouterr()
     compact_history = _events(tmp_path)[-1]["context_sources"]["task_history"]
     assert compact_history["consulted"] is True
     assert compact_history["status"] in {"available", "partial"}
     assert main(
-        ["context", "query", history_query, "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]
+        ["graph", "search", history_query, "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]
     ) == 0
     capsys.readouterr()
 

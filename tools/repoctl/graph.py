@@ -517,7 +517,7 @@ def build_graph(
         )
         explicit_path_refs = record.get("explicit_path_refs") if isinstance(record.get("explicit_path_refs"), list) else []
         for path_ref in explicit_path_refs:
-            if record_status != "reviewed":
+            if record_status != "current":
                 continue
             if not isinstance(path_ref, dict) or path_ref.get("kind") not in {
                 KnowledgeExplicitPathKind.APPLIES_TO_PATH.value,
@@ -538,9 +538,9 @@ def build_graph(
                         "KNOWLEDGE_APPLIES_TO",
                         record_node_id,
                         file_id(repo_id, resolution.path),
-                        "reviewed",
+                        "current",
                         "knowledge_record",
-                        {"freshness": record.get("status", "reviewed"), "path_kind": path_ref.get("kind")},
+                        {"freshness": record.get("status", "current"), "path_kind": path_ref.get("kind")},
                     )
                 )
             elif resolution.status == RepoSelectorStatus.AMBIGUOUS:
@@ -590,7 +590,7 @@ def build_graph(
                     source_node_id,
                     "recorded",
                     "knowledge_record",
-                    {"freshness": record.get("status", "reviewed")},
+                    {"freshness": record.get("status", "current")},
                 )
             )
     provider_entries = semantic_provider_entries(entries)
@@ -824,6 +824,33 @@ def build_graph(
                 )
             )
 
+    # A tree-sitter Rust `mod name;` with one existing sibling module is a
+    # typed, source-anchored relation, unlike a lexical name coincidence.
+    # Provider cache validates this tool payload as part of its source digest.
+    for result in semantic_results:
+        if result.provider != "tree_sitter_structural":
+            continue
+        module_relations = result.tool.get("module_file_relations", [])
+        for relation in module_relations if isinstance(module_relations, list) else []:
+            if not isinstance(relation, dict):
+                continue
+            from_path = str(relation.get("importer_path") or "")
+            to_path = str(relation.get("target_path") or "")
+            from_node = file_id(repo_id, from_path)
+            to_node = file_id(repo_id, to_path)
+            if (not from_path or not to_path or from_path == to_path or
+                from_node not in nodes or to_node not in nodes):
+                continue
+            add_edge(GraphEdge(
+                "IMPORTS_FILE", from_node, to_node, "resolved", result.provider,
+                {"match_kind": "rust_mod_declaration", "anchor": relation.get("anchor", {})},
+            ))
+            if is_test_path(from_path) and not is_test_path(to_path):
+                add_edge(GraphEdge(
+                    "TESTS_FILE", from_node, to_node, "resolved", result.provider,
+                    {"evidence_type": "rust_mod_declared_by_test", "confidence": "high"},
+                ))
+
     parse_error_count = int(summary.get("parse_error") or 0)
     provider_coverage = {
         "imports": _import_provider_coverage(
@@ -898,7 +925,7 @@ def build_graph(
             {"kind": "repometa_annotation", "assertion": "declared", "digest": digest_data(source_payloads["repometa_annotation"])},
             {"kind": "repometa_policy", "assertion": "default", "digest": digest_data(source_payloads["repometa_policy"])},
             {"kind": "task_completion", "assertion": "recorded", "digest": digest_data(source_payloads["task_completion"])},
-            {"kind": "knowledge_records", "assertion": "reviewed", "digest": digest_data(source_payloads["knowledge_records"])},
+            {"kind": "knowledge_records", "assertion": "current", "digest": digest_data(source_payloads["knowledge_records"])},
             {"kind": "structured_file_relations", "assertion": "resolved", "digest": digest_data(source_payloads["structured_file_relations"])},
             {"kind": "rpc_resolutions", "assertion": "resolved", "digest": digest_data(source_payloads["rpc_resolutions"])},
             *[

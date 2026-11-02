@@ -32,13 +32,13 @@ Context, Graph, Git, metadata, and direct reads help decide scope. Their queries
 
 `## Verification` is optional free-form text. Keep a command or result only when it helps a future reader. Repoctl does not parse, grade, register, hash, or require it.
 
-Use `task log append` for meaningful timestamped checkpoints, not repeated waits or connection receipts. Keep current work and remaining acceptance criteria near Goal; consolidate superseded operational prose in live Tasks without losing decisions, failures or source references. Update Handoff when the next action changes. `task resume --compact` returns Goal and section locations alongside the reviewed Handoff; use `task show T-... --section "<heading>" --json` to read a relevant section without reopening the full history. Before a real pause or transfer, replace the generated Handoff placeholder with four concrete fields, remove its marker, and bind it:
+Use `task log append` for meaningful timestamped checkpoints, not repeated waits or connection receipts. Keep current work and remaining acceptance criteria near Goal; consolidate superseded operational prose in live Tasks without losing decisions, failures or source references. Update Handoff when the next action changes. `task resume` returns the current Goal, exact source section locations, and the four active Handoff fields; use `task show T-... --section "<heading>" --json` to read a relevant section without reopening the full history. Before a real pause or transfer, replace the generated Handoff placeholder with four concrete fields, remove its marker, and bind it:
 
 ```bash
 ./scripts/repoctl task handoff bind T-... --json
 ```
 
-The fields are Next exact step, First file to open, First command to run, and Done when. The command is inert text. Meaningful Goal/Task contract, Handoff, Chosen/Notes, child, or repository changes invalidate binding. An appended log entry or optional Verification note alone does not; if a failed test changes the next action, explicitly revise current instructions. Context Packs are one-time reference views and are not bindable.
+The fields are Next exact step, First file to open, First command to run, and Done when. The command is inert text. Meaningful Goal/Task contract, Handoff, Chosen/Notes, child, or repository changes invalidate binding. An appended log entry or optional Verification note alone does not; if a failed test changes the next action, explicitly revise current instructions. Graph/Knowledge reads are inert evidence and never bind to Task state.
 
 ## Finish and history
 

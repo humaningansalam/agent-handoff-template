@@ -218,7 +218,6 @@ Context is a separate consumer of the same snapshot. It passes typed file or pro
 
 Context may form a bounded lexical file hypothesis before calling Graph. Confirmed Graph relations and lexical candidates remain distinct. Traversal direction and depth are fixed by mode, and merged relations retain per-origin distance.
 
-Surviving anchors become top-level `graph_seed_refs` with their exact typed source identity and digest. These are read-only continuation hints. They do not define Chosen scope and are not persisted as query receipts. Context Pack may carry the same hints as a one-time view or export.
 
 ## Query result
 

@@ -16,9 +16,9 @@ The default operating layer is **Task, Board, and Workflows**.
 The understanding and reuse layer is **Graph and Knowledge**.
 
 - **Graph** exposes current code structure, references, impact, entrypoints, implementations, dependents, and relevant tests with provenance, freshness, and explicit completeness.
-- **Knowledge** preserves only reusable claim/reason/source records. Current means not superseded and implies no human approval. Older public `reviewed` labels were compatibility terminology, not a separate review stage.
+- **Knowledge** preserves only reusable claim/reason/source records. `current` means not superseded, not human-approved. New releases expose no `reviewed` alias.
 
-Context ranking and source-linking remain internal read-flow machinery. Context, Pack, and Capsule are not new durable user obligations or independent state planes.
+Source retrieval and ranking remain Graph/Knowledge internal read helpers. No separate Context/Pack/Capsule command, export, or durable user lifecycle exists.
 
 ## Read map
 
@@ -32,7 +32,6 @@ Read only the documents needed for the change:
 - `docs/adr/` — important decisions and their outcomes.
 - `docs/workflows/` — procedures that are repeated, risky, or order-sensitive.
 
-Legacy `docs/prd/**` files remain readable for adopted workspaces, but placement there does not automatically promote research, benchmark, hypothesis, draft, or future material to current product authority.
 
 ## Primary flows
 
@@ -43,7 +42,7 @@ Legacy `docs/prd/**` files remain readable for adopted workspaces, but placement
 3. Implement in the selected product repository and run useful checks.
 4. Keep only concise current results in the Task, then finish it.
 
-No Graph, Knowledge, Context, Pack, or verification-registration action is mandatory.
+No Graph or Knowledge query, export, or verification-registration action is mandatory.
 
 ### Ambiguous or large-codebase change
 
@@ -75,7 +74,7 @@ Execution Log additions and optional Verification prose do not alone make a Hand
 - Completed Task evidence is not rewritten or re-sealed as newly verified by a text migration.
 - A valid Graph snapshot remains queryable when optional provider cache or text/evidence index components are unavailable.
 - Current-source overlay and stale-relation exclusion remain intact.
-- Precise language support may reuse external LSP/SCIP/tree-sitter ecosystems through the common node/edge/source model; unsupported precision is reported honestly.
+- Optional native Tree-sitter indexes provide syntax-grounded Rust/Go/Java/Kotlin/Swift definitions and uniquely-resolved direct calls; missing type-level resolution is explicitly partial. Existing Python, TypeScript, Dart and C# providers remain independently available.
 - `docs/PRD.md` is the physical minimum. Additional documents are created only when real complexity requires them; empty folders and empty templates are not required.
 - repoctl supplies context and safe boundaries. It does not own external agents, queues, model/provider selection, deployment, or delivery.
 - MCP is a future external access layer, not part of this release.

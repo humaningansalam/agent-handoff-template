@@ -1,13 +1,12 @@
 # repoctl Module Boundaries
 
-These boundaries keep the small product model stable: Task owns current work, Handoff owns restart instructions, Context owns material to read, and Knowledge owns optional reusable reasoning.
+These boundaries keep the small product model stable: Task owns current work and Handoff, Graph owns typed source navigation and its read-only evidence search, and Knowledge owns optional reusable reasoning.
 
 ## Ownership
 
 - **Task lifecycle** owns task frontmatter, Board membership, archive transitions, repository start baselines, pre-existing dirty ownership, Chosen-scope closure checks, Handoff bindings, completion receipts, and live-task resume selection.
 - **Task Markdown** owns human meaning: Goal, Chosen and Notes, Execution Log, optional Verification prose, and the four Handoff fields. Repoctl validates structure but does not infer correctness from prose.
-- **Context** owns bounded source-linked retrieval over current source, documents, explicit history modes, Knowledge, and existing Graph relations. It does not write scope or query-selection state.
-- **Context Pack** owns one-time collection and rendering from current Task inputs. It may write only the caller-requested output path and never writes Task or Handoff state.
+- **Graph evidence search** is the bounded, read-only source-linked retrieval implementation inside Graph. It reuses source documents, explicit historical queries, Knowledge, and materialized relations without writing scope or query-selection state.
 - **Graph** owns a rebuildable typed relation snapshot over provider facts, metadata, documents, task/history subjects, and Knowledge. Queries never rebuild it implicitly.
 - **History projection** owns the derived completion catalogue, checkpoint, bounded hot history, and exact cold-history lookup. Completion receipts and Task artifacts remain the source history.
 - **Knowledge** owns current durable records, source resolution, query projection, explicit replacement links, and migration reporting for preserved older records.
@@ -20,14 +19,13 @@ These boundaries keep the small product model stable: Task owns current work, Ha
 ## Derived-layer rules
 
 - Graph and index state are disposable derivatives. A stale derivative may require maintenance but does not make a healthy workspace upgrade incomplete.
-- Context and Graph output may propose navigation, never Task scope, ownership, or authority.
+- Graph evidence and typed relation results may propose navigation, never Task scope, ownership, or authority.
 - Lexical candidates and compatible unresolved relationships remain separate from confirmed typed relations.
-- Context cold-history matches appear only in explicit history modes and cannot alter current-source ranking, Graph seeds, traversal, or Chosen.
+- Explicit history searches appear only in explicit history modes and cannot alter current-source ranking, Graph seeds, traversal, or Chosen.
 - Completion receipt hashes bind history identity. They do not prove that code was checked or a test passed.
 - Knowledge source digests identify recorded provenance. Later drift is a warning and does not hide the saved decision.
 - Direct Knowledge records need no approval event. Older events are preserved files and are not an execution or query lane.
-- Current Context and Graph queries create no persistent result receipt. Retired result and Discovery state is ignored; historical completion receipts retain their isolated read boundary.
-- A Context Pack has no lifecycle binding. Resume composes Task and Handoff state without loading a saved Pack.
+- Current Graph searches and relation queries create no persistent result receipt. Retired result and Discovery state is ignored; historical completion receipts retain their isolated read boundary.
 - `.repometa` stores sparse human metadata, never Graph fields or derived retrieval state.
 - The Dart semantic provider owns resolved RPC source facts and invocation validity; the structured resolver owns SQL compatibility. Graph consumes their typed results without a second language scanner.
 - Multi-repo identity comes from the repository registry, not path-name inference.

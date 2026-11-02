@@ -615,8 +615,7 @@ def test_explicit_history_rejects_ambiguous_receipt_artifact_authority(tmp_path:
     assert any(node.id == f"task:{task_id}" for node in first.nodes)
     assert main(
         [
-            "context",
-            "query",
+            "graph", "search",
             history_token,
             "--mode",
             "past-decision",

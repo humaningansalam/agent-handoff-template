@@ -81,7 +81,7 @@ def test_knowledge_add_writes_one_record_and_source_change_is_advisory(
     assert not (tmp_path / ".repoctl-state/knowledge/candidates").exists()
     assert not list((tmp_path / "docs/knowledge/events").glob("E-*.json"))
 
-    source = tmp_path / "docs/contracts/repoctl-context-contract.md"
+    source = tmp_path / "docs/contracts/repoctl-evidence-contract.md"
     source.write_text(source.read_text(encoding="utf-8") + "\nChanged later.\n", encoding="utf-8")
 
     assert main(["knowledge", "query", "source bundles", "--repo-id", "main", "--json"]) == 0
@@ -165,7 +165,7 @@ def test_knowledge_replacement_and_optional_author_use_records_only(
             "--reason",
             "The original rule misses retry traffic.",
             "--source",
-            "docs/contracts/repoctl-context-contract.md",
+            "docs/contracts/repoctl-evidence-contract.md",
             "--replaces",
             original["id"],
             "--author",
@@ -184,7 +184,7 @@ def test_knowledge_replacement_and_optional_author_use_records_only(
     assert main(["knowledge", "query", "routing rule", "--repo-id", "main", "--include-history", "--json"]) == 0
     history = _payload(capsys)
     statuses = {item["record"]["id"]: item["record"]["status"] for item in history["data"]["results"]}
-    assert statuses == {original["id"]: "superseded", replacement["id"]: "reviewed"}
+    assert statuses == {original["id"]: "superseded", replacement["id"]: "current"}
     assert not list((tmp_path / "docs/knowledge/events").glob("E-*.json"))
 
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from .completion_catalogue import prepare_completion_sidecar_writes
 from .io import LOCK_REL, RepoctlError, atomic_write, decode_schema_version
+from .task_history_migration import receipt_witness
 from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states, verify_legacy_change_terminal_states_at_revision
 from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
@@ -92,6 +93,7 @@ class CompletionReceiptArtifactResolutionStatus(StrEnum):
     UNRESOLVABLE = "unresolvable"
     OUTSIDE_WORKSPACE = "outside_workspace"
     UNREADABLE = "unreadable"
+    WITNESS_INVALID = "history_witness_invalid"
 
 
 @dataclass(frozen=True)
@@ -528,34 +530,35 @@ HANDOFF_WARNING_BYTES = 8 * 1024
 
 
 def _task_log_summary(message: str, *, field: str = "message") -> str:
-    """Keep operational summaries in Markdown and leave bulk evidence outside it."""
+    """Accept meaningful human notes, but never emit unbounded command output."""
 
     stripped = message.strip()
     if not stripped:
         raise RepoctlError(f"task log {field} is required")
     lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-    joined = " ".join(lines)
     known_dump = re.search(
         r"(?:residue_paths|baseline_conflicts|changed_paths|dirty_paths)\s*=\s*\[",
-        stripped,
-        flags=re.IGNORECASE,
+        stripped, flags=re.IGNORECASE,
     )
     path_tokens = re.findall(
         r"(?<![A-Za-z0-9_.-])(?:docs|repos|tests|tools|src|lib|app|packages)/[^\s,;]+",
         stripped,
     )
-    looks_like_output = (
-        "```" in stripped
+    if (
+        known_dump
+        or "```" in stripped
         or "Traceback (most recent call last)" in stripped
-        or (len(lines) >= 4 and sum("=" in line or ":" in line for line in lines) >= 3)
         or len(path_tokens) >= 8
-    )
-    if known_dump or looks_like_output:
+        or len(stripped.encode("utf-8")) > 8192
+        or len(lines) > 60
+    ):
         raise RepoctlError(
-            "bulk output and path arrays do not belong in a Task log; record a concise result and a source or artifact reference",
+            "bulk output and path inventories do not belong in a Task log; record the result or cite an existing source",
             code="task_log_detail_requires_reference",
         )
-    return joined
+    # A multi-line Decision / Reason / Constraint / Result is valid. Keep it
+    # as one Markdown list item rather than rejecting it based on punctuation.
+    return "\n  ".join(lines)
 
 
 def append_task_log(root: Path, task_id: str, message: str) -> dict[str, Any]:
@@ -612,15 +615,41 @@ def task_content_audit(task: Task) -> dict[str, Any]:
 
 
 def migrate_task_slop_text(text: str) -> tuple[str, list[dict[str, Any]]]:
-    """Compact only recognized repoctl-generated dumps; preserve all other prose."""
+    """Rewrite known repoctl output only inside unfenced Execution Log bullets.
 
+    User examples, prose, and fenced source stay byte-for-byte unchanged, even
+    if they contain a synthetic cancel command or a matching path list.
+    """
     changes: list[dict[str, Any]] = []
     output: list[str] = []
-    cancel_field = re.compile(r"; (residue_paths|baseline_conflicts)=(\[[^\n]*?\])")
-    scope_line = re.compile(r"^(?P<prefix>\s*- [^:]+: )scope changed: removed (?P<removed>.*?); added (?P<added>.*?); reason=(?P<reason>.*?)(?P<ending>\r?\n)?$")
+    cancel_field = re.compile(r"; (residue_paths|baseline_conflicts)=(\[[^\r\n]*?\])")
+    scope_line = re.compile(
+        r"^(?P<prefix>- \d{8}T\d{6}Z: )scope changed: removed (?P<removed>.*?); "
+        r"added (?P<added>.*?); reason=(?P<reason>[^\r\n]*?)(?P<ending>\r?\n)?$"
+    )
+    cancel_prefix = re.compile(r"^- \d{8}T\d{6}Z: task canceled: ")
+    in_log = False
+    fence_char = ""
+    fence_len = 0
     for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
+        heading = re.match(r"^## (.+?)\s*\r?\n?$", line)
+        if heading and not fence_char:
+            in_log = heading.group(1).strip() == "Execution Log"
+        if in_log:
+            fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if fence:
+                marker = fence.group(1)
+                if not fence_char:
+                    fence_char, fence_len = marker[0], len(marker)
+                elif marker[0] == fence_char and len(marker) >= fence_len:
+                    fence_char, fence_len = "", 0
+                output.append(line)
+                continue
+        if not in_log or fence_char:
+            output.append(line)
+            continue
         migrated = line
-        if "task canceled" in line and ("residue_paths=[" in line or "baseline_conflicts=[" in line):
+        if cancel_prefix.match(line) and ("residue_paths=[" in line or "baseline_conflicts=[" in line):
             counts: dict[str, int] = {}
             valid = True
             for match in cancel_field.finditer(line):
@@ -634,14 +663,13 @@ def migrate_task_slop_text(text: str) -> tuple[str, list[dict[str, Any]]]:
                     break
                 counts[match.group(1)] = len(values)
             if valid and counts:
-                ending = "\n" if line.endswith("\n") else ""
+                ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
                 body = cancel_field.sub("", line.rstrip("\r\n"))
                 suffixes = []
                 if "residue_paths" in counts:
                     suffixes.append(f"residue_count={counts['residue_paths']}")
                 if "baseline_conflicts" in counts:
                     suffixes.append(f"baseline_conflict_count={counts['baseline_conflicts']}")
-                suffixes.append("detail_ref=task.cancel.data.cancel_gate")
                 migrated = body + "; " + "; ".join(suffixes) + ending
                 changes.append({"line": line_number, "kind": "cancel_path_dump", "counts": counts})
         match = scope_line.match(migrated)
@@ -651,9 +679,11 @@ def migrate_task_slop_text(text: str) -> tuple[str, list[dict[str, Any]]]:
                 return 0 if stripped in {"", "none", "(none)"} else len([item for item in stripped.split(",") if item.strip()])
             removed_count = item_count(match.group("removed"))
             added_count = item_count(match.group("added"))
-            migrated = (f"{match.group('prefix')}scope changed: removed_count={removed_count}; "
-                        f"added_count={added_count}; reason={match.group('reason')}; detail_ref=Discovery.Chosen"
-                        f"{match.group('ending') or ''}")
+            migrated = (
+                f"{match.group('prefix')}scope changed: removed_count={removed_count}; "
+                f"added_count={added_count}; reason={match.group('reason')}"
+                f"{match.group('ending') or ''}"
+            )
             changes.append({"line": line_number, "kind": "scope_path_dump", "counts": {"removed": removed_count, "added": added_count}})
         output.append(migrated)
     return "".join(output), changes
@@ -839,8 +869,7 @@ def update_task_discovery(
             updated_text,
             "Execution Log",
             f"- {utc_stamp()}: scope changed: removed_count={len(removed)}; "
-            f"added_count={len(added)}; reason={_task_log_summary(reason, field='reason')}; "
-            "detail_ref=Discovery.Chosen",
+            f"added_count={len(added)}; reason={_task_log_summary(reason, field='reason')}",
         )
 
     return {
@@ -1764,6 +1793,12 @@ def _resolve_receipt_artifact(
             receipt_sha256,
         )
     path = existing[0]
+    witness = receipt_witness(root, task_id, receipt_path=receipt_path)
+    if witness.status == "invalid":
+        return CompletionReceiptArtifactResolution(
+            receipt_path, value, CompletionReceiptArtifactResolutionStatus.WITNESS_INVALID,
+            candidate_paths, existing_paths, receipt_sha256,
+        )
     try:
         resolved = path.resolve()
         root_resolved = root.resolve()
@@ -1786,7 +1821,7 @@ def _resolve_receipt_artifact(
             receipt_sha256,
         )
     try:
-        artifact_bytes = path.read_bytes()
+        artifact_bytes = (witness.path if witness.status == "valid" and witness.path else path).read_bytes()
         artifact_text = artifact_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return CompletionReceiptArtifactResolution(
@@ -1821,6 +1856,7 @@ def _completion_receipt_artifact_resolution_error(
         CompletionReceiptArtifactResolutionStatus.UNRESOLVABLE: "cannot be resolved",
         CompletionReceiptArtifactResolutionStatus.OUTSIDE_WORKSPACE: "escapes workspace",
         CompletionReceiptArtifactResolutionStatus.UNREADABLE: "is unreadable",
+        CompletionReceiptArtifactResolutionStatus.WITNESS_INVALID: "has an invalid history-presentation witness",
     }
     return RepoctlError(
         f"task completion receipt artifact {messages[resolution.status]}: {resolution.declared_path}",
@@ -4836,8 +4872,7 @@ def cancel_task(root: Path, task_id: str, *, reason: str, residue_paths: list[st
     text = task.path.read_text(encoding="utf-8")
     transition_entry = copy["task_canceled"].format(reason=_task_log_summary(reason, field="reason"))
     transition_entry += (
-        f"; residue_count={len(residue_paths)}; baseline_conflict_count={len(baseline_conflicts)}; "
-        "detail_ref=task.cancel.data.cancel_gate"
+        f"; residue_count={len(residue_paths)}; baseline_conflict_count={len(baseline_conflicts)}"
     )
     text = append_section_entry(text, "Execution Log", f"- {finish_timestamp}: {transition_entry}")
     text = replace_frontmatter_line(text, "status", "canceled")

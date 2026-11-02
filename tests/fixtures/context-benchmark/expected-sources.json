@@ -24,7 +24,7 @@
     ],
     "must_find": [
       {
-        "path": "docs/contracts/repoctl-context-contract.md",
+        "path": "docs/contracts/repoctl-evidence-contract.md",
         "section": "Purpose"
       }
     ],
@@ -155,7 +155,7 @@
   "Q-009": {
     "acceptable": [
       {
-        "path": "docs/contracts/repoctl-context-contract.md",
+        "path": "docs/contracts/repoctl-evidence-contract.md",
         "section": "Purpose"
       }
     ],
@@ -171,7 +171,7 @@
   "Q-010": {
     "acceptable": [
       {
-        "path": "docs/contracts/repoctl-context-contract.md",
+        "path": "docs/contracts/repoctl-evidence-contract.md",
         "section": "Project documents, history, and Knowledge"
       }
     ],

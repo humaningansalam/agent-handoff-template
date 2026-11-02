@@ -64,7 +64,7 @@ class ContextEvidenceKind(StrEnum):
     STARTUP_READING = "startup_reading"
     GRAPH_SEED = "graph_seed"
     GRAPH_RELATION = "graph_relation"
-    REVIEWED_KNOWLEDGE_PATH = "reviewed_knowledge_path"
+    KNOWLEDGE_RECORDS_PATH = "knowledge_records_path"
     HISTORY_CORROBORATION = "history_corroboration"
 
 
@@ -79,7 +79,7 @@ class ContextAnchorStrength(StrEnum):
 class ContextGraphAnchorProvenance(StrEnum):
     EXACT_IDENTITY = "exact_identity"
     PROVIDER_SYMBOL = "provider_symbol"
-    REVIEWED_KNOWLEDGE = "reviewed_knowledge"
+    KNOWLEDGE_RECORDS = "knowledge_records"
     LEXICAL_FILE = "lexical_file"
 
 
@@ -325,7 +325,7 @@ class ContextBundle:
         default=None,
         repr=False,
     )
-    schema: str = "repoctl.context.bundle"
+    schema: str = "repoctl.graph.evidence"
     schema_version: int = 15
     authoritative: bool = False
     bundle_digest: str = ""

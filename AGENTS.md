@@ -20,12 +20,13 @@ Canonical operating rules for this workspace. Tool adapters defer here and must 
 
 ## Session Start and Read Order
 
-At session start and after compaction, resume the known live task with `./scripts/repoctl task resume <TASK_ID> --compact --json`. Use `./scripts/repoctl task resume --json` when no task is known.
+At session start and after compaction, resume the known live task with `./scripts/repoctl task resume <TASK_ID> --json`. Use `./scripts/repoctl task resume --json` when no task is known.
 
 - `no_live` resumes nothing.
 - `single_live` selects the only live task.
 - `ambiguous` requires read-only selection with `./scripts/repoctl task resume <TASK_ID> --json`.
-- For focused restart reading, use `task resume <TASK_ID> --compact --json`: canonical fields refer to the complete reviewed context returned once. Default/`--full` output retains legacy strings; a current binding does not make historical prose current.
+- Read the known Task ID directly; `task resume <TASK_ID> --json` returns the current four restart fields and source links. Do not repeat `resume` after opening the same Task.
+
 - Only a non-null `executable_handoff` with `status: current` is an execution instruction.
 - Board rows, task history, archived Handoffs, and `readable_handoff` are inspection evidence only.
 - Handoff freshness and lifecycle health are independent. A current Handoff is not executable while lifecycle health is unhealthy.
@@ -38,31 +39,20 @@ When no task is live, create one only for current product work. Never select arc
 
 For project orientation, confirm the selected Git root from `docs/repoctl.json` or `repo list`, then read its README and existing AGENTS/CONTRIBUTING guidance. Read nested AGENTS guidance on the path to the files you will touch; do not pre-read unrelated descendants. Start project requirements at `docs/PRD.md`; when it is an index, follow only the links relevant to the current request and its stated active authority. Retrieval rank, historical tasks, and the template README do not establish the active product specification. Resolve conflicting versions from current authority before editing.
 
-Find implementation and dependencies in the selected repository's source, manifest, and relevant tests. Obtain check commands and their working directory from contribution guidance, manifest scripts, or CI; Context verification hints are suggestions to review, not an execution plan. Confirm runtime prerequisites and acceptance evidence separately (for example hardware, credentials, approved input data, or an existing worker). Use exact reads for known paths; neither a Graph build nor a Context Pack is required to understand a small change or run its checks.
+Find implementation and dependencies in the selected repository's source, manifest, and relevant tests. Obtain check commands and their working directory from contribution guidance, manifest scripts, or CI; Graph source hints are read-only evidence, not an execution plan. Confirm runtime prerequisites and acceptance evidence separately (for example hardware, credentials, approved input data, or an existing worker). Use exact reads for known paths; a Graph build is not required to understand a small change or run its checks.
 
 For changes spanning agents, languages, or shared interfaces, read [Code Quality](docs/workflows/code-quality.md). Before writing or changing tests, read [잘 작성된 테스트 코드](docs/workflows/well-written-tests.md).
 
 ## Product Work Loop
 
-1. Explore without changing product files. Use compact `context query` for ambiguous intent, Git status/diff for a changed-set review, Graph or direct reads for a known file, `rg` for an exact identity, and explicit history or Knowledge queries for prior decisions.
+1. Explore without changing product files. Use `graph search` for an unknown owner, `graph query` or `graph workflow` for typed relationships and known entrypoints, and `knowledge query` for durable decisions. Use direct reads for exact identities.
+
 2. Create or resume the product task and run `task start` before the first product mutation. Read-only exploration is not gated on task creation or start.
 3. Once edit scope is concrete, record the canonical workspace-relative files in the Task's one Chosen set. Add a short Note only when the scope decision or source reference will help later.
 4. Edit the smallest coherent scope and check observable behavior as ordinary development work.
 5. Finish through repoctl when actual product changes fit Chosen scope and required repository metadata is valid. `## Verification` is optional free-form work notes; repoctl does not register, grade, hash, or require test results.
 
-Context and Graph are independent read-only entry points; neither is a mandatory precursor to the other.
-
-- Use top-level `graph_seed_refs` as ranked, source-bound continuation inputs after inspecting their source.
-- Use `completeness.graph_anchor.seed_anchors` only to interpret coverage and provenance.
-- `exact_identity`, `provider_symbol`, and `reviewed_knowledge` are source-bound anchors; `lexical_file` is a ranked hypothesis.
-- `resolved` proves that a typed Graph path exists; it does not prove ownership, authority, or edit scope.
-- Follow typed imports, calls, tests, task/document relations, or impact paths only when they answer the current question.
-- Do not restart a coherent Context result with another broad repository search. Use narrow confirmation, a refined query, or an explicit Graph refresh when evidence is ambiguous, missing, or stale.
-- Do not record searches, opened files, tool choices, or query results merely to prove that discovery happened.
-
-`graph query` reads the last materialized snapshot and never rebuilds automatically. Build or rebuild explicitly when required. With a valid snapshot, Context uses the persistent evidence index and overlays changed or stale paths. Without a valid Graph, Context may still return lexical source, documents, tasks, and Knowledge while marking Graph relations unavailable.
-
-A Context Pack is an optional one-time view or export of current task material. It never defines scope, authority, Handoff freshness, or completion readiness. Creating or exporting a Pack does not bind it to the Task.
+Graph searches and Knowledge lookups are read-only aids, never scope or test proof. Inspect cited source before edits; confirmed Graph relations are distinct from lexical candidates. A stale or partial Graph cannot prove no impact; refresh explicitly as a separate action. Do not repeat broad searches when the next file is already known. Record only material scope decisions, blockers and source references in the Task.
 
 When `docs/repoctl.json` sets `debug_mode` to `true`, repoctl records bounded local command diagnostics under `docs/tasks/.repoctl-state/debug/events.jsonl`. The ignored journal does not change Task, Chosen, Handoff, Board, Graph, Knowledge, metadata, or command results.
 
@@ -101,9 +91,7 @@ A binding records review of those four fields, current task inputs, child state,
 
 Keep Goal, current work, remaining acceptance criteria and Handoff easy to find. Update the Handoff when the next action changes; a log entry does not update it. Keep the Execution Log short through `task log append`; consolidate repetitive waits, connection checks and superseded operational status in live Tasks while retaining meaningful requirements, decisions, causes, results and source references. Use `## Verification` only for commands or results worth retaining for a future reader. Missing notes, an unrun check, wording, or result status never blocks `task finish`.
 
-Preserve a long external request or review once, in the Task or an existing workspace source file, and reference its exact path/heading and requestRef when available. Keep the current outcome and effective decisions near Goal or Shared Interfaces / Decisions; identify which earlier instructions an amendment supersedes and which constraints remain in force. Handoff points to the current next step and those sources. Do not recopy full requests into Goal, log, Verification, and Handoff, trim meaningful events to meet a quota, or rewrite completed records. These notes do not replace Chosen, lifecycle frontmatter, or a current Handoff binding.
-
-For a dispatch, send the current action/scope, effective constraints and exact source references. Refer to the relevant sections of existing Task or orchestration records; do not forward the full growing history. Keep complete sources accessible and read them when needed.
+Keep only effective decisions, constraints, blockers, outcomes and next actions in the Task. Cite an existing source by its real path and heading when additional detail exists. Do not invent references or copy transient request IDs, external dispatch queues, acknowledgements, or orchestration logs into shared Tasks. Do not copy the same long input into Goal, Execution Log, Verification and Handoff. Historic Task cleanup uses an explicit audited one-time migration; do not hand-edit receipt-bound completion records.
 
 Block or cancel with explicit transition intent: `task block T-... --reason "..."` or `task cancel T-... --reason "..."`. Use `--reason-file` only when that intent already exists in a UTF-8 file. These transitions append the reason to Execution Log and preserve Verification unchanged.
 

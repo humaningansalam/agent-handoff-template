@@ -22,6 +22,7 @@ from .context_retrieval import (
 )
 from .context_sources import MAX_CONTEXT_SOURCE_BYTES, context_document_paths, context_product_manifest_paths, context_source_kind
 from .document_roles import (
+    DocumentRole,
     ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES,
     SOURCE_EXCLUDED_DOCUMENT_ROLES,
     source_document_role,
@@ -33,7 +34,7 @@ from .tasks import Problem
 
 
 EVIDENCE_INDEX_SCHEMA = "repoctl.evidence.index"
-EVIDENCE_INDEX_SCHEMA_VERSION = 8
+EVIDENCE_INDEX_SCHEMA_VERSION = 9
 STATIC_KINDS = {"document", "product_manifest", "verification_hint"}
 
 
@@ -106,6 +107,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
             content_sha256 TEXT NOT NULL,
             body TEXT NOT NULL,
             title TEXT NOT NULL,
+            document_role TEXT NOT NULL,
             file_fingerprint TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS chunks_path_idx ON chunks(path, kind);
@@ -182,8 +184,8 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
         INSERT INTO chunks(
             source_key, kind, path, section, section_kind, line_start, line_end,
             source_fact_id, provider, provider_symbol_id, content_sha256, body,
-            title, file_fingerprint
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            title, document_role, file_fingerprint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_key) DO UPDATE SET
             kind=excluded.kind,
             path=excluded.path,
@@ -197,6 +199,7 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
             content_sha256=excluded.content_sha256,
             body=excluded.body,
             title=excluded.title,
+            document_role=excluded.document_role,
             file_fingerprint=excluded.file_fingerprint
         """,
         [
@@ -214,6 +217,7 @@ def _insert_chunks(connection: sqlite3.Connection, chunks: list[DocumentChunk], 
                 chunk.source_ref.content_sha256,
                 chunk.text,
                 chunk.title,
+                chunk.document_role.value,
                 file_fingerprint,
             )
             for chunk in chunks
@@ -466,7 +470,7 @@ def _source_chunks(root: Path, *, entry: CodeIndexEntry, snapshot: GraphSnapshot
 def _source_manifest(connection: sqlite3.Connection, kinds: set[str]) -> str:
     placeholders = ",".join("?" for _ in kinds)
     rows = connection.execute(
-        f"SELECT kind, path, section, section_kind, line_start, line_end, source_fact_id, provider, provider_symbol_id, content_sha256 FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end, source_fact_id, provider, provider_symbol_id",
+        f"SELECT kind, path, section, section_kind, line_start, line_end, source_fact_id, provider, provider_symbol_id, content_sha256, document_role FROM chunks WHERE kind IN ({placeholders}) ORDER BY kind, path, section, section_kind, line_start, line_end, source_fact_id, provider, provider_symbol_id",
         tuple(sorted(kinds)),
     ).fetchall()
     return digest_data([dict(row) for row in rows])
@@ -671,11 +675,7 @@ def _row_chunk(
         ),
         text=str(row["body"]),
         title=str(row["title"]),
-        document_role=source_document_role(
-            kind=kind,
-            path=path,
-            repository_path=repository_path,
-        ),
+        document_role=DocumentRole(str(row["document_role"])),
         corpus_fts_score=corpus_fts_score,
         corpus_fts_rank=corpus_fts_rank if corpus_fts_score is not None else 0,
     )
@@ -838,11 +838,7 @@ def _path_diverse_fts_rows(
     path_counts: dict[str, int] = {}
     rows: list[sqlite3.Row] = []
     for row in cursor:
-        document_role = source_document_role(
-            kind=str(row["kind"]),
-            path=str(row["path"]),
-            repository_path=repository_path,
-        )
+        document_role = DocumentRole(str(row["document_role"]))
         if document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES | SOURCE_EXCLUDED_DOCUMENT_ROLES:
             continue
         row_path = str(row["path"])
@@ -871,11 +867,7 @@ def _lane_balanced_fts_rows(
     path_counts: dict[tuple[ContextRetrievalLane, str], int] = {}
     rows: list[sqlite3.Row] = []
     for row in cursor:
-        document_role = source_document_role(
-            kind=str(row["kind"]),
-            path=str(row["path"]),
-            repository_path=repository_path,
-        )
+        document_role = DocumentRole(str(row["document_role"]))
         if document_role in ORDINARY_RECALL_EXCLUDED_DOCUMENT_ROLES | SOURCE_EXCLUDED_DOCUMENT_ROLES:
             continue
         lane = context_retrieval_lane(

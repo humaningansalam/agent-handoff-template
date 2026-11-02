@@ -595,8 +595,7 @@ def test_release_archive_closes_first_and_later_completion_tails_and_recovers(
         )["data"]["query_status"] == "found"
         history = _run_release_repoctl(
             root,
-            "context",
-            "query",
+            "graph", "search",
             f"catalogue release decision {index}",
             "--mode",
             "past-decision",
@@ -1041,7 +1040,7 @@ def test_hot_projection_stays_subject_local_as_cold_outcome_grows(tmp_path: Path
             "active_chosen": [subject["id"] for subject in subjects],
             "episodes": [
                 {
-                    "reviewed": [subject["id"] for subject in subjects],
+                    "current": [subject["id"] for subject in subjects],
                     "excluded": [],
                     "outside_candidate_set": [],
                 }
