@@ -64,6 +64,9 @@ def _reproducible_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
     info.uname = info.gname = ""
     info.mtime = 0
     info.pax_headers = {}
+    # The checkout umask must not change the published archive bytes.
+    # Keep executable files executable, but omit host-specific write bits.
+    info.mode = 0o755 if info.mode & 0o111 else 0o644
     return info
 
 

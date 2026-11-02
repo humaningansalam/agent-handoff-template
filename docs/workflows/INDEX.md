@@ -25,6 +25,6 @@ Provider-, model-, role-, and orchestrator-specific procedures are adopter-local
 | `repo-metadata.md` | Creating/modifying graph-relevant files in `repos/`, or using `.repometa` to discover candidate files before task promotion | Root workspace files only, generated/vendor/build outputs | metadata, repo, graph, discovery | valid `repos/.repometa` policy/annotation state and inspected discovery candidates |
 | `repoctl-upgrade.md` | Updating an adopting workspace to a newer repoctl/control-plane release | Product repo changes, project-specific workflow edits, or Board/Backlog/task cleanup | upgrade, release, control-plane | dry-run plan, inspected apply result, and workspace health checks |
 
-- [v0.14.2 one-time adopter transition](v0.14-rollout.md) — only the designated rollout owner applies this after source release
+- [v0.14.3 one-time adopter transition](v0.14-rollout.md) — only the designated rollout owner applies this after source release
 
 - [Recover missing Task archive authority](task-archive-recovery.md) — read-only evidence and owner-approved restore; never synthesize completed Task bytes

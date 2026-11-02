@@ -45,6 +45,40 @@ def test_build_release_archive_uses_manifest_managed_paths(tmp_path: Path) -> No
     assert f"{prefix}/docs/workflows/repo-metadata.md" in names
 
 
+def test_release_archive_modes_are_independent_of_checkout_umask(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    normal = root / "docs/PRD.md"
+    executable = root / "scripts/repoctl"
+    normal.parent.mkdir(parents=True)
+    executable.parent.mkdir(parents=True)
+    normal.write_text("# Current product\n", encoding="utf-8")
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (root / "repoctl-upgrade-manifest.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "package": "agent-workspace-control-plane",
+            "version": "0.1.0",
+            "replace_paths": ["docs/PRD.md", "scripts/repoctl"],
+            "create_paths": [],
+            "preserve_paths": [],
+        }),
+        encoding="utf-8",
+    )
+
+    normal.chmod(0o644)
+    executable.chmod(0o755)
+    first = build_release_archive(root, tmp_path / "first")
+    normal.chmod(0o664)
+    executable.chmod(0o775)
+    second = build_release_archive(root, tmp_path / "second")
+
+    assert first.read_bytes() == second.read_bytes()
+    prefix = "agent-workspace-control-plane-0.1.0"
+    with tarfile.open(second, "r:gz") as archive:
+        assert archive.getmember(f"{prefix}/docs/PRD.md").mode == 0o644
+        assert archive.getmember(f"{prefix}/scripts/repoctl").mode == 0o755
+
+
 def test_release_rejects_unsafe_identity_and_preserves_existing_artifact_on_failure(tmp_path: Path) -> None:
     root = tmp_path / "source"
     out = tmp_path / "dist"
