@@ -376,7 +376,10 @@ def write_plan(path: Path, payload: dict[str, Any]) -> None:
     atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
-def _atomic_copy_file(source: Path, target: Path) -> None:
+def _atomic_copy_file(
+    source: Path, target: Path, *,
+    expected_target_hash: str | None = None, expected_source_hash: str | None = None,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
@@ -385,6 +388,17 @@ def _atomic_copy_file(source: Path, target: Path) -> None:
             dst.flush()
             os.fsync(dst.fileno())
         shutil.copystat(source, tmp)
+        if expected_source_hash is not None and _hash_file(tmp) != expected_source_hash:
+            raise RepoctlError("managed source changed during copy",
+                               code="upgrade_plan_stale", path=str(source))
+        if expected_target_hash is not None:
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise RepoctlError("managed destination changed during copy",
+                                   code="upgrade_plan_stale", path=str(target))
+            observed = _hash_file(target) if target.is_file() else ""
+            if observed != expected_target_hash:
+                raise RepoctlError("managed destination changed during copy",
+                                   code="upgrade_plan_stale", path=str(target))
         os.replace(tmp, target)
     except Exception:
         if tmp.exists() and not tmp.is_symlink():
@@ -628,27 +642,50 @@ def _prune_empty_parents(root: Path, start: Path) -> None:
         current = current.parent
 
 
-def _rollback_applied(root: Path, applied: list[dict[str, str]], backups: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _rollback_applied(
+    root: Path, applied: list[dict[str, str]], backups: list[dict[str, Any]],
+    expected: dict[str, tuple[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     backup_by_path = {backup["path"]: backup["backup_path"] for backup in backups}
     rolled_back: list[dict[str, str]] = []
+    conflicts: list[dict[str, str]] = []
     for operation in reversed(applied):
-        rel = _safe_rel(str(operation["path"]))
-        target = _assert_contained_path(root, rel, code="upgrade_rollback_failed")
-        backup_rel = backup_by_path.get(rel, "")
-        if backup_rel:
-            backup_path = _assert_contained_path(root, backup_rel, code="upgrade_rollback_failed", require_file=True)
-            if not backup_path.is_file():
-                raise RepoctlError(f"upgrade rollback backup is missing: {backup_rel}", code="upgrade_rollback_failed", path=backup_rel)
-            _atomic_copy_file(backup_path, target)
-            rolled_back.append({"path": rel, "action": "restore"})
-        else:
-            if target.exists():
-                if target.is_file() or target.is_symlink():
+        rel = str(operation["path"])
+        try:
+            rel = _safe_rel(rel)
+            target = _assert_contained_path(root, rel, code="upgrade_rollback_failed")
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise RepoctlError("rollback target is no longer a regular file",
+                                   code="upgrade_rollback_failed", path=rel)
+            current_hash = _hash_file(target) if target.is_file() else ""
+            before_hash, after_hash = expected[rel]
+            if current_hash == before_hash:
+                rolled_back.append({"path": rel, "action": "already_original"})
+                continue
+            if current_hash != after_hash:
+                raise RepoctlError("a later edit changed the managed file; preserve it",
+                                   code="upgrade_rollback_conflict", path=rel)
+            backup_rel = backup_by_path.get(rel, "")
+            if before_hash:
+                if not backup_rel:
+                    raise RepoctlError("original managed file backup is missing",
+                                       code="upgrade_rollback_failed", path=rel)
+                backup_path = _assert_contained_path(root, backup_rel,
+                                                      code="upgrade_rollback_failed", require_file=True)
+                if _hash_file(backup_path) != before_hash:
+                    raise RepoctlError("original backup content changed",
+                                       code="upgrade_rollback_failed", path=backup_rel)
+                _atomic_copy_file(backup_path, target,
+                                  expected_target_hash=after_hash,
+                                  expected_source_hash=before_hash)
+                rolled_back.append({"path": rel, "action": "restore"})
+            else:
+                if target.is_file():
                     target.unlink()
-                else:
-                    raise RepoctlError(f"upgrade rollback target is not a file: {rel}", code="upgrade_rollback_failed", path=rel)
-            rolled_back.append({"path": rel, "action": "remove_created"})
-    return rolled_back
+                rolled_back.append({"path": rel, "action": "remove_created"})
+        except (OSError, RepoctlError, KeyError, ValueError) as exc:
+            conflicts.append({"path": rel, "reason": str(exc)})
+    return rolled_back, conflicts
 
 
 def _load_plan(path: Path) -> dict[str, Any]:
@@ -747,6 +784,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         raise RepoctlError("upgrade source from plan is unavailable", code="invalid_upgrade_source", path=str(source_root))
     applied: list[dict[str, str]] = []
     backups: list[dict[str, Any]] = []
+    rollback_expected: dict[str, tuple[str, str]] = {}
     backup_root = root / UPGRADE_STATE_REL / run_id / "backup"
     applied_migrations: list[dict[str, Any]] = []
 
@@ -768,16 +806,39 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
         _verify_plan_fresh(root, plan)
         current_migrations = _verify_plan_bound_to_source(root, source_root, plan)
         migration_writes = _archive_locator_migration_writes(root, current_migrations)
+        run_path = _assert_contained_path(
+            root, (UPGRADE_STATE_REL / run_id).as_posix(), code="upgrade_run_collision",
+        )
+        try:
+            run_path.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise RepoctlError("upgrade run identity already exists; retry without overwriting prior evidence",
+                               code="upgrade_run_collision", path=run_path.relative_to(root).as_posix()) from exc
         try:
             for operation in plan["operations"]:
                 rel = _safe_rel(str(operation["path"]))
                 action = str(operation.get("action") or "replace")
                 target_path = _assert_contained_path(root, rel, code="invalid_upgrade_target")
+                expected_before = str(operation.get("target_hash") or "")
+                observed = _hash_file(target_path) if target_path.is_file() else ""
+                if observed != expected_before:
+                    raise RepoctlError("managed file changed after upgrade planning",
+                                       code="upgrade_plan_stale", path=rel)
                 backup_target(rel, target_path)
+                # Journal before mutation; a writer can replace a file and
+                # still raise before returning from its write call.
+                rollback_expected[rel] = (
+                    str(operation.get("target_hash") or ""),
+                    "" if action == "remove" else str(operation.get("source_hash") or ""),
+                )
+                applied.append({"path": rel, "action": action})
                 if action == "remove":
                     if target_path.exists():
                         if not target_path.is_file():
                             raise RepoctlError(f"remove target is not a file: {rel}", code="invalid_upgrade_target", path=rel)
+                        if _hash_file(target_path) != expected_before:
+                            raise RepoctlError("managed file changed before removal",
+                                               code="upgrade_plan_stale", path=rel)
                         target_path.unlink()
                         _prune_empty_parents(root, target_path.parent)
                 else:
@@ -787,12 +848,14 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                     source_hash = _hash_file(source_path)
                     if source_hash != operation.get("source_hash"):
                         raise RepoctlError(f"managed source changed after plan: {rel}", code="upgrade_plan_stale", path=rel)
-                    _atomic_copy_file(source_path, target_path)
-                applied.append({"path": rel, "action": action})
+                    _atomic_copy_file(source_path, target_path,
+                                      expected_target_hash=expected_before,
+                                      expected_source_hash=source_hash)
             for locator_path, locator_text, migration in migration_writes:
-                atomic_write(locator_path, locator_text)
                 locator_rel = locator_path.relative_to(root).as_posix()
+                rollback_expected[locator_rel] = ("", _hash_bytes(locator_text.encode("utf-8")))
                 applied.append({"path": locator_rel, "action": "migration_create"})
+                atomic_write(locator_path, locator_text)
                 applied_migrations.append(
                     {
                         "name": migration["name"],
@@ -803,7 +866,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                     }
                 )
         except Exception as error:
-            rolled_back = _rollback_applied(root, applied, backups)
+            rolled_back, rollback_conflicts = _rollback_applied(root, applied, backups, rollback_expected)
             rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
             atomic_write(
                 rollback_path,
@@ -815,6 +878,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                         "applied": applied,
                         "backups": backups,
                         "rolled_back": rolled_back,
+                        "rollback_conflicts": rollback_conflicts,
                         "error": str(error),
                     },
                     ensure_ascii=False,
@@ -822,6 +886,12 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                 )
                 + "\n",
             )
+            if rollback_conflicts:
+                raise RepoctlError(
+                    "upgrade failed and concurrent changes prevented a complete rollback; inspect retained backups",
+                    code="upgrade_rollback_incomplete",
+                    path=", ".join(problem["path"] for problem in rollback_conflicts),
+                ) from error
             if isinstance(error, RepoctlError):
                 raise
             raise
@@ -855,7 +925,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
             receipt_path = root / UPGRADE_STATE_REL / run_id / "receipt.json"
             atomic_write(receipt_path, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         except Exception as error:
-            rolled_back = _rollback_applied(root, applied, backups)
+            rolled_back, rollback_conflicts = _rollback_applied(root, applied, backups, rollback_expected)
             rollback_path = root / UPGRADE_STATE_REL / run_id / "rollback.json"
             atomic_write(
                 rollback_path,
@@ -867,6 +937,7 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                         "applied": applied,
                         "backups": backups,
                         "rolled_back": rolled_back,
+                        "rollback_conflicts": rollback_conflicts,
                         "error": str(error),
                     },
                     ensure_ascii=False,
@@ -874,6 +945,12 @@ def apply_upgrade(root: Path, *, plan_file: str | Path) -> dict[str, Any]:
                 )
                 + "\n",
             )
+            if rollback_conflicts:
+                raise RepoctlError(
+                    "upgrade failed and concurrent changes prevented a complete rollback; inspect retained backups",
+                    code="upgrade_rollback_incomplete",
+                    path=", ".join(problem["path"] for problem in rollback_conflicts),
+                ) from error
             raise
     return {
         "run_id": run_id,

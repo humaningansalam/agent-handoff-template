@@ -79,6 +79,27 @@ def _regular_path_under(root: Path, path: Path) -> bool:
         return False
 
 
+def _rollback_knowledge_stage(root: Path, written: list[tuple[Path, bytes]]) -> None:
+    """Remove only the exact bytes written by this one-time staging call."""
+    conflicts: list[str] = []
+    for path, expected in reversed(written):
+        rel = path.relative_to(root).as_posix()
+        try:
+            if not path.exists() and not path.is_symlink():
+                continue
+            if not _regular_path_under(root, path) or path.read_bytes() != expected:
+                conflicts.append(rel)
+                continue
+            path.unlink()
+        except (OSError, UnicodeError, ValueError):
+            conflicts.append(rel)
+    if conflicts:
+        raise RepoctlError(
+            "Knowledge staging failed; concurrent changes prevented complete rollback",
+            code="knowledge_migration_rollback_incomplete", path=", ".join(sorted(set(conflicts))),
+        )
+
+
 def preserved_legacy_migration_witness(root: Path, legacy: dict[str, Any]) -> bool:
     """Validate the explicit *staging-only* v1/v2 conversion witness."""
     legacy_id = str(legacy.get("id") or "")
@@ -304,21 +325,20 @@ def migrate_legacy_knowledge(
                         "original_witness_path": before_path.relative_to(root).as_posix(),
                         "kind": "link_cited_current_v2",
                     }
-                    written: list[Path] = []
+                    written: list[tuple[Path, bytes]] = []
                     try:
+                        written.append((before_path, raw))
                         atomic_write(before_path, raw.decode("utf-8"))
-                        written.append(before_path)
-                        atomic_write(manifest_path, json.dumps(proof, indent=2, sort_keys=True) + "\n")
-                        written.append(manifest_path)
+                        proof_text = json.dumps(proof, indent=2, sort_keys=True) + "\n"
+                        written.append((manifest_path, proof_text.encode("utf-8")))
+                        atomic_write(manifest_path, proof_text)
                         if not preserved_legacy_migration_witness(root, record):
                             raise RepoctlError(
                                 "cannot verify preserved current source citation",
                                 code="knowledge_migration_proof_invalid",
                             )
                     except Exception:
-                        for item in reversed(written):
-                            if item.exists() and not item.is_symlink():
-                                item.unlink()
+                        _rollback_knowledge_stage(root, written)
                         raise
                     committed += 1
                     row["status"] = "applied_link_cited_current_v2"
@@ -386,23 +406,22 @@ def migrate_legacy_knowledge(
                     "original_witness_path": before_path.relative_to(root).as_posix(),
                     "kind": row["status"],
                 }
-                written: list[Path] = []
+                written: list[tuple[Path, bytes]] = []
                 try:
+                    written.append((before_path, raw))
                     atomic_write(before_path, raw.decode("utf-8"))
-                    written.append(before_path)
                     if not reuse:
+                        written.append((destination_path, prepared.text.encode("utf-8")))
                         atomic_write(destination_path, prepared.text)
-                        written.append(destination_path)
                     # Publish proof last: unfinished source-only writes are
                     # not allowed to suppress a future legacy migration warning.
-                    atomic_write(manifest_path, json.dumps(proof, indent=2, sort_keys=True) + "\n")
-                    written.append(manifest_path)
+                    proof_text = json.dumps(proof, indent=2, sort_keys=True) + "\n"
+                    written.append((manifest_path, proof_text.encode("utf-8")))
+                    atomic_write(manifest_path, proof_text)
                     if not preserved_legacy_migration_witness(root, record):
                         raise RepoctlError("cannot verify published Knowledge migration", code="knowledge_migration_proof_invalid")
                 except Exception:
-                    for item in reversed(written):
-                        if item.exists() and not item.is_symlink():
-                            item.unlink()
+                    _rollback_knowledge_stage(root, written)
                     raise
                 committed += 1
                 row["status"] = "applied_" + row["status"]

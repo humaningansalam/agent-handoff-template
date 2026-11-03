@@ -466,21 +466,20 @@ def migrate_completion_receipts(
                             break
             except Exception:
                 rollback_errors: list[str] = []
-                relinked_paths = {
-                    item.relative_to(root).as_posix()
-                    for _, _, _, _, _, _, _, relinks in prepared
-                    for item, _, _ in relinks
-                }
-                protected_archives = {
-                    historical_archive
-                    for _, _, _, historical_archive, _, _, _, relinks in prepared
-                    if relinks
+                archive_dependents = {
+                    historical_archive: {
+                        receipt_path.relative_to(root).as_posix(),
+                        proof_path.relative_to(root).as_posix(),
+                        *(item.relative_to(root).as_posix() for item, _, _ in relinks),
+                    }
+                    for receipt_path, _, _, historical_archive, proof_path, _, _, relinks in prepared
                 }
                 for item, original_bytes, expected_current in reversed(written):
                     try:
-                        if (item in protected_archives
-                                and any(problem in relinked_paths for problem in rollback_errors)):
-                            # A concurrent writer may cite this exact archived original.
+                        if (item in archive_dependents
+                                and any(problem in archive_dependents[item] for problem in rollback_errors)):
+                            # A changed current receipt/proof or current Knowledge
+                            # may still depend on this exact historical source.
                             rollback_errors.append(item.relative_to(root).as_posix())
                             continue
                         if not item.exists() and original_bytes is None:
@@ -683,6 +682,10 @@ def migrate_legacy_task_states(
                             break
             except Exception:
                 failures: list[str] = []
+                archive_origins = {
+                    archived: (state, original, proof)
+                    for state, original, archived, proof, _ in prepared
+                }
                 for kind, path, before, after in reversed(written):
                     try:
                         if kind == "retire":
@@ -691,6 +694,16 @@ def migrate_legacy_task_states(
                             elif not path.is_file() or path.is_symlink() or path.read_bytes() != before:
                                 failures.append(path.relative_to(root).as_posix())
                         else:
+                            if path in archive_origins:
+                                state, original_state, proof = archive_origins[path]
+                                if (state.relative_to(root).as_posix() in failures
+                                        or proof.relative_to(root).as_posix() in failures
+                                        or not state.is_file() or state.is_symlink()
+                                        or state.read_bytes() != original_state):
+                                    # A newer state or proof still needs the
+                                    # exact original archived before rollback.
+                                    failures.append(path.relative_to(root).as_posix())
+                                    continue
                             if not path.exists() and not path.is_symlink():
                                 continue
                             if not path.is_file() or path.is_symlink() or path.read_bytes() != after:

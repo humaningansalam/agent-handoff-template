@@ -1528,6 +1528,38 @@ def test_completion_receipt_transition_rolls_back_or_preserves_concurrent_owner_
     assert not proof.exists()
 
 
+def test_receipt_transition_rollback_keeps_original_if_external_receipt_edit_intervenes(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    import tools.repoctl.io as task_io
+
+    task_id, receipt, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    original = receipt.read_bytes()
+    archived = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    real_write = task_io.atomic_write
+    external_bytes = b""
+
+    def edit_after_conversion(path, content):
+        nonlocal external_bytes
+        if path == proof:
+            raise OSError("simulated later proof failure")
+        real_write(path, content)
+        if path == receipt:
+            # A separate writer changes the newly converted receipt after our
+            # write; it must not be overwritten, nor lose the old v2 source.
+            external_bytes = receipt.read_bytes() + b" \n"
+            receipt.write_bytes(external_bytes)
+
+    monkeypatch.setattr(task_io, "atomic_write", edit_after_conversion)
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) != 0
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["problems"][0]["code"] == "receipt_transition_rollback_incomplete"
+    assert receipt.read_bytes() == external_bytes
+    assert archived.read_bytes() == original
+    assert not proof.exists()
+
+
 def test_completion_receipt_transition_rejects_partial_history_proof(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
@@ -1827,4 +1859,50 @@ def test_closed_state_retirement_handles_fault_and_concurrent_edit(
     assert main(["task", "migrate-states", task_id, "--apply", "--json"]) != 0
     capsys.readouterr()
     assert state_path.read_bytes() == (old if fault == "proof_write" else old + b" ")
-    assert not archive.exists() and not proof.exists()
+    if fault == "concurrent_edit":
+        assert archive.read_bytes() == old
+        assert not proof.exists()
+    else:
+        assert not archive.exists() and not proof.exists()
+
+
+def test_closed_state_batch_rollback_keeps_original_if_external_state_reappears(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    import tools.repoctl.io as task_io
+
+    first_id, _, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    assert main(["task", "migrate-receipts", first_id, "--apply", "--json"]) == 0
+    capsys.readouterr()
+    first_state = _downgrade_finished_state_to_v3(tmp_path, first_id)
+    first_original = first_state.read_bytes()
+
+    second_id = "T-20260609184047Z"
+    add_board_task(tmp_path, f"{second_id}--beta.md",
+                   task_text(second_id, status="todo").replace('area: ""', 'area: "ops"'))
+    assert main(["task", "start", second_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", second_id, "--json"]) == 0
+    capsys.readouterr()
+    second_state = _downgrade_finished_state_to_v3(tmp_path, second_id)
+    second_original = second_state.read_bytes()
+
+    first_archive = tmp_path / f"docs/archive/task-evidence/start-baselines/{first_id}.json"
+    second_archive = tmp_path / f"docs/archive/task-evidence/start-baselines/{second_id}.json"
+    real_write = task_io.atomic_write
+    external_bytes = first_original + b" \n"
+
+    def fail_second_after_external_state_edit(path, content):
+        if path == second_archive:
+            first_state.write_bytes(external_bytes)
+            raise OSError("simulated later state archive failure")
+        real_write(path, content)
+
+    monkeypatch.setattr(task_io, "atomic_write", fail_second_after_external_state_edit)
+    assert main(["task", "migrate-states", "--apply", "--json"]) != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["problems"][0]["code"] == "state_transition_rollback_incomplete"
+    assert first_state.read_bytes() == external_bytes
+    assert first_archive.read_bytes() == first_original
+    assert second_state.read_bytes() == second_original
+    assert not second_archive.exists()

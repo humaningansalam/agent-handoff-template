@@ -55,6 +55,42 @@ def test_one_time_migration_preserves_original_source_and_creates_v2(tmp_path, m
     assert _out(capsys)['data']['legacy_record_count']==1
 
 
+def test_knowledge_stage_rollback_preserves_external_v2_edit(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from tools.repoctl import knowledge_migration as migration
+    from tools.repoctl.io import RepoctlError
+
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--stage-concurrency'
+    old = _legacy(tmp_path, name,
+                  reason='A real retry test found stable durable keys.',
+                  sources=['docs/contracts/repoctl-evidence-contract.md'])
+    original = old.read_bytes()
+    preview = migration.migrate_legacy_knowledge(
+        tmp_path, repo_id='main', record_id=name,
+    )['records'][0]
+    assert preview['status'] == 'create_v2'
+    destination = tmp_path / preview['destination_path']
+    real_write = migration.atomic_write
+    external = b'{"external":"independent owner edit after v2 write"}\n'
+
+    def fail_proof_after_external_edit(path, content):
+        if path.name == 'migration.json':
+            destination.write_bytes(external)
+            raise OSError('later witness failure')
+        real_write(path, content)
+
+    monkeypatch.setattr(migration, 'atomic_write', fail_proof_after_external_edit)
+    with pytest.raises(RepoctlError) as caught:
+        migration.migrate_legacy_knowledge(
+            tmp_path, repo_id='main', record_id=name, apply=True,
+        )
+    assert caught.value.code == 'knowledge_migration_rollback_incomplete'
+    assert destination.read_bytes() == external
+    assert old.read_bytes() == original
+
+
 def test_finalization_relocates_v1_and_preserves_exact_v2_citation(tmp_path, monkeypatch, capsys):
     _setup_knowledge_workspace(tmp_path, monkeypatch)
     name = 'K-20260609184045Z--archived-origin'

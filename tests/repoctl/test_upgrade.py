@@ -509,6 +509,114 @@ def test_upgrade_apply_rolls_back_files_when_receipt_write_fails(tmp_path: Path,
     ]
 
 
+@pytest.mark.parametrize("kind", ["replaced", "created", "removed"])
+def test_upgrade_failed_receipt_keeps_external_owner_edits(
+    tmp_path: Path, monkeypatch, kind: str,
+) -> None:
+    from tools.repoctl import upgrade
+
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    legacy = workspace / "docs/adr/legacy.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("old historical doc\n", encoding="utf-8")
+    write_source(source, manifest={
+        "schema_version": 1,
+        "package": "agent-workspace-control-plane",
+        "version": "0.1.0",
+        "replace_paths": ["scripts/repoctl", "docs/tasks/TEMPLATE.md"],
+        "remove_paths": ["docs/adr/legacy.md"],
+        "preserve_paths": ["repos/**", "docs/BOARD.md", "docs/PRD.md",
+                           "docs/tasks/T-*.md", "docs/archive/tasks/**"],
+    })
+    plan = plan_upgrade(workspace, source=source)
+    assert not plan["conflicts"]
+    write_plan(plan_file, plan)
+
+    target = {
+        "replaced": workspace / "scripts/repoctl",
+        "created": workspace / "docs/tasks/TEMPLATE.md",
+        "removed": legacy,
+    }[kind]
+    real_write = upgrade.atomic_write
+    external = b"External owner edit during upgrade rollback.\n"
+
+    def fail_receipt_after_external_edit(path, content):
+        if path.name == "receipt.json":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(external)
+            raise OSError("simulated later receipt failure")
+        real_write(path, content)
+
+    monkeypatch.setattr(upgrade, "atomic_write", fail_receipt_after_external_edit)
+    with pytest.raises(RepoctlError) as caught:
+        apply_upgrade(workspace, plan_file=plan_file)
+    assert caught.value.code == "upgrade_rollback_incomplete"
+    assert target.read_bytes() == external
+    rollback_paths = list((workspace / "docs/tasks/.repoctl-state/upgrades").glob("*/rollback.json"))
+    assert len(rollback_paths) == 1
+    rollback = json.loads(rollback_paths[0].read_text(encoding="utf-8"))
+    assert any(problem["path"] == target.relative_to(workspace).as_posix()
+               for problem in rollback["rollback_conflicts"])
+
+
+def test_upgrade_rechecks_each_file_before_overwriting_a_midflight_owner_edit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from tools.repoctl import upgrade
+
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(source)
+    write_plan(plan_file, plan_upgrade(workspace, source=source))
+    runner = workspace / "scripts/repoctl"
+    owner_bytes = b"Owner changed the old runner during upgrade.\n"
+    real_copy = upgrade._atomic_copy_file
+
+    def edit_other_managed_file(source_path, target_path, **kwargs):
+        real_copy(source_path, target_path, **kwargs)
+        if target_path.name == "TEMPLATE.md":
+            runner.write_bytes(owner_bytes)
+
+    monkeypatch.setattr(upgrade, "_atomic_copy_file", edit_other_managed_file)
+    with pytest.raises(RepoctlError) as caught:
+        apply_upgrade(workspace, plan_file=plan_file)
+    assert caught.value.code == "upgrade_plan_stale"
+    assert runner.read_bytes() == owner_bytes
+    assert not (workspace / "docs/tasks/TEMPLATE.md").exists()
+
+
+def test_upgrade_refuses_reusing_a_previous_run_id_and_backup_directory(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from tools.repoctl import upgrade
+
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    plan_file = tmp_path / "plan.json"
+    write_workspace(workspace)
+    write_source(source)
+    monkeypatch.setattr(upgrade, "_utc_id", lambda: "20261103060000Z")
+    write_plan(plan_file, plan_upgrade(workspace, source=source))
+    applied = apply_upgrade(workspace, plan_file=plan_file)
+    receipt = workspace / applied["receipt_path"]
+    original_receipt = receipt.read_bytes()
+    old_backup = next((receipt.parent / "backup").rglob("repoctl"))
+    original_backup = old_backup.read_bytes()
+
+    # Even a valid no-op follow-up plan must not overwrite historical evidence.
+    write_plan(plan_file, plan_upgrade(workspace, source=source))
+    with pytest.raises(RepoctlError) as caught:
+        apply_upgrade(workspace, plan_file=plan_file)
+    assert caught.value.code == "upgrade_run_collision"
+    assert receipt.read_bytes() == original_receipt
+    assert old_backup.read_bytes() == original_backup
+
+
 def test_upgrade_manifest_rejects_managed_preserve_overlap(tmp_path: Path, monkeypatch, capsys) -> None:
     workspace = tmp_path / "workspace"
     source = tmp_path / "source"
