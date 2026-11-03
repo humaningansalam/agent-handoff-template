@@ -82,6 +82,10 @@ def test_command_identity_is_stable_across_success_domain_and_parse_failures(tmp
     hidden = json.loads(capsys.readouterr().out)
     assert hidden["command"] == "graph"
     assert "evidence-benchmark" not in hidden["problems"][0]["message"]
+    graph_parser = next(action for action in build_parser()._actions if isinstance(action, argparse._SubParsersAction)).choices["graph"]
+    graph_leaves = next(action for action in graph_parser._actions if isinstance(action, argparse._SubParsersAction)).choices
+    assert "evidence-benchmark" not in graph_leaves
+    assert "evidence-materialize" not in graph_leaves
 
 
 def test_registered_command_help_executes_and_visible_commands_describe_required_arguments() -> None:
@@ -204,7 +208,7 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
     graph_actions = _next_actions_for_problems(
             [{"code": "context_graph_seed_identity_unavailable"}],
             data={
-                "bundle": {
+                "result": {
                     "repository": {"id": "main"},
                     "query": {"text": "where is context", "mode": "past_decision"},
                     "completeness": {
@@ -212,7 +216,7 @@ def test_emitted_commands_execute_without_unresolved_inputs(tmp_path: Path, monk
                             "identity_coverage": {
                                 "recovery_selectors": [
                                     {"kind": "file", "value": "docs/contracts/repoctl-evidence-contract.md"},
-                                    {"kind": "symbol", "value": "build_context_bundle", "in_file": "tools/repoctl/context.py"},
+                                    {"kind": "symbol", "value": "build_graph_source_evidence", "in_file": "tools/repoctl/context.py"},
                                 ]
                             }
                         }

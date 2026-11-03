@@ -99,9 +99,9 @@ class ContextAnchorStatus(StrEnum):
 
 
 class ContextAnchorResolutionCode(StrEnum):
-    RESOLVED = "context_graph_anchor_resolved"
-    AMBIGUOUS = "context_graph_anchor_ambiguous"
-    UNRESOLVED = "context_graph_anchor_unresolved"
+    RESOLVED = "graph_source_anchor_resolved"
+    AMBIGUOUS = "graph_source_anchor_ambiguous"
+    UNRESOLVED = "graph_source_anchor_unresolved"
 
 
 @dataclass(frozen=True)
@@ -305,7 +305,7 @@ class ContextCandidate:
 
 
 @dataclass(frozen=True)
-class ContextBundle:
+class GraphSourceEvidence:
     repository: dict[str, str]
     query: dict[str, Any]
     source_snapshots: dict[str, str]
@@ -328,7 +328,7 @@ class ContextBundle:
     schema: str = "repoctl.graph.evidence"
     schema_version: int = 15
     authoritative: bool = False
-    bundle_digest: str = ""
+    evidence_digest: str = ""
 
     def to_dict(self, *, include_digest: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -352,11 +352,11 @@ class ContextBundle:
             "selection": self.selection,
         }
         if include_digest:
-            data["bundle_digest"] = self.bundle_digest or digest_data(data)
+            data["evidence_digest"] = self.evidence_digest or digest_data(data)
         return data
 
-    def with_digest(self) -> ContextBundle:
-        return ContextBundle(
+    def with_digest(self) -> GraphSourceEvidence:
+        return GraphSourceEvidence(
             repository=self.repository,
             query=self.query,
             source_snapshots=self.source_snapshots,
@@ -373,7 +373,7 @@ class ContextBundle:
             schema=self.schema,
             schema_version=self.schema_version,
             authoritative=self.authoritative,
-            bundle_digest=digest_data(self.to_dict(include_digest=False)),
+            evidence_digest=digest_data(self.to_dict(include_digest=False)),
         )
 
 def _knowledge_sort_key(item: dict[str, Any]) -> tuple[float, str]:

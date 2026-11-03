@@ -25,7 +25,8 @@
         ],
         "tests": [
           "tests/test_predict.py",
-          "tests/test_model_manager_concurrency.py"
+          "tests/test_model_manager_concurrency.py",
+          "tests/test_upload_model.py"
         ]
       },
       "expected_statuses": [
@@ -52,7 +53,7 @@
           "crates/daemon/src/audio_clock.rs"
         ],
         "tests": [
-          "crates/core/src/lib.rs"
+          "crates/daemon/src/audio_clock.rs"
         ],
         "callers_or_dependents": [
           "crates/daemon/src/main.rs"

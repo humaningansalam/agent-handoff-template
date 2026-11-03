@@ -870,7 +870,7 @@ def test_graph_and_context_follow_typescript_barrel_calls_inside_anonymous_callb
             "--json",
         ]
     ) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/src/projections.ts"
     )
@@ -917,7 +917,7 @@ def test_graph_and_context_prioritize_owner_source_and_direct_test(tmp_path: Pat
     assert any(item["selector"] == {"kind": "file", "value": "tests/test_auth.py"} for item in graph_result["continuations"])
 
     assert main(["graph", "search", "validate_token", "--repo-id", "main", "--json"]) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["groups"]["likely_change_surface"][0]["source_ref"]["path"] == "repos/auth.py"
     assert bundle["groups"]["tests_and_verification"][0]["source_ref"]["path"] == "repos/tests/test_auth.py"
     assert sum(len(items) for group, items in bundle["groups"].items() if group != "warnings_and_completeness") <= 8

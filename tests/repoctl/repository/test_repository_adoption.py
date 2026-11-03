@@ -151,10 +151,12 @@ def test_historical_completion_receipts_do_not_bind_current_repository_identity(
 def test_root_completion_receipt_does_not_create_repository_namespace(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     task_id = "T-20260609184046Z"
-    text = task_text(task_id, status="doing").replace('area: ""', 'area: "ops"')
+    text = task_text(task_id, status="todo").replace('area: ""', 'area: "ops"')
     add_board_task(tmp_path, f"{task_id}--workspace-update.md", text)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
     assert main(["task", "finish", task_id, "--json"]) == 0
     finish_payload = json.loads(capsys.readouterr().out)
     receipt = json.loads((tmp_path / finish_payload["data"]["completion_receipt"]).read_text(encoding="utf-8"))
@@ -168,6 +170,17 @@ def test_root_completion_receipt_does_not_create_repository_namespace(tmp_path: 
     assert postflight_payload["data"]["repository_state"]["namespaces"] == []
 
     receipt_path = tmp_path / finish_payload["data"]["completion_receipt"]
+    completed_task_path = tmp_path / receipt["task_path_at_completion"]
+    original_task = completed_task_path.read_bytes()
+    completed_task_path.unlink()  # isolated fixture only
+    assert main(["upgrade", "postflight", "--workspace-root", str(tmp_path), "--json"]) == 1
+    missing_payload = json.loads(capsys.readouterr().out)
+    assert any(
+        p["code"] == "repository_completion_task_missing"
+        and receipt["task_path_at_completion"] in p["message"]
+        for p in missing_payload["problems"]
+    )
+    completed_task_path.write_bytes(original_task)
     tampered = dict(receipt)
     tampered["task_id"] = "T-20260609184047Z"
     receipt_path.write_text(json.dumps(tampered, indent=2, sort_keys=True) + "\n", encoding="utf-8")

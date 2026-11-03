@@ -588,6 +588,26 @@ def repository_state_namespaces(root: Path) -> tuple[list[dict[str, Any]], list[
         if source is RepositoryStateSource.COMPLETION_RECEIPT and raw_repo_id == "":
             if _completion_receipt_task_scope(root, path, payload) is TaskRepositoryScope.WORKSPACE:
                 return
+            # A missing archived Task is missing source evidence, not an
+            # invented repository identity. Preserve this distinction for
+            # one-time adopter repair without manufacturing completed bytes.
+            declared = payload.get("task_path_at_completion")
+            task_id = payload.get("task_id")
+            if (isinstance(declared, str) and isinstance(task_id, str)
+                    and task_id == path.stem and re.fullmatch(r"T-[0-9]{14}Z", task_id)
+                    and declared == declared.strip() and "\\" not in declared):
+                rel_task = PurePosixPath(declared)
+                if (not rel_task.is_absolute() and ".." not in rel_task.parts
+                        and rel_task.parent.as_posix() in {"docs/tasks", "docs/archive/tasks"}
+                        and rel_task.name.startswith(f"{task_id}--") and rel_task.suffix == ".md"):
+                    exact = root / declared
+                    if not exact.is_file() and not exact.is_symlink():
+                        problems.append(_problem(
+                            "error", "repository_completion_task_missing",
+                            f"completion receipt declares a missing Task source: {declared}",
+                            path.relative_to(root).as_posix(),
+                        ))
+                        return
         add(str(raw_repo_id or ""), source=source, path=path)
 
     for state_root, source in (

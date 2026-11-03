@@ -13,7 +13,7 @@ from typing import Any
 from .completion_catalogue import prepare_completion_sidecar_writes
 from .io import LOCK_REL, RepoctlError, atomic_write, decode_schema_version
 from .task_history_migration import receipt_witness
-from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest, verify_legacy_change_terminal_states, verify_legacy_change_terminal_states_at_revision
+from .git import ChangedEntry, RepoGitState, StablePathState, normalize_repo_path, normalize_stable_path_state, repo_change_fingerprint_records, repo_changed_entries, repo_commit_range_entries, repo_git_head, repo_git_state, repo_git_status, repo_is_ancestor, repo_path_fingerprints, repo_path_stable_states, stable_path_state_digest
 from .graph_model import digest_data
 from .markdown import append_section_entry, find_section, has_section, parse_frontmatter, parse_labeled_list_section, replace_frontmatter_line, replace_section
 from .repositories import REPO_REQUIRED_TASK_AREAS, TASK_AREAS, RepoLayout, RepoSelectorStatus, RepoTarget, RepositoryIdentitySource, default_repo_target, repo_layout, resolve_repo_selector_path, resolve_task_repo_target
@@ -544,13 +544,15 @@ def _task_log_summary(message: str, *, field: str = "message") -> str:
         r"(?<![A-Za-z0-9_.-])(?:docs|repos|tests|tools|src|lib|app|packages)/[^\s,;]+",
         stripped,
     )
+    # Detect pasted machine output by shape. Total length and line count are
+    # diagnostics, not approval gates for authored Task reasoning.
+    opaque_machine_token = re.search(r"[A-Za-z0-9+/=_-]{4096,}", stripped)
     if (
         known_dump
         or "```" in stripped
         or "Traceback (most recent call last)" in stripped
         or len(path_tokens) >= 8
-        or len(stripped.encode("utf-8")) > 8192
-        or len(lines) > 60
+        or opaque_machine_token
     ):
         raise RepoctlError(
             "bulk output and path inventories do not belong in a Task log; record the result or cite an existing source",
@@ -1130,75 +1132,27 @@ def validate_workspace_write_path(root: Path, path: Path, *, boundary: Path) -> 
 
 
 def _task_archive_locator(root: Path, task_id: str) -> Path | None:
-    """Resolve one archived task through fixed per-task machine state."""
+    """Resolve an archived Task only through its current exact-ID locator."""
 
     if ID_RE.fullmatch(task_id) is None:
         return None
-    task_path = ""
-    relocated_content_sha256 = ""
     locator_path = archive_locator_path(root, task_id)
-    if locator_path.exists() or locator_path.is_symlink():
-        if not _contained_regular_file(root, locator_path, _state_dir(root) / "archive"):
-            return None
-        try:
-            task_path = parse_archive_locator(locator_path.read_text(encoding="utf-8"), task_id=task_id)
-        except (OSError, UnicodeDecodeError, ValueError):
-            return None
-    else:
-        receipt_path = _completion_receipt_path(root, task_id)
-        if not _contained_regular_file(root, receipt_path, _state_dir(root) / "completions"):
-            return None
-        try:
-            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(receipt, dict) or receipt.get("task_id") != task_id:
-            return None
-        try:
-            _completion_receipt_repo_id(receipt_path, root, receipt)
-            if (
-                receipt.get("status") != "done"
-                or not isinstance(receipt.get("content_sha256"), str)
-                or not _valid_sha256(str(receipt.get("content_sha256") or ""))
-                or not isinstance(receipt.get("changed_entries"), list)
-                or not isinstance(receipt.get("repo_evidence"), dict)
-                or (
-                    _completion_receipt_schema_version(receipt, rel=receipt_path.relative_to(root).as_posix())
-                    < COMPLETION_RECEIPT_SCHEMA_VERSION
-                    and not isinstance(receipt.get("verification"), dict)
-                )
-            ):
-                return None
-        except RepoctlError:
-            return None
-        task_path = completion_receipt_task_path(receipt)
-        if task_path.startswith("docs/tasks/"):
-            # Older receipts retain the pre-archive path. Resolve only its
-            # exact filename and hash, without rewriting immutable history.
-            archived_path = root / "docs/archive/tasks" / PurePosixPath(task_path).name
-            if (
-                (root / task_path).exists()
-                or (root / task_path).is_symlink()
-                or sorted((root / "docs/archive/tasks").glob(f"{task_id}--*.md")) != [archived_path]
-            ):
-                return None
-            task_path = archived_path.relative_to(root).as_posix()
-            relocated_content_sha256 = receipt["content_sha256"]
-    if not _valid_receipt_task_path(task_path, task_id=task_id) or not task_path.startswith("docs/archive/tasks/"):
+    if not _contained_regular_file(root, locator_path, _state_dir(root) / "archive"):
+        return None
+    try:
+        task_path = parse_archive_locator(locator_path.read_text(encoding="utf-8"), task_id=task_id)
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
     path = root / task_path
     if not _contained_regular_file(root, path, root / "docs/archive/tasks"):
         return None
     try:
-        if relocated_content_sha256 and _sha256_bytes(path.read_bytes()) != relocated_content_sha256:
-            return None
         task = load_task(path, root, archived=True)
     except (OSError, UnicodeError, RepoctlError):
         return None
     if task.id != task_id or task.status not in NON_LIVE:
         return None
     return path
-
 
 def archive_locator_writes(root: Path, moves: list[tuple[Path, Path]], tasks: list[Task]) -> list[tuple[Path, str]]:
     """Bind each archive move to one immutable, fixed-path lookup record."""
@@ -1865,26 +1819,28 @@ def _completion_receipt_artifact_resolution_error(
     )
 
 
-def _completion_receipt_schema_version(data: dict[str, Any], *, rel: str) -> int:
+def _completion_receipt_schema_version(
+    data: dict[str, Any], *, rel: str, migration_only: bool = False,
+) -> int:
     if data.get("schema") != "repoctl.task.completion":
         raise RepoctlError(f"task completion receipt has invalid schema: {rel}", code="invalid_completion_receipt", path=rel)
     try:
         return decode_schema_version(
             data.get("schema_version"),
             supported=(
-                LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION,
-                TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
-                DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
-                COMPLETION_RECEIPT_SCHEMA_VERSION,
+                (2, 3, 4, COMPLETION_RECEIPT_SCHEMA_VERSION)
+                if migration_only else (COMPLETION_RECEIPT_SCHEMA_VERSION,)
             ),
         )
     except ValueError as exc:
         raise RepoctlError(f"task completion receipt has invalid schema: {rel}", code="invalid_completion_receipt", path=rel) from exc
 
 
-def _completion_receipt_repo_id(path: Path, root: Path, data: dict[str, Any]) -> str:
+def _completion_receipt_repo_id(
+    path: Path, root: Path, data: dict[str, Any], *, migration_only: bool = False,
+) -> str:
     rel = path.relative_to(root).as_posix()
-    _completion_receipt_schema_version(data, rel=rel)
+    _completion_receipt_schema_version(data, rel=rel, migration_only=migration_only)
     task_id = data.get("task_id")
     if not isinstance(task_id, str) or not ID_RE.fullmatch(task_id) or path.stem != task_id:
         raise RepoctlError(f"task completion receipt task_id does not match filename: {rel}", code="invalid_completion_receipt", path=rel)
@@ -2115,13 +2071,15 @@ def _validate_completion_receipt(
     *,
     receipt_text: str = "",
     artifact_resolution: CompletionReceiptArtifactResolution | None = None,
+    validate_artifact: bool = True,  # False only for an explicit, proof-preserving schema transition.
+    migration_only: bool = False,  # Historical schema parsing is never a normal reader.
 ) -> CompletionReceiptArtifact:
     rel = path.relative_to(root).as_posix()
     task_id = data.get("task_id")
-    _completion_receipt_repo_id(path, root, data)
+    _completion_receipt_repo_id(path, root, data, migration_only=migration_only)
     if data.get("status") != "done":
         raise RepoctlError(f"task completion receipt has invalid status: {rel}", code="invalid_completion_receipt", path=rel)
-    schema_version = _completion_receipt_schema_version(data, rel=rel)
+    schema_version = _completion_receipt_schema_version(data, rel=rel, migration_only=migration_only)
     completed_at = data.get("completed_at")
     if not isinstance(task_id, str):
         raise RepoctlError(f"task completion receipt has invalid identity: {rel}", code="invalid_completion_receipt", path=rel)
@@ -2129,6 +2087,7 @@ def _validate_completion_receipt(
     if schema_version in {
         TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
         DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
+        COMPLETION_RECEIPT_SCHEMA_VERSION,
     } or has_transition_fields:
         valid_completion_stamp = isinstance(completed_at, str) and _valid_utc_stamp(completed_at)
     else:
@@ -2158,13 +2117,15 @@ def _validate_completion_receipt(
             raise RepoctlError(f"task completion receipt has invalid verification truncation flag: {rel}", code="invalid_completion_receipt", path=rel)
     elif verification is not None:
         raise RepoctlError(f"current task completion receipt must not contain verification proof state: {rel}", code="invalid_completion_receipt", path=rel)
-    resolution = artifact_resolution or _resolve_receipt_artifact(root, task_id, task_path, receipt_path=rel)
-    if resolution.status is not CompletionReceiptArtifactResolutionStatus.RESOLVED:
-        raise _completion_receipt_artifact_resolution_error(resolution)
-    artifact_bytes = resolution.artifact_bytes
-    artifact_text = resolution.artifact_text
-    if _sha256_bytes(artifact_bytes) != content_sha256:
-        raise RepoctlError(f"task completion receipt hash does not match artifact: {rel}", code="invalid_completion_receipt", path=rel)
+    resolved_path, artifact_text = "", ""
+    if validate_artifact:
+        resolution = artifact_resolution or _resolve_receipt_artifact(root, task_id, task_path, receipt_path=rel)
+        if resolution.status is not CompletionReceiptArtifactResolutionStatus.RESOLVED:
+            raise _completion_receipt_artifact_resolution_error(resolution)
+        artifact_text = resolution.artifact_text
+        resolved_path = resolution.resolved_path
+        if _sha256_bytes(resolution.artifact_bytes) != content_sha256:
+            raise RepoctlError(f"task completion receipt hash does not match artifact: {rel}", code="invalid_completion_receipt", path=rel)
     repo_evidence = data.get("repo_evidence")
     if not isinstance(repo_evidence, dict):
         raise RepoctlError(f"task completion receipt has invalid repo evidence: {rel}", code="invalid_completion_receipt", path=rel)
@@ -2187,6 +2148,7 @@ def _validate_completion_receipt(
     if schema_version in {
         TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
         DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
+        COMPLETION_RECEIPT_SCHEMA_VERSION,
     } or has_transition_fields:
         started_at = data.get("started_at")
         completed_event_at = data.get("completed_event_at")
@@ -2215,7 +2177,7 @@ def _validate_completion_receipt(
         receipt_text=receipt_text,
         receipt_sha256=_sha256_text(receipt_text),
         declared_path=task_path,
-        resolved_path=resolution.resolved_path,
+        resolved_path=resolved_path,
         content_sha256=content_sha256,
         artifact_text=artifact_text,
     )
@@ -2262,6 +2224,18 @@ def collect_completion_receipt_collection(
             continue
         if not isinstance(data, dict):
             problems.append(Problem("error", "invalid_completion_receipt", f"task completion receipt has invalid schema: {rel}", rel))
+            continue
+        # A foreign repository's receipt cannot block this repository's
+        # explicit cold-history rebuild solely because its schema is obsolete.
+        # Identity is still checked before skipping; no old schema is parsed.
+        if (
+            repo_id is not None
+            and isinstance(data.get("repo_id"), str)
+            and data["repo_id"] != repo_id
+            and (not data["repo_id"] or re.fullmatch(r"[a-z][a-z0-9_-]*", data["repo_id"]))
+            and data.get("task_id") == path.stem
+            and ID_RE.fullmatch(path.stem)
+        ):
             continue
         try:
             receipt_repo_id = _completion_receipt_repo_id(path, root, data)
@@ -2441,7 +2415,9 @@ def _write_task_state(root: Path, task_id: str, payload: dict[str, Any]) -> None
     atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
-def _read_task_state(root: Path, task_id: str) -> dict[str, Any] | None:
+def _read_task_state(
+    root: Path, task_id: str, *, migration_only: bool = False,
+) -> dict[str, Any] | None:
     path = _baseline_path(root, task_id)
     if not path.is_file():
         return None
@@ -2454,7 +2430,10 @@ def _read_task_state(root: Path, task_id: str) -> dict[str, Any] | None:
     try:
         schema_version = decode_schema_version(
             data.get("schema_version"),
-            supported=(LEGACY_TASK_STATE_SCHEMA_VERSION, TASK_STATE_SCHEMA_VERSION),
+            supported=(
+                (LEGACY_TASK_STATE_SCHEMA_VERSION, TASK_STATE_SCHEMA_VERSION)
+                if migration_only else (TASK_STATE_SCHEMA_VERSION,)
+            ),
         )
     except ValueError as exc:
         raise RepoctlError(
@@ -2739,8 +2718,10 @@ def _decode_repo_baseline_record(
     }
 
 
-def _read_repo_baseline(root: Path, task_id: str) -> dict[str, Any] | None:
-    data = _read_task_state(root, task_id)
+def _read_repo_baseline(
+    root: Path, task_id: str, *, migration_only: bool = False,
+) -> dict[str, Any] | None:
+    data = _read_task_state(root, task_id, migration_only=migration_only)
     if data is None:
         return None
     path = _baseline_path(root, task_id)
@@ -3444,224 +3425,6 @@ def _done_descendant_completion_receipts(
     )
 
 
-def _legacy_event_interval(started_at: str, completed_at: str) -> tuple[str, str] | None:
-    if not _valid_utc_stamp(started_at) or not _valid_legacy_completion_stamp(completed_at):
-        return None
-    try:
-        start = datetime.strptime(started_at, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC, microsecond=0)
-        end = (
-            datetime.strptime(completed_at, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC, microsecond=999999)
-            if _valid_utc_stamp(completed_at)
-            else datetime.fromisoformat(completed_at.removesuffix("Z") + "+00:00")
-        )
-    except ValueError:
-        return None
-    if start > end:
-        return None
-    return (
-        start.isoformat(timespec="microseconds").replace("+00:00", "Z"),
-        end.isoformat(timespec="microseconds").replace("+00:00", "Z"),
-    )
-
-
-def _legacy_transition_problem(path: str, message: str) -> Problem:
-    return Problem(
-        "error",
-        "transition_evidence_incomplete",
-        message,
-        path,
-        "legacy_completion_receipt_v2",
-    )
-
-
-def _legacy_descendant_path_claims(
-    root: Path,
-    *,
-    child: Task,
-    receipt: dict[str, Any],
-    receipt_path: str,
-    entries: list[ChangedEntry],
-    target: RepoTarget,
-    claim_mode: _CompletionEvidenceMode,
-    terminal_revision: str | None,
-) -> tuple[list[_DescendantPathClaim], list[Problem], set[str]]:
-    """Project a v2 receipt only while its recorded terminal state is still provable."""
-    repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
-    mode, attribution = _completion_evidence_pair(repo_evidence, rel=receipt_path)
-    if not (
-        mode is _CompletionEvidenceMode.WORKING_TREE_DIFF
-        and attribution is _CompletionEvidenceAttribution.TASK_WORKING_TREE
-    ):
-        return [], [], set()
-
-    raw_ownership = _receipt_baseline_ownership(
-        repo_evidence,
-        rel=receipt_path,
-        schema_version=LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION,
-    )
-    owned_paths = {
-        path
-        for path, decision in raw_ownership.items()
-        if decision["ownership"] == BaselineOwnership.TASK.value
-    }
-    mutation_paths = set(_entry_mutation_paths(entries))
-    evidence_paths = mutation_paths | owned_paths
-    if not evidence_paths:
-        return [], [], set()
-
-    def incomplete(paths: set[str], message: str) -> tuple[list[_DescendantPathClaim], list[Problem], set[str]]:
-        return [], [_legacy_transition_problem(path, message) for path in sorted(paths)], evidence_paths
-
-    try:
-        baseline = _read_repo_baseline(root, child.id)
-    except RepoctlError:
-        return incomplete(evidence_paths, "legacy child task state is invalid or unreadable")
-    if baseline is None or baseline.get("state_version") != LEGACY_TASK_STATE_SCHEMA_VERSION:
-        return incomplete(evidence_paths, "legacy child receipt has no matching legacy task-start state")
-
-    manifest = repo_evidence.get("fingerprint_manifest") if isinstance(repo_evidence.get("fingerprint_manifest"), dict) else {}
-    start_head = str(repo_evidence.get("start_head") or "")
-    observed_head = str(repo_evidence.get("observed_head") or "")
-    baseline_head = str(baseline.get("head") or "")
-    current_head, current_head_state = repo_git_head(root, target)
-    if _repository_target_identity_problem(target=target, baseline=baseline) is not None:
-        return incomplete(evidence_paths, "legacy child task-start repository identity does not match the selected repository")
-    identity_matches = (
-        str(receipt.get("repo_id") or "") == target.id
-        and str(manifest.get("repo_id") or "") == target.id
-        and str(manifest.get("repo_path") or "") == target.display_path
-        and baseline_head == start_head == observed_head
-        and str(manifest.get("start_head") or "") == start_head
-        and str(manifest.get("observed_head") or "") == observed_head
-        and (start_head == "<unborn>" or bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", start_head)))
-        and current_head_state.available
-    )
-    if not identity_matches:
-        return incomplete(evidence_paths, "legacy child receipt and task-start repository identities do not match")
-
-    if not current_head_state.available:
-        return incomplete(evidence_paths, "legacy child terminal Git evidence cannot be observed")
-    if current_head == observed_head:
-        if claim_mode is not _CompletionEvidenceMode.WORKING_TREE_DIFF:
-            return [], [], set()
-        evaluation_mode = _CompletionEvidenceMode.WORKING_TREE_DIFF
-    else:
-        if claim_mode is not _CompletionEvidenceMode.COMMITTED_RANGE:
-            return [], [], set()
-        is_ancestor, ancestry_state = repo_is_ancestor(
-            root,
-            ancestor=observed_head,
-            descendant=current_head,
-            target=target,
-        )
-        if not ancestry_state.available or not is_ancestor:
-            return incomplete(evidence_paths, "legacy child recorded HEAD is not a proven ancestor of the current repository HEAD")
-        if terminal_revision and terminal_revision != current_head:
-            return incomplete(evidence_paths, "legacy child repository identity changed while terminal evidence was observed")
-        evaluation_mode = _CompletionEvidenceMode.COMMITTED_RANGE
-
-    interval = _legacy_event_interval(
-        str(baseline.get("created_at") or ""),
-        str(receipt.get("completed_at") or ""),
-    )
-    if interval is None:
-        return incomplete(evidence_paths, "legacy child receipt has no valid conservative execution interval")
-
-    dirty_paths = set(_entry_mutation_paths(list(baseline.get("entries") or [])))
-    unprovable_paths = (mutation_paths & dirty_paths) | owned_paths
-    problems = [
-        _legacy_transition_problem(path, "legacy child started with this path already dirty, so its before-state cannot be reconstructed")
-        for path in sorted(unprovable_paths)
-    ]
-    candidate_paths = mutation_paths - unprovable_paths
-    if not candidate_paths:
-        return [], problems, evidence_paths
-
-    if evaluation_mode is _CompletionEvidenceMode.WORKING_TREE_DIFF:
-        terminal_verification, terminal_state = verify_legacy_change_terminal_states(
-            root,
-            entries=entries,
-            candidate_paths=candidate_paths,
-            manifest=manifest,
-            target=target,
-        )
-    else:
-        terminal_verification, terminal_state = verify_legacy_change_terminal_states_at_revision(
-            root,
-            entries=entries,
-            candidate_paths=candidate_paths,
-            manifest=manifest,
-            observed_head=observed_head,
-            terminal_revision=current_head,
-            target=target,
-        )
-    if not terminal_state.available:
-        return incomplete(candidate_paths, "legacy child terminal Git evidence cannot be observed")
-    after_states = dict(terminal_verification.states)
-    drifted_paths = set(terminal_verification.unverified_paths)
-    if terminal_verification.problem is not None:
-        drifted_paths.update(candidate_paths)
-
-    confirmed_head, confirmed_head_state = repo_git_head(root, target)
-    expected_head = observed_head if evaluation_mode is _CompletionEvidenceMode.WORKING_TREE_DIFF else current_head
-    if not confirmed_head_state.available or confirmed_head != expected_head:
-        problems.extend(
-            _legacy_transition_problem(
-                path,
-                "legacy child repository identity changed while terminal evidence was observed",
-            )
-            for path in sorted(candidate_paths)
-        )
-        return [], problems, evidence_paths
-
-    problems.extend(
-        _legacy_transition_problem(path, "legacy child has no safe terminal-state commitment matching the current path")
-        for path in sorted(drifted_paths)
-    )
-    claim_paths = set(after_states) - drifted_paths
-    if not claim_paths:
-        return [], problems, evidence_paths
-
-    before_states, before_state = repo_path_stable_states(
-        root,
-        sorted(claim_paths),
-        target,
-        revision=start_head,
-    )
-    if not before_state.available:
-        problems.extend(
-            _legacy_transition_problem(path, "legacy child stable before path state cannot be observed")
-            for path in sorted(claim_paths)
-        )
-        return [], problems, evidence_paths
-
-    started_at, completed_at = interval
-    claims: list[_DescendantPathClaim] = []
-    for path in sorted(claim_paths):
-        before = before_states[path]
-        after = after_states[path]
-        if stable_path_state_digest(before) == stable_path_state_digest(after):
-            problems.append(
-                _legacy_transition_problem(path, "legacy child receipt names a change without a stable path transition")
-            )
-            continue
-        claims.append(
-            _DescendantPathClaim(
-                task_id=child.id,
-                receipt_path=receipt_path,
-                repo_id=target.id,
-                mode=evaluation_mode,
-                path=path,
-                effect="remove" if after.get("kind") == "missing" else "write",
-                basis=("observed_change",),
-                before=before,
-                after=after,
-                started_at=started_at,
-                completed_at=completed_at,
-            )
-        )
-    return claims, problems, evidence_paths
-
 
 def _descendant_claims_by_path(
     *,
@@ -3679,23 +3442,6 @@ def _descendant_claims_by_path(
             continue
         receipt_path = f"docs/tasks/.repoctl-state/completions/{child.id}.json"
         entries = [_receipt_changed_entry(item, rel=receipt_path) for item in receipt.get("changed_entries", [])]
-        schema_version = receipt.get("schema_version")
-        if schema_version == LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION:
-            legacy_claims, legacy_problems, legacy_paths = _legacy_descendant_path_claims(
-                root,
-                child=child,
-                receipt=receipt,
-                receipt_path=receipt_path,
-                entries=entries,
-                target=target,
-                claim_mode=claim_mode,
-                terminal_revision=terminal_revision,
-            )
-            evidence_paths.update(legacy_paths)
-            problems.extend(legacy_problems)
-            for claim in legacy_claims:
-                claims.setdefault(claim.path, []).append(claim)
-            continue
         repo_evidence = receipt.get("repo_evidence") if isinstance(receipt.get("repo_evidence"), dict) else {}
         mode, attribution = _completion_evidence_pair(repo_evidence, rel=receipt_path)
         if mode is not claim_mode:
@@ -4783,7 +4529,12 @@ def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = 
                 path=task.rel_path,
             )
     receipt_schema_version = COMPLETION_RECEIPT_SCHEMA_VERSION
-    has_transition_evidence = path_transitions is not None and _valid_event_stamp(started_at)
+    if path_transitions is None or not _valid_event_stamp(started_at):
+        raise RepoctlError(
+            "task completion requires a verified current start transition; no partial v5 receipt will be written",
+            code="transition_evidence_incomplete",
+            path=task.rel_path,
+        )
     receipt_rel = receipt_path.relative_to(root).as_posix()
     text = _finalize_handoff(text, status="done", new_path=new_path, receipt_path=receipt_rel, evidence_mode=evidence_mode.value, copy=copy)
     if moves:
@@ -4810,8 +4561,7 @@ def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = 
             "scope": (repo_delta or {}).get("scope") or {},
         },
     }
-    if has_transition_evidence:
-        repo_evidence["path_transitions"] = path_transitions
+    repo_evidence["path_transitions"] = path_transitions
     receipt = {
         "schema": "repoctl.task.completion",
         "schema_version": receipt_schema_version,
@@ -4824,9 +4574,8 @@ def finish_task(root: Path, task_id: str, *, meta_gate: dict[str, Any] | None = 
         "changed_entries": changed_entries,
         "repo_evidence": repo_evidence,
     }
-    if has_transition_evidence:
-        receipt["started_at"] = started_at
-        receipt["completed_event_at"] = finish_event_timestamp
+    receipt["started_at"] = started_at
+    receipt["completed_event_at"] = finish_event_timestamp
     receipt_text = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     receipt_writes.append((receipt_path, receipt_text))
     catalogue_writes = prepare_completion_sidecar_writes(

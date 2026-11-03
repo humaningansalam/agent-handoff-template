@@ -264,10 +264,11 @@ def test_task_doctor_does_not_materialize_finish_writes(tmp_path: Path, monkeypa
         if path.is_file()
     }
 
-    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 0
+    assert main(["task", "doctor", "T-20260609184046Z", "--json"]) == 1
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["finish_ready"] is True
+    assert payload["data"]["finish_ready"] is False
+    assert "transition_evidence_incomplete" in payload["data"]["blocked_by"]
     after = {
         path.relative_to(tmp_path).as_posix(): path.read_bytes()
         for path in tmp_path.rglob("*")

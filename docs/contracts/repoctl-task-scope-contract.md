@@ -45,9 +45,9 @@ For product work, doctor and finish compare actual task changes with Chosen:
 
 Chosen describes scope. It is not proof that a file was read, reviewed, tested, or correct. `## Verification` is separate optional prose and does not participate in Discovery or finish readiness.
 
-## Context and Graph
+## Graph and source discovery
 
-Context, Graph, Git, metadata queries, and direct source reads help an agent choose files. Their output stays read-only. Querying them creates no Task-owned result receipt, episode, candidate disposition, or future ranking signal.
+Graph search and query, Git, metadata queries, Knowledge, and direct source reads help an agent choose files. Their output stays read-only. Querying them creates no Task-owned result receipt, episode, candidate disposition, or future ranking signal.
 
 Graph search and Knowledge can cite current Task files without creating or redefining Discovery scope.
 
@@ -55,7 +55,7 @@ Fields from retired Discovery workflows and files under `docs/tasks/.repoctl-sta
 
 ## Completion history
 
-Task finish still publishes one immutable completion receipt and bounded history entry. New history derives changed paths and searchable human Task text without freezing a Discovery episode or structured check record. Explicit Context history modes and Graph task/artifact selectors may inspect that history; ordinary current-source ranking does not consume it as scope or authority.
+Task finish publishes one immutable v5 completion receipt and bounded history entry. New history derives changed paths and searchable human Task text without freezing a Discovery episode or structured check record. Explicit Graph history search and task/artifact selectors may inspect that history; ordinary current-source ranking does not consume it as scope or authority. Historical receipt schema translations are explicit one-time conversions, not normal legacy reads.
 
 Completion receipts and Task artifacts preserve history identity. They make no claim that a command or test ran.
 

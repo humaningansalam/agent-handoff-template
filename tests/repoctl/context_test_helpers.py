@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from tools.repoctl.completion_catalogue import rebuild_completion_catalogue
 from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projection
@@ -17,7 +18,7 @@ def _write_context_docs(root: Path) -> None:
     (root / "docs/contracts").mkdir(parents=True, exist_ok=True)
     (root / "docs/workflows").mkdir(parents=True, exist_ok=True)
     (root / "docs/PRD.md").write_text(
-        "# PRD\n\n## Evidence And Context\n\nEvidence Context comes before reviewed knowledge. It retrieves source-bound evidence before any explicitly reviewed knowledge record is promoted.\n",
+        "# PRD\n\n## Graph and Knowledge\n\nGraph retrieves source-bound implementation evidence; Knowledge stores reviewed claims and their reasons.\n",
         encoding="utf-8",
     )
     (root / "docs/contracts/repoctl-graph-contract.md").write_text(
@@ -25,11 +26,11 @@ def _write_context_docs(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "docs/contracts/repoctl-evidence-contract.md").write_text(
-        "# repoctl Context contract\n\nContext retrieval returns read-only source bundles and source authorities remain separate after retrieval. Context retrieval is read-only and non-authoritative. It does not replace Graph, task, Board, Backlog, or repometa authority.\n",
+        "# repoctl Graph evidence contract\n\nGraph evidence retrieval returns read-only, source-linked results. It does not replace original code, Task scope, Board or repometa authority.\n",
         encoding="utf-8",
     )
     (root / "docs/contracts/repoctl-module-boundaries.md").write_text(
-        "# repoctl module boundaries\n\n## Derived layer rules\n\nA future layer rule prevents Context from replacing task, Board, Backlog, Graph, or repometa authority.\n",
+        "# repoctl module boundaries\n\n## Derived layer rules\n\nGraph and Knowledge are derived navigation and reusable judgment, not Task or product repository authority.\n",
         encoding="utf-8",
     )
     (root / "docs/workflows/generated.md").write_text("# Workflow\n\nGenerated output is not an authority.\n", encoding="utf-8")
@@ -85,15 +86,18 @@ Keep token validation centralized.
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(archive_text, encoding="utf-8")
     archive_hash = _sha256_text(archive_text)
-    verification_text = "`uv run pytest tests/test_auth.py` passed."
-    verification_hash = _sha256_text(verification_text)
+    # Synthetic test-only lifecycle and path facts, never claims about real historical tasks.
+    completion_event = datetime.strptime(completed_at, "%Y%m%dT%H%M%SZ")
+    start_event = completion_event - timedelta(seconds=1)
     receipt = {
         "schema": "repoctl.task.completion",
-        "schema_version": 2,
+        "schema_version": 5,
         "repo_id": repo_id,
         "task_id": task_id,
         "status": "done",
         "completed_at": completed_at,
+        "started_at": start_event.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "completed_event_at": completion_event.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "task_path_at_completion": archive_rel,
         "content_sha256": archive_hash,
         "changed_entries": [{"change": "modified", "path": path} for path in changed_paths],
@@ -108,14 +112,16 @@ Keep token validation centralized.
             "ownership": {},
             "meta_gate": {},
             "delta": {"changed_count": len(changed_paths)},
-        },
-        "verification": {
-            "source": "task_section",
-            "source_sha256": verification_hash,
-            "normalization": "none",
-            "normalized_sha256": verification_hash,
-            "stored_sha256": verification_hash,
-            "truncated": False,
+            "path_transitions": [
+                {
+                    "path": path,
+                    "effect": "write",
+                    "basis": ["observed_change"],
+                    "before": {"kind": "file", "blob_oid": "a" * 40, "executable": False},
+                    "after": {"kind": "file", "blob_oid": "b" * 40, "executable": False},
+                }
+                for path in changed_paths
+            ],
         },
     }
     receipt_path = root / "docs/tasks/.repoctl-state/completions" / f"{task_id}.json"
@@ -127,32 +133,16 @@ def _rebuild_completion_history(root: Path, repo_id: str = "main") -> None:
     rebuild_completion_catalogue(root, repo_id)
 
 
-def _write_context_pack_task(
-    root: Path,
-    *,
-    task_id: str,
-    slug: str,
-    title: str,
-    goal: str,
-    status: str = "doing",
-    context_doc: str = "docs/contracts/repoctl-evidence-contract.md",
-    chosen: str = "repos/app.py",
-    first_command: str | None = None,
+def _write_graph_evidence_task(
+    root: Path, *, task_id: str, slug: str, title: str, goal: str,
+    context_doc: str,
 ) -> None:
-    first_command = first_command or f"./scripts/repoctl graph search 'current implementation and tests' --repo-id main --json"
-    execution_log = ""
-    if status == "todo":
-        created_stamp = (
-            f"{task_id[2:6]}-{task_id[6:8]}-{task_id[8:10]}"
-            f"T{task_id[10:12]}:{task_id[12:14]}:{task_id[14:16]}Z"
-        )
-        execution_log = f"\n## Execution Log\n\n- {created_stamp}: Fixture task created.\n"
-    task_path = root / "docs/tasks" / f"{task_id}--{slug}.md"
-    task_path.write_text(
+    """Provide a real Task source for Graph search; no Pack is created."""
+    (root / "docs/tasks" / f"{task_id}--{slug}.md").write_text(
         f"""---
 id: {task_id}
 title: "{title}"
-status: {status}
+status: doing
 owner: "codex"
 repo_ref: ""
 repo_id: "main"
@@ -170,25 +160,22 @@ depends_on: []
 
 ## Discovery
 
-- Chosen files: `{chosen}`
+- Chosen files: `repos/app.py`
 - Notes: none yet
 
 ## Goal
 
 {goal}
-{execution_log}
 
 ## Handoff
 
-- Next exact step: inspect current graph source evidence.
+- Next exact step: inspect current Graph source evidence.
 - First file to open: `{context_doc}`
-- First command to run: `{first_command}`
-- Done when: required context evidence is visible.
+- First command to run: ./scripts/repoctl graph search 'implementation and tests' --repo-id main --json
+- Done when: required Graph evidence is visible.
 """,
         encoding="utf-8",
     )
-
-
 
 
 def _setup_context_workspace(root: Path, monkeypatch) -> Path:

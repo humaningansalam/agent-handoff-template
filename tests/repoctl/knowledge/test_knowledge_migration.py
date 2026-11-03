@@ -52,7 +52,131 @@ def test_one_time_migration_preserves_original_source_and_creates_v2(tmp_path, m
     assert main(['knowledge','migrate','--repo-id','main','--json'])==0
     assert _out(capsys)['data']['records'][0]['status']=='already_preserved'
     assert main(['knowledge','check','--repo-id','main','--json'])==0
-    assert _out(capsys)['data']['legacy_record_count']==0
+    assert _out(capsys)['data']['legacy_record_count']==1
+
+
+def test_finalization_relocates_v1_and_preserves_exact_v2_citation(tmp_path, monkeypatch, capsys):
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--archived-origin'
+    original_path = _legacy(tmp_path, name)
+    original = original_path.read_bytes()
+    authored = tmp_path / 'docs/manual-links.md'
+    authored.write_text(f'# Source links\n\n- docs/knowledge/records/{name}.json\n')
+    authored_before = authored.read_bytes()
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+                 '--claim','Keep durable keys on every retry.',
+                 '--reason','A later observed retry proves the same invariant.',
+                 '--source',f'docs/knowledge/records/{name}.json','--json'])==0
+    current = _out(capsys)['data']['record']
+    old_ref = current['source_refs'][0]
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
+    assert _out(capsys)['data']['records'][0]['status']=='applied_link_cited_current_v2'
+    before_current = (tmp_path/f"docs/knowledge/records/{current['id']}.json").read_bytes()
+    args = ['knowledge','migrate','--repo-id','main','--record-id',name,'--finalize','--json']
+    assert main(args)==0
+    preview = _out(capsys)['data']['records'][0]
+    assert preview['status']=='ready_to_finalize'
+    assert preview['authored_markdown_links']==[{'path':'docs/manual-links.md','line':3}]
+    assert original_path.read_bytes()==original
+    assert (tmp_path/f"docs/knowledge/records/{current['id']}.json").read_bytes()==before_current
+    assert main([*args[:-1],'--apply','--json'])==0
+    applied = _out(capsys)['data']['records'][0]
+    assert applied['status']=='applied_finalized'
+    archive = tmp_path/f'docs/archive/knowledge/{name}.json'
+    assert not original_path.exists() and archive.read_bytes()==original
+    assert authored.read_bytes()==authored_before  # authored links require owner review
+    updated = json.loads((tmp_path/f"docs/knowledge/records/{current['id']}.json").read_text())
+    assert updated['source_refs'][0]['path']==f'docs/archive/knowledge/{name}.json'
+    assert updated['source_refs'][0]['content_sha256']==old_ref['content_sha256']
+    assert updated['reason']==current['reason'] and updated['recorded_at']==current['recorded_at']
+    assert not (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'original.json').exists()
+    assert main(['knowledge','check','--repo-id','main','--json'])==0
+    checked=_out(capsys)
+    assert checked['data']['legacy_record_count']==0
+    assert not any(p['code']=='knowledge_source_missing' for p in checked['problems'])
+    assert main(['knowledge','migrate','--repo-id','main','--json'])==0
+    assert _out(capsys)['data']['record_count']==0
+    assert main([*args[:-1],'--apply','--json'])==0
+    assert _out(capsys)['data']['records'][0]['status']=='already_finalized'
+
+
+def test_finalization_partial_write_rolls_back_original_and_citations(tmp_path, monkeypatch, capsys):
+    from tools.repoctl import knowledge_migration as migration
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--finalize-rollback'
+    old = _legacy(tmp_path, name)
+    assert main(['knowledge','add','--repo-id','main','--kind','decision',
+                 '--claim','Keep durable keys on every retry.',
+                 '--reason','An actual retry test demonstrated stable token reuse.',
+                 '--source',f'docs/knowledge/records/{name}.json','--json'])==0
+    current = _out(capsys)['data']['record']
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
+    _out(capsys)
+    current_path = tmp_path/f"docs/knowledge/records/{current['id']}.json"
+    manifest = tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'migration.json'
+    old_bytes, current_bytes, manifest_bytes = old.read_bytes(),current_path.read_bytes(),manifest.read_bytes()
+    original_write = migration.atomic_write
+    writes = 0
+    def fail_second_write(path, body):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError('simulated finalization failure')
+        return original_write(path, body)
+    monkeypatch.setattr(migration,'atomic_write',fail_second_write)
+    with pytest.raises(OSError,match='simulated finalization failure'):
+        migration.finalize_legacy_knowledge(tmp_path,repo_id='main',record_id=name,apply=True)
+    assert old.read_bytes()==old_bytes
+    assert current_path.read_bytes()==current_bytes
+    assert manifest.read_bytes()==manifest_bytes
+    assert not (tmp_path/f'docs/archive/knowledge/{name}.json').exists()
+
+
+def test_finalization_preserves_unlocked_concurrent_current_edit(tmp_path, monkeypatch, capsys):
+    """If another writer changes a later v2, roll back only our own writes."""
+    from tools.repoctl import knowledge_migration as migration
+    from tools.repoctl.io import RepoctlError
+    from tools.repoctl.knowledge_records import _knowledge_record_digest
+
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--concurrent-finalize'
+    old = _legacy(tmp_path, name)
+    current = []
+    for claim in ('Keep durable keys on every retry.',
+                  'Historical durable-key rationale is still useful.'):
+        assert main(['knowledge', 'add', '--repo-id', 'main', '--kind', 'decision',
+                     '--claim', claim, '--reason', 'A verified historical record is the original source.',
+                     '--source', f'docs/knowledge/records/{name}.json', '--json']) == 0
+        current.append(_out(capsys)['data']['record']['id'])
+    assert main(['knowledge', 'migrate', '--repo-id', 'main', '--record-id', name, '--apply', '--json']) == 0
+    _out(capsys)
+    first, second = [tmp_path / 'docs/knowledge/records' / f'{id}.json' for id in sorted(current)]
+    prior_first = first.read_bytes()
+    original = old.read_bytes()
+    proof = tmp_path / 'docs/tasks/.repoctl-state/knowledge-migrations' / name / 'migration.json'
+    prior_proof = proof.read_bytes()
+    write_original = migration.atomic_write
+    changed = False
+
+    def external_edit_during_first_write(path, body):
+        nonlocal changed
+        if path == first and not changed:
+            changed = True
+            newer = json.loads(second.read_text())
+            newer['reason'] = 'An independent writer revised this reason.'
+            newer['record_digest'] = _knowledge_record_digest(newer)
+            second.write_text(json.dumps(newer, indent=2, sort_keys=True) + '\n')
+        return write_original(path, body)
+
+    monkeypatch.setattr(migration, 'atomic_write', external_edit_during_first_write)
+    with pytest.raises(RepoctlError, match='current Knowledge changed during finalization'):
+        migration.finalize_legacy_knowledge(tmp_path, repo_id='main', record_id=name, apply=True)
+    assert changed
+    assert old.read_bytes() == original
+    assert first.read_bytes() == prior_first
+    assert json.loads(second.read_text())['reason'] == 'An independent writer revised this reason.'
+    assert proof.read_bytes() == prior_proof
+    assert not (tmp_path / 'docs/archive/knowledge' / f'{name}.json').exists()
 
 
 def test_missing_reason_or_source_requires_real_verified_input(tmp_path,monkeypatch,capsys):
@@ -120,10 +244,19 @@ def test_equivalent_current_record_referencing_legacy_id_needs_review(tmp_path, 
     assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--json'])==0
     output=_out(capsys)
     assert output['data']['records'][0]['status']=='reuse_existing_v2'
-    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==0
+    # A staged v1 replacement is not a supported normal schema: the partial
+    # migration must not silently restore runtime legacy-id compatibility.
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--apply','--json'])==1
     applied=_out(capsys)
     assert applied['data']['records'][0]['status']=='applied_reuse_existing_v2'
+    assert applied['data']['projection_problems']==['knowledge_replaces_missing']
     assert legacy.is_file()
+    assert main(['knowledge','migrate','--repo-id','main','--record-id',name,'--finalize','--apply','--json'])==0
+    assert _out(capsys)['data']['records'][0]['status']=='applied_finalized'
+    assert not legacy.exists()
+    assert (tmp_path/f'docs/archive/knowledge/{name}.json').is_file()
+    after=json.loads(curpath.read_text())
+    assert name not in after['replaces']
     assert main(['knowledge','check','--repo-id','main','--json'])==0
     assert _out(capsys)['data']['legacy_record_count']==0
 
@@ -164,7 +297,7 @@ def test_different_current_claim_citing_legacy_original_blocks_in_place_mutation
     assert (tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/name/'original.json').read_bytes() == before
     assert main(['knowledge','check','--repo-id','main','--json'])==0
     checked=_out(capsys)
-    assert checked['data']['legacy_record_count'] == 0
+    assert checked['data']['legacy_record_count'] == 1
     assert not any(p['code']=='knowledge_source_changed' for p in checked['problems'])
 
 
@@ -209,7 +342,7 @@ def test_migration_projection_rebuild_failure_is_not_reported_as_success(tmp_pat
     assert any(problem['code']=='knowledge_migration_projection_rebuild_failed' for problem in output['problems'])
     assert path.read_bytes() == original
     assert main(['knowledge','check','--repo-id','main','--json']) == 0
-    assert _out(capsys)['data']['legacy_record_count'] == 0
+    assert _out(capsys)['data']['legacy_record_count'] == 1
 
 
 def test_existing_v2_exactly_citing_v1_claim_can_preserve_stale_historical_source(tmp_path, monkeypatch, capsys) -> None:
@@ -247,7 +380,7 @@ def test_existing_v2_exactly_citing_v1_claim_can_preserve_stale_historical_sourc
     assert preserved_legacy_migration_witness(tmp_path,json.loads(old.read_text()))
     assert main(['knowledge','check','--repo-id','main','--json'])==0
     checked=_out(capsys)['data']
-    assert checked['legacy_record_count']==0
+    assert checked['legacy_record_count']==1
     assert main(['knowledge','migrate','--repo-id','main','--record-id',old_id,'--json'])==0
     assert _out(capsys)['data']['records'][0]['status']=='already_preserved'
     witness=tmp_path/'docs/tasks/.repoctl-state/knowledge-migrations'/old_id/'original.json'
@@ -317,7 +450,7 @@ def test_existing_v2_can_narrow_scope_but_migration_reports_original_paths(tmp_p
     _out(capsys)
     assert old.read_bytes()==original
     assert main(['knowledge','check','--repo-id','main','--json'])==0
-    assert _out(capsys)['data']['legacy_record_count']==0
+    assert _out(capsys)['data']['legacy_record_count']==1
 
 
 def test_existing_v2_broadening_scope_requires_separate_review(tmp_path,monkeypatch,capsys) -> None:

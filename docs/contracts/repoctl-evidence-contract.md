@@ -117,7 +117,7 @@ Graph evidence and Graph queries are read-only. They do not create persistent re
 
 ## Human output
 
-`--format markdown` presents the same selected bundle in a readable order: interpretation, must-read authority, likely change surface, tests, callers/dependents, Knowledge/history, and warnings. Rendered output is a view and must not be re-ingested as a new source of authority.
+`graph search --format markdown` renders selected source evidence in a readable order: interpretation, must-read authority, likely change surface, tests, callers/dependents, Knowledge/history, and warnings. Rendered output is a view, not a new source of authority.
 
 
 ## Product interface

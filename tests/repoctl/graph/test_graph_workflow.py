@@ -65,8 +65,10 @@ def test_http_route_workflow_links_source_candidate_and_confirmed_test(tmp_path,
     assert result['status'] == 'partial'
     assert [x['path'] for x in result['stages']['entrypoints']] == ['src/api/model_routes.py']
     assert any(x['path'] == 'src/core/model_manager.py' and x['relation'] == 'candidate' for x in result['stages']['implementation'])
-    assert any(x['path'] == 'tests/test_predict.py' and x['relation'] == 'candidate' for x in result['stages']['tests'])
-    assert any(x['path'] == 'tests/test_model_manager_concurrency.py' and x['relation'] == 'confirmed' for x in result['stages']['tests'])
+    assert any(x['path'] == 'tests/test_predict.py' and x['relation'] == 'source'
+               and x['verification'] == 'python_literal_http_test' for x in result['stages']['tests'])
+    assert any(x['path'] == 'tests/test_model_manager_concurrency.py' and x['relation'] == 'source'
+               and x['verification'] == 'python_imported_class_method_test' for x in result['stages']['tests'])
     assert any(x['to'] == 'src/core/model_manager.py' and x['relation'] == 'candidate' for x in result['links'])
     assert any('not provider-confirmed' in w for w in result['warnings'])
     assert main(['graph', 'workflow', '--route', '/predict', '--in-file', 'src/api/model_routes.py', '--json']) == 0
@@ -88,21 +90,20 @@ def test_route_ambiguity_fails_closed_without_selecting_an_arbitrary_handler(tmp
     assert chosen['stages']['entrypoints'][0]['path'] == 'src/api/first.py'
 
 
-def test_rust_module_and_embedded_test_are_partial_source_evidence(tmp_path, monkeypatch, capsys) -> None:
+def test_rust_module_fallback_does_not_promote_similar_test_names(tmp_path, monkeypatch, capsys) -> None:
     repo = _workspace(tmp_path, monkeypatch)
     _write(repo, 'crates/daemon/src/audio_clock.rs', 'pub struct AudioClockDriftEstimator;\n')
-    _write(repo, 'crates/core/src/lib.rs', '''pub fn bridge_frames() { }
+    _write(repo, 'crates/core/src/lib.rs', '''pub struct HostAudioClockModel;
 #[test]
-fn host_audio_clock_default_contract() { assert!(true); }
+fn host_audio_clock_default_contract() { let _model = HostAudioClockModel; }
 ''')
     _materialize(tmp_path)
     assert main(['graph', 'workflow', '--symbol', 'audio_clock', '--json']) == 0
     result = _payload(capsys)['data']['result']
     assert result['status'] == 'partial'
-    assert {'crates/daemon/src/audio_clock.rs', 'crates/core/src/lib.rs'} <= {
-        x['path'] for x in result['stages']['implementation']
-    }
-    assert any(x['path'] == 'crates/core/src/lib.rs' and x['relation'] == 'candidate' for x in result['stages']['tests'])
+    assert any(x['path'] == 'crates/daemon/src/audio_clock.rs' for x in result['stages']['implementation'])
+    assert not any(x['path'] == 'crates/core/src/lib.rs' for x in result['stages']['implementation'])
+    assert not any(x['path'] == 'crates/core/src/lib.rs' for x in result['stages']['tests'])
     assert result['completeness']['precision'] == 'partial'
 
 
@@ -146,7 +147,8 @@ def test_workflow_benchmark_measures_paths_and_provenance_not_edges(tmp_path, mo
     assert result['confirmed_path_recall'] < result['path_recall']
     assert result['status_expected'] is True
     assert result['stages']['tests']['found_count'] == 2
-    assert result['stages']['tests']['confirmed_count'] >= 1
+    assert result['stages']['tests']['confirmed_count'] == 0
+    assert result['stages']['tests']['verified_count'] == 2
     assert result['required_stages_covered'] is True
     assert result['required_stages_precise'] is False
     assert result['task_navigation_complete'] is False
@@ -207,6 +209,31 @@ def test_workflow_full_required_relation_evidence_can_pass() -> None:
     assert score['confirmed_path_recall'] == 0.75
 
 
+def test_benchmark_requires_zero_false_positive_paths_for_completion() -> None:
+    from tools.repoctl.graph_workflow import evaluate_workflow_benchmark
+    result = {'status': 'found', 'stages': {
+        'entrypoints': [{'path': 'route.py', 'relation': 'source'}],
+        'implementation': [{'path': 'manager.py', 'relation': 'confirmed'}],
+        'tests': [
+            {'path': 'tests/test_predict.py', 'relation': 'confirmed'},
+            {'path': 'tests/test_similar_name.py', 'relation': 'candidate'},
+        ],
+    }}
+    case = {
+        'id': 'extra-test', 'required_stages': ['entrypoint', 'implementation', 'tests'],
+        'expected_statuses': ['found'],
+        'expected_paths': {
+            'entrypoints': ['route.py'], 'implementation': ['manager.py'],
+            'tests': ['tests/test_predict.py'],
+        },
+    }
+    score = evaluate_workflow_benchmark(result, case)
+    assert score['path_recall'] == 1.0
+    assert score['required_stages_precise'] is True
+    assert score['false_positive_count'] == 1
+    assert score['task_navigation_complete'] is False
+
+
 def test_dart_exact_seed_recovers_live_sibling_importer_without_inventing_a_call(tmp_path, monkeypatch) -> None:
     from tools.repoctl.graph_model import GraphNode, GraphSnapshot, file_id
     from tools.repoctl.graph_workflow import query_graph_workflow
@@ -246,23 +273,34 @@ def test_stale_dart_entrypoint_has_dart_source_provenance_not_rust(tmp_path, mon
     assert result['stages']['tests'] == []
 
 
-def test_rust_module_precision_still_discovers_embedded_test_in_another_crate(tmp_path,monkeypatch,capsys) -> None:
-    repo=_workspace(tmp_path,monkeypatch)
-    _write(repo,'crates/daemon/src/main.rs','mod audio_clock;\nfn main(){}\n')
-    _write(repo,'crates/daemon/src/audio_clock.rs','pub struct AudioClockDriftEstimator;\n')
-    _write(repo,'crates/core/src/lib.rs','''#[test]
+def test_rust_module_precision_verifies_owned_test_and_rejects_other_crate(tmp_path, monkeypatch, capsys) -> None:
+    repo = _workspace(tmp_path, monkeypatch)
+    _write(repo, 'crates/daemon/src/main.rs', 'mod audio_clock;\nfn main(){}\n')
+    _write(repo, 'crates/daemon/src/audio_clock.rs', '''pub struct AudioClockDriftEstimator;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn drift_estimator_contract() {
+        let _estimator = AudioClockDriftEstimator;
+    }
+}
+''')
+    _write(repo, 'crates/core/src/lib.rs', '''#[test]
 fn host_audio_clock_default_contract_matches_values() { assert!(true); }
 ''')
     _materialize(tmp_path)
-    assert main(['graph','workflow','--symbol','audio_clock','--repo-id','main','--json']) == 0
-    result=_payload(capsys)['data']['result']
-    assert any(item['path']=='crates/daemon/src/audio_clock.rs' and item['relation']=='confirmed'
+    assert main(['graph', 'workflow', '--symbol', 'audio_clock', '--repo-id', 'main', '--json']) == 0
+    result = _payload(capsys)['data']['result']
+    assert any(item['path'] == 'crates/daemon/src/audio_clock.rs' and item['relation'] == 'confirmed'
                for item in result['stages']['implementation'])
-    assert any(item['path']=='crates/daemon/src/main.rs' and item['relation']=='confirmed'
+    assert any(item['path'] == 'crates/daemon/src/main.rs' and item['relation'] == 'confirmed'
                for item in result['stages']['callers_or_dependents'])
-    assert any(item['path']=='crates/core/src/lib.rs' and item['relation']=='candidate'
+    assert any(item['path'] == 'crates/daemon/src/audio_clock.rs'
+               and item['verification'] == 'rust_embedded_test_decl'
                for item in result['stages']['tests'])
-    assert result['status']=='partial'
+    assert not any(item['path'] == 'crates/core/src/lib.rs' for item in result['stages']['tests'])
+    assert result['status'] == 'partial'
 
 
 def test_dart_exact_part_of_chain_connects_library_caller_and_test(tmp_path,monkeypatch,capsys) -> None:
@@ -469,11 +507,23 @@ def test_cleanup_only():
     manager = ModelManager()
     assert manager is not None
 ''')
+    _write(repo, 'tests/test_predict_fake.py', '''from src.core.model_manager import ModelManager
+
+def test_predict_unrelated():
+    fake = object()
+    fake.predict()
+''')
+    _write(repo, 'tests/test_predictive_route.py', '''def test_predictive_route(client):
+    client.post('/predictive')
+    # client.post('/predict') is a comment, not a test.
+''')
     _materialize(tmp_path)
     assert main(['graph','workflow','--route','/predict','--json']) == 0
     result = _payload(capsys)['data']['result']
     paths = {item['path'] for item in result['stages']['tests']}
     assert 'tests/test_model_manager_cleanup.py' not in paths
+    assert 'tests/test_predict_fake.py' not in paths
+    assert 'tests/test_predictive_route.py' not in paths
     assert 'tests/test_model_manager_concurrency.py' in paths
     assert 'tests/test_predict.py' in paths
 

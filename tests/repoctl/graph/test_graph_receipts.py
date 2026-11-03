@@ -24,13 +24,36 @@ from tests.repoctl.repository.test_repositories import commit_all, init_repo, wr
 
 
 def _receipt(task_id: str, *, repo_id: str, task_path: str, content_sha256: str, changed_entries: list[dict[str, str]]) -> dict[str, object]:
+    """Fixture-only current v5 facts; unrelated Task/source bytes stay authoritative."""
+    transitions: list[dict[str, object]] = []
+    for item in changed_entries:
+        change, path = item["change"], item["path"]
+        affected = [(path, "remove" if change == "deleted" else "write")]
+        if change == "renamed":
+            affected = [(item["old_path"], "remove"), (path, "write")]
+        for affected_path, effect in affected:
+            transitions.append({
+                "path": affected_path,
+                "effect": effect,
+                "basis": ["observed_change"],
+                "before": (
+                    {"kind": "missing"} if effect == "write" and change in {"renamed", "added"}
+                    else {"kind": "file", "blob_oid": "a" * 40, "executable": False}
+                ),
+                "after": (
+                    {"kind": "missing"} if effect == "remove"
+                    else {"kind": "file", "blob_oid": "b" * 40, "executable": False}
+                ),
+            })
     return {
         "schema": "repoctl.task.completion",
-        "schema_version": 2,
+        "schema_version": 5,
         "task_id": task_id,
         "repo_id": repo_id,
         "status": "done",
-        "completed_at": "2026-06-09T18:40:46Z",
+        "completed_at": "20260609T184046Z",
+        "started_at": "2026-06-09T18:40:44.000000Z",
+        "completed_event_at": "2026-06-09T18:40:46.000000Z",
         "task_path_at_completion": task_path,
         "content_sha256": content_sha256,
         "changed_entries": changed_entries,
@@ -40,17 +63,10 @@ def _receipt(task_id: str, *, repo_id: str, task_path: str, content_sha256: str,
             "start_head": "a" * 40,
             "observed_head": "a" * 40,
             "diff_fingerprint_sha256": "sha256:" + "b" * 64,
-        },
-        "verification": {
-            "source": "task_section",
-            "source_sha256": "sha256:" + "c" * 64,
-            "normalization": "normalize_final_newline",
-            "normalized_sha256": "sha256:" + "c" * 64,
-            "stored_sha256": "sha256:" + "c" * 64,
-            "truncated": False,
+            "ownership": {},
+            "path_transitions": transitions,
         },
     }
-
 
 def _rebuild_completion_history(root: Path, *, repo_id: str = "main") -> None:
     """Explicitly migrate legacy/raw receipt fixtures into catalogue state."""
@@ -536,7 +552,9 @@ def test_file_query_does_not_label_task_sibling_changes_as_direct(tmp_path: Path
             {"change": "modified", "path": "newer_task_sibling.py"},
         ],
     )
-    newer_receipt["completed_at"] = "2026-06-10T18:40:46Z"
+    newer_receipt["completed_at"] = "20260610T184046Z"
+    newer_receipt["started_at"] = "2026-06-10T18:40:44.000000Z"
+    newer_receipt["completed_event_at"] = "2026-06-10T18:40:46.000000Z"
     (receipt_dir / f"{newer_task_id}.json").write_text(
         json.dumps(newer_receipt) + "\n",
         encoding="utf-8",
@@ -625,7 +643,7 @@ def test_explicit_history_rejects_ambiguous_receipt_artifact_authority(tmp_path:
             "--json",
         ]
     ) == 0
-    initial_context = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    initial_context = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(item["source_ref"]["path"] == archive_rel for item in initial_context["groups"]["related_history"])
 
     live_path = tmp_path / live_rel

@@ -158,8 +158,8 @@ def collect_context_sources(
         receipt_warnings = [
             Problem(
                 "warning",
-                "context_completion_receipt_invalid",
-                f"{problem.message}; receipt excluded from this Context bundle",
+                "graph_source_completion_receipt_invalid",
+                f"{problem.message}; receipt excluded from Graph source evidence",
                 problem.path,
             )
             for problem in receipt_problems
@@ -461,8 +461,8 @@ def context_graph_problems(
             mapped.append(
                 Problem(
                     "warning",
-                    "context_graph_completion_receipt_invalid",
-                    f"{problem.message}; graph task receipt evidence is incomplete for this Context bundle",
+                    "graph_source_receipt_incomplete",
+                    f"{problem.message}; task receipt evidence is incomplete for Graph source search",
                     problem.path,
                     problem.code,
                 )

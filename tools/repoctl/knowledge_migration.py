@@ -1,9 +1,7 @@
-"""Explicit one-time Knowledge v1 migration with immutable original provenance.
+"""Explicit one-time Knowledge v1 conversion preserving original evidence.
 
-Only current v2 records enter query/Graph. An historical v1 file which is
-referenced elsewhere must retain its exact original path and bytes. Instead
-of rewriting/removing it, an explicit, digest-verified proof connects that
-historical source to an equivalent or newly saved v2 record.
+Staging verifies the current v2 successor, then finalization moves unmodified
+v1 bytes outside active storage and retargets exact historical citations.
 """
 from __future__ import annotations
 
@@ -16,7 +14,7 @@ from typing import Any
 
 from .io import RepoctlError, atomic_write, repoctl_lock
 from .knowledge_records import (
-    _record_dir, prepare_knowledge_record,
+    _record_dir, prepare_knowledge_record, _knowledge_record_digest,
     _knowledge_record_contract_problems,
 )
 from .knowledge_projection import KNOWLEDGE_RECORD_SCHEMA_VERSION, rebuild_knowledge_projection
@@ -82,12 +80,7 @@ def _regular_path_under(root: Path, path: Path) -> bool:
 
 
 def preserved_legacy_migration_witness(root: Path, legacy: dict[str, Any]) -> bool:
-    """Verify the original v1 and current v2 bytes against an explicit proof.
-
-    A missing, corrupt or tampered proof is never an implicit migration. This
-    function is used by the normal Knowledge status/check to avoid repeatedly
-    treating deliberately preserved provenance as a pending v1 conversion.
-    """
+    """Validate the explicit *staging-only* v1/v2 conversion witness."""
     legacy_id = str(legacy.get("id") or "")
     try:
         old_path = _record_dir(root) / f"{legacy_id}.json"
@@ -141,35 +134,6 @@ def preserved_legacy_migration_witness(root: Path, legacy: dict[str, Any]) -> bo
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
         return False
 
-
-
-def verified_preserved_legacy_ids(root: Path, *, repo_id: str, ids: set[str]) -> set[str]:
-    """Historical v1 IDs may be replacement references only with valid proofs.
-
-    A v1 original is never inserted as a query/projection head. Its historical
-    identity is referenced only from an intact v2 migration's checked witness.
-    """
-    result: set[str] = set()
-    for record_id in ids:
-        if _ID.fullmatch(record_id) is None:
-            continue
-        path = _record_dir(root) / f"{record_id}.json"
-        if not _regular_path_under(root, path):
-            continue
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            continue
-        if (
-            isinstance(record, dict)
-            and record.get("schema") == "repoctl.knowledge.record"
-            and record.get("schema_version") == 1
-            and record.get("id") == record_id
-            and str(record.get("repo_id") or "") == repo_id
-            and preserved_legacy_migration_witness(root, record)
-        ):
-            result.add(record_id)
-    return result
 
 
 def _scope_paths(record: dict[str, Any]) -> list[str]:
@@ -452,3 +416,194 @@ def migrate_legacy_knowledge(
         "applied_count": committed, "records": rows,
         "projection_problems": projection_errors,
     }
+def _authored_markdown_mentions(root: Path, record_id: str) -> list[dict[str, Any]]:
+    """Locate authored references without editing code fences or user prose."""
+    docs = root / "docs"
+    if not docs.is_dir():
+        return []
+    matches: list[dict[str, Any]] = []
+    for path in sorted(docs.rglob("*.md")):
+        relative = path.relative_to(docs)
+        if relative.parts and relative.parts[0] == "archive":
+            continue  # historical sources must not be rewritten
+        if not _regular_path_under(root, path):
+            raise RepoctlError("authored Knowledge reference cannot be scanned safely",
+                               code="knowledge_migration_reference_unreadable",
+                               path=path.relative_to(root).as_posix())
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise RepoctlError("authored Knowledge reference is unreadable",
+                               code="knowledge_migration_reference_unreadable",
+                               path=path.relative_to(root).as_posix()) from exc
+        for number, line in enumerate(lines, 1):
+            if record_id in line:
+                matches.append({"path": path.relative_to(root).as_posix(), "line": number})
+    return matches
+
+
+def finalize_legacy_knowledge(
+    root: Path, *, repo_id: str, record_id: str, apply: bool = False,
+) -> dict[str, Any]:
+    """One-time removal of a converted v1 from the active record directory.
+
+    The original bytes move to historical evidence. Exact v2 citations are
+    retargeted to that same historical file with their original digest; no
+    claim, reason, recorded_at or source content is fabricated. A live v1
+    reference that cannot be safely rewritten blocks finalization.
+    """
+    if _ID.fullmatch(record_id) is None:
+        raise RepoctlError("finalize requires one valid --record-id", code="knowledge_migration_id_invalid")
+    old_path = _record_dir(root) / f"{record_id}.json"
+    archive = root / "docs/archive/knowledge" / f"{record_id}.json"
+    before_path, manifest_path = _proof_paths(root, record_id)
+    for item in (old_path, archive, before_path, manifest_path):
+        _assert_safe_proof_path(root, item)
+    with repoctl_lock(root) if apply else nullcontext():
+        if not old_path.is_file():
+            if archive.is_file() and manifest_path.is_file():
+                try:
+                    proof = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError):
+                    proof = {}
+                if (proof.get("schema_version") == 2
+                        and proof.get("finalized_archive_path") == archive.relative_to(root).as_posix()
+                        and proof.get("finalized_archive_sha256") == _sha(archive.read_bytes())):
+                    return {"mode": "apply" if apply else "dry_run", "record_count": 1,
+                            "applied_count": 0, "records": [{"id": record_id, "status": "already_finalized",
+                            "archive_path": archive.relative_to(root).as_posix()}],
+                            "projection_problems": []}
+            raise RepoctlError("v1 record not found for finalization", code="knowledge_migration_record_missing")
+        original = old_path.read_bytes()
+        try:
+            legacy = json.loads(original.decode("utf-8"))
+        except (ValueError, UnicodeError) as exc:
+            raise RepoctlError("v1 Knowledge JSON is invalid", code="knowledge_migration_invalid_json") from exc
+        if (not isinstance(legacy, dict) or legacy.get("id") != record_id
+                or legacy.get("schema_version") != 1 or legacy.get("repo_id") != repo_id
+                or not preserved_legacy_migration_witness(root, legacy)):
+            return {"mode": "apply" if apply else "dry_run", "record_count": 1,
+                    "applied_count": 0, "records": [{"id": record_id, "status": "needs_prior_migration",
+                    "path": old_path.relative_to(root).as_posix(),
+                    "explanation": "first verify an equivalent v2 and its original-source preservation witness"}],
+                    "projection_problems": []}
+        if archive.exists() or archive.is_symlink():
+            raise RepoctlError("historical destination already exists", code="knowledge_migration_archive_collision",
+                               path=archive.relative_to(root).as_posix())
+        original_proof = manifest_path.read_bytes()
+        proof = json.loads(original_proof.decode("utf-8"))
+        destination_id = str(proof["destination_id"])
+        old_rel = old_path.relative_to(root).as_posix()
+        archive_rel = archive.relative_to(root).as_posix()
+        rewrites: list[tuple[Path, bytes, str]] = []
+        current_files: list[tuple[Path, dict[str, Any]]] = []
+        for item in sorted(_record_dir(root).glob("K-*.json")):
+            if item == old_path:
+                continue
+            if not _regular_path_under(root, item):
+                raise RepoctlError("unsafe current Knowledge path", code="knowledge_migration_path_unsafe", path=str(item))
+            data = json.loads(item.read_text(encoding="utf-8"))
+            if data.get("schema_version") != KNOWLEDGE_RECORD_SCHEMA_VERSION:
+                continue
+            if _knowledge_record_contract_problems(data, record_id=item.stem,
+                                                   repo_id=str(data.get("repo_id") or "")):
+                raise RepoctlError("current Knowledge contract is invalid", code="knowledge_migration_current_invalid",
+                                   path=item.relative_to(root).as_posix())
+            current_files.append((item, data))
+        for item, data in current_files:
+            modified = json.loads(json.dumps(data))
+            changed = False
+            for ref in modified.get("source_refs", []):
+                if not isinstance(ref, dict) or ref.get("path") != old_rel:
+                    continue
+                if ref.get("content_sha256") != _sha(original):
+                    raise RepoctlError("v2 cites a different historical Knowledge digest",
+                                       code="knowledge_migration_source_mismatch",
+                                       path=item.relative_to(root).as_posix())
+                ref["path"] = archive_rel
+                changed = True
+            if record_id in modified.get("replaces", []):
+                if item.stem != destination_id:
+                    raise RepoctlError("another v2 replaces this v1; review that lineage before finalization",
+                                       code="knowledge_migration_replacement_review",
+                                       path=item.relative_to(root).as_posix())
+                modified["replaces"] = [value for value in modified["replaces"] if value != record_id]
+                changed = True
+            if changed:
+                modified["record_digest"] = _knowledge_record_digest(modified)
+                if _knowledge_record_contract_problems(modified, record_id=item.stem,
+                                                       repo_id=str(modified.get("repo_id") or "")):
+                    raise RepoctlError("rewritten v2 contract would be invalid",
+                                       code="knowledge_migration_rewrite_invalid",
+                                       path=item.relative_to(root).as_posix())
+                raw = item.read_bytes()
+                rewritten = json.dumps(modified, ensure_ascii=False, indent=2, sort_keys=True) + chr(10)
+                rewrites.append((item, raw, rewritten))
+        # Rewriting a cited current v2 would invalidate another source digest.
+        changed_paths = {item.relative_to(root).as_posix() for item, _, _ in rewrites}
+        for item, data in current_files:
+            if any(isinstance(ref, dict) and ref.get("path") in changed_paths
+                   for ref in data.get("source_refs", [])):
+                raise RepoctlError("rewritten v2 is itself cited; review transitive provenance",
+                                   code="knowledge_migration_dependent_citation",
+                                   path=item.relative_to(root).as_posix())
+        row: dict[str, Any] = {
+            "id": record_id, "status": "ready_to_finalize",
+            "path": old_rel, "archive_path": archive_rel, "original_sha256": _sha(original),
+            "destination_id": destination_id,
+            "rewritten_current_records": [item.relative_to(root).as_posix() for item, _, _ in rewrites],
+            "authored_markdown_links": _authored_markdown_mentions(root, record_id),
+        }
+        if not apply:
+            return {"mode": "dry_run", "record_count": 1, "applied_count": 0,
+                    "records": [row], "projection_problems": []}
+        if old_path.read_bytes() != original or manifest_path.read_bytes() != original_proof:
+            raise RepoctlError("historical source or witness changed", code="knowledge_migration_concurrent_edit")
+        # A successor modified since staging is not verified historical evidence.
+        destination = _record_dir(root) / f"{destination_id}.json"
+        if (not _regular_path_under(root, destination)
+                or _sha(destination.read_bytes()) != proof["destination_sha256"]):
+            raise RepoctlError("verified current Knowledge successor changed",
+                               code="knowledge_migration_concurrent_edit")
+        rewritten: list[tuple[Path, bytes]] = []
+        moved = False
+        proof_updated = False
+        try:
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            old_path.rename(archive)
+            moved = True
+            for item, previous, updated in rewrites:
+                # External writers may ignore repoctl's lock: never overwrite
+                # a newer current record with an earlier prepared rewrite.
+                if item.read_bytes() != previous:
+                    raise RepoctlError("current Knowledge changed during finalization",
+                                       code="knowledge_migration_concurrent_edit")
+                atomic_write(item, updated)
+                rewritten.append((item, previous))
+            new_proof = dict(proof)
+            new_proof["schema_version"] = 2
+            new_proof["destination_sha256"] = _sha(destination.read_bytes())
+            new_proof["finalized_archive_path"] = archive_rel
+            new_proof["finalized_archive_sha256"] = _sha(original)
+            new_proof["rewritten_current_records"] = [
+                {"path": item.relative_to(root).as_posix(), "before_sha256": _sha(previous),
+                 "after_sha256": _sha(updated.encode("utf-8"))}
+                for item, previous, updated in rewrites
+            ]
+            atomic_write(manifest_path, json.dumps(new_proof, ensure_ascii=False, indent=2, sort_keys=True) + chr(10))
+            proof_updated = True
+            # The archive is now the sole byte-preserved original; remove the
+            # temporary duplicate witness only after all current refs resolve.
+            before_path.unlink()
+        except Exception:
+            if proof_updated:
+                atomic_write(manifest_path, original_proof.decode("utf-8"))
+            for item, previous in reversed(rewritten):
+                atomic_write(item, previous.decode("utf-8"))
+            if moved and archive.is_file():
+                archive.rename(old_path)
+            raise
+        row["status"] = "applied_finalized"
+    _, problems = rebuild_knowledge_projection(root, repo_id=repo_id)
+    return {"mode": "apply", "record_count": 1, "applied_count": 1,
+            "records": [row], "projection_problems": [item.code for item in problems]}

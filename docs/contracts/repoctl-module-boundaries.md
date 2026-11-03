@@ -9,7 +9,7 @@ These boundaries keep the small product model stable: Task owns current work and
 - **Graph evidence search** is the bounded, read-only source-linked retrieval implementation inside Graph. It reuses source documents, explicit historical queries, Knowledge, and materialized relations without writing scope or query-selection state.
 - **Graph** owns a rebuildable typed relation snapshot over provider facts, metadata, documents, task/history subjects, and Knowledge. Queries never rebuild it implicitly.
 - **History projection** owns the derived completion catalogue, checkpoint, bounded hot history, and exact cold-history lookup. Completion receipts and Task artifacts remain the source history.
-- **Knowledge** owns current durable records, source resolution, query projection, explicit replacement links, and migration reporting for preserved older records.
+- **Knowledge** owns current v2 records, source resolution, query projection and explicit replacement links. A separate one-time migration stages and finalizes remaining v1 data into immutable historical source files; v1 is never an ordinary query input.
 - **Backlog** owns opaque raw block CRUD only.
 - **Metadata** owns `.repometa` policy, annotations, exclusions, move repair, and metadata validation.
 - **Index providers** own read-only technical facts such as language, imports, symbols, calls, effects, and structured dependencies.
@@ -43,4 +43,4 @@ Root Task/control state and each product Git repository remain separate. Root sc
 - No project-specific hardcode in core discovery defaults.
 - No direct `.repometa` mutation outside repoctl in normal operation.
 - No hidden state-changing recovery in `task doctor`, query commands, or `next_actions`.
-- No automatic query receipts, Discovery episodes, verification registrations, Pack bindings, Knowledge approvals, or generated wiki state reintroduced under a different name.
+- No automatic query receipts, Discovery episodes, verification registrations, query bindings, Knowledge approvals, or generated wiki state reintroduced under a different name.

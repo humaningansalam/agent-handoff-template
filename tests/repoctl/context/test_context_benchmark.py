@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from tools.repoctl.cli import main
+from tools.repoctl.context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
 from tools.repoctl.knowledge_projection import initialize_empty_knowledge_projection
 from tests.repoctl.context_test_helpers import (
     _setup_context_multirepo_workspace,
@@ -42,28 +43,16 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
 ) -> None:
     fixture = _setup_benchmark_workspace(tmp_path, monkeypatch)
 
-    assert main(["graph", "evidence-materialize", "--fixture", fixture.as_posix(), "--repo-id", "main", "--json"]) == 0
-    materialized = json.loads(capsys.readouterr().out)
-    assert materialized["data"]["totals"]["created"] >= 10
-    assert materialized["data"]["totals"]["conflict"] == 0
+    materialized, materialize_problems = materialize_context_benchmark_corpus(tmp_path, fixture=fixture, repo_id="main")
+    assert materialize_problems == []
+    assert materialized["totals"]["created"] >= 10
+    assert materialized["totals"]["conflict"] == 0
 
-    assert main(
-        [
-            "graph", "evidence-benchmark",
-            "--fixture",
-            fixture.as_posix(),
-            "--repo-id",
-            "main",
-            "--min-recall-at-5",
-            "0.85",
-            "--require-source-integrity",
-            "--require-fixture-corpus",
-            "--require-no-forbidden",
-            "--json",
-        ]
-    ) == 0
-
-    payload = json.loads(capsys.readouterr().out)
+    benchmark, benchmark_problems = run_context_benchmark(
+        tmp_path, fixture=fixture, repo_id="main", min_recall_at_5=0.85,
+        require_source_integrity=True, require_fixture_corpus=True, require_no_forbidden=True,
+    )
+    payload = {"data": benchmark, "problems": [problem.to_dict() for problem in benchmark_problems]}
     summary = payload["data"]["summary"]
     assert payload["data"]["question_count"] == 35
     assert summary["source_ref_integrity"] is True
@@ -94,15 +83,11 @@ def test_context_benchmark_materializes_real_fixture_and_measures_retrieval_qual
     assert payload["problems"] == []
     assert main(
         [
-            "graph", "search",
-            "packaged/operational_controls.py",
-            "--repo-id",
-            "main",
-            "--full",
-            "--json",
+            "graph", "search", "packaged/operational_controls.py",
+            "--repo-id", "main", "--full", "--json",
         ]
     ) == 0
-    exact_copy = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    exact_copy = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item["source_ref"]["path"] == "repos/packaged/operational_controls.py"
         and set(item["evidence_kinds"]) & {"exact_path", "exact_filename"}
@@ -119,21 +104,12 @@ def test_context_benchmark_keeps_multirepo_results_isolated(
     fixture = Path("tests/fixtures/context-benchmark-multirepo").resolve()
     _write_context_benchmark_collection_corpus(tmp_path, fixture)
 
-    assert main(
-        [
-            "graph", "evidence-benchmark",
-            "--fixture",
-            fixture.as_posix(),
-            "--require-fixture-corpus",
-            "--require-no-cross-repo",
-            "--require-no-forbidden",
-            "--min-category-visible-recall",
-            "multi-repo-isolation=1.0",
-            "--json",
-        ]
-    ) == 0
-
-    payload = json.loads(capsys.readouterr().out)
+    benchmark, benchmark_problems = run_context_benchmark(
+        tmp_path, fixture=fixture, require_fixture_corpus=True,
+        require_no_cross_repo=True, require_no_forbidden=True,
+        min_category_visible_recall={"multi-repo-isolation": 1.0},
+    )
+    payload = {"data": benchmark, "problems": [problem.to_dict() for problem in benchmark_problems]}
     result = payload["data"]["results"][0]
     assert result["repo_id"] == "web"
     assert result["metrics"]["visible_recall"] == 1.0

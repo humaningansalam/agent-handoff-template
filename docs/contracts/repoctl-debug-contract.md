@@ -21,12 +21,12 @@ An event may contain:
 - recognized option names and argument count, without values
 - validated repository and Task IDs
 - exit status and problem/warning codes
-- Context source consultation counts; Graph/Knowledge query outcomes and returned source paths or record IDs; Knowledge saves, including task finish; Handoff freshness and resume executability
+- Graph/Knowledge evidence-source consultation counts; Graph/Knowledge query outcomes and returned source paths or record IDs; Knowledge saves, including task finish; Handoff freshness and resume executability
 
 Returned references are bounded within the same event, with total count and truncation status. Raw queries, paths from arguments, excerpts, Task prose, Knowledge claims/reasons, stdout, stderr, error messages, credentials, environment variables, full result payloads, Discovery selections, and verification outcomes are not stored.
 
 ## Summary meaning
 
-`debug summary --json` reports command counts, success/failure, duration, later same-shape success after failure, Context source consultation, and journal completeness. A request shape uses command, validated target, argument count, and non-output option names because raw values are deliberately absent.
+`debug summary --json` reports command counts, success/failure, duration, later same-shape success after failure, Graph/Knowledge evidence-source consultation, and journal completeness. A request shape uses command, validated target, argument count, and non-output option names because raw values are deliberately absent.
 
-Query status separates a returned match from a successful empty query. References link the returned context to original execution records for downstream-use analysis; neither a return nor a later same-shape success proves reuse or recovery. Direct file reads remain in the caller's execution record, not this repoctl journal.
+Query status separates a returned match from a successful empty query. References link the returned evidence to original execution records for downstream-use analysis; neither a return nor a later same-shape success proves reuse or recovery. Direct file reads remain in the caller's execution record, not this repoctl journal.
