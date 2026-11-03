@@ -565,9 +565,11 @@ def finalize_legacy_knowledge(
                 or _sha(destination.read_bytes()) != proof["destination_sha256"]):
             raise RepoctlError("verified current Knowledge successor changed",
                                code="knowledge_migration_concurrent_edit")
-        rewritten: list[tuple[Path, bytes]] = []
+        # Journal expected bytes before each write: a failing writer may
+        # already have replaced the file when it raises.
+        rewritten: list[tuple[Path, bytes, bytes]] = []
         moved = False
-        proof_updated = False
+        expected_proof: bytes | None = None
         try:
             archive.parent.mkdir(parents=True, exist_ok=True)
             old_path.rename(archive)
@@ -578,8 +580,8 @@ def finalize_legacy_knowledge(
                 if item.read_bytes() != previous:
                     raise RepoctlError("current Knowledge changed during finalization",
                                        code="knowledge_migration_concurrent_edit")
+                rewritten.append((item, previous, updated.encode("utf-8")))
                 atomic_write(item, updated)
-                rewritten.append((item, previous))
             new_proof = dict(proof)
             new_proof["schema_version"] = 2
             new_proof["destination_sha256"] = _sha(destination.read_bytes())
@@ -590,18 +592,57 @@ def finalize_legacy_knowledge(
                  "after_sha256": _sha(updated.encode("utf-8"))}
                 for item, previous, updated in rewrites
             ]
-            atomic_write(manifest_path, json.dumps(new_proof, ensure_ascii=False, indent=2, sort_keys=True) + chr(10))
-            proof_updated = True
+            expected_proof = (json.dumps(new_proof, ensure_ascii=False, indent=2, sort_keys=True) + chr(10)).encode("utf-8")
+            atomic_write(manifest_path, expected_proof.decode("utf-8"))
             # The archive is now the sole byte-preserved original; remove the
             # temporary duplicate witness only after all current refs resolve.
             before_path.unlink()
-        except Exception:
-            if proof_updated:
-                atomic_write(manifest_path, original_proof.decode("utf-8"))
-            for item, previous in reversed(rewritten):
-                atomic_write(item, previous.decode("utf-8"))
-            if moved and archive.is_file():
-                archive.rename(old_path)
+        except Exception as failure:
+            conflicts: list[str] = []
+            if expected_proof is not None:
+                try:
+                    if not _regular_path_under(root, manifest_path):
+                        conflicts.append(manifest_path.relative_to(root).as_posix())
+                    else:
+                        current_proof = manifest_path.read_bytes()
+                        if current_proof == expected_proof:
+                            atomic_write(manifest_path, original_proof.decode("utf-8"))
+                        elif current_proof != original_proof:
+                            conflicts.append(manifest_path.relative_to(root).as_posix())
+                except Exception:
+                    conflicts.append(manifest_path.relative_to(root).as_posix())
+            for item, previous, updated in reversed(rewritten):
+                try:
+                    if not _regular_path_under(root, item):
+                        conflicts.append(item.relative_to(root).as_posix())
+                    else:
+                        current = item.read_bytes()
+                        if current == updated:
+                            atomic_write(item, previous.decode("utf-8"))
+                        elif current != previous:
+                            # This is now somebody else's edit, not our write.
+                            conflicts.append(item.relative_to(root).as_posix())
+                except Exception:
+                    conflicts.append(item.relative_to(root).as_posix())
+            if moved:
+                try:
+                    if not _regular_path_under(root, archive) or archive.read_bytes() != original or old_path.exists() or old_path.is_symlink():
+                        conflicts.append(archive_rel)
+                    elif conflicts:
+                        # Keep the historical path for externally edited v2
+                        # citations while restoring the original active v1.
+                        atomic_write(old_path, original.decode("utf-8"))
+                    else:
+                        archive.rename(old_path)
+                except Exception:
+                    conflicts.append(archive_rel)
+            if conflicts:
+                raise RepoctlError(
+                    "finalization failed; concurrent edits prevented a complete rollback; "
+                    "original evidence was retained for explicit reconciliation",
+                    code="knowledge_migration_rollback_incomplete",
+                    path=", ".join(sorted(set(conflicts))),
+                ) from failure
             raise
         row["status"] = "applied_finalized"
     _, problems = rebuild_knowledge_projection(root, repo_id=repo_id)

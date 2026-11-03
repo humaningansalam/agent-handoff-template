@@ -170,23 +170,89 @@ def _receipt_knowledge_citations(root: Path) -> dict[str, list[str]]:
             raise ValueError(f"unreadable Knowledge source: {path}") from exc
         if not isinstance(record, dict):
             raise ValueError(f"invalid Knowledge source: {path}")
+        citation_paths: set[str] = set()
         for ref in record.get("source_refs", []):
             if isinstance(ref, dict) and isinstance(ref.get("path"), str):
-                refs.setdefault(ref["path"], []).append(path.relative_to(root).as_posix())
+                citation_paths.add(ref["path"])
+        if isinstance(record.get("sources"), list):
+            citation_paths.update(source for source in record["sources"] if isinstance(source, str))
+        if isinstance(record.get("source"), str):
+            citation_paths.add(record["source"])
+        for cited_path in citation_paths:
+            refs.setdefault(cited_path, []).append(path.relative_to(root).as_posix())
     return refs
 
 
+def _plan_receipt_knowledge_relinks(
+    root: Path, *, receipt_rel: str, archive_rel: str, original_sha256: str,
+    cited: dict[str, list[str]],
+) -> list[tuple[Path, bytes, str]]:
+    """Relink only verified current v2 citations for one reviewed receipt transition."""
+    from .io import RepoctlError
+    from .knowledge_records import _knowledge_record_contract_problems, _knowledge_record_digest
+
+    changes: list[tuple[Path, bytes, str]] = []
+    for rel in sorted(set(cited.get(receipt_rel, []))):
+        path = root / rel
+        if not _safe_transition_path(root, path, must_exist=True):
+            raise RepoctlError("citing Knowledge source is unsafe",
+                               code="receipt_transition_knowledge_unsafe", path=rel)
+        original = path.read_bytes()
+        try:
+            data = json.loads(original.decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise RepoctlError("citing Knowledge record is invalid JSON",
+                               code="receipt_transition_knowledge_invalid", path=rel) from exc
+        if not isinstance(data, dict) or data.get("schema_version") != 2:
+            raise RepoctlError("first finalize active v1 Knowledge; only current v2 may be relinked",
+                               code="receipt_transition_knowledge_v1", path=rel)
+        if _knowledge_record_contract_problems(
+            data, record_id=path.stem, repo_id=str(data.get("repo_id") or ""),
+        ):
+            raise RepoctlError("citing current Knowledge record is not valid",
+                               code="receipt_transition_knowledge_invalid", path=rel)
+        if cited.get(rel):
+            raise RepoctlError("another Knowledge record cites this record's digest; review transitive provenance",
+                               code="receipt_transition_knowledge_dependent", path=rel)
+        updated = json.loads(json.dumps(data))
+        matched = False
+        for ref in updated["source_refs"]:
+            if not isinstance(ref, dict) or ref.get("path") != receipt_rel:
+                continue
+            if ref.get("content_sha256") != original_sha256:
+                raise RepoctlError("Knowledge citation differs from actual old receipt bytes",
+                                   code="receipt_transition_knowledge_digest", path=rel)
+            if ref.get("kind") not in {"workspace_file", "completion_receipt", "task_artifact"}:
+                raise RepoctlError("Knowledge citation kind cannot follow the archived receipt",
+                                   code="receipt_transition_knowledge_kind", path=rel)
+            if ref["kind"] == "task_artifact":
+                ref["kind"] = "workspace_file"  # old docs/tasks/ prefix classified this JSON as a Task
+            ref["path"] = archive_rel
+            matched = True
+        if not matched:
+            raise RepoctlError("Knowledge citation changed while preparing transition",
+                               code="receipt_transition_knowledge_concurrent_edit", path=rel)
+        updated["record_digest"] = _knowledge_record_digest(updated)
+        if _knowledge_record_contract_problems(
+            updated, record_id=path.stem, repo_id=str(updated.get("repo_id") or ""),
+        ):
+            raise RepoctlError("relinked Knowledge record would violate its contract",
+                               code="receipt_transition_knowledge_invalid", path=rel)
+        changes.append((path, original, json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2) + "\n"))
+    return changes
+
+
 def migrate_completion_receipts(
-    root: Path, *, task_id: str = "", apply: bool = False,
+    root: Path, *, task_id: str = "", apply: bool = False, relink_knowledge: bool = False,
 ) -> dict[str, Any]:
-    """Explicit, one-time v3/v4 -> v5 conversion, never a normal legacy reader.
+    """Explicit, one-time v2-v4 -> v5 conversion, never a normal legacy reader.
 
     Validates the old and new schemas without inferring changed Task bytes,
     saves its byte-identical historical receipt once, and changes only its
     presentation. Existing artifact drift is separately reported, never fixed
     by rewriting the recorded completion hash. Verification and Discovery outcome remain in the old source, not
-    copied as current completion authority. Incomplete v2 evidence is reported
-    without fabricating a start event or path transition.
+    copied as current completion authority. Unrecorded v2 start/transition
+    events remain explicitly incomplete in v5, never fabricated.
     """
     from contextlib import nullcontext
 
@@ -196,6 +262,9 @@ def migrate_completion_receipts(
     if task_id and TASK_ID.fullmatch(task_id) is None:
         raise RepoctlError("receipt transition requires a valid Task ID",
                            code="receipt_transition_invalid_id")
+    if relink_knowledge and not task_id:
+        raise RepoctlError("Knowledge relinking requires one reviewed Task ID",
+                           code="receipt_transition_knowledge_requires_id")
     root = root.resolve()
     directory = root / "docs/tasks/.repoctl-state/completions"
     if not _safe_transition_path(root, directory, must_exist=False) and (
@@ -212,7 +281,7 @@ def migrate_completion_receipts(
         paths = sorted(directory.glob("T-*.json")) if directory.is_dir() else []
 
     records: list[dict[str, Any]] = []
-    prepared: list[tuple[Path, bytes, str, Path, Path, str, str]] = []
+    prepared: list[tuple[Path, bytes, str, Path, Path, str, str, list[tuple[Path, bytes, str]]]] = []
     with repoctl_lock(root) if apply else nullcontext():
         cited = _receipt_knowledge_citations(root)
         for path in paths:
@@ -270,15 +339,26 @@ def migrate_completion_receipts(
             if type(version) is not int or version not in {2, 3, 4}:
                 row.update(status="unresolved", reason="unsupported receipt schema")
                 continue
-            if (
-                not isinstance(data.get("started_at"), str)
-                or not isinstance(data.get("completed_event_at"), str)
-                or not isinstance(data.get("repo_evidence"), dict)
-                or not isinstance(data["repo_evidence"].get("path_transitions"), list)
-            ):
-                row.update(status="unresolved", reason="original start/completion event or path transitions are absent; cannot reconstruct historical proof")
+            complete_events = (
+                isinstance(data.get("started_at"), str)
+                and isinstance(data.get("completed_event_at"), str)
+                and isinstance(data.get("repo_evidence"), dict)
+                and isinstance(data["repo_evidence"].get("path_transitions"), list)
+            )
+            # v2 did not record start events or exact before/after transitions.
+            # Their absence is an evidence limitation, not damaged source.
+            # A v5 historical marker can retain this fact without invention.
+            historical_gap = (
+                version == 2
+                and isinstance(data.get("repo_evidence"), dict)
+                and "started_at" not in data
+                and "completed_event_at" not in data
+                and "path_transitions" not in data["repo_evidence"]
+            )
+            if not complete_events and not historical_gap:
+                row.update(status="unresolved", reason="partial or inconsistent start/completion event or path transition evidence")
                 continue
-            if cited.get(rel):
+            if cited.get(rel) and not relink_knowledge:
                 row.update(status="unresolved", reason="current Knowledge cites the original receipt digest",
                            cited_by=sorted(cited[rel]))
                 continue
@@ -289,6 +369,17 @@ def migrate_completion_receipts(
                 row.update(status="unresolved", reason="historical proof destination exists or is unsafe",
                            archive_path=archive.relative_to(root).as_posix())
                 continue
+            knowledge_relinks: list[tuple[Path, bytes, str]] = []
+            if cited.get(rel):
+                try:
+                    knowledge_relinks = _plan_receipt_knowledge_relinks(
+                        root, receipt_rel=rel, archive_rel=archive.relative_to(root).as_posix(),
+                        original_sha256=digest_bytes(raw), cited=cited,
+                    )
+                except RepoctlError as exc:
+                    row.update(status="unresolved", reason=f"{exc.code}: {exc}",
+                               cited_by=sorted(cited[rel]))
+                    continue
             try:
                 _validate_completion_receipt(path, root, data, receipt_text=raw.decode("utf-8"),
                                              validate_artifact=False, migration_only=True)
@@ -296,8 +387,14 @@ def migrate_completion_receipts(
                 converted["schema_version"] = 5
                 converted.pop("verification", None)
                 converted.pop("discovery_outcome", None)
+                if historical_gap:
+                    converted["historical_transition_evidence"] = {
+                        "status": "not_recorded",
+                        "original_receipt_sha256": digest_bytes(raw),
+                    }
                 replacement = json.dumps(converted, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-                _validate_completion_receipt(path, root, converted, receipt_text=replacement, validate_artifact=False)
+                _validate_completion_receipt(path, root, converted, receipt_text=replacement,
+                                             validate_artifact=False, migration_only=True)
             except RepoctlError as exc:
                 row.update(status="unresolved", reason=f"{exc.code}: {exc}")
                 continue
@@ -316,15 +413,27 @@ def migrate_completion_receipts(
                 "kind": "presentation_only",
                 "source_integrity_at_conversion": "unverified" if row.get("source_problem") else "verified",
             }
+            if knowledge_relinks:
+                manifest["relinked_current_knowledge_records"] = [
+                    {"path": item.relative_to(root).as_posix(),
+                     "before_sha256": digest_bytes(before),
+                     "after_sha256": digest_bytes(after.encode("utf-8"))}
+                    for item, before, after in knowledge_relinks
+                ]
             manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-            prepared.append((path, raw, replacement, archive, proof, manifest_text, rel))
+            prepared.append((path, raw, replacement, archive, proof, manifest_text, rel, knowledge_relinks))
             row.update(status="ready", archive_path=manifest["original_path"],
                        original_sha256=manifest["original_sha256"],
                        current_sha256=manifest["current_sha256"])
+            if knowledge_relinks:
+                row["relinked_current_knowledge_records"] = manifest["relinked_current_knowledge_records"]
+            if historical_gap:
+                row["historical_transition_evidence"] = "not_recorded"
+                row["evidence_limitation"] = "v2 never recorded start/completion events or path transitions"
         if apply and prepared:
             written: list[tuple[Path, bytes | None, bytes]] = []
             try:
-                for path, original, replacement, archive, proof, manifest_text, rel in prepared:
+                for path, original, replacement, archive, proof, manifest_text, rel, knowledge_relinks in prepared:
                     if path.read_bytes() != original:
                         raise RepoctlError("receipt changed during explicit conversion",
                                            code="receipt_transition_concurrent_edit", path=rel)
@@ -339,6 +448,13 @@ def migrate_completion_receipts(
                                            code="receipt_transition_concurrent_edit", path=rel)
                     written.append((path, original, replacement.encode("utf-8")))
                     atomic_write(path, replacement)
+                    for item, old, new in knowledge_relinks:
+                        if not _safe_transition_path(root, item, must_exist=True) or item.read_bytes() != old:
+                            raise RepoctlError("Knowledge record changed during receipt conversion",
+                                               code="receipt_transition_knowledge_concurrent_edit",
+                                               path=item.relative_to(root).as_posix())
+                        written.append((item, old, new.encode("utf-8")))
+                        atomic_write(item, new)
                     if not _safe_transition_path(root, proof, must_exist=False):
                         raise RepoctlError("receipt proof destination changed during conversion",
                                            code="receipt_transition_concurrent_edit", path=rel)
@@ -350,8 +466,23 @@ def migrate_completion_receipts(
                             break
             except Exception:
                 rollback_errors: list[str] = []
+                relinked_paths = {
+                    item.relative_to(root).as_posix()
+                    for _, _, _, _, _, _, _, relinks in prepared
+                    for item, _, _ in relinks
+                }
+                protected_archives = {
+                    historical_archive
+                    for _, _, _, historical_archive, _, _, _, relinks in prepared
+                    if relinks
+                }
                 for item, original_bytes, expected_current in reversed(written):
                     try:
+                        if (item in protected_archives
+                                and any(problem in relinked_paths for problem in rollback_errors)):
+                            # A concurrent writer may cite this exact archived original.
+                            rollback_errors.append(item.relative_to(root).as_posix())
+                            continue
                         if not item.exists() and original_bytes is None:
                             continue
                         if not item.is_file() or item.is_symlink():
@@ -389,6 +520,7 @@ def migrate_completion_receipts(
         "applied_count": len(applied),
         "unresolved_count": len(unresolved),
         "source_problem_count": sum(bool(row.get("source_problem")) for row in records),
+        "historical_evidence_gap_count": sum(row.get("historical_transition_evidence") == "not_recorded" for row in records),
         "records": records,
         "history_rebuild_required": bool(applied),
         "history_rebuild_commands": rebuild_commands,

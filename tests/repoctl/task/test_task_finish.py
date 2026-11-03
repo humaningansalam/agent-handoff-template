@@ -1421,17 +1421,81 @@ def test_completion_receipt_transition_reports_existing_artifact_drift_without_r
     assert json.loads(proof.read_bytes())["source_integrity_at_conversion"] == "unverified"
 
 
-def test_completion_receipt_transition_does_not_fabricate_missing_v2_events(
+def test_completion_receipt_transition_preserves_v2_missing_events_without_invention(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
-    task_id, receipt_path, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    from tools.repoctl.task_history_migration import digest_bytes
+    from tools.repoctl.tasks import _validate_completion_receipt
+    from tools.repoctl.io import RepoctlError
+
+    task_id, receipt_path, source = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
     before = receipt_path.read_bytes()
-    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 1
-    response = json.loads(capsys.readouterr().out)
-    assert response["data"]["records"][0]["status"] == "unresolved"
-    assert response["data"]["applied_count"] == 0
+    args = ["task", "migrate-receipts", task_id, "--json"]
+    assert main(args) == 0
+    preview = json.loads(capsys.readouterr().out)["data"]
+    assert preview["records"][0]["status"] == "ready"
+    assert preview["source_problem_count"] == 0
+    assert preview["historical_evidence_gap_count"] == 1
     assert receipt_path.read_bytes() == before
-    assert not (tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json").exists()
+    assert main([*args, "--apply"]) == 0
+    result = json.loads(capsys.readouterr().out)["data"]
+    assert result["applied_count"] == 1
+    current = json.loads(receipt_path.read_bytes())
+    assert current["schema_version"] == 5
+    assert current["content_sha256"] == source["content_sha256"]
+    assert current["completed_at"] == source["completed_at"]
+    assert current["changed_entries"] == source["changed_entries"]
+    assert "started_at" not in current and "completed_event_at" not in current
+    assert "path_transitions" not in current["repo_evidence"]
+    assert current["historical_transition_evidence"] == {
+        "status": "not_recorded", "original_receipt_sha256": digest_bytes(before),
+    }
+    assert "verification" not in current
+    _validate_completion_receipt(receipt_path, tmp_path, current)
+    archive = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    assert archive.read_bytes() == before and proof.is_file()
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["records"][0]["status"] == "already_converted"
+
+    # Current schema does not silently trust a self-declared gap if the
+    # exact original evidence and conversion witness are no longer intact.
+    proof.unlink()
+    with pytest.raises(RepoctlError, match="without intact original evidence"):
+        _validate_completion_receipt(receipt_path, tmp_path, current)
+
+
+def test_completion_receipt_partial_v2_history_is_not_guessed(tmp_path, monkeypatch, capsys):
+    task_id, receipt_path, source = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    source["started_at"] = "20260609T184046Z"
+    before = json.dumps(source, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    receipt_path.write_text(before, encoding="utf-8")
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 1
+    row = json.loads(capsys.readouterr().out)["data"]["records"][0]
+    assert row["status"] == "unresolved"
+    assert "partial or inconsistent" in row["reason"]
+    assert receipt_path.read_text(encoding="utf-8") == before
+
+
+def test_old_v2_without_ownership_or_manifest_is_preserved_as_incomplete_history(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from tools.repoctl.tasks import _validate_completion_receipt
+
+    task_id, receipt_path, data = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    data['repo_evidence'].pop('ownership', None)
+    data['repo_evidence'].pop('fingerprint_manifest', None)
+    receipt_path.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + '\n')
+    original = receipt_path.read_bytes()
+    assert main(['task', 'migrate-receipts', task_id, '--apply', '--json']) == 0
+    report = json.loads(capsys.readouterr().out)['data']
+    assert report['applied_count'] == 1 and report['source_problem_count'] == 0
+    current = json.loads(receipt_path.read_text())
+    assert 'ownership' not in current['repo_evidence']
+    assert 'fingerprint_manifest' not in current['repo_evidence']
+    assert current['historical_transition_evidence']['status'] == 'not_recorded'
+    _validate_completion_receipt(receipt_path, tmp_path, current)
+    assert (tmp_path / f'docs/archive/task-evidence/receipts/{task_id}.json').read_bytes() == original
 
 
 @pytest.mark.parametrize("fault", ["proof_write", "concurrent_edit"])
@@ -1475,6 +1539,193 @@ def test_completion_receipt_transition_rejects_partial_history_proof(
     assert main(["task", "migrate-receipts", task_id, "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["records"][0]["status"] == "unresolved"
+
+
+def _write_receipt_knowledge_citation(root: Path, receipt: Path, *, version: int = 2) -> Path:
+    from tools.repoctl.task_history_migration import digest_bytes
+    from tools.repoctl.knowledge_records import _knowledge_record_digest
+
+    record_id = "K-20260609184046Z--completion-receipt-source"
+    data = {
+        "schema": "repoctl.knowledge.record",
+        "schema_version": version,
+        "id": record_id,
+        "repo_id": "",
+        "kind": "decision",
+        "claim": "Historical completion remains independently sourced.",
+        "reason": "The original completion receipt is retained as the source of record.",
+        "source_refs": [{
+            "kind": "workspace_file",
+            "path": receipt.relative_to(root).as_posix(),
+            "content_sha256": digest_bytes(receipt.read_bytes()),
+        }],
+        "applies_to": {"paths": []},
+        "replaces": [],
+        "recorded_at": "2026-06-09T18:40:46Z",
+    }
+    data["record_digest"] = _knowledge_record_digest(data)
+    path = root / f"docs/knowledge/records/{record_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    return path
+
+
+def test_receipt_transition_relinks_exact_current_knowledge_source_only_when_requested(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from tools.repoctl.knowledge_records import knowledge_source_ref_resolutions, _knowledge_record_digest
+    from tools.repoctl.task_history_migration import digest_bytes
+
+    task_id, receipt, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    old_receipt = receipt.read_bytes()
+    record_path = _write_receipt_knowledge_citation(tmp_path, receipt)
+    old_record = record_path.read_bytes()
+    args = ["task", "migrate-receipts", task_id, "--json"]
+    assert main(args) == 1
+    default = json.loads(capsys.readouterr().out)["data"]["records"][0]
+    assert default["status"] == "unresolved"
+    assert main(["task", "migrate-receipts", "--relink-knowledge", "--json"]) != 0
+    capsys.readouterr()
+    assert main([*args, "--relink-knowledge"]) == 0
+    preview = json.loads(capsys.readouterr().out)["data"]["records"][0]
+    assert preview["status"] == "ready"
+    assert preview["relinked_current_knowledge_records"][0]["path"] == record_path.relative_to(tmp_path).as_posix()
+    assert record_path.read_bytes() == old_record and receipt.read_bytes() == old_receipt
+    assert main([*args, "--relink-knowledge", "--apply"]) == 0
+    result = json.loads(capsys.readouterr().out)["data"]
+    assert result["applied_count"] == 1 and result["unresolved_count"] == 0
+    archived = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json"
+    assert archived.read_bytes() == old_receipt
+    updated = json.loads(record_path.read_bytes())
+    assert updated["source_refs"][0]["path"] == archived.relative_to(tmp_path).as_posix()
+    assert updated["source_refs"][0]["content_sha256"] == digest_bytes(old_receipt)
+    assert updated["claim"] == json.loads(old_record)["claim"]
+    assert updated["reason"] == json.loads(old_record)["reason"]
+    assert updated["recorded_at"] == json.loads(old_record)["recorded_at"]
+    assert updated["record_digest"] == _knowledge_record_digest(updated)
+    assert all(item.status.value == "current" for item in knowledge_source_ref_resolutions(tmp_path, updated))
+    proof = json.loads((tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json").read_bytes())
+    assert proof["relinked_current_knowledge_records"][0]["before_sha256"] == digest_bytes(old_record)
+
+
+def test_v1_finalization_then_receipt_relink_is_one_time_current_only(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from tools.repoctl.task_history_migration import digest_bytes
+
+    task_id, receipt, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    original_receipt = receipt.read_bytes()
+    legacy_id = "K-20260609184046Z--historic-completion"
+    legacy = {
+        "schema": "repoctl.knowledge.record",
+        "schema_version": 1,
+        "id": legacy_id,
+        "repo_id": "",
+        "kind": "decision",
+        "claim": "The historical receipt remains evidence of completion.",
+        "reason": "Its original recorded Task digest must be retained.",
+        "sources": [receipt.relative_to(tmp_path).as_posix()],
+    }
+    legacy_path = tmp_path / f"docs/knowledge/records/{legacy_id}.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text(json.dumps(legacy, sort_keys=True, indent=2) + "\n")
+    assert main(["task", "migrate-receipts", task_id, "--relink-knowledge", "--json"]) == 1
+    assert "knowledge_v1" in json.loads(capsys.readouterr().out)["data"]["records"][0]["reason"]
+    command = ["knowledge", "migrate", "--workspace", "--record-id", legacy_id]
+    assert main([*command, "--apply", "--json"]) == 0
+    staged = json.loads(capsys.readouterr().out)["data"]["records"][0]
+    current_id = staged["destination_id"]
+    assert main([*command, "--finalize", "--apply", "--json"]) == 0
+    finalized = json.loads(capsys.readouterr().out)["data"]["records"][0]
+    assert finalized["status"] == "applied_finalized"
+    assert not legacy_path.exists()
+    assert (tmp_path / f"docs/archive/knowledge/{legacy_id}.json").is_file()
+    assert main(["task", "migrate-receipts", task_id, "--relink-knowledge", "--apply", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)["data"]
+    assert result["applied_count"] == 1
+    current = json.loads((tmp_path / f"docs/knowledge/records/{current_id}.json").read_bytes())
+    source = current["source_refs"][0]
+    assert source["path"] == f"docs/archive/task-evidence/receipts/{task_id}.json"
+    assert source["content_sha256"] == digest_bytes(original_receipt)
+    assert (tmp_path / source["path"]).read_bytes() == original_receipt
+    assert main(["knowledge", "check", "--workspace", "--json"]) == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("blocker", ["active_v1", "wrong_digest", "transitive"])
+def test_receipt_transition_refuses_ambiguous_knowledge_citations(
+    tmp_path: Path, monkeypatch, capsys, blocker: str,
+) -> None:
+    from tools.repoctl.knowledge_records import _knowledge_record_digest
+    from tools.repoctl.task_history_migration import digest_bytes
+
+    task_id, receipt, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    record_path = _write_receipt_knowledge_citation(tmp_path, receipt, version=1 if blocker == "active_v1" else 2)
+    data = json.loads(record_path.read_bytes())
+    if blocker == "wrong_digest":
+        data["source_refs"][0]["content_sha256"] = "sha256:" + "0" * 64
+        data["record_digest"] = _knowledge_record_digest(data)
+        record_path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")
+    if blocker == "transitive":
+        dependent = dict(data)
+        dependent["id"] = "K-20260609184046Z--dependent-source"
+        dependent["claim"] = "Dependent record must not be silently rehashed."
+        dependent["source_refs"] = [{
+            "kind": "workspace_file",
+            "path": record_path.relative_to(tmp_path).as_posix(),
+            "content_sha256": digest_bytes(record_path.read_bytes()),
+        }]
+        dependent["record_digest"] = _knowledge_record_digest(dependent)
+        (record_path.parent / (dependent["id"] + ".json")).write_text(
+            json.dumps(dependent, sort_keys=True, indent=2) + "\n",
+        )
+    before = {p.name: p.read_bytes() for p in record_path.parent.glob("K-*.json")}
+    old_receipt = receipt.read_bytes()
+    assert main(["task", "migrate-receipts", task_id, "--relink-knowledge", "--apply", "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)["data"]["records"][0]
+    assert result["status"] == "unresolved"
+    assert "receipt_transition_knowledge_" in result["reason"]
+    assert receipt.read_bytes() == old_receipt
+    assert {p.name: p.read_bytes() for p in record_path.parent.glob("K-*.json")} == before
+    assert not (tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json").exists()
+
+
+def test_receipt_relink_rollback_preserves_external_knowledge_edit_and_original_receipt(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    import tools.repoctl.io as task_io
+    from tools.repoctl.knowledge_records import _knowledge_record_digest
+
+    task_id, receipt, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    original_receipt = receipt.read_bytes()
+    record_path = _write_receipt_knowledge_citation(tmp_path, receipt)
+    archive = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    original_write = task_io.atomic_write
+    writes = 0
+
+    def edit_after_own_write(path, content):
+        nonlocal writes
+        writes += 1
+        if writes == 4:
+            raise OSError("simulated receipt proof failure")
+        original_write(path, content)
+        if writes == 3:
+            external = json.loads(record_path.read_bytes())
+            external["reason"] = "A later external owner edit must not be overwritten."
+            external["record_digest"] = _knowledge_record_digest(external)
+            record_path.write_text(json.dumps(external, sort_keys=True, indent=2) + "\n")
+
+    monkeypatch.setattr(task_io, "atomic_write", edit_after_own_write)
+    assert main(["task", "migrate-receipts", task_id, "--relink-knowledge", "--apply", "--json"]) != 0
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["problems"][0]["code"] == "receipt_transition_rollback_incomplete"
+    external = json.loads(record_path.read_bytes())
+    assert external["reason"] == "A later external owner edit must not be overwritten."
+    assert archive.read_bytes() == original_receipt
+    assert external["source_refs"][0]["path"] == archive.relative_to(tmp_path).as_posix()
+    assert receipt.read_bytes() == original_receipt
+    assert not proof.exists()
 
 
 def _downgrade_finished_state_to_v3(tmp_path: Path, task_id: str) -> Path:

@@ -112,6 +112,35 @@ def test_task_slop_never_rewrites_examples_or_fences() -> None:
     assert 'residue_count=1; baseline_conflict_count=0' in migrated
 
 
+def test_task_slop_ignores_code_fence_heading_opened_in_notes() -> None:
+    from tools.repoctl.tasks import migrate_task_slop_text
+
+    example = '- 20261101T010203Z: task canceled: example only; residue_paths=["repos/a.py", "repos/b.py"]; baseline_conflicts=[]\n'
+    real = '- 20261101T010204Z: task canceled: real; residue_paths=["repos/c.py"]; baseline_conflicts=[]\n'
+    for opener, closer in (("```markdown", "```"), ("~~~~markdown", "~~~~")):
+        document = (
+            "## Notes\n\n" + opener + "\n## Execution Log\n" + example
+            + closer + "\n\n## Execution Log\n" + real
+        )
+        migrated, changes = migrate_task_slop_text(document)
+        assert len(changes) == 1
+        assert example in migrated
+        assert real not in migrated
+        assert "real; residue_count=1; baseline_conflict_count=0\n" in migrated
+        assert migrated.count("residue_count=") == 1
+
+    # A fence-looking line with an info suffix is code content, not a close.
+    info_marker = (
+        "## Notes\n\n~~~\n~~~python\n## Execution Log\n" + example
+        + "~~~\n\n## Execution Log\n" + real
+    )
+    migrated, changes = migrate_task_slop_text(info_marker)
+    assert len(changes) == 1 and example in migrated and real not in migrated
+
+    unfinished = "## Notes\n\n"+ "```markdown\n## Execution Log\n" + example
+    assert migrate_task_slop_text(unfinished) == (unfinished, [])
+
+
 def test_closed_child_slop_is_not_mutated_by_default_apply(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
     path = add_board_task(

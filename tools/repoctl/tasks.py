@@ -634,19 +634,21 @@ def migrate_task_slop_text(text: str) -> tuple[str, list[dict[str, Any]]]:
     fence_char = ""
     fence_len = 0
     for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
+        # A code fence can begin before Execution Log. Never interpret a
+        # heading inside an example as the real section boundary.
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence:
+            marker = fence.group(1)
+            if not fence_char:
+                fence_char, fence_len = marker[0], len(marker)
+            elif (marker[0] == fence_char and len(marker) >= fence_len
+                  and not line[fence.end():].strip()):
+                fence_char, fence_len = "", 0
+            output.append(line)
+            continue
         heading = re.match(r"^## (.+?)\s*\r?\n?$", line)
         if heading and not fence_char:
             in_log = heading.group(1).strip() == "Execution Log"
-        if in_log:
-            fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-            if fence:
-                marker = fence.group(1)
-                if not fence_char:
-                    fence_char, fence_len = marker[0], len(marker)
-                elif marker[0] == fence_char and len(marker) >= fence_len:
-                    fence_char, fence_len = "", 0
-                output.append(line)
-                continue
         if not in_log or fence_char:
             output.append(line)
             continue
@@ -1916,9 +1918,12 @@ def _receipt_baseline_ownership(
     *,
     rel: str,
     schema_version: int,
+    incomplete_history: bool = False,
 ) -> dict[str, dict[str, str]]:
     raw_ownership = repo_evidence.get("ownership")
-    if schema_version == LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION and "ownership" not in repo_evidence:
+    if (schema_version == LEGACY_COMPLETION_RECEIPT_SCHEMA_VERSION or incomplete_history) and "ownership" not in repo_evidence:
+        # There are no recorded ownership decisions to validate; this does
+        # not prove that historical dirty paths or decisions were empty.
         return {}
     try:
         return _canonical_baseline_ownership(
@@ -2084,6 +2089,18 @@ def _validate_completion_receipt(
     if not isinstance(task_id, str):
         raise RepoctlError(f"task completion receipt has invalid identity: {rel}", code="invalid_completion_receipt", path=rel)
     has_transition_fields = "started_at" in data or "completed_event_at" in data
+    historical = data.get("historical_transition_evidence")
+    incomplete_history = historical is not None
+    if incomplete_history and (
+        schema_version != COMPLETION_RECEIPT_SCHEMA_VERSION
+        or not isinstance(historical, dict)
+        or set(historical) != {"status", "original_receipt_sha256"}
+        or historical.get("status") != "not_recorded"
+        or not isinstance(historical.get("original_receipt_sha256"), str)
+        or not _valid_sha256(historical["original_receipt_sha256"])
+        or has_transition_fields
+    ):
+        raise RepoctlError("historical evidence marker is inconsistent with current receipt", code="invalid_completion_receipt", path=rel)
     if schema_version in {
         TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
         DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
@@ -2134,6 +2151,7 @@ def _validate_completion_receipt(
         repo_evidence,
         rel=rel,
         schema_version=schema_version,
+        incomplete_history=incomplete_history,
     )
     fingerprint = str(repo_evidence.get("diff_fingerprint_sha256") or "")
     if mode is not _CompletionEvidenceMode.NONE and not _valid_sha256(fingerprint):
@@ -2145,11 +2163,13 @@ def _validate_completion_receipt(
     if len(set(entries)) != len(entries):
         raise RepoctlError(f"task completion receipt has duplicate changed_entries: {rel}", code="invalid_completion_receipt", path=rel)
     _validate_receipt_fingerprint_manifest(rel=rel, data=data, repo_evidence=repo_evidence, entries=entries)
-    if schema_version in {
+    if incomplete_history and "path_transitions" in repo_evidence:
+        raise RepoctlError("historical receipt must not invent path transitions", code="invalid_completion_receipt", path=rel)
+    if not incomplete_history and (schema_version in {
         TRANSITION_COMPLETION_RECEIPT_SCHEMA_VERSION,
         DISCOVERY_OUTCOME_COMPLETION_RECEIPT_SCHEMA_VERSION,
         COMPLETION_RECEIPT_SCHEMA_VERSION,
-    } or has_transition_fields:
+    } or has_transition_fields):
         started_at = data.get("started_at")
         completed_event_at = data.get("completed_event_at")
         if not isinstance(started_at, str) or not _valid_event_stamp(started_at):
@@ -2171,6 +2191,36 @@ def _validate_completion_receipt(
             code="invalid_completion_receipt",
             path=rel,
         )
+    if incomplete_history and not migration_only:
+        # A current v5 presentation can describe a real old completion whose
+        # start/transition events were never recorded. The immutable original
+        # and conversion proof must exist; no old schema is read normally.
+        from .task_history_migration import _receipt_transition_paths, _safe_transition_path, digest_bytes
+
+        _active, historical_source, conversion_proof = _receipt_transition_paths(root, task_id)
+        try:
+            if (not _safe_transition_path(root, historical_source, must_exist=True)
+                    or not _safe_transition_path(root, conversion_proof, must_exist=True)):
+                raise ValueError("original receipt or migration proof is missing")
+            original_digest = digest_bytes(historical_source.read_bytes())
+            conversion = json.loads(conversion_proof.read_text(encoding="utf-8"))
+            if (
+                original_digest != historical["original_receipt_sha256"]
+                or not isinstance(conversion, dict)
+                or conversion.get("schema") != "repoctl.task.receipt-transition"
+                or conversion.get("kind") != "presentation_only"
+                or conversion.get("task_id") != task_id
+                or conversion.get("original_path") != historical_source.relative_to(root).as_posix()
+                or conversion.get("original_sha256") != original_digest
+                or conversion.get("receipt_path") != rel
+                or conversion.get("current_sha256") != digest_bytes(path.read_bytes())
+            ):
+                raise ValueError("historical provenance no longer matches")
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            raise RepoctlError(
+                "current receipt has incomplete history without intact original evidence",
+                code="invalid_completion_receipt", path=rel,
+            ) from exc
     return CompletionReceiptArtifact(
         receipt=data,
         receipt_path=rel,

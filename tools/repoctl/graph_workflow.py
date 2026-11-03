@@ -307,7 +307,8 @@ def _dedupe_entries(entries: list[dict[str, Any]], *, preferred_symbol: str = ""
     # implementation is the first navigation action, not alphabetic filename.
     result = list(merged.values())
     result.sort(key=lambda item: (
-        0 if item.get("symbol", "").rsplit(".", 1)[-1] == preferred_symbol else 1,
+        0 if preferred_symbol and (item.get("symbol", "").rsplit(".", 1)[-1] == preferred_symbol
+                                   or Path(item["path"]).stem == preferred_symbol) else 1,
         0 if item["relation"] == "confirmed" else 1,
         item["path"],
     ))
@@ -743,7 +744,10 @@ def query_graph_workflow(
         implementations, preferred_symbol=route.strip("/").split("/")[-1] if route else symbol.rsplit(".", 1)[-1]
     )
     dependents, dependent_count = _dedupe_entries(dependents)
-    tests, test_count = _dedupe_entries(tests)
+    tests, test_count = _dedupe_entries(
+        tests,
+        preferred_symbol=f"{Path(implementations[0]['path']).stem}_test" if len(implementations) == 1 else "",
+    )
     any_found = bool(entrypoints or implementations)
     candidate_present = any(item["relation"] == "candidate" for item in [*implementations, *dependents, *tests])
     # Empty/stale materialization cannot prove a negative; no-test evidence
@@ -794,6 +798,7 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
     caller answer cannot meet a required compiler-confirmed relation stage.
     """
     expected = case.get("expected_paths") if isinstance(case.get("expected_paths"), dict) else {}
+    related = case.get("expected_related_paths") if isinstance(case.get("expected_related_paths"), dict) else {}
     stages = result.get("stages") if isinstance(result.get("stages"), dict) else {}
     aliases = {"entrypoint": "entrypoints", "current_source": "implementation"}
     required = case.get("required_stages") if isinstance(case.get("required_stages"), list) else []
@@ -806,6 +811,8 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
     for stage in sorted(expected):
         values = expected[stage]
         expected_paths = sorted({str(value) for value in values if isinstance(value, str) and value}) if isinstance(values, list) else []
+        related_values = related.get(stage)
+        related_paths = {value for value in related_values if isinstance(value, str) and value} if isinstance(related_values, list) else set()
         stage_key = aliases.get(stage, stage)
         observations = [entry for entry in stages.get(stage_key, []) if isinstance(entry, dict)]
         matches = {str(entry.get("path") or ""): entry for entry in observations if entry.get("path")}
@@ -822,7 +829,16 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
             or (matches[path].get("relation") == "source"
                 and matches[path].get("verification") in verified_source_types)
         )
-        false_positive_paths = sorted(set(matches) - set(expected_paths))
+        # Secondary Dart tests import the library owning the queried part.
+        # They are verified compile dependencies, not direct behavioural
+        # ground truth. Only explicitly reviewed exact part-chain paths can
+        # avoid the false-positive count; a name candidate still fails.
+        verified_related = sorted(
+            path for path in related_paths & set(matches)
+            if matches[path].get("relation") == "confirmed"
+            and matches[path].get("evidence") == "TESTS_FILE through exact Dart library/part chain"
+        )
+        false_positive_paths = sorted(set(matches) - set(expected_paths) - set(verified_related))
         total += len(expected_paths)
         hits += len(hit_paths)
         confirmed_hits += len(confirmed_paths)
@@ -838,6 +854,8 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
             "missing_paths": sorted(set(expected_paths) - set(matches)),
             "false_positive_paths": false_positive_paths[:MAX_WORKFLOW_STAGE_ENTRIES],
             "false_positive_count": len(false_positive_paths),
+            "verified_related_paths": verified_related,
+            "verified_related_count": len(verified_related),
             "first_expected_path": expected_paths[0] if expected_paths else "",
             "first_observed_path": first_observed,
             "first_path_correct": bool(expected_paths and first_observed in expected_paths),

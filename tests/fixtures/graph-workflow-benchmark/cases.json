@@ -89,6 +89,38 @@
           "lib/runtime/local_store/local_waitlist_authority.dart"
         ]
       },
+      "expected_related_paths": {
+        "tests": [
+          "test/build_local_store_server_package_test.dart",
+          "test/dinein_table_session_authority_acceptance_test.dart",
+          "test/identity_tenant_actual_local_test.dart",
+          "test/local_waitlist_authority_test.dart",
+          "test/pickup_runtime_isolation_readiness_test.dart",
+          "test/store_server_local_authority_bootstrap_test.dart",
+          "test/store_server_local_customer_server_test.dart",
+          "test/store_server_outbox_uploader_test.dart",
+          "test/store_server_process_client_controller_test.dart",
+          "test/store_server_process_codec_test.dart",
+          "test/store_server_process_dispatcher_test.dart",
+          "test/store_server_process_e2e_test.dart",
+          "test/store_server_process_offline_staff_enrollment_restart_test.dart",
+          "test/store_server_process_offline_staff_post_restart_ticket_authority_test.dart",
+          "test/store_server_process_prepared_daemon_rediscovery_characterization_test.dart",
+          "test/store_server_process_retryable_read_reconnect_characterization_test.dart",
+          "test/store_server_process_staff_enroll_admission_characterization_test.dart",
+          "test/store_server_restaurant_backup_test.dart",
+          "test/store_server_role_transfer_actual_local_test.dart",
+          "test/store_server_role_transfer_artifact_test.dart",
+          "test/store_server_runtime_test.dart",
+          "test/store_server_update_launch_preflight_test.dart",
+          "test/store_ticket_service_local_authority_test.dart",
+          "test/support/store_server_lite_process_e2e_fixture.dart",
+          "test/support/store_server_process_e2e_fixture.dart",
+          "test/support/store_server_process_external_admission_fixture.dart",
+          "test/ticket_request_handler_local_authority_test.dart",
+          "test/widget_test.dart"
+        ]
+      },
       "expected_statuses": [
         "partial",
         "found"
@@ -118,7 +150,8 @@
         ]
       },
       "expected_statuses": [
-        "partial"
+        "partial",
+        "found"
       ]
     }
   ]

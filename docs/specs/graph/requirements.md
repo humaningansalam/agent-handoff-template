@@ -14,6 +14,8 @@ Current-source overlay excludes stale stored relations. Ambiguity fails closed. 
 
 `graph workflow` returns entrypoints, implementations, callers/dependents and tests separately. Compiler/AST-confirmed edges are typed and distinguishable from textual candidates. A required but ungrounded stage is **not evaluated**, not an empty-success stage. Benchmarks include negative and stale cases, first action correctness, false-positive paths, provenance and required-stage precision; full recall or correct required paths with extra false-positive paths cannot count as task-navigation completion.
 
+For Dart `part` files, a test importing the exact owning library is a verified **library/part compile dependency**, not automatically a direct behavioural assertion of the selected extension. The fixture records these separately as `expected_related_paths`; only source-confirmed `TESTS_FILE through exact Dart library/part chain` entries qualify. Direct target tests remain first in navigation. Unrelated or candidate-only tests still fail false-positive checks. A proven stale→current refresh may legitimately return `found` rather than only `partial`.
+
 Document authority reflects declared adoption status as well as location: an explicitly draft/proposed requirement cannot be promoted to adopted authority by its filename.
 
 ## Source-grounded relationship extensions (post-v0.14.1, source branch)

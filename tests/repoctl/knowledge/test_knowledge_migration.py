@@ -179,6 +179,50 @@ def test_finalization_preserves_unlocked_concurrent_current_edit(tmp_path, monke
     assert not (tmp_path / 'docs/archive/knowledge' / f'{name}.json').exists()
 
 
+def test_finalization_failure_keeps_external_edit_after_own_write(tmp_path, monkeypatch, capsys):
+    from tools.repoctl import knowledge_migration as migration
+    from tools.repoctl.io import RepoctlError
+    from tools.repoctl.knowledge_records import _knowledge_record_digest
+
+    _setup_knowledge_workspace(tmp_path, monkeypatch)
+    name = 'K-20260609184045Z--rollback-external-edit'
+    old = _legacy(tmp_path, name)
+    original = old.read_bytes()
+    assert main(['knowledge', 'add', '--repo-id', 'main', '--kind', 'decision',
+                 '--claim', 'Keep durable keys on every retry.',
+                 '--reason', 'The verified retry test shows stable keys.',
+                 '--source', f'docs/knowledge/records/{name}.json', '--json']) == 0
+    current_id = _out(capsys)['data']['record']['id']
+    assert main(['knowledge', 'migrate', '--repo-id', 'main', '--record-id', name,
+                 '--apply', '--json']) == 0
+    _out(capsys)
+    current_path = tmp_path / 'docs/knowledge/records' / f'{current_id}.json'
+    manifest = tmp_path / 'docs/tasks/.repoctl-state/knowledge-migrations' / name / 'migration.json'
+    original_proof = manifest.read_bytes()
+    original_write = migration.atomic_write
+    external_bytes = None
+
+    def fail_manifest_after_external_edit(path, body):
+        nonlocal external_bytes
+        if path == manifest:
+            record = json.loads(current_path.read_text())
+            record['reason'] = 'Externally edited after finalizer wrote this v2.'
+            record['record_digest'] = _knowledge_record_digest(record)
+            external_bytes = (json.dumps(record, indent=2, sort_keys=True) + '\n').encode()
+            current_path.write_bytes(external_bytes)
+            raise OSError('manifest write failed after external v2 edit')
+        return original_write(path, body)
+
+    monkeypatch.setattr(migration, 'atomic_write', fail_manifest_after_external_edit)
+    with pytest.raises(RepoctlError) as caught:
+        migration.finalize_legacy_knowledge(tmp_path, repo_id='main', record_id=name, apply=True)
+    assert caught.value.code == 'knowledge_migration_rollback_incomplete'
+    assert current_path.read_bytes() == external_bytes
+    assert old.read_bytes() == original
+    assert (tmp_path / 'docs/archive/knowledge' / f'{name}.json').read_bytes() == original
+    assert manifest.read_bytes() == original_proof
+
+
 def test_missing_reason_or_source_requires_real_verified_input(tmp_path,monkeypatch,capsys):
     _setup_knowledge_workspace(tmp_path, monkeypatch)
     name='K-20260609184045Z--needs-reason'

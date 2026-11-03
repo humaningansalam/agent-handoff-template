@@ -2900,6 +2900,7 @@ def cmd_task_migrate_receipts(args: argparse.Namespace) -> int:
         find_workspace_root(),
         task_id=str(args.task_id or ""),
         apply=bool(args.apply),
+        relink_knowledge=bool(args.relink_knowledge),
     )
     unresolved = [item for item in data["records"] if item["status"] == "unresolved"]
     source_problems = [item for item in data["records"] if item.get("source_problem")]
@@ -6736,9 +6737,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_migrate_slop.add_argument("--closed", action="store_true", help="explicitly migrate one done/canceled/archived Task, preserving the original completion witness")
     task_migrate_slop.add_argument("--json", action="store_true")
     task_migrate_slop.set_defaults(func=cmd_task_migrate_slop)
-    task_migrate_receipts = task_sub.add_parser("migrate-receipts", help="One-time v3/v4 to v5 completion receipt transition with original proof preserved; preview by default.")
+    task_migrate_receipts = task_sub.add_parser("migrate-receipts", help="One-time v2-v4 to v5 completion receipt transition; missing v2 events remain explicitly unverified; preview by default.")
     task_migrate_receipts.add_argument("task_id", nargs="?", help="one completed Task id; omit for all verifiable historical receipts")
     task_migrate_receipts.add_argument("--apply", action="store_true", help="write verified v5 receipts and a byte-identical archived original under a guarded transaction")
+    task_migrate_receipts.add_argument("--relink-knowledge", action="store_true", help="for one reviewed Task only, retarget exact v2 Knowledge SHA citations to its archived original receipt; finalize v1 first")
     task_migrate_receipts.add_argument("--json", action="store_true")
     task_migrate_receipts.set_defaults(func=cmd_task_migrate_receipts)
     task_migrate_states = task_sub.add_parser("migrate-states", help="One-time retirement of closed v3 Task baselines; live v3 states need owner review.")

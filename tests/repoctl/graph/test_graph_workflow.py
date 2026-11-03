@@ -234,6 +234,55 @@ def test_benchmark_requires_zero_false_positive_paths_for_completion() -> None:
     assert score['task_navigation_complete'] is False
 
 
+def test_gakza_fixture_distinguishes_direct_test_and_proven_part_dependents() -> None:
+    from tools.repoctl.graph_workflow import evaluate_workflow_benchmark
+
+    cases = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/graph-workflow-benchmark/cases.json').read_text())['cases']
+    case = next(item for item in cases if item['id'] == 'gakza-dart-precision')
+    direct = case['expected_paths']['tests'][0]
+    related = case['expected_related_paths']['tests'][0]
+    provenance = 'TESTS_FILE through exact Dart library/part chain'
+    result = {'status': 'found', 'stages': {
+        'implementation': [{'path': case['expected_paths']['implementation'][0], 'relation': 'confirmed'}],
+        'callers_or_dependents': [{'path': case['expected_paths']['callers_or_dependents'][0], 'relation': 'confirmed'}],
+        'tests': [{'path': direct, 'relation': 'confirmed', 'evidence': provenance},
+                  {'path': related, 'relation': 'confirmed', 'evidence': provenance}],
+    }}
+    good = evaluate_workflow_benchmark(result, case)
+    assert good['task_navigation_complete'] is True
+    assert good['stages']['tests']['verified_related_count'] == 1
+    assert good['false_positive_count'] == 0
+
+    # A string match or an unrelated test must not gain credit merely because
+    # the corpus has verified secondary compile-time dependencies.
+    result['stages']['tests'][1]['relation'] = 'candidate'
+    unproven = evaluate_workflow_benchmark(result, case)
+    assert unproven['false_positive_count'] == 1
+    assert unproven['task_navigation_complete'] is False
+    result['stages']['tests'][1]['relation'] = 'confirmed'
+    result['stages']['tests'].append({'path': 'test/unrelated_test.dart', 'relation': 'confirmed'})
+    extra = evaluate_workflow_benchmark(result, case)
+    assert extra['false_positive_count'] == 1
+    assert extra['task_navigation_complete'] is False
+
+
+def test_cops_fixture_accepts_only_proven_current_refresh_found() -> None:
+    from tools.repoctl.graph_workflow import evaluate_workflow_benchmark
+
+    cases = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/graph-workflow-benchmark/cases.json').read_text())['cases']
+    case = next(item for item in cases if item['id'] == 'cops-and-robbers-stale-empty')
+    result = {'status': 'found', 'stages': {
+        'implementation': [{'path': 'lib/main.dart', 'relation': 'confirmed'}],
+    }, 'refresh': {'status': 'current', 'source_rechecked': True}}
+    verified = evaluate_workflow_benchmark(result, case)
+    assert verified['status_expected'] is True
+    assert verified['task_navigation_complete'] is True
+    result['refresh']['source_rechecked'] = False
+    missing_proof = evaluate_workflow_benchmark(result, case)
+    assert missing_proof['task_navigation_complete'] is False
+    assert missing_proof['required_stages']['refresh']['precise'] is False
+
+
 def test_dart_exact_seed_recovers_live_sibling_importer_without_inventing_a_call(tmp_path, monkeypatch) -> None:
     from tools.repoctl.graph_model import GraphNode, GraphSnapshot, file_id
     from tools.repoctl.graph_workflow import query_graph_workflow

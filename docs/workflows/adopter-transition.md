@@ -7,14 +7,14 @@ This workflow **supersedes the earlier v0.14.3 rollout instructions**; neither v
 After acceptance, pin the new release tag, archive, size and SHA-256 from the source Main's final report; do not reuse the v0.14.3 archive or commands as a deployment target. Extract to a separate directory, not over the current workspace. Back up adopter-owned root docs, current and historical Task/Knowledge, `.repoctl-state` (including ignored receipts, migration witnesses, manifests, projections), and root Git state together. Record the product repository's existing dirty baseline; never reset product Git roots.
 
 ```bash
+ADOPTER=/absolute/path/to/selected-consumer-workspace
 SOURCE=/absolute/path/to/verified-new-source-release-extraction
-PLAN=.repoctl-state/upgrade-reviewed-plan.json
-./scripts/repoctl repo list --json
-./scripts/repoctl task audit --include-archived --json
-./scripts/repoctl upgrade plan --from "$SOURCE" --output "$PLAN" --json
-# Review owner-owned create/replace/remove operations and any conflicts before apply.
-./scripts/repoctl upgrade apply --plan-file "$PLAN" --json
-# Run final postflight only after the explicit source transitions below.
+PLAN=/absolute/path/to/reviewed-upgrade-plan.json
+"$SOURCE/scripts/repoctl" upgrade plan --workspace-root "$ADOPTER" --from "$SOURCE" --output "$PLAN" --json
+# Review exact operations, owner-owned create files and missing archive identities before apply.
+"$SOURCE/scripts/repoctl" upgrade apply --workspace-root "$ADOPTER" --plan-file "$PLAN" --json
+# The immediate postflight is diagnostic; finish each source transition before final acceptance.
+cd "$ADOPTER"
 ```
 
 If the **read-only upgrade plan** finds an `archive_locator_migration_conflict`, stop without applying and have the adopter owner resolve the missing predecessor Task/archive identity from real evidence; never synthesize a replacement archive or rewrite a receipt. The preceding source audit found this blocker in Hither and HostSpan; its historical 28/30 plan result is not proof that those workspaces are now fixed. If postflight finds an archived/closed-task receipt conflict, halt rather than rewriting the receipt to today's hash.
@@ -27,14 +27,17 @@ The current runtime accepts v5 completion receipts and v4 Task start states only
 ./scripts/repoctl task migrate-receipts --json
 ./scripts/repoctl task migrate-receipts T-YYYYMMDDHHMMSSZ --json
 ./scripts/repoctl task migrate-receipts T-YYYYMMDDHHMMSSZ --apply --json
+# Only when this old receipt has a reviewed current v2 Knowledge citation; finalize v1 (§4) first:
+./scripts/repoctl task migrate-receipts T-YYYYMMDDHHMMSSZ --relink-knowledge --json
+./scripts/repoctl task migrate-receipts T-YYYYMMDDHHMMSSZ --relink-knowledge --apply --json
 ./scripts/repoctl task migrate-states --json
 ./scripts/repoctl task migrate-states T-YYYYMMDDHHMMSSZ --json
 ./scripts/repoctl task migrate-states T-YYYYMMDDHHMMSSZ --apply --json
 ```
 
-Receipt conversion preserves **byte-identical old receipts**, the original Task artifact hash, start/completion timestamps, path transitions, and a SHA-linked provenance manifest under `docs/archive/task-evidence/receipts/`. The output reports `source_problem_count` independently: an already-mismatched or missing historical Task is **not repaired** by translating a schema. Even when the format translation was written, an integrity problem makes the command fail; investigate actual historical evidence and stop before calling history rebuilding or postflight successful. Incomplete v2 event/transition evidence remains unresolved. Rewriting the receipt hash to the present file is prohibited.
+Receipt conversion retains the **exact original receipt bytes** and recorded Task-content hash under `docs/archive/task-evidence/receipts/` with a SHA-linked witness. Existing event times and path transitions remain unchanged when recorded. Older v2 receipts that never contained start/completion events or path transitions can become current v5 records with `historical_transition_evidence.status=not_recorded`; this is an explicitly incomplete historical interval, **not inferred proof**. A partially populated or inconsistent set of event fields is unresolved. Compare `historical_evidence_gap_count` (source never recorded the fields) separately from `source_problem_count` (missing or changed actual Task evidence). A schema translation cannot repair pre-existing Task digest drift: stop on that integrity warning. Never replace the recorded content hash with today's Task hash.
 
-Only after a closed Task has a v5 completion authority may its old v3 start-state be retired. `migrate-states` preserves exact original state bytes under `docs/archive/task-evidence/start-baselines/` and removes only the retired active state. Live v3 state, missing Task identity, and cited source hashes are unresolved; do not restart an active Task, infer old dirty state, or force a new baseline. If current Knowledge cites old receipt/state bytes, address the exact cited record and its provenance via the reviewed Knowledge step first, then retry the individual transition. Rebuild completion history using each *exact* repository selector in `history_rebuild_commands` after integrity review; a workspace-only receipt uses `--workspace`.
+Only after a closed Task has a v5 completion authority may its old v3 start-state be retired. `migrate-states` preserves exact original state bytes under `docs/archive/task-evidence/start-baselines/` and removes only the retired active state. Live v3 state, missing Task identity, and cited source hashes are unresolved; do not restart an active Task, infer old dirty state, or force a new baseline. For a cited receipt, first finalize active v1 through §4, then preview the individual `--relink-knowledge` command. It retargets only matching SHA-verified current v2 source refs to the byte-identical archived receipt, without changing claims, reasons or original timestamps. An active v1, mismatched source SHA, transitive Knowledge citation or concurrent change is a blocker. If rollback cannot undo its own Knowledge write after an external edit, it preserves that edit **and the original archived receipt** and reports a conflict; reconcile them before retrying. A cited old start-state still requires its own explicit reviewed source fix. Rebuild Knowledge projection after successful relinking and completion history using each exact repository selector in `history_rebuild_commands`; a workspace-only receipt uses `--workspace`.
 
 ## 3. Explicitly clean known Task-generated slop
 
@@ -68,6 +71,8 @@ Default apply **never** edits a done/canceled child just because it remains in `
 Replace `main` with the actual repository ID; use `--workspace` for root-only records. Stage/finalize **one reviewed ID at a time**, not a blind batch. The first `--apply` may return a nonzero *incomplete transition* status if an existing v2 still `replaces` the active v1 ID: do not add runtime legacy support or try to repair its derived projection early. Review the preview, then complete `--finalize --apply` and rerun the check. An actual missing reason/source, conflicting historical SHA, ambiguous successor, unsafe citation or transitive v2 reference is a blocker and must not be fabricated or ignored.
 
 Finalization retains the **exact v1 bytes** under `docs/archive/knowledge/<record-id>.json`, rewrites only verified SHA-linked v2 references, updates affected v2 digests, and removes the now-duplicate temporary witness. No v1 remains under active `docs/knowledge/records/` after a successful conversion. Inspect `authored_markdown_links` in the preview for exact paths and lines; fix Task/ADR/PRD/Workflow links deliberately after reviewing their meaning. The command never rewrites examples, prose or product-specific decisions. Do not leave a shadow copy or pretend the old path is canonical. Historical Task receipt drift remains visible and may require owner review; migration is not new task verification.
+
+If another writer changes a v2 after finalization's own write and a later step fails, rollback **must not erase that edit**. `knowledge_migration_rollback_incomplete` stops the transition and names the conflicting file. The exact v1 may remain at both the active path and historical archive so the externally edited v2 citation still resolves. Preserve both and reconcile the conflict explicitly before retrying; do not force-clean it as a successful migration.
 
 ## 5. Migrate old project documents and references
 
