@@ -57,14 +57,14 @@ def test_graph_search_never_promotes_explicitly_proposed_spec(tmp_path: Path, mo
     _materialize(tmp_path)
     assert main(['graph','search','zzroute_nonce_17','--repo-id','main','--full','--json']) == 0
     payload = json.loads(capsys.readouterr().out)
-    candidates = [item for item in payload['data']['bundle']['evidence']
+    candidates = [item for item in payload['data']['result']['evidence']
                   if item['source_ref']['path']=='docs/specs/route/requirements.md']
     assert candidates
     assert all(item['document_role']=='reference' for item in candidates)
     spec.write_text('# Idempotency\n\nStatus: accepted\n\nzzroute_nonce_17 must be unique.\n', encoding='utf-8')
     assert main(['graph','search','zzroute_nonce_17','--repo-id','main','--full','--json']) == 0
     accepted = json.loads(capsys.readouterr().out)
-    latest = [item for item in accepted['data']['bundle']['evidence']
+    latest = [item for item in accepted['data']['result']['evidence']
               if item['source_ref']['path']=='docs/specs/route/requirements.md']
     assert latest
     assert all(item['document_role']=='product_authority' for item in latest)
@@ -84,6 +84,6 @@ def test_old_docs_prd_is_not_collected_for_graph_search(tmp_path: Path, monkeypa
     _materialize(tmp_path)
     assert main(['graph','search','zzold_prd_marker_72','--repo-id','main','--full','--json']) == 0
     result = json.loads(capsys.readouterr().out)
-    paths = [item['source_ref']['path'] for item in result['data']['bundle']['evidence']]
+    paths = [item['source_ref']['path'] for item in result['data']['result']['evidence']]
     assert old.relative_to(tmp_path).as_posix() not in paths
     assert product_old.relative_to(tmp_path).as_posix() not in paths

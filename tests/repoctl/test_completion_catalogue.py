@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import tarfile
 from pathlib import Path
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -49,19 +50,23 @@ def _receipt_input(
 ) -> CompletionReceiptInput:
     artifact_path = f"docs/archive/tasks/{task_id}--catalogued.md"
     artifact_text = artifact_text or f"# {task_id}\n\nVerified completion.\n"
-    verification_digest = _digest("verified")
+    # A self-consistent v5 receipt fixture; no old verification-proof state is invented.
+    completed_at = f"{task_id[2:10]}T{task_id[10:16]}Z"
+    completion_event = datetime.strptime(completed_at, "%Y%m%dT%H%M%SZ")
+    start_event = completion_event - timedelta(seconds=1)
     receipt = {
         "schema": "repoctl.task.completion",
-        "schema_version": 2,
+        "schema_version": 5,
         "repo_id": repo_id,
         "task_id": task_id,
         "status": "done",
-        "completed_at": f"{task_id[2:10]}T{task_id[10:16]}Z",
+        "completed_at": completed_at,
+        "started_at": start_event.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "completed_event_at": completion_event.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "task_path_at_completion": artifact_path,
         "content_sha256": _digest(artifact_text),
         "changed_entries": [
-            {"change": "modified", "path": path}
-            for path in changed_paths
+            {"change": "modified", "path": path} for path in changed_paths
         ],
         "repo_evidence": {
             "mode": "working_tree_diff",
@@ -74,15 +79,16 @@ def _receipt_input(
             "ownership": {},
             "meta_gate": {},
             "delta": {"changed_count": len(changed_paths)},
-        },
-        "verification": {
-            "source": "task_section",
-            "source_path": "",
-            "source_sha256": verification_digest,
-            "normalization": "normalize_final_newline",
-            "normalized_sha256": verification_digest,
-            "stored_sha256": verification_digest,
-            "truncated": False,
+            "path_transitions": [
+                {
+                    "path": path,
+                    "effect": "write",
+                    "basis": ["observed_change"],
+                    "before": {"kind": "file", "blob_oid": "a" * 40, "executable": False},
+                    "after": {"kind": "file", "blob_oid": "b" * 40, "executable": False},
+                }
+                for path in changed_paths
+            ],
         },
     }
     receipt_path = f"docs/tasks/.repoctl-state/completions/{task_id}.json"
@@ -603,7 +609,7 @@ def test_release_archive_closes_first_and_later_completion_tails_and_recovers(
             "main",
             "--full",
         )
-        assert history["data"]["bundle"]["completeness"]["explicit_task_history"]["selected_record_count"] >= 1
+        assert history["data"]["result"]["completeness"]["explicit_task_history"]["selected_record_count"] >= 1
         if index == 1:
             subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
             subprocess.run(

@@ -49,15 +49,15 @@ def test_repoctl_release_field_gate_runs_real_quality_checks_and_cleans_fixture_
     assert payload["data"]["product_readiness"] == "not_evaluated"
     assert payload["data"]["failed_count"] == 0
     assert "knowledge_records_check" in gates
-    assert gates["context_benchmark"]["ok"] is True
-    assert "knowledge_result_questions" not in gates["context_benchmark"]["summary"]
-    assert "by_category" not in gates["context_benchmark"]["summary"]
+    assert gates["graph_search_retrieval"]["ok"] is True
+    assert "knowledge_result_questions" not in gates["graph_search_retrieval"]["summary"]
+    assert "by_category" not in gates["graph_search_retrieval"]["summary"]
     assert not any("pack" in gate for gate in gates)
     artifact_output = output.read_text(encoding="utf-8")
     artifact = json.loads(artifact_output)
     assert artifact["data"]["artifact"]["path"] == ".repoctl-state/field-gates/repoctl-release.json"
     artifact_gates = {gate["name"]: gate for gate in artifact["data"]["gates"]}
-    assert "by_category" in artifact_gates["context_benchmark"]["summary"]
+    assert "by_category" in artifact_gates["graph_search_retrieval"]["summary"]
     assert len(compact_output.encode("utf-8")) < len(artifact_output.encode("utf-8"))
     assert source_annotation.read_text(encoding="utf-8") == "{}\n"
     assert not (repo / ".repometa/policy.json").exists()

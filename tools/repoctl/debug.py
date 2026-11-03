@@ -18,7 +18,7 @@ from .settings import debug_mode, load_repoctl_settings
 DEBUG_EVENTS_REL = Path("docs/tasks/.repoctl-state/debug/events.jsonl")
 DEBUG_TRUNCATED_REL = DEBUG_EVENTS_REL.with_name("capture-truncated")
 DEBUG_EVENT_SCHEMA = "repoctl.debug.event"
-DEBUG_EVENT_SCHEMA_VERSION = 1
+DEBUG_EVENT_SCHEMA_VERSION = 2
 _MAX_ITEMS = 100
 _MAX_REFERENCES = 32
 _MAX_EVENT_BYTES = 64 * 1024
@@ -103,8 +103,8 @@ def observe_envelope(envelope: Any) -> None:
             nodes.extend([relation.get("from", {}), relation.get("to", {})])
         _observe_result(str(data.get("query_status") or "unavailable"), nodes)
         trace["result"]["freshness"] = str((data.get("freshness") or {}).get("status") or "unavailable")
-    elif command == "graph.search" and isinstance(data.get("bundle"), dict):
-        groups = data["bundle"].get("groups", {})
+    elif command == "graph.search" and isinstance(data.get("result"), dict):
+        groups = data["result"].get("groups", {})
         items = [item for group in groups.values() for item in group if isinstance(item, dict)]
         _observe_result("found" if items else "not_found", items)
     elif command in {"task.resume", "task.handoff.bind"}:
@@ -184,7 +184,7 @@ def observe_context(
     anchor = completeness.get("graph_anchor") if isinstance(completeness.get("graph_anchor"), Mapping) else {}
     explicit_history = completeness.get("explicit_task_history") if isinstance(completeness.get("explicit_task_history"), Mapping) else {}
     history_status = str(explicit_history.get("status") or "disabled")
-    trace["context_sources"] = {
+    trace["evidence_sources"] = {
         "graph": {
             "available": bool(completeness.get("graph_available")),
             "anchor_status": str(anchor.get("status") or "not_requested"),
@@ -222,7 +222,7 @@ def finish_debug(root: Path, token: Token[dict[str, Any] | None], *, exit_code: 
                 "warning_codes": sorted(trace["warning_codes"])[:_MAX_ITEMS],
             },
         }
-        for field in ("context_sources", "result"):
+        for field in ("evidence_sources", "result"):
             if field in trace:
                 event[field] = trace[field]
         append_debug_event(root, event)
@@ -248,7 +248,7 @@ def debug_summary(root: Path) -> dict[str, Any]:
             "last_timestamp": max(timestamps, default=None),
         },
         "commands": commands,
-        "context_sources": _context_source_summary(events),
+        "evidence_sources": _context_source_summary(events),
         "outcomes": {
             "succeeded": sum(event["outcome"]["ok"] for event in events),
             "failed": sum(not event["outcome"]["ok"] for event in events),
@@ -296,7 +296,7 @@ def _context_source_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     knowledge = {"consulted": 0, "queries_with_results": 0, "returned": 0}
     history: dict[str, Any] = {"consulted": 0, "statuses": Counter(), "queries_with_results": 0, "returned": 0}
     for event in events:
-        sources = event.get("context_sources")
+        sources = event.get("evidence_sources")
         if not isinstance(sources, dict):
             continue
         graph_source = sources["graph"]
@@ -411,7 +411,7 @@ def _valid_event(value: Any) -> bool:
             and _valid_request(value.get("request"))
             and _valid_target(value.get("target"))
             and _valid_outcome(value.get("outcome"))
-            and _valid_sources(value.get("context_sources"))
+            and _valid_sources(value.get("evidence_sources"))
             and _valid_result(value.get("result"))
         )
     except (KeyError, TypeError):

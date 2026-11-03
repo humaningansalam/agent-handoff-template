@@ -15,3 +15,12 @@ Archive is for preserving non-live task file originals.
 - Source of truth for non-live work remains the task file itself, whether it is still under `docs/tasks/` or already moved to `docs/archive/tasks/`.
 - Remove standalone items from `docs/BOARD.md` when they cease to be live (archived).
 - Remove child items from `docs/BOARD.md` when the child reaches `done` or `canceled`, even if the file remains in `docs/tasks/` until the parent is archived.
+
+## Historical migration witnesses
+
+Explicit one-time transitions preserve byte-identical originals under
+`docs/archive/task-evidence/receipts/` and `docs/archive/task-evidence/start-baselines/`.
+The SHA-linked manifest records a format change, not a new completion or validation.
+An original Task/receipt hash mismatch remains an unresolved integrity finding.
+Back up and restore these witnesses together with Task, state, receipts, Knowledge,
+and the derived completion catalogue.

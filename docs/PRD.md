@@ -18,7 +18,7 @@ The understanding and reuse layer is **Graph and Knowledge**.
 - **Graph** exposes current code structure, references, impact, entrypoints, implementations, dependents, and relevant tests with provenance, freshness, and explicit completeness.
 - **Knowledge** preserves only reusable claim/reason/source records. `current` means not superseded, not human-approved. New releases expose no `reviewed` alias.
 
-Source retrieval and ranking remain Graph/Knowledge internal read helpers. No separate Context/Pack/Capsule command, export, or durable user lifecycle exists.
+Source retrieval and ranking remain Graph/Knowledge internal read helpers; they do not create separate durable records, mandatory exports, or user workflows.
 
 ## Read map
 

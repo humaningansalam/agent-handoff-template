@@ -92,25 +92,121 @@ def _called_names(function: ast.AST) -> set[tuple[str, str]]:
     return calls
 
 
-def _python_test_exercises_operation(source: str, *, method: str, route: str) -> bool:
-    """Require a direct operation call inside a Python test; imports alone do not prove coverage."""
+def _python_test_operation_evidence(
+    source: str, *, method: str, route: str,
+    implementation_path: str = "", implementation_class: str = "",
+) -> tuple[str, int] | None:
+    """Verify a test's literal HTTP request or imported concrete manager call.
+
+    Similar method names and a module import alone are never evidence that a
+    test exercises this route or class. This is AST source evidence, not a
+    claim that the test executed successfully.
+    """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
-        return False
-    for test in ast.walk(tree):
+        return None
+    implementation_module = implementation_path.removesuffix(".py").replace("/", ".")
+    imported_names = {
+        alias.asname or alias.name
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+        and node.module == implementation_module
+        for alias in node.names if alias.name == implementation_class
+    } if implementation_module and implementation_class else set()
+    for test in tree.body:
         if not isinstance(test, (ast.FunctionDef, ast.AsyncFunctionDef)) or not test.name.startswith("test_"):
             continue
-        for node in ast.walk(test):
+        parameters = {arg.arg for arg in test.args.args}
+        nodes = list(ast.walk(test))
+        for node in nodes:
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            if node.func.attr == method:
-                return True
             if (node.func.attr in {"get", "post", "put", "patch", "delete"}
-                and node.args and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == route):
-                return True
-    return False
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in parameters
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                    and node.args[0].value.split("?", 1)[0].split("#", 1)[0] == route):
+                return "python_literal_http_test", node.lineno
+        if not imported_names:
+            continue
+        constructed = set()
+        for node in nodes:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = node.value
+            if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+                continue
+            if value.func.id not in imported_names:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            constructed.update(target.id for target in targets if isinstance(target, ast.Name))
+        for node in nodes:
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != method:
+                continue
+            receiver = node.func.value
+            if (isinstance(receiver, ast.Name) and receiver.id in constructed
+                    or isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name)
+                    and receiver.func.id in imported_names):
+                return "python_imported_class_method_test", node.lineno
+    return None
+
+
+def _rust_embedded_test_evidence(source: str) -> tuple[str, int] | None:
+    """Find an AST-validated #[test] referring to a declaration in this module.
+
+    Identical words in other crates, comments and string literals do not
+    establish that a test exercises this Rust implementation.
+    """
+    try:
+        from tree_sitter_language_pack import get_parser
+        text = source.encode("utf-8")
+        root = get_parser("rust").parse(text).root_node
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return None
+    if root.has_error:
+        return None
+    definitions: set[str] = set()
+    for child in root.named_children:
+        if child.type not in {"struct_item", "enum_item", "trait_item", "function_item", "type_item"}:
+            continue
+        name = child.child_by_field_name("name")
+        if name is not None:
+            definitions.add(text[name.start_byte:name.end_byte].decode("utf-8"))
+    if not definitions:
+        return None
+    scopes = [root]
+    while scopes:
+        scope = scopes.pop()
+        attributes: list[str] = []
+        for node in scope.named_children:
+            if node.type == "attribute_item":
+                attributes.append(text[node.start_byte:node.end_byte].decode("utf-8"))
+                continue
+            marked_test = any(re.fullmatch(r"#\[test\]", attr.strip()) for attr in attributes)
+            attributes.clear()
+            if node.type == "mod_item":
+                body = node.child_by_field_name("body")
+                if body is not None:
+                    scopes.append(body)
+            if node.type != "function_item" or not marked_test:
+                continue
+            name = node.child_by_field_name("name")
+            body = node.child_by_field_name("body")
+            if name is None or body is None:
+                continue
+            pending = [body]
+            while pending:
+                item = pending.pop()
+                if item.type in {"identifier", "type_identifier"}:
+                    identifier = text[item.start_byte:item.end_byte].decode("utf-8")
+                    if identifier in definitions:
+                        return (text[name.start_byte:name.end_byte].decode("utf-8"),
+                                node.start_point.row + 1)
+                pending.extend(item.named_children)
+    return None
 
 
 def _flask_factory_attribute_wiring(
@@ -359,9 +455,11 @@ def query_graph_workflow(
                         implementation_class=info["name"].split(".", 1)[0],
                     )
                     if wiring:
-                        implementations.append(_entry(
+                        verified = _entry(
                             info["path"], relation="source", evidence=wiring["evidence"], symbol=info["name"],
-                        ))
+                        )
+                        verified["verification"] = "python_flask_factory_wiring"
+                        implementations.append(verified)
                         links.extend([
                             {"from": path, "to": wiring["path"], "relation": "source", "evidence": "Flask blueprint registration"},
                             {"from": wiring["path"], "to": info["path"], "relation": "source", "evidence": "Imported implementation constructed and assigned to current_app receiver property", "line": wiring["line"]},
@@ -429,7 +527,13 @@ def query_graph_workflow(
                         source,
                     ) and Path(path).stem != symbol.rsplit(".", 1)[-1]:
                         dependents.append(_entry(path, relation="source", evidence="Rust module/use declaration", symbol=symbol, line=matched_line))
-                    elif not is_test_path(path):
+                    elif not is_test_path(path) and (
+                        suffix != ".rs" or Path(path).stem == symbol.rsplit(".", 1)[-1]
+                        or bool(re.search(
+                            r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|struct|enum|trait|mod)\s+"
+                            + re.escape(symbol.rsplit(".", 1)[-1]) + r"\b", source,
+                        ))
+                    ):
                         # A matched basename is not a Rust module for other
                         # languages. Dart `void main()` can be proven by
                         # current source syntax, but a filename match alone
@@ -453,15 +557,29 @@ def query_graph_workflow(
                                 else "current source text or module name; semantic relation unconfirmed"
                             ),
                         ))
-                    if suffix == ".rs" and re.search(
-                        r"#\[(?:tokio::)?test\]\s*(?:async\s+)?fn\s+[A-Za-z0-9_]*"
-                        + re.escape(symbol.rsplit(".", 1)[-1]), source,
-                    ):
-                        tests.append(_entry(path, relation="candidate", evidence="named Rust embedded unit test"))
-
     # Provider-confirmed calls/imports and TESTS_FILE paths are preserved. An
     # edge touching a stale source is never presented as a current relation.
     selected_files = {entry["path"] for entry in [*entrypoints, *implementations]}
+
+    def route_test_proof(path: str) -> tuple[str, int] | None:
+        current = source_read(path)
+        operation = route.strip("/").split("/")[-1]
+        direct = _python_test_operation_evidence(current, method=operation, route=route)
+        if direct:
+            return direct
+        for entry in implementations:
+            qualified = str(entry.get("symbol") or "")
+            if "." not in qualified:
+                continue
+            match = _python_test_operation_evidence(
+                current, method=operation, route=route,
+                implementation_path=entry["path"],
+                implementation_class=qualified.split(".", 1)[0],
+            )
+            if match:
+                return match
+        return None
+
     for edge in snapshot.edges:
         if edge.kind not in {"CALLS", "IMPORTS_FILE", "TESTS_FILE"}:
             continue
@@ -478,24 +596,48 @@ def query_graph_workflow(
                 dependents.append(_entry(from_path, relation="confirmed", evidence="CALLS"))
         if edge.kind == "IMPORTS_FILE" and to_path in selected_files and from_path not in selected_files:
             if is_test_path(from_path):
-                if route and from_path.endswith(".py") and not _python_test_exercises_operation(
-                    source_read(from_path), method=route.strip("/").split("/")[-1], route=route,
-                ):
-                    continue
-                tests.append(_entry(from_path, relation="confirmed", evidence="IMPORTS_FILE"))
+                if route and from_path.endswith(".py"):
+                    proof = route_test_proof(from_path)
+                    if not proof:
+                        continue
+                    verified = _entry(from_path, relation="source", evidence="AST-verified route or imported manager operation", line=proof[1])
+                    verified["verification"] = proof[0]
+                    tests.append(verified)
+                else:
+                    tests.append(_entry(from_path, relation="confirmed", evidence="IMPORTS_FILE"))
             else:
                 dependents.append(_entry(from_path, relation="confirmed", evidence="IMPORTS_FILE"))
         if edge.kind == "TESTS_FILE" and to_path in selected_files:
-            if route and from_path.endswith(".py") and not _python_test_exercises_operation(
-                source_read(from_path), method=route.strip("/").split("/")[-1], route=route,
-            ):
-                continue
-            tests.append(_entry(from_path, relation="confirmed", evidence="TESTS_FILE"))
-    # Rust often embeds tests inside a production `lib.rs` rather than a
-    # separate tests/ file. A named #[test] function mentioning this exact
-    # component is useful *candidate* navigation, not a typed tested-by edge.
-    # Keep this independent of symbol lookup: a confirmed Rust `mod` import
-    # must not hide valid embedded test locations.
+            if route and from_path.endswith(".py"):
+                proof = route_test_proof(from_path)
+                if not proof:
+                    continue
+                verified = _entry(from_path, relation="source", evidence="AST-verified route or imported manager operation", line=proof[1])
+                verified["verification"] = proof[0]
+                tests.append(verified)
+            else:
+                tests.append(_entry(from_path, relation="confirmed", evidence="TESTS_FILE"))
+    # Rust unit tests can live inside the implementation module itself.
+    # Verify a real #[test] body references an AST-declared symbol from that
+    # module; a similar test name in a different crate is not a test edge.
+    rust_crates = {
+        tuple(Path(item["path"]).parts[:2])
+        for item in implementations
+        if item["path"].endswith(".rs") and Path(item["path"]).parts[:1] == ("crates",)
+    }
+    for implementation in implementations:
+        path = implementation["path"]
+        if not path.endswith(".rs") or path in stale:
+            continue
+        proof = _rust_embedded_test_evidence(source_read(path))
+        if proof:
+            verified = _entry(path, relation="source",
+                              evidence="Rust AST #[test] body references a declaration in this module",
+                              symbol=proof[0], line=proof[1])
+            verified["verification"] = "rust_embedded_test_decl"
+            tests.append(verified)
+    # Name-only tests in the *same crate* remain candidate navigation. A
+    # cross-crate name overlap never establishes a test of this module.
     if symbol and any(item["path"].endswith(".rs") for item in implementations):
         component = symbol.rsplit(".", 1)[-1]
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", component):
@@ -506,6 +648,8 @@ def query_graph_workflow(
             )
             for candidate in bounded_files:
                 if not candidate.endswith(".rs") or candidate in stale:
+                    continue
+                if Path(candidate).parts[:1] == ("crates",) and tuple(Path(candidate).parts[:2]) not in rust_crates:
                     continue
                 content = source_read(candidate)
                 for found in rust_test.finditer(content):
@@ -582,13 +726,15 @@ def query_graph_workflow(
             and (route_stem in Path(path).stem or any(stem in Path(path).stem for stem in implementation_stems))
         ]
         for path in direct_test_paths:
-            text = source_read(path)
-            if not _python_test_exercises_operation(text, method=route_stem, route=route):
-                continue
-            if route in text:
-                tests.append(_entry(path, relation="candidate", evidence="HTTP route literal in current test source"))
-            elif implementation_stems and text and any(stem in Path(path).stem for stem in implementation_stems):
-                tests.append(_entry(path, relation="candidate", evidence="test module name matches current implementation; inspect assertions"))
+            proof = route_test_proof(path)
+            if proof:
+                verified = _entry(
+                    path, relation="source",
+                    evidence="AST-verified exact HTTP request or imported concrete implementation call",
+                    line=proof[1],
+                )
+                verified["verification"] = proof[0]
+                tests.append(verified)
         # A small workflow should not scan every unrelated test source by
         # default; missing tests are explicitly partial rather than zero.
 
@@ -602,7 +748,9 @@ def query_graph_workflow(
     candidate_present = any(item["relation"] == "candidate" for item in [*implementations, *dependents, *tests])
     # Empty/stale materialization cannot prove a negative; no-test evidence
     # does not mean a code path has no tests.
-    partial = candidate_present or incomplete_inventory or scan_exhausted or not tests or str(freshness.get("status") or "current") != "current"
+    partial = (candidate_present or incomplete_inventory or scan_exhausted or not tests
+               or any(item["relation"] == "source" for item in [*implementations, *tests])
+               or str(freshness.get("status") or "current") != "current")
     if not any_found:
         status = "partial" if str(freshness.get("status") or "current") != "current" or incomplete_inventory else "unsupported" if symbol and any(Path(path).suffix.casefold() in _FALLBACK_SUFFIXES for path in bounded_files) else "not_found"
     else:
@@ -650,6 +798,10 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
     aliases = {"entrypoint": "entrypoints", "current_source": "implementation"}
     required = case.get("required_stages") if isinstance(case.get("required_stages"), list) else []
     metrics: dict[str, Any] = {}
+    verified_source_types = {
+        "python_flask_factory_wiring", "python_literal_http_test",
+        "python_imported_class_method_test", "rust_embedded_test_decl",
+    }
     total = hits = confirmed_hits = output_count = false_positive_count = 0
     for stage in sorted(expected):
         values = expected[stage]
@@ -664,6 +816,12 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
         structural_paths = sorted(
             path for path in hit_paths if matches[path].get("relation") in {"source", "confirmed"}
         )
+        verified_paths = sorted(
+            path for path in hit_paths
+            if matches[path].get("relation") == "confirmed"
+            or (matches[path].get("relation") == "source"
+                and matches[path].get("verification") in verified_source_types)
+        )
         false_positive_paths = sorted(set(matches) - set(expected_paths))
         total += len(expected_paths)
         hits += len(hit_paths)
@@ -676,6 +834,7 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
             "found_count": len(hit_paths),
             "confirmed_count": len(confirmed_paths),
             "structural_count": len(structural_paths),
+            "verified_count": len(verified_paths),
             "missing_paths": sorted(set(expected_paths) - set(matches)),
             "false_positive_paths": false_positive_paths[:MAX_WORKFLOW_STAGE_ENTRIES],
             "false_positive_count": len(false_positive_paths),
@@ -698,12 +857,12 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
             required_details[requested] = {"status": "unscored_no_ground_truth", "covered": False, "precise": False}
             continue
         covered = row["found_count"] == row["expected_count"]
-        # The concrete route decorator is a source-anchored entrypoint. For
-        # implementation, callers and tests, source matches are not semantic
-        # compiler-confirmed relations.
+        # Concrete route decorators are structural entrypoints. Other required
+        # stages need provider links or a specific verified AST source proof;
+        # a generic source/candidate path is insufficient.
         precise = covered and (
             row["structural_count"] == row["expected_count"] if stage == "entrypoints"
-            else row["confirmed_count"] == row["expected_count"]
+            else row["verified_count"] == row["expected_count"]
         )
         required_details[requested] = {
             "status": "precise" if precise else "candidate_only" if covered else "missing",
@@ -724,7 +883,7 @@ def evaluate_workflow_benchmark(result: dict[str, Any], case: dict[str, Any]) ->
         "required_stages_covered": all_covered,
         "required_stages_precise": all_precise,
         "first_path_correct": first_path_correct,
-        "task_navigation_complete": status_expected and all_covered and all_precise and first_path_correct,
+        "task_navigation_complete": status_expected and all_covered and all_precise and first_path_correct and false_positive_count == 0,
         "expected_path_count": total,
         "found_path_count": hits,
         "confirmed_path_count": confirmed_hits,

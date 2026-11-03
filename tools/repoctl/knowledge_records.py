@@ -391,20 +391,16 @@ def _legacy_source_identity(record: dict[str, Any]) -> tuple[tuple[str, str], ..
 def _legacy_records_requiring_migration(
     artifacts: list[dict[str, Any]], *, root: Path, repo_id: str,
 ) -> list[dict[str, Any]]:
-    """Only unresolved v1 records trigger migration warnings.
+    """Report v1 still in the active directory until one-time finalization.
 
-    A deliberately preserved original v1 may still be cited by a newer v2
-    record. It is excluded only with a verified one-time preservation witness;
-    ordinary search and Graph still consume v2 records exclusively.
+    Normal Knowledge query consumes v2 only. A preservation witness is not a
+    substitute for removing a converted duplicate from active records.
     """
-    from .knowledge_migration import preserved_legacy_migration_witness
-
     return [
         record for record in artifacts
         if record.get("schema") == "repoctl.knowledge.record"
         and record.get("schema_version") == 1
         and str(record.get("repo_id") or "") == repo_id
-        and not preserved_legacy_migration_witness(root, record)
     ]
 
 
@@ -538,7 +534,7 @@ def check_knowledge_records(root: Path, *, repo_id: str) -> tuple[dict[str, Any]
         Problem(
             "warning",
             "knowledge_record_migration_required",
-            "legacy Knowledge is preserved but inactive; read it and save the reusable claim as a current record",
+            "unfinalized v1 remains in active storage; convert it and explicitly finalize the historical source relocation",
             f"docs/knowledge/records/{record.get('id', '')}.json",
         )
         for record in legacy
@@ -1293,14 +1289,8 @@ def _superseded_ids(records: list[dict[str, Any]]) -> set[str]:
 
 
 def _supersession_problems(records: list[dict[str, Any]], *, root: Path) -> list[Problem]:
-    from .knowledge_migration import verified_preserved_legacy_ids
-
     problems: list[Problem] = []
     known = {str(record.get("id") or "") for record in records}
-    pending_ids = _superseded_ids(records) - known
-    allowed_historical = set()
-    for repo_id in {str(record.get("repo_id") or "") for record in records}:
-        allowed_historical.update(verified_preserved_legacy_ids(root, repo_id=repo_id, ids=pending_ids))
     for record in records:
         record_id = str(record.get("id") or "")
         raw_replacements = record.get("replaces")
@@ -1311,7 +1301,7 @@ def _supersession_problems(records: list[dict[str, Any]], *, root: Path) -> list
             superseded = str(superseded_id)
             if superseded == record_id:
                 problems.append(Problem("error", "knowledge_replaces_self", "knowledge record cannot replace itself", record_id))
-            if superseded and superseded not in known and superseded not in allowed_historical:
+            if superseded and superseded not in known:
                 problems.append(Problem("error", "knowledge_replaces_missing", "replaced record does not exist", superseded))
     return problems
 

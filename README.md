@@ -25,7 +25,7 @@ Repoctl deliberately does not create proof that tests ran. `## Verification` is 
 | Markdown task managers | Tasks and Kanban | Product-repository boundaries, start baselines, safe finish checks, and restartable Handoffs |
 | Spec-driven tools | Spec -> plan -> tasks | Execution state after task intent already exists |
 | Coding agents | Autonomous coding loop | A shared workspace contract that survives model and session changes |
-| Code search and memory tools | Retrieval or long-term notes | Source-linked Context, typed Graph navigation, and optional reusable decisions in one repository-aware workspace |
+| Code search and memory tools | Retrieval or long-term notes | Source-linked Graph search, typed Graph navigation, and optional reusable decisions in one repository-aware workspace |
 
 ## Use this when
 
@@ -33,7 +33,7 @@ Repoctl deliberately does not create proof that tests ran. `## Verification` is 
 - task files should be the unit of current work
 - private workspace state and product code need separate Git boundaries
 - several coding tools may work in the same workspace over time
-- a large repository benefits from bounded Context and typed Graph navigation
+- a large repository benefits from bounded source lookup and typed Graph navigation
 - reusable decisions should remain linked to their sources
 
 ## Prerequisites
@@ -104,7 +104,7 @@ Before a real pause or transfer, write the four Handoff fields, remove the gener
 
 Meaningful changes to Goal/Task contract, Chosen/Notes, child lifecycle, Handoff, or repository observation invalidate binding. Routine Execution Log additions and optional Verification prose do not. When a failed check changes the next step or a constraint, update the current Task/Handoff explicitly. Repoctl never executes the stored command.
 
-## Finding code and context
+## Finding code and sources
 
 Use direct reads, `rg`, or Graph when the identity is already known. For ambiguous work, use Graph source search for a bounded cited working set:
 
@@ -117,7 +117,7 @@ Use direct reads, `rg`, or Graph when the identity is already known. For ambiguo
 
 Graph source search combines current source, documents, history, Knowledge, and Graph. It does not create edit scope. `graph query` reads typed materialized relations; `graph workflow` adds bounded live-source hints for route and source navigation, explicitly labeling non-confirmed links as candidates. Refresh explicitly with `graph build` after source changes; a stale snapshot never proves zero impact.
 
-No Pack/export registration step is part of the current Task lifecycle. Keep current reasoning in Task and reusable conclusions in Knowledge; open named source files directly.
+No export registration step is part of the Task lifecycle. Keep current reasoning in Task and reusable conclusions in Knowledge; open named source files directly.
 
 ## Reusing decisions
 
@@ -134,7 +134,7 @@ Most work needs only its archived Task. Save Knowledge when a decision, invarian
   --json
 ```
 
-Saving the record completes the action. `knowledge query` and Graph evidence searches can read it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Upgrade preserves older Knowledge files; legacy records require an explicit one-time source-preserving conversion; normal query reads only v2, and referenced v1 original bytes are never rewritten. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
+Saving the record completes the action. `knowledge query` and Graph evidence searches can read it immediately. A changed source produces a warning while the saved reasoning remains visible. Save a new record with `--replaces K-...` when a decision changes. Older v1 Knowledge is one-time conversion input, not a supported query format: run `knowledge migrate --record-id K-... --apply`, review its current v2 successor, then `knowledge migrate --record-id K-... --finalize --apply`. Finalization archives byte-identical v1 evidence and updates exact citations; unresolved provenance blocks conversion. A missing or stale projection falls back to bounded, validated v2 originals and emits a warning.
 
 When the reusable conclusion is ready during closeout, the corresponding `task finish --knowledge-kind --knowledge-claim --knowledge-reason` options save it atomically with task completion.
 
@@ -165,7 +165,7 @@ When the reusable conclusion is ready during closeout, the corresponding `task f
 Key contracts:
 
 - [JSON output](docs/contracts/repoctl-json-contract.md)
-- [Context and Task Packs](docs/contracts/repoctl-evidence-contract.md)
+- [Graph source evidence](docs/contracts/repoctl-evidence-contract.md)
 - [Graph](docs/contracts/repoctl-graph-contract.md)
 - [Task Chosen scope](docs/contracts/repoctl-task-scope-contract.md)
 - [Module boundaries](docs/contracts/repoctl-module-boundaries.md)
@@ -175,10 +175,10 @@ Key contracts:
 
 - Task frontmatter is status authority; `docs/BOARD.md` is the live registry.
 - Product mutation starts from a recorded repository baseline. Existing dirty files stay outside task ownership unless explicitly resolved.
-- The Task's Chosen set is the only current edit-scope record. Context, Graph, history, Backlog, and retired outcome state do not create scope.
+- The Task's Chosen set is the only current edit-scope record. Source search, Graph, history, Backlog, and retired outcome state do not create scope.
 - Standalone completed tasks archive under `docs/archive/tasks/`. Completion receipts preserve lifecycle and repository-change history; their content hashes identify the archived record and make no test claim.
 - `.repometa` provides sparse human metadata and changed-file gates. Graph and the code index remain derived.
-- Context, Graph, and Knowledge preserve source identity and repository namespace. They provide evidence and navigation rather than authority.
+- Graph and Knowledge preserve source identity and repository namespace. They provide evidence and navigation rather than authority.
 - Upgrade postflight reports stale derived Graph or Knowledge projections as maintenance with exit status 0 when durable state is otherwise valid. An unused missing Graph and empty Knowledge need no initialization.
 
 ## Debug mode

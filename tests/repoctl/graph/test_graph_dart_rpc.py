@@ -648,11 +648,11 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
 
     assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
-    context_bundle = context_payload["data"]["bundle"]
+    context_bundle = context_payload["data"]["result"]
     assert context_bundle["relationship_candidate_count"] == 1
     graph_anchor = context_bundle["completeness"]["graph_anchor"]
     assert graph_anchor["status"] == "resolved"
-    assert graph_anchor["code"] == "context_graph_anchor_resolved"
+    assert graph_anchor["code"] == "graph_source_anchor_resolved"
     assert graph_anchor["seed_paths"] == ["lib/client.dart"]
     assert graph_anchor["candidate_paths"] == [
         "lib/client.dart",
@@ -731,11 +731,11 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
 
     assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     provider_stale_context_payload = json.loads(capsys.readouterr().out)
-    assert provider_stale_context_payload["data"]["bundle"]["relationship_candidates"] == []
-    assert provider_stale_context_payload["data"]["bundle"]["relationship_candidate_count"] == 0
+    assert provider_stale_context_payload["data"]["result"]["relationship_candidates"] == []
+    assert provider_stale_context_payload["data"]["result"]["relationship_candidate_count"] == 0
     assert any(
         item["code"] == "context_graph_stale"
-        for item in provider_stale_context_payload["data"]["bundle"]["groups"]["warnings_and_completeness"]
+        for item in provider_stale_context_payload["data"]["result"]["groups"]["warnings_and_completeness"]
     )
 
     restored_config = {**original_config, "generator": "rpc-fixture-update"}
@@ -778,11 +778,11 @@ def test_graph_preserves_every_dart_rpc_outcome_and_projects_only_linked_facts(t
 
     assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     stale_context_payload = json.loads(capsys.readouterr().out)
-    assert stale_context_payload["data"]["bundle"]["relationship_candidates"] == []
-    assert stale_context_payload["data"]["bundle"]["relationship_candidate_count"] == 0
+    assert stale_context_payload["data"]["result"]["relationship_candidates"] == []
+    assert stale_context_payload["data"]["result"]["relationship_candidate_count"] == 0
     assert any(
         item["code"] == "context_graph_stale"
-        for item in stale_context_payload["data"]["bundle"]["groups"]["warnings_and_completeness"]
+        for item in stale_context_payload["data"]["result"]["groups"]["warnings_and_completeness"]
     )
 
     reduced, reduced_problems, reduced_meta = materialize_graph(tmp_path, target=target)
@@ -847,7 +847,7 @@ def test_repometa_eligibility_change_invalidates_materialized_rpc_evidence(tmp_p
 
     assert main(["graph", "search", "linked rpc", "--mode", "code-location", "--json"]) == 0
     context_payload = json.loads(capsys.readouterr().out)
-    bundle = context_payload["data"]["bundle"]
+    bundle = context_payload["data"]["result"]
     assert bundle["relationship_candidates"] == []
     assert bundle["relationship_candidate_count"] == 0
     assert not [
@@ -902,7 +902,7 @@ def test_context_exact_rpc_identity_selects_one_same_line_source_fact(tmp_path: 
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     for routine in ("alpha", "beta"):
         assert main(["graph", "search", routine, "--mode", "code-location", "--full", "--json"]) == 0
-        bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+        bundle = json.loads(capsys.readouterr().out)["data"]["result"]
         assert bundle["relationship_candidate_count"] == 1
         assert [item["source"]["runtime_identity"]["value"] for item in bundle["relationship_candidates"]] == [routine]
         exact_source = next(
@@ -914,7 +914,7 @@ def test_context_exact_rpc_identity_selects_one_same_line_source_fact(tmp_path: 
         assert exact_source["source_ref"]["source_fact_id"] == bundle["relationship_candidates"][0]["candidate_id"]
 
     assert main(["graph", "search", "lib/client.dart", "--mode", "code-location", "--json"]) == 0
-    file_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    file_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert file_bundle["relationship_candidate_count"] == 2
     assert {
         item["source"]["runtime_identity"]["value"]

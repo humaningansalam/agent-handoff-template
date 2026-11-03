@@ -17,7 +17,6 @@ from .repositories import RepoTarget, default_repo_target
 
 ChangedEntry: TypeAlias = tuple[str, str, str]
 StablePathState: TypeAlias = dict[str, Any]
-_LEGACY_V2_UNREADABLE_CONTENT = b"<unreadable>"
 
 
 @dataclass(frozen=True)
@@ -38,7 +37,6 @@ class GitNameStatusProblem(StrEnum):
 
 class ChangeFingerprintProjection(StrEnum):
     CURRENT = "current"
-    LEGACY_V2 = "legacy_v2"
 
 
 class GitObservationProblem(StrEnum):
@@ -47,7 +45,6 @@ class GitObservationProblem(StrEnum):
     PATH_UNAVAILABLE = "git_path_observation_unavailable"
     CONTENT_UNAVAILABLE = "git_content_observation_unavailable"
     LINK_UNAVAILABLE = "git_link_observation_unavailable"
-    LEGACY_STATE_AMBIGUOUS = "legacy_path_state_ambiguous"
     OBSERVATION_CHANGED = "git_observation_changed"
     EVIDENCE_INVALID = "git_evidence_invalid"
 
@@ -76,13 +73,6 @@ class _PathStateManifestResult:
 class PathFingerprintObservation:
     manifest: dict[str, Any]
     stable_state: StablePathState | None = None
-
-
-@dataclass(frozen=True)
-class LegacyTerminalStateVerification:
-    states: dict[str, StablePathState]
-    unverified_paths: tuple[str, ...]
-    problem: GitObservationProblem | None = None
 
 
 def _target(root: Path, target: RepoTarget | None = None) -> RepoTarget | None:
@@ -733,57 +723,6 @@ def _git_bytes_result(repo: Path, args: list[str]) -> _GitBytesResult:
     return _GitBytesResult(result.stdout)
 
 
-def _hash_observed_blob(repo: Path, content: bytes, *, path: str | None = None) -> str:
-    args = ["git", "hash-object", "--stdin"]
-    if path is not None:
-        args.append(f"--path={path}")
-    try:
-        result = subprocess.run(
-            args,
-            cwd=repo,
-            input=content,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return ""
-    object_id = result.stdout.decode("ascii", errors="ignore").strip()
-    return object_id if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", object_id) else ""
-
-
-def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    return (
-        int(value.st_mode),
-        int(value.st_size),
-        int(value.st_mtime_ns),
-        int(value.st_ctime_ns),
-        int(value.st_ino),
-        int(value.st_dev),
-    )
-
-
-def _path_generation_token(path: Path) -> tuple[tuple[Any, ...], GitObservationProblem | None]:
-    try:
-        value = os.lstat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return ("missing",), None
-    except OSError:
-        return (), GitObservationProblem.PATH_UNAVAILABLE
-    identity: tuple[Any, ...] = _stat_identity(value)
-    if stat.S_ISLNK(value.st_mode):
-        try:
-            target = os.readlink(path)
-        except OSError:
-            return (), GitObservationProblem.LINK_UNAVAILABLE
-        return ("symlink", *identity, target), None
-    if stat.S_ISREG(value.st_mode):
-        return ("file", *identity), None
-    if stat.S_ISDIR(value.st_mode):
-        return ("directory", *identity), None
-    return ("other", *identity), None
-
-
 def _path_state_manifest_result(
     repo: Path,
     path: str,
@@ -834,11 +773,6 @@ def _path_state_manifest_result(
             except OSError:
                 return _PathStateManifestResult(None, GitObservationProblem.LINK_UNAVAILABLE)
             manifest.update({"kind": "symlink", "symlink_target": observed_target})
-            if projection is ChangeFingerprintProjection.LEGACY_V2:
-                object_id = _hash_observed_blob(repo, os.fsencode(observed_target))
-                if not object_id:
-                    return _PathStateManifestResult(None, GitObservationProblem.COMMAND_FAILED)
-                stable_state = {"kind": "symlink", "target_blob_oid": object_id}
         elif stat.S_ISREG(file_stat.st_mode):
             observed_kind = "file"
             try:
@@ -846,73 +780,12 @@ def _path_state_manifest_result(
             except OSError:
                 return _PathStateManifestResult(None, GitObservationProblem.CONTENT_UNAVAILABLE)
             manifest.update({"kind": "file", "content_sha256": _sha256_bytes(observed_content)})
-            if projection is ChangeFingerprintProjection.LEGACY_V2:
-                # v2 hashed this exact byte sequence when a file read failed.
-                # An actual file with the same content is therefore ambiguous.
-                if observed_content == _LEGACY_V2_UNREADABLE_CONTENT:
-                    return _PathStateManifestResult(
-                        manifest,
-                        GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
-                    )
-                object_id = _hash_observed_blob(repo, observed_content, path=normalized)
-                if not object_id:
-                    return _PathStateManifestResult(None, GitObservationProblem.COMMAND_FAILED)
-                stable_state = {
-                    "kind": "file",
-                    "blob_oid": object_id,
-                    "executable": bool(file_stat.st_mode & 0o111),
-                }
         elif stat.S_ISDIR(file_stat.st_mode):
             observed_kind = "directory"
             manifest["kind"] = "directory"
         else:
             observed_kind = "other"
             manifest["kind"] = "other"
-        if projection is ChangeFingerprintProjection.LEGACY_V2 and observed_kind in {"directory", "other"}:
-            return _PathStateManifestResult(
-                manifest,
-                GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
-            )
-
-    if projection is ChangeFingerprintProjection.LEGACY_V2:
-        status_after = _git_bytes_result(
-            repo,
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", normalized],
-        )
-        index_after = _git_bytes_result(repo, ["ls-files", "--stage", "-z", "--", normalized])
-        if (
-            status_after.problem is not None
-            or index_after.problem is not None
-            or status_after.data != status_result.data
-            or index_after.data != index_result.data
-        ):
-            return _PathStateManifestResult(None, GitObservationProblem.OBSERVATION_CHANGED)
-        try:
-            final_stat = os.lstat(file_path)
-        except (FileNotFoundError, NotADirectoryError):
-            if observed_kind != "missing":
-                return _PathStateManifestResult(None, GitObservationProblem.OBSERVATION_CHANGED)
-        except OSError:
-            return _PathStateManifestResult(None, GitObservationProblem.PATH_UNAVAILABLE)
-        else:
-            if observed_kind == "missing" or _stat_identity(final_stat) != _stat_identity(file_stat):
-                return _PathStateManifestResult(None, GitObservationProblem.OBSERVATION_CHANGED)
-            if observed_kind == "file":
-                try:
-                    final_content = file_path.read_bytes()
-                except OSError:
-                    return _PathStateManifestResult(None, GitObservationProblem.CONTENT_UNAVAILABLE)
-                if final_content != observed_content:
-                    return _PathStateManifestResult(None, GitObservationProblem.OBSERVATION_CHANGED)
-            elif observed_kind == "symlink":
-                try:
-                    final_target = os.readlink(file_path)
-                except OSError:
-                    return _PathStateManifestResult(None, GitObservationProblem.LINK_UNAVAILABLE)
-                if final_target != observed_target:
-                    return _PathStateManifestResult(None, GitObservationProblem.OBSERVATION_CHANGED)
-        if stable_state is None:
-            return _PathStateManifestResult(None, GitObservationProblem.LEGACY_STATE_AMBIGUOUS)
     return _PathStateManifestResult(manifest, stable_state=stable_state)
 
 
@@ -969,56 +842,19 @@ def repo_path_fingerprint_observations(
     normalized_paths = sorted({normalized for value in paths if (normalized := normalize_repo_path(value))})
     if not normalized_paths:
         return {}, state
-    batch_head = ""
-    batch_status = _GitBytesResult(b"")
-    batch_index = _GitBytesResult(b"")
-    batch_generations: dict[str, tuple[Any, ...]] = {}
-    if projection is ChangeFingerprintProjection.LEGACY_V2:
-        batch_head, head_state = repo_git_head(root, selected)
-        if not head_state.available:
-            return {}, head_state
-        batch_status = _git_bytes_result(
-            selected.root_path,
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *normalized_paths],
-        )
-        batch_index = _git_bytes_result(
-            selected.root_path,
-            ["ls-files", "--stage", "-z", "--", *normalized_paths],
-        )
-        if batch_status.problem is not None or batch_index.problem is not None:
-            return {}, RepoGitState(
-                False,
-                f"{selected.display_path}/ cannot begin repository path observation",
-                selected.id,
-                selected.display_path,
-                GitObservationProblem.COMMAND_FAILED.value,
-            )
-        for path in normalized_paths:
-            token, token_problem = _path_generation_token(selected.root_path / path)
-            if token_problem is not None:
-                return {}, RepoGitState(
-                    False,
-                    f"{selected.display_path}/ cannot begin repository path observation: {path}",
-                    selected.id,
-                    selected.display_path,
-                    token_problem.value,
-                )
-            batch_generations[path] = token
-
     untracked_paths: set[str] = set()
-    if projection is ChangeFingerprintProjection.CURRENT:
-        untracked_before = _git_bytes_result(
-            selected.root_path, ["ls-files", "--others", "--exclude-standard", "-z"],
-        )
-        if untracked_before.problem is not None:
-            return {}, RepoGitState(False, "cannot observe untracked paths", selected.id,
-                                    selected.display_path, untracked_before.problem.value)
-        requested_paths = set(normalized_paths)
-        untracked_paths = {
-            path for raw in untracked_before.data.split(b"\0")
-            if raw and (path := os.fsdecode(raw)) in requested_paths
-            and not path.startswith(":") and not any(char in path for char in "*?[]\\")
-        }
+    untracked_before = _git_bytes_result(
+        selected.root_path, ["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    if untracked_before.problem is not None:
+        return {}, RepoGitState(False, "cannot observe untracked paths", selected.id,
+                                selected.display_path, untracked_before.problem.value)
+    requested_paths = set(normalized_paths)
+    untracked_paths = {
+        path for raw in untracked_before.data.split(b"\0")
+        if raw and (path := os.fsdecode(raw)) in requested_paths
+        and not path.startswith(":") and not any(char in path for char in "*?[]\\")
+    }
 
     observations: dict[str, PathFingerprintObservation] = {}
     for path in normalized_paths:
@@ -1041,44 +877,6 @@ def repo_path_fingerprint_observations(
             manifest=manifest_result.manifest,
             stable_state=manifest_result.stable_state,
         )
-    if projection is ChangeFingerprintProjection.LEGACY_V2:
-        final_generations: dict[str, tuple[Any, ...]] = {}
-        for path in normalized_paths:
-            token, token_problem = _path_generation_token(selected.root_path / path)
-            if token_problem is not None:
-                return {}, RepoGitState(
-                    False,
-                    f"{selected.display_path}/ cannot complete repository path observation: {path}",
-                    selected.id,
-                    selected.display_path,
-                    token_problem.value,
-                )
-            final_generations[path] = token
-        final_status = _git_bytes_result(
-            selected.root_path,
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *normalized_paths],
-        )
-        final_index = _git_bytes_result(
-            selected.root_path,
-            ["ls-files", "--stage", "-z", "--", *normalized_paths],
-        )
-        final_head, final_head_state = repo_git_head(root, selected)
-        if (
-            final_status.problem is not None
-            or final_index.problem is not None
-            or not final_head_state.available
-            or final_head != batch_head
-            or final_status.data != batch_status.data
-            or final_index.data != batch_index.data
-            or final_generations != batch_generations
-        ):
-            return {}, RepoGitState(
-                False,
-                f"{selected.display_path}/ repository paths changed during observation",
-                selected.id,
-                selected.display_path,
-                GitObservationProblem.OBSERVATION_CHANGED.value,
-            )
     if untracked_paths:
         untracked_after = _git_bytes_result(
             selected.root_path, ["ls-files", "--others", "--exclude-standard", "-z"],
@@ -1098,491 +896,6 @@ def repo_change_fingerprint_records(
 ) -> tuple[list[dict[str, str]], RepoGitState]:
     records, _observations, state = repo_change_fingerprint_observations(root, entries, target)
     return records, state
-
-
-def verify_legacy_change_terminal_states(
-    root: Path,
-    *,
-    entries: list[ChangedEntry],
-    candidate_paths: set[str],
-    manifest: dict[str, Any],
-    target: RepoTarget | None = None,
-) -> tuple[LegacyTerminalStateVerification, RepoGitState]:
-    """Verify terminal path states committed by a legacy v2 fingerprint manifest.
-
-    This is the sole boundary that interprets the legacy Git manifest. Callers
-    receive typed stable states and never inspect its raw fingerprint fields.
-    """
-    selected = _target(root, target)
-    state = repo_git_state(root, selected)
-    normalized_candidates = {
-        normalized
-        for path in candidate_paths
-        if (normalized := normalize_repo_path(path)) and normalized == path
-    }
-    if not state.available:
-        return LegacyTerminalStateVerification({}, tuple(sorted(normalized_candidates))), state
-    if normalized_candidates != candidate_paths or not isinstance(manifest, dict):
-        return (
-            LegacyTerminalStateVerification(
-                {},
-                tuple(sorted(candidate_paths)),
-                GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
-            ),
-            state,
-        )
-
-    def entry_key(entry: ChangedEntry) -> str:
-        return "\0".join(entry)
-
-    def entry_ports(entry: ChangedEntry) -> tuple[tuple[str, str, str], ...]:
-        change, path, old_path = entry
-        if change == "renamed":
-            return ((old_path, "source", change), (path, "destination", change))
-        if change == "copied":
-            return ((path, "destination", change),)
-        return ((path, "path", change),)
-
-    entry_set = set(entries)
-    raw_fingerprints = manifest.get("entry_fingerprints")
-    recorded_fingerprints: dict[str, str] = {}
-    if raw_fingerprints is not None:
-        if not isinstance(raw_fingerprints, list):
-            return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-        for item in raw_fingerprints:
-            if not isinstance(item, dict) or set(item) not in {
-                frozenset({"change", "path", "fingerprint_sha256"}),
-                frozenset({"change", "path", "old_path", "fingerprint_sha256"}),
-            }:
-                return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-            if any(not isinstance(item.get(field), str) for field in item):
-                return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-            entry = (
-                item["change"],
-                item["path"],
-                item.get("old_path", ""),
-            )
-            fingerprint = item["fingerprint_sha256"]
-            key = entry_key(entry)
-            if (
-                entry not in entry_set
-                or key in recorded_fingerprints
-                or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint)
-            ):
-                return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-            recorded_fingerprints[key] = fingerprint
-
-    raw_untracked = manifest.get("untracked")
-    untracked_records: dict[str, dict[str, Any]] = {}
-    if raw_untracked is not None:
-        if not isinstance(raw_untracked, list):
-            return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-        for item in raw_untracked:
-            if not isinstance(item, dict):
-                return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-            path = item.get("path")
-            if not isinstance(path, str):
-                return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-            if normalize_repo_path(path) != path or path in untracked_records:
-                return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths)), GitObservationProblem.LEGACY_STATE_AMBIGUOUS), state
-            untracked_records[path] = item
-
-    path_entry_counts: dict[str, int] = {}
-    for entry in entries:
-        for path, _role, _change in entry_ports(entry):
-            if path in normalized_candidates:
-                path_entry_counts[path] = path_entry_counts.get(path, 0) + 1
-    unverified_paths = {path for path, count in path_entry_counts.items() if count > 1}
-    eligible_paths = normalized_candidates - unverified_paths
-    states: dict[str, StablePathState] = {}
-    entry_write_paths: dict[str, set[str]] = {}
-    observation_entries: list[ChangedEntry] = []
-    for entry in entries:
-        ports = tuple(port for port in entry_ports(entry) if port[0] in eligible_paths)
-        if not ports:
-            continue
-        removal_paths = {
-            path
-            for path, role, change in ports
-            if change == "deleted" or (change == "renamed" and role == "source")
-        }
-        write_paths = {path for path, _role, _change in ports} - removal_paths
-        states.update({path: {"kind": "missing"} for path in removal_paths})
-        if not write_paths:
-            continue
-        key = entry_key(entry)
-        entry_write_paths[key] = write_paths
-        change, path, _old_path = entry
-        if key in recorded_fingerprints or (change == "untracked" and path in untracked_records):
-            observation_entries.append(entry)
-        else:
-            unverified_paths.update(write_paths)
-
-    current_fingerprints: dict[str, str] = {}
-    observations: dict[str, PathFingerprintObservation] = {}
-    if observation_entries:
-        current_records, observations, observation_state = repo_change_fingerprint_observations(
-            root,
-            observation_entries,
-            selected,
-            projection=ChangeFingerprintProjection.LEGACY_V2,
-        )
-        if not observation_state.available:
-            return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), observation_state
-        current_fingerprints = {
-            entry_key(
-                (
-                    item["change"],
-                    item["path"],
-                    item.get("old_path", ""),
-                )
-            ): item["fingerprint_sha256"]
-            for item in current_records
-        }
-
-    for entry in observation_entries:
-        key = entry_key(entry)
-        write_paths = entry_write_paths.get(key, set())
-        recorded_fingerprint = recorded_fingerprints.get(key)
-        change, path, _old_path = entry
-        terminal_commitment_matches = (
-            current_fingerprints.get(key) == recorded_fingerprint
-            if recorded_fingerprint
-            else change == "untracked"
-            and path in untracked_records
-            and path in observations
-            and observations[path].manifest == untracked_records[path]
-        )
-        if not terminal_commitment_matches:
-            unverified_paths.update(write_paths)
-            continue
-        for write_path in write_paths:
-            observation = observations.get(write_path)
-            if (
-                observation is None
-                or observation.stable_state is None
-                or observation.stable_state.get("kind") == "missing"
-            ):
-                unverified_paths.add(write_path)
-                continue
-            states[write_path] = observation.stable_state
-
-    for path in unverified_paths:
-        states.pop(path, None)
-    return LegacyTerminalStateVerification(states, tuple(sorted(unverified_paths))), state
-
-
-def verify_legacy_change_terminal_states_at_revision(
-    root: Path,
-    *,
-    entries: list[ChangedEntry],
-    candidate_paths: set[str],
-    manifest: dict[str, Any],
-    observed_head: str,
-    terminal_revision: str,
-    target: RepoTarget | None = None,
-) -> tuple[LegacyTerminalStateVerification, RepoGitState]:
-    """Replay a legacy v2 terminal state against one descendant commit.
-
-    Legacy v2 fingerprints include the index and worktree status, so a clean
-    checkout cannot be compared to them directly.  This creates a disposable
-    repository that reads the source object database through Git alternates and
-    tries the two complete v2 projections: unstaged/untracked and fully staged.
-    The source repository is never used as a worktree or index.
-    """
-    selected = _target(root, target)
-    state = repo_git_state(root, selected)
-    normalized_candidates = {
-        normalized
-        for path in candidate_paths
-        if (normalized := normalize_repo_path(path)) and normalized == path
-    }
-    if not state.available:
-        return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), state
-    if (
-        normalized_candidates != candidate_paths
-        or not isinstance(manifest, dict)
-        or not normalized_candidates
-        or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", terminal_revision)
-        or (
-            observed_head != "<unborn>"
-            and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", observed_head)
-        )
-    ):
-        return (
-            LegacyTerminalStateVerification(
-                {},
-                tuple(sorted(candidate_paths)),
-                GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
-            ),
-            state,
-        )
-    assert selected is not None
-
-    source_states, source_state = repo_path_stable_states(
-        root,
-        sorted(normalized_candidates),
-        selected,
-        revision=terminal_revision,
-    )
-    if not source_state.available or set(source_states) != normalized_candidates:
-        if source_state.available:
-            source_state = RepoGitState(
-                False,
-                f"{selected.display_path}/ historical terminal path state is incomplete",
-                selected.id,
-                selected.display_path,
-                GitObservationProblem.PATH_UNAVAILABLE.value,
-            )
-        return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), source_state
-
-    try:
-        objects_result = subprocess.run(
-            ["git", "rev-parse", "--git-path", "objects"],
-            cwd=selected.root_path,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        objects_result = None
-    if objects_result is None or objects_result.returncode != 0:
-        return (
-            LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))),
-            RepoGitState(
-                False,
-                f"{selected.display_path}/ cannot locate the Git object database for historical replay",
-                selected.id,
-                selected.display_path,
-                "legacy_terminal_replay_unavailable",
-            ),
-        )
-    object_path = Path(objects_result.stdout.strip())
-    if not object_path.is_absolute():
-        object_path = selected.root_path / object_path
-    try:
-        object_path = object_path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return (
-            LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))),
-            RepoGitState(
-                False,
-                f"{selected.display_path}/ cannot resolve the Git object database for historical replay",
-                selected.id,
-                selected.display_path,
-                "legacy_terminal_replay_unavailable",
-            ),
-        )
-    if not object_path.is_dir() or any(value in object_path.as_posix() for value in "\r\n"):
-        return (
-            LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))),
-            RepoGitState(
-                False,
-                f"{selected.display_path}/ cannot use the Git object database for historical replay",
-                selected.id,
-                selected.display_path,
-                "legacy_terminal_replay_unavailable",
-            ),
-        )
-
-    replay_unavailable = RepoGitState(
-        False,
-        f"{selected.display_path}/ cannot construct an isolated historical Git projection",
-        selected.id,
-        selected.display_path,
-        "legacy_terminal_replay_unavailable",
-    )
-
-    def invalid_projection() -> tuple[LegacyTerminalStateVerification, RepoGitState]:
-        return (
-            LegacyTerminalStateVerification(
-                {},
-                tuple(sorted(candidate_paths)),
-                GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
-            ),
-            state,
-        )
-
-    replay_env = os.environ.copy()
-    for variable in (
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    ):
-        replay_env.pop(variable, None)
-    replay_env["GIT_CONFIG_GLOBAL"] = os.devnull
-    replay_env["GIT_CONFIG_SYSTEM"] = os.devnull
-    replay_env["GIT_TERMINAL_PROMPT"] = "0"
-
-    def projection_matches(
-        verification: LegacyTerminalStateVerification,
-        verification_state: RepoGitState,
-    ) -> bool:
-        if (
-            not verification_state.available
-            or verification.problem is not None
-            or verification.unverified_paths
-            or set(verification.states) != normalized_candidates
-        ):
-            return False
-        return all(
-            stable_path_state_digest(verification.states[path])
-            == stable_path_state_digest(source_states[path])
-            for path in normalized_candidates
-        )
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="repoctl-legacy-v2-") as temporary_root:
-            replay_root = Path(temporary_root)
-            source_root = selected.root_path.resolve()
-            try:
-                replay_root.resolve().relative_to(source_root)
-            except ValueError:
-                pass
-            else:
-                return invalid_projection()[0], replay_unavailable
-
-            try:
-                initialized = subprocess.run(
-                    ["git", "init", "--quiet"],
-                    cwd=replay_root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=replay_env,
-                    check=False,
-                )
-            except OSError:
-                initialized = None
-            if initialized is None or initialized.returncode != 0:
-                return invalid_projection()[0], replay_unavailable
-
-            git_dir = replay_root / ".git"
-            alternate_file = git_dir / "objects" / "info" / "alternates"
-            try:
-                alternate_file.parent.mkdir(parents=True, exist_ok=True)
-                alternate_file.write_text(object_path.as_posix() + "\n", encoding="utf-8")
-            except OSError:
-                return invalid_projection()[0], replay_unavailable
-
-            def run_git(arguments: list[str]) -> bool:
-                try:
-                    result = subprocess.run(
-                        ["git", *arguments],
-                        cwd=replay_root,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        env=replay_env,
-                        check=False,
-                    )
-                except OSError:
-                    return False
-                return result.returncode == 0
-
-            if not all(
-                run_git(["config", key, value])
-                for key, value in (
-                    ("core.autocrlf", "false"),
-                    ("core.symlinks", "true"),
-                    ("core.filemode", "true"),
-                    ("core.attributesFile", os.devnull),
-                )
-            ):
-                return invalid_projection()[0], replay_unavailable
-            if not run_git(["symbolic-ref", "HEAD", "refs/heads/repoctl-replay"]):
-                return invalid_projection()[0], replay_unavailable
-            if observed_head != "<unborn>" and not run_git(
-                ["update-ref", "refs/heads/repoctl-replay", observed_head]
-            ):
-                return invalid_projection()[0], replay_unavailable
-            if not run_git(["cat-file", "-e", f"{terminal_revision}^{{commit}}"]):
-                return invalid_projection()[0], replay_unavailable
-            if observed_head != "<unborn>" and not run_git(
-                ["cat-file", "-e", f"{observed_head}^{{commit}}"]
-            ):
-                return invalid_projection()[0], replay_unavailable
-
-            def read_tree(revision: str) -> bool:
-                return run_git(
-                    ["read-tree", "--empty"]
-                    if revision == "<unborn>"
-                    else ["read-tree", "--reset", revision]
-                )
-
-            def apply_recorded_modes() -> bool:
-                raw_untracked = manifest.get("untracked")
-                if raw_untracked is None:
-                    return True
-                if not isinstance(raw_untracked, list):
-                    return False
-                for item in raw_untracked:
-                    if not isinstance(item, dict):
-                        return False
-                    path = item.get("path")
-                    if not isinstance(path, str) or normalize_repo_path(path) != path:
-                        return False
-                    if path not in normalized_candidates:
-                        continue
-                    mode = item.get("mode")
-                    if not isinstance(mode, str) or not re.fullmatch(r"[0-7]{4}", mode):
-                        return False
-                    candidate = replay_root / path
-                    try:
-                        file_stat = os.lstat(candidate)
-                    except (FileNotFoundError, NotADirectoryError):
-                        continue
-                    except OSError:
-                        return False
-                    if stat.S_ISREG(file_stat.st_mode):
-                        try:
-                            os.chmod(candidate, int(mode, 8), follow_symlinks=False)
-                        except OSError:
-                            return False
-                return True
-
-            def evaluate(index_revision: str) -> tuple[LegacyTerminalStateVerification, RepoGitState]:
-                if not read_tree(terminal_revision):
-                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
-                if not run_git(["checkout-index", "--all", "--force"]):
-                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
-                if not apply_recorded_modes():
-                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), state
-                if not read_tree(index_revision):
-                    return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
-                replay_target = RepoTarget(
-                    selected.id,
-                    replay_root,
-                    selected.display_path,
-                    selected.identity_source,
-                )
-                return verify_legacy_change_terminal_states(
-                    replay_root,
-                    entries=entries,
-                    candidate_paths=normalized_candidates,
-                    manifest=manifest,
-                    target=replay_target,
-                )
-
-            for index_revision in (observed_head, terminal_revision):
-                verification, verification_state = evaluate(index_revision)
-                if projection_matches(verification, verification_state):
-                    return verification, state
-                if not verification_state.available and verification_state.problem_code == "legacy_terminal_replay_unavailable":
-                    return verification, replay_unavailable
-    except (OSError, RuntimeError):
-        return LegacyTerminalStateVerification({}, tuple(sorted(candidate_paths))), replay_unavailable
-
-    return (
-        LegacyTerminalStateVerification(
-            {},
-            tuple(sorted(candidate_paths)),
-            GitObservationProblem.LEGACY_STATE_AMBIGUOUS,
-        ),
-        state,
-    )
 
 
 def repo_path_fingerprints(root: Path, paths: list[str], target: RepoTarget | None = None) -> tuple[dict[str, str], RepoGitState]:

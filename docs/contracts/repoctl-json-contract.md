@@ -123,17 +123,19 @@ A Chosen-scope decision action owns the complete path list at `data.action_input
 
 ## Completion receipt v5
 
-New completion receipts use schema v5. They retain stable Task/artifact identity, repository identity, changed entries, baseline/transition information when available, and metadata-gate history. They omit `verification` and `discovery_outcome`.
+New completion receipts use schema v5. They retain stable Task/artifact identity, repository identity, changed entries, verified start/completion event timestamps, explicit path transitions (an empty list for no changes), and metadata-gate history. A missing or unverifiable start transition blocks finish rather than creating a partial v5 receipt. They omit `verification` and `discovery_outcome`.
 
-Receipt and task-artifact hashes protect lifecycle-history identity. They do not assert that a command ran, a file state was tested, or a result passed. Readers continue to accept immutable v2–v4 receipts under their historical schema, including their legacy verification and Discovery outcome fields. Legacy v2 working-tree child evidence may also be read after a descendant commit when repository identity, ancestry, the original fingerprint commitment, and the committed terminal path state are all provable. Replay uses an isolated temporary Git index/worktree and never rewrites the source repository or historical records; missing or unreproducible evidence remains an error.
+Receipt and task-artifact hashes protect lifecycle-history identity. They do not assert that a command ran, a file state was tested, or a result passed. Normal receipt readers and descendant attribution accept **v5 only**. A one-time `task migrate-receipts [TASK_ID] --apply` converts sufficiently evidenced older receipts while preserving byte-identical originals and their original Task hashes under `docs/archive/task-evidence/receipts/`. A source hash mismatch remains a blocking integrity finding, not a new completion or verification. Old receipts missing authentic event/transition evidence remain unresolved instead of entering the current runtime.
 
-## Context, Graph, and Pack output
+Closed v3 start baselines may be retired by explicit `task migrate-states [TASK_ID] --apply` after their completion receipts are current. The exact original state and proof are preserved under `docs/archive/task-evidence/start-baselines/`. A live v3 baseline is unresolved: no synthetic start event, stable dirty state, or new Task baseline is inferred. Normal Task state readers accept v4 only. Rebuild the derived completion catalogue by the exact repository selectors returned by the receipt migration after source integrity issues have been reviewed. These migration commands are not permanent format aliases.
+
+## Graph evidence and Knowledge output
 
 `graph search` and `graph query` return their evidence directly. Repeating either command creates no persistent result-receipt cache or selectable-result state. Stable source refs, typed relations, repository identity, completeness, freshness, and continuations remain in the command payload.
 
-An explicit `resume [TASK_ID]` or `task resume [TASK_ID]` query (optionally followed by a colon and the question) routes to the existing read-only current Task resume projection before repository candidate retrieval. `data.bundle` is null and `data.task_resume` contains that projection; selection, freshness, lifecycle errors and warnings are preserved. An explicit conflicting repository selector is rejected. General implementation searches use Graph source navigation.
+An explicit `resume [TASK_ID]` or `task resume [TASK_ID]` query (optionally followed by a colon and the question) routes to the existing read-only current Task resume projection before repository candidate retrieval. `data.result` is null and `data.task_resume` contains that projection; selection, freshness, lifecycle errors and warnings are preserved. An explicit conflicting repository selector is rejected. General implementation searches use Graph source navigation.
 
-Default Context JSON is a bounded working projection. `--full` adds raw evidence and diagnostics without changing the meaning of visible members. Graph `--full` likewise adds raw nodes, edges, and provider diagnostics.
+Default `graph search` JSON is a bounded, source-linked navigation result under `data.result`. `--full` adds evidence and diagnostics without changing source identity. `graph query --full` adds underlying nodes, edges and provider diagnostics. Neither command registers an export or creates a separate persistent user layer.
 
 
 ## Knowledge output
@@ -142,7 +144,7 @@ Knowledge commands select `--repo-id ID` or `--workspace`. Workspace records use
 
 `knowledge add` saves a durable record in one operation and returns the record path plus derived projection status. A projection or Graph synchronization failure is a warning after the record is safely stored, with an explicit maintenance action.
 
-Knowledge queries may report source drift while continuing to return the saved conclusion. The projection contains current direct records only. `knowledge check` and upgrade postflight report preserved older records that require one-time agent migration.
+Knowledge queries may report source drift while continuing to return the saved conclusion. The projection contains current direct records only. `knowledge check` and upgrade postflight report every v1 still in active records, including staged but not finalized ones; explicit one-time conversion retains original bytes in historical archive and verifies current v2 references.
 
 Default Knowledge queries retain claims, reasons, applicability and one source view: `source_refs` carries the declared path, kind, current status, and a different resolved path when relocated. `--full` retains all source digests and resolution diagnostics; `--explain` retains ranking details. Query selection and source-drift warnings are identical across views. Source-drift warnings cover returned records only; `lifecycle.source_changed_count` still counts all examined records. Use `knowledge check` for catalog-wide diagnostics.
 

@@ -10,9 +10,10 @@ import pytest
 
 from tools.repoctl import context as context_module
 from tools.repoctl.cli import main
-from tools.repoctl.context import compact_context_bundle
+from tools.repoctl.context_benchmark import run_context_benchmark
+from tools.repoctl.context import compact_graph_source_evidence
 from tools.repoctl.context_model import (
-    ContextBundle,
+    GraphSourceEvidence,
     ContextCandidate,
     ContextEvidenceKind,
     ContextSectionKind,
@@ -30,7 +31,7 @@ from tools.repoctl.repositories import require_repo_target
 from tests.repoctl.knowledge_test_helpers import _add_knowledge_source
 from tests.repoctl.context_test_helpers import (
     _rebuild_completion_history,
-    _write_context_pack_task,
+    _write_graph_evidence_task,
     _write_completion_receipt,
     _write_context_benchmark_collection_corpus,
     _setup_context_multirepo_workspace,
@@ -77,15 +78,15 @@ def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
         "context_graph_unavailable",
         "context_metadata_unavailable",
     }
-    assert context_payload["data"]["bundle"]["completeness"]["status"] == "partial"
+    assert context_payload["data"]["result"]["completeness"]["status"] == "partial"
     assert any(
         item.get("source_ref", {}).get("path") == "repos/app.py"
-        for items in context_payload["data"]["bundle"]["groups"].values()
+        for items in context_payload["data"]["result"]["groups"].values()
         for item in items
     )
     assert [action.get("kind") for action in context_payload["next_actions"]] == [
         "graph_build",
-        "context_resume",
+        "graph_search_resume",
     ]
 
     assert not (tmp_path / ".repoctl-state/knowledge/main/current-head.json").exists()
@@ -120,7 +121,7 @@ def test_cold_workspace_source_discovery_and_optional_enrichment_bootstrap(
     assert receipt_count() == receipts_before
     snapshot_path.write_text(original_snapshot, encoding="utf-8")
 
-    _write_context_pack_task(
+    _write_graph_evidence_task(
         tmp_path,
         task_id="T-20260902010101Z",
         slug="cold-bootstrap",
@@ -251,7 +252,7 @@ def test_compact_context_bounds_groups_and_omits_repository_wide_diagnostics() -
         )
         for index in range(10)
     ]
-    bundle = ContextBundle(
+    bundle = GraphSourceEvidence(
         repository={"id": "main", "path": "repos", "identity_source": "reserved"},
         query={"text": "test"},
         source_snapshots={},
@@ -303,7 +304,7 @@ def test_compact_context_bounds_groups_and_omits_repository_wide_diagnostics() -
         },
     ).with_digest()
 
-    compact = compact_context_bundle(bundle, max_group_items=2)
+    compact = compact_graph_source_evidence(bundle, max_group_items=2)
 
     assert len(compact["groups"]["must_read"]) == 2
     assert [item["sections"][0]["section"] for item in compact["groups"]["must_read"]] == ["Decision 0", "Decision 1"]
@@ -353,7 +354,7 @@ def test_compact_context_projects_items_with_their_primary_continuations() -> No
         "likely_change_surface": [source_item],
         "must_read": must_read,
     }
-    bundle = ContextBundle(
+    bundle = GraphSourceEvidence(
         repository={"id": "main", "path": "repos", "identity_source": "reserved"},
         query={"text": "module behavior"},
         source_snapshots={},
@@ -363,7 +364,7 @@ def test_compact_context_projects_items_with_their_primary_continuations() -> No
         groups=groups,
     ).with_digest()
 
-    compact = compact_context_bundle(bundle)
+    compact = compact_graph_source_evidence(bundle)
 
     assert [item["record_id"] for item in compact["groups"]["knowledge_records"]] == ["K-1"]
     continuations = {
@@ -405,7 +406,7 @@ def test_compact_context_scans_until_group_limits_and_keeps_warnings() -> None:
         "supporting_evidence": [{"source_ref": {"kind": "document", "path": "docs/malformed.md"}}],
         "warnings_and_completeness": [{"code": "graph_partial", "status": "warning"}],
     }
-    bundle = ContextBundle(
+    bundle = GraphSourceEvidence(
         repository={"id": "main", "path": "repos", "identity_source": "reserved"},
         query={"text": "module impact"},
         source_snapshots={},
@@ -415,9 +416,9 @@ def test_compact_context_scans_until_group_limits_and_keeps_warnings() -> None:
         groups=groups,
     ).with_digest()
 
-    compact = compact_context_bundle(bundle)
+    compact = compact_graph_source_evidence(bundle)
 
-    assert compact == compact_context_bundle(bundle)
+    assert compact == compact_graph_source_evidence(bundle)
     assert compact["groups"]["callers_and_dependents"] == []
     assert [item["record_id"] for item in compact["groups"]["knowledge_records"]] == ["K-2"]
     assert compact["groups"]["supporting_evidence"] == []
@@ -432,7 +433,7 @@ def test_compact_context_scans_until_group_limits_and_keeps_warnings() -> None:
     assert ("symbol", "new_symbol_0") not in continuations
 
 
-def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_context_query_returns_source_result(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     (repo / "app.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
     (tmp_path / "docs/contracts/repoctl-graph-contract.md").write_text(
@@ -443,20 +444,23 @@ def test_context_query_returns_source_bundle(tmp_path: Path, monkeypatch, capsys
     assert main(["graph", "search", "Why is Graph non-authoritative?", "--mode", "authority", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    bundle = payload["data"]["bundle"]
-    assert bundle["schema"] == "repoctl.graph.evidence"
-    assert bundle["authoritative"] is False
-    assert bundle["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
-    assert bundle["schema_version"] == 15
-    assert bundle["view"] == "compact"
-    grouped_items = [item for items in bundle["groups"].values() for item in items if isinstance(item.get("source_ref"), dict)]
+    result = payload["data"]["result"]
+    assert result["schema"] == "repoctl.graph.evidence"
+    assert result["authoritative"] is False
+    assert result["repository"] == {"id": "main", "path": "repos", "identity_source": "reserved"}
+    assert result["schema_version"] == 15
+    assert "view" not in result
+    grouped_items = [item for items in result["groups"].values() for item in items if isinstance(item.get("source_ref"), dict)]
     refs = [item["source_ref"] for item in grouped_items]
     graph_contracts = [item for item in grouped_items if item["source_ref"]["path"] == "docs/contracts/repoctl-graph-contract.md"]
     assert len(graph_contracts) == 1
     assert {section["section"] for section in graph_contracts[0]["sections"]} == {"repoctl Graph contract", "Source authority"}
     assert all(ref["content_sha256"].startswith("sha256:") for ref in refs)
-    assert "graph" not in payload["data"]
-    assert payload["warnings"][0]["code"] == "context_not_authoritative"
+    assert "bundle" not in payload["data"]
+    assert "guide" not in payload["data"]
+    assert "guide" not in result
+    assert result["result_digest"].startswith("sha256:")
+    assert payload["warnings"][0]["code"] == "graph_not_authoritative"
 
 
 def test_context_query_ranks_provider_section_owner_over_repeated_body_noise(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -474,7 +478,7 @@ def test_context_query_ranks_provider_section_owner_over_repeated_body_noise(tmp
 
     assert main(["graph", "search", "reconcile settlement", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     change_surface = bundle["groups"]["likely_change_surface"]
     assert [item["source_ref"]["path"] for item in change_surface[:2]] == ["repos/owner.py", "repos/noise.py"]
     owner = next(item for item in bundle["evidence"] if item["source_ref"]["path"] == "repos/owner.py")
@@ -499,7 +503,7 @@ def test_context_query_preserves_named_owner_beyond_body_noise_cutoff(tmp_path: 
 
     assert main(["graph", "search", "locate owner", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     paths = [
         item["source_ref"]["path"]
         for item in bundle["evidence"]
@@ -537,7 +541,7 @@ def test_context_query_does_not_promote_generic_natural_language_token_to_exact_
     query = "public search results evidence related activity detail route dead end"
     assert main(["graph", "search", query, "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert "render.py" in {item["anchor"]["path"] for item in resolution["anchors"]}
@@ -557,7 +561,7 @@ def test_context_query_does_not_promote_generic_natural_language_token_to_exact_
     )
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     compact_source_paths = {
         item["source_ref"]["path"]
         for item in compact["groups"]["likely_change_surface"]
@@ -579,7 +583,7 @@ def test_context_query_does_not_promote_generic_natural_language_token_to_exact_
                 "--json",
             ]
         ) == 0
-        punctuated = json.loads(capsys.readouterr().out)["data"]["bundle"]
+        punctuated = json.loads(capsys.readouterr().out)["data"]["result"]
         punctuated_resolution = punctuated["selection"]["graph_anchor"]
         assert "render.py" in {
             item["anchor"]["path"] for item in punctuated_resolution["anchors"]
@@ -1048,7 +1052,7 @@ def test_context_query_preserves_cross_component_runtime_coverage_against_vocabu
         "exchange routing plus HTTP historical candle pagination before_ts start_ts end_ts cursor examples"
     )
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    without_graph = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    without_graph = json.loads(capsys.readouterr().out)["data"]["result"]
     without_graph_sources = {
         item["source_ref"]["path"]
         for item in without_graph["groups"]["likely_change_surface"]
@@ -1058,7 +1062,7 @@ def test_context_query_preserves_cross_component_runtime_coverage_against_vocabu
 
     _materialize(tmp_path)
     assert main(["graph", "search", query, "--repo-id", "main", "--full", "--json"]) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     anchor_paths = {
         item["anchor"]["path"]
         for item in full["selection"]["graph_anchor"]["anchors"]
@@ -1068,7 +1072,7 @@ def test_context_query_preserves_cross_component_runtime_coverage_against_vocabu
     assert "tests/test_upbit_rest_client.py" not in anchor_paths
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     compact_sources = {
         item["source_ref"]["path"]
         for item in compact["groups"]["likely_change_surface"]
@@ -1112,7 +1116,7 @@ def test_context_query_keeps_single_term_runtime_candidate_in_typed_coverage(
             "--json",
         ]
     ) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     coverage = resolution["selection_coverage"]
     assert "runtime/implementation.py" in coverage["eligible_paths"]
@@ -1162,7 +1166,7 @@ def test_context_query_prefers_distinct_query_evidence_over_graph_degree(
             "--json",
         ]
     ) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     anchors = bundle["selection"]["graph_anchor"]["anchors"]
     assert anchors[0]["anchor"]["path"] == "runtime/implementation.py"
     assert "runtime/implementation.py" in {
@@ -1207,7 +1211,7 @@ def test_context_graph_refresh_does_not_reduce_distinct_owner_coverage(
     query = "tablet wide navigation sidebar content reading font threshold layout"
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    before = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    before = json.loads(capsys.readouterr().out)["data"]["result"]
     before_paths = {
         item["source_ref"]["path"]
         for item in before["groups"]["likely_change_surface"]
@@ -1217,7 +1221,7 @@ def test_context_graph_refresh_does_not_reduce_distinct_owner_coverage(
 
     _materialize(tmp_path)
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    after = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    after = json.loads(capsys.readouterr().out)["data"]["result"]
     after_paths = {
         item["source_ref"]["path"]
         for item in after["groups"]["likely_change_surface"]
@@ -1259,7 +1263,7 @@ def test_context_query_preserves_independent_owner_before_connected_component_re
 
     query = "amber cobalt quartz meadow violet harbor"
     assert main(["graph", "search", query, "--repo-id", "main", "--full", "--json"]) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     anchors = {
         item["anchor"]["path"]
         for item in full["selection"]["graph_anchor"]["anchors"]
@@ -1269,7 +1273,7 @@ def test_context_query_preserves_independent_owner_before_connected_component_re
     assert len(anchors & dependency_paths) == 1
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     compact_paths = {
         item["source_ref"]["path"]
         for item in compact["groups"]["likely_change_surface"]
@@ -1329,7 +1333,7 @@ def test_context_query_uses_only_declared_components_after_novel_terms_are_satur
 
     query = "amber cobalt quartz meadow violet harbor silver orbit"
     assert main(["graph", "search", query, "--repo-id", "main", "--full", "--json"]) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     anchors = {
         item["anchor"]["path"]
         for item in bundle["selection"]["graph_anchor"]["anchors"]
@@ -1350,7 +1354,7 @@ def test_context_query_uses_only_declared_components_after_novel_terms_are_satur
     ]
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     compact_components = {
         item["source_ref"]["path"]: item.get("component_ids", [])
         for item in compact["groups"]["likely_change_surface"]
@@ -1395,7 +1399,7 @@ def test_context_query_does_not_infer_components_from_directories(
             "--json",
         ]
     ) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     candidates = bundle["selection"]["graph_anchor"]["candidates"]
 
     assert candidates
@@ -1442,7 +1446,7 @@ def test_context_query_exposes_only_selected_fresh_component_crossings(
             "--json",
         ]
     ) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
 
     assert compact["component_crossing_count"] == 1
     crossing = compact["component_crossings"][0]
@@ -1480,7 +1484,7 @@ def test_context_reports_bounded_working_set_coverage_in_json_text_and_markdown(
     query = "alpha comet beta orbit gamma signal delta harbor"
 
     assert main(["graph", "search", query, "--repo-id", "main", "--full", "--json"]) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     coverage = full["selection"]["graph_anchor"]["selection_coverage"]
     assert coverage["status"] == "partial"
     assert coverage["reason"] == "anchor_budget_exhausted"
@@ -1489,7 +1493,7 @@ def test_context_reports_bounded_working_set_coverage_in_json_text_and_markdown(
     assert coverage["coverage_omitted_count"] == 1
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     compact_coverage = compact["completeness"]["graph_anchor"]["selection_coverage"]
     assert compact_coverage["status"] == "partial"
     assert compact_coverage["coverage_omitted_count"] == 1
@@ -1561,7 +1565,7 @@ def test_compact_working_set_reports_visible_omissions_with_field_identity() -> 
         "unrepresented_roles": [],
         "unrepresented_components": [],
     }
-    bundle = ContextBundle(
+    bundle = GraphSourceEvidence(
         repository={"id": "main", "path": "repos", "identity_source": "reserved"},
         query={"text": "alpha beta gamma delta", "mode": "code_location"},
         source_snapshots={},
@@ -1570,7 +1574,7 @@ def test_compact_working_set_reports_visible_omissions_with_field_identity() -> 
             "graph_completeness": {"status": "complete"},
             "graph_anchor": {
                 "status": "resolved",
-                "code": "context_graph_anchor_resolved",
+                "code": "graph_source_anchor_resolved",
                 "anchors": anchors,
                 "candidates": anchors,
                 "selection_coverage": anchor_coverage,
@@ -1581,7 +1585,7 @@ def test_compact_working_set_reports_visible_omissions_with_field_identity() -> 
         groups=groups,
     )
 
-    compact = compact_context_bundle(bundle)
+    compact = compact_graph_source_evidence(bundle)
     assert len(compact["groups"]["likely_change_surface"]) == 2
     assert compact["completeness"]["graph_anchor"]["selection_coverage"]["status"] == "complete"
     coverage = compact["completeness"]["working_set_coverage"]
@@ -1592,9 +1596,9 @@ def test_compact_working_set_reports_visible_omissions_with_field_identity() -> 
     assert coverage["unrepresented_field_term_evidence"] == {}
     assert "unrepresented_query_terms" not in coverage
 
-    text = context_module.render_context_text(bundle)
+    text = context_module.render_graph_source_text(bundle)
     assert "working_set_coverage status=complete" in text
-    markdown = context_module.render_context_markdown(bundle)
+    markdown = context_module.render_graph_source_markdown(bundle)
     assert "## Compact Working Set" in markdown
     assert "Working-set coverage: `complete`" in markdown
 
@@ -1646,7 +1650,7 @@ def test_context_query_prefers_connected_test_over_weak_lexical_test_candidate(
     query = "reconcile invoice failure handling"
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
 
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     change_paths = {
         item["source_ref"]["path"]
         for item in compact["groups"]["likely_change_surface"]
@@ -1705,7 +1709,7 @@ def test_context_query_keeps_explicit_named_source_and_named_test_ahead_of_weak_
     query = "Redmi admin_screen widget test empty hierarchy"
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
 
-    fresh = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    fresh = json.loads(capsys.readouterr().out)["data"]["result"]
     assert fresh["completeness"]["graph_anchor"]["status"] == "resolved"
     assert [item["path"] for item in fresh["graph_seed_refs"]] == [
         "admin_screen.py"
@@ -1734,7 +1738,7 @@ def test_context_query_keeps_explicit_named_source_and_named_test_ahead_of_weak_
         ["graph", "search", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
 
-    stale_full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    stale_full = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = stale_full["selection"]["graph_anchor"]
     assert resolution["status"] == "unresolved"
     assert resolution["anchors"] == []
@@ -1749,7 +1753,7 @@ def test_context_query_keeps_explicit_named_source_and_named_test_ahead_of_weak_
     ]
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    stale = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    stale = json.loads(capsys.readouterr().out)["data"]["result"]
     stale_sources = {
         item["source_ref"]["path"]
         for item in stale["groups"]["likely_change_surface"]
@@ -1795,7 +1799,7 @@ def test_context_query_marks_duplicate_explicit_named_basename_ambiguous(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "ambiguous"
     assert resolution["anchors"] == []
@@ -1841,7 +1845,7 @@ def test_context_query_preserves_ranked_graph_seed_order_in_full_and_compact_vie
         "main",
     ]
     assert main([*args, "--full", "--json"]) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     ranked_paths = [
         item["anchor"]["path"]
         for item in full["selection"]["graph_anchor"]["anchors"]
@@ -1854,7 +1858,7 @@ def test_context_query_preserves_ranked_graph_seed_order_in_full_and_compact_vie
     assert [item["path"] for item in full["graph_seed_refs"]] == ranked_paths
 
     assert main([*args, "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert [item["path"] for item in compact["completeness"]["graph_anchor"]["seed_anchors"]] == ranked_paths
     assert [item["path"] for item in compact["graph_seed_refs"]] == ranked_paths
     assert [
@@ -1895,7 +1899,7 @@ def test_context_query_promotes_weak_test_seed_connected_to_retained_source(
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     full_seed_paths = [item["path"] for item in full["graph_seed_refs"]]
     assert full_seed_paths == [
         "tests/test_owner.py",
@@ -1913,7 +1917,7 @@ def test_context_query_promotes_weak_test_seed_connected_to_retained_source(
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--json"]
     ) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert [item["path"] for item in compact["graph_seed_refs"]] == full_seed_paths
     assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/src/owner.py"
@@ -1974,7 +1978,7 @@ def test_context_query_keeps_stronger_test_anchor_when_another_lane_matches_dire
         ["graph", "search", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
 
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     anchors = full["selection"]["graph_anchor"]["anchors"]
     anchor_paths = {item["anchor"]["path"] for item in anchors}
     assert "web/test/test_render.py" not in anchor_paths
@@ -1989,7 +1993,7 @@ def test_context_query_keeps_stronger_test_anchor_when_another_lane_matches_dire
     )
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item["source_ref"]["path"] == "repos/web/src/gate_policy.py"
         for item in compact["groups"]["likely_change_surface"]
@@ -2022,7 +2026,7 @@ def test_context_query_fts_recall_is_path_diverse_before_candidate_limit(tmp_pat
 
     assert main(["graph", "search", "shared retrieval phrase", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     source_paths = {
         item["source_ref"]["path"]
         for item in bundle["evidence"]
@@ -2054,7 +2058,7 @@ def test_context_query_ranks_index_and_dirty_overlay_in_one_candidate_corpus(tmp
     query = "quartz settlement rendezvous"
     assert main(["graph", "search", query, "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     ranked = bundle["groups"]["likely_change_surface"]
     assert ranked[0]["source_ref"]["path"] == "repos/a_dirty_owner.ini"
     owner_fts = ranked[0]["score_breakdown"]["fts"]
@@ -2064,7 +2068,7 @@ def test_context_query_ranks_index_and_dirty_overlay_in_one_candidate_corpus(tmp
     )
 
     assert main(["graph", "search", query, "--mode", "code-location", "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/a_dirty_owner.ini"
     )
@@ -2078,7 +2082,7 @@ def test_context_query_promotes_structured_data_only_by_exact_identity(tmp_path:
 
     assert main(["graph", "search", "current project architecture and recent decisions", "--repo-id", "main", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     packed_paths = [
         item["source_ref"]["path"]
         for items in bundle["groups"].values()
@@ -2090,7 +2094,7 @@ def test_context_query_promotes_structured_data_only_by_exact_identity(tmp_path:
     assert "evidence" not in bundle
 
     assert main(["graph", "search", "fallback-must-not-index-this", "--repo-id", "main", "--json"]) == 0
-    fallback_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    fallback_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     fallback_paths = {
         item["source_ref"]["path"]
         for items in fallback_bundle["groups"].values()
@@ -2100,7 +2104,7 @@ def test_context_query_promotes_structured_data_only_by_exact_identity(tmp_path:
     assert "repos/config.json" not in fallback_paths
 
     assert main(["graph", "search", "config.json", "--repo-id", "main", "--json"]) == 0
-    exact_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    exact_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     config_item = next(
         item
         for items in exact_bundle["groups"].values()
@@ -2112,7 +2116,7 @@ def test_context_query_promotes_structured_data_only_by_exact_identity(tmp_path:
 
     _materialize(tmp_path)
     assert main(["graph", "search", "fallback-must-not-index-this", "--repo-id", "main", "--json"]) == 0
-    indexed_fallback = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    indexed_fallback = json.loads(capsys.readouterr().out)["data"]["result"]
     assert "repos/config.json" not in {
         item["source_ref"]["path"]
         for items in indexed_fallback["groups"].values()
@@ -2121,7 +2125,7 @@ def test_context_query_promotes_structured_data_only_by_exact_identity(tmp_path:
     }
 
     assert main(["graph", "search", "config.json", "--repo-id", "main", "--json"]) == 0
-    indexed_exact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    indexed_exact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item.get("source_ref", {}).get("kind") == "structured_data"
         and item["source_ref"]["path"] == "repos/config.json"
@@ -2157,7 +2161,7 @@ def test_context_query_exactly_matches_workflow_and_dotfile_identity(tmp_path: P
         ("supabase/seed.sql", "repos/supabase/seed.sql", "current_source"),
     ):
         assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-        bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+        bundle = json.loads(capsys.readouterr().out)["data"]["result"]
         item = bundle["groups"]["likely_change_surface"][0]
         assert item["source_ref"] == {
             "kind": kind,
@@ -2168,7 +2172,7 @@ def test_context_query_exactly_matches_workflow_and_dotfile_identity(tmp_path: P
         assert "exact" in item["selection_reason"]
 
     assert main(["graph", "search", "payments api key", "--repo-id", "main", "--json"]) == 0
-    config_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    config_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     env_item = next(
         item
         for item in config_bundle["groups"]["likely_change_surface"]
@@ -2177,7 +2181,7 @@ def test_context_query_exactly_matches_workflow_and_dotfile_identity(tmp_path: P
     assert env_item["source_ref"]["kind"] == "config"
 
     assert main(["graph", "search", ".temporary-state.md", "--repo-id", "main", "--json"]) == 0
-    markdown_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    markdown_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert "repos/.temporary-state.md" not in {
         item["source_ref"]["path"]
         for items in markdown_bundle["groups"].values()
@@ -2201,7 +2205,7 @@ def test_context_query_supports_legal_backtick_path(tmp_path: Path, monkeypatch,
     assert payload["ok"] is True
     assert "repos/owner`file.py" in {
         item["source_ref"]["path"]
-        for items in payload["data"]["bundle"]["groups"].values()
+        for items in payload["data"]["result"]["groups"].values()
         for item in items
         if isinstance(item.get("source_ref"), dict)
     }
@@ -2230,7 +2234,7 @@ def test_context_query_read_first_populates_must_read(tmp_path: Path, monkeypatc
 
     assert main(["graph", "search", "이 프로젝트에서 다음 개발을 시작하려면 무엇을 먼저 읽어야 하나?", "--repo-id", "main", "--mode", "startup-reading", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["query"]["mode"] == "startup_reading"
     must_read_paths = [item["source_ref"]["path"] for item in bundle["groups"]["must_read"]]
     assert "repos/README.md" in must_read_paths
@@ -2252,7 +2256,7 @@ def test_context_query_auto_retrieves_root_project_documents_from_materialized_i
 
     assert main(["graph", "search", "Evidence And Context", "--repo-id", "main", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["completeness"]["project_knowledge"]["documents"]["result_count"] > 0
     assert any(
         item.get("source_ref", {}).get("path") == "docs/PRD.md"
@@ -2320,7 +2324,7 @@ def test_context_query_preserves_document_meaning_in_materialized_index(tmp_path
         }
 
     indexed_payload = run_full_query()
-    indexed = indexed_payload["data"]["bundle"]
+    indexed = indexed_payload["data"]["result"]
     indexed_roles = {
         item["source_ref"]["path"]: item.get("document_role")
         for item in indexed["evidence"]
@@ -2360,7 +2364,7 @@ def test_context_query_preserves_document_meaning_in_materialized_index(tmp_path
     )
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     must_read = {
         item["source_ref"]["path"]: item.get("document_role")
         for item in compact["groups"]["must_read"]
@@ -2371,7 +2375,7 @@ def test_context_query_preserves_document_meaning_in_materialized_index(tmp_path
     assert compact["groups"]["supporting_evidence"][0]["source_ref"]["path"] == "docs/workflows/INDEX.md"
 
     assert main(["graph", "search", "docs/workflows/TEMPLATE.md", "--repo-id", "main", "--full", "--json"]) == 0
-    exact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    exact = json.loads(capsys.readouterr().out)["data"]["result"]
     template = next(
         item
         for item in exact["evidence"]
@@ -2404,7 +2408,7 @@ def test_context_compact_suppresses_weak_root_operational_doc_but_keeps_product_
     assert main(
         ["graph", "search", token, "--repo-id", "main", "--full", "--json"]
     ) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item["source_ref"]["path"] == "docs/contracts/service-loader-policy.md"
         for item in full["groups"]["must_read"]
@@ -2415,7 +2419,7 @@ def test_context_compact_suppresses_weak_root_operational_doc_but_keeps_product_
     )
 
     assert main(["graph", "search", token, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert not any(
         item["source_ref"]["path"] == "docs/contracts/service-loader-policy.md"
         for item in compact["groups"]["must_read"]
@@ -2434,7 +2438,7 @@ def test_context_compact_suppresses_weak_root_operational_doc_but_keeps_product_
             "--json",
         ]
     ) == 0
-    explicit = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    explicit = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item["source_ref"]["path"] == "docs/contracts/service-loader-policy.md"
         for item in explicit["groups"]["must_read"]
@@ -2496,7 +2500,7 @@ def test_context_compact_does_not_treat_generic_root_path_or_section_terms_as_do
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     full_item = next(
         item
         for item in full["evidence"]
@@ -2506,7 +2510,7 @@ def test_context_compact_does_not_treat_generic_root_path_or_section_terms_as_do
     assert expected_evidence_kind in full_item["evidence_kinds"]
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert not any(
         item["source_ref"]["path"] == f"docs/workflows/{document_name}"
         for item in compact["groups"]["must_read"]
@@ -2523,7 +2527,7 @@ def test_context_compact_does_not_treat_generic_root_path_or_section_terms_as_do
     assert main(
         ["graph", "search", "orphanedzz", "--repo-id", "main", "--json"]
     ) == 0
-    root_only = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    root_only = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item["source_ref"]["path"] == "docs/workflows/workspace-only-policy.md"
         for item in root_only["groups"]["must_read"]
@@ -2551,7 +2555,7 @@ def test_context_query_keeps_product_reference_documents_out_of_authority(tmp_pa
 
     assert main(["graph", "search", token, "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     located = {
         item["source_ref"]["path"]: (group, item)
         for group, items in bundle["groups"].items()
@@ -2606,7 +2610,7 @@ def test_context_query_auto_balances_product_source_tests_and_project_documents(
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(item["source_ref"]["path"] == "repos/owner.py" for item in bundle["groups"]["likely_change_surface"])
     assert not any(item["source_ref"]["path"] == "repos/tests/test_owner.py" for item in bundle["groups"]["tests_and_verification"])
     assert any(item["source_ref"]["path"] == "docs/PRD.md" for item in bundle["groups"]["must_read"])
@@ -2646,7 +2650,7 @@ def test_context_query_auto_balances_product_source_tests_and_project_documents(
     )
 
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
-    partial = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    partial = json.loads(capsys.readouterr().out)["data"]["result"]
     assert partial["completeness"]["graph_anchor"]["status"] == "resolved"
     assert any(item["source_ref"]["path"] == "repos/owner.py" for item in partial["groups"]["likely_change_surface"])
     assert any(item["source_ref"]["path"] == "docs/PRD.md" for item in partial["groups"]["must_read"])
@@ -2679,7 +2683,7 @@ def test_context_query_indexes_text_sources_without_claiming_semantic_graph_supp
     query = "Noise Receiver first-use UX prompt canvas dial cursor mobile zoom reduced motion safety overlay contrast privacy terms"
     assert main(["graph", "search", query, "--repo-id", "main", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     paths = {item["source_ref"]["path"] for item in bundle["groups"]["likely_change_surface"]}
     assert paths == {
         "repos/index.html",
@@ -2688,7 +2692,7 @@ def test_context_query_indexes_text_sources_without_claiming_semantic_graph_supp
     }
 
     assert main(["graph", "search", query, "--repo-id", "main", "--full", "--json"]) == 0
-    full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    full = json.loads(capsys.readouterr().out)["data"]["result"]
     assert any(
         item["source_ref"]["path"] == "repos/index.html"
         for item in full["evidence"]
@@ -2707,7 +2711,7 @@ def test_context_query_returns_actionable_groups_for_call_impact(tmp_path: Path,
 
     assert main(["graph", "search", "validate_token", "--mode", "call-impact", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["query"]["mode"] == "call_impact"
     groups = bundle["groups"]
     assert any(item["source_ref"]["kind"] == "graph_relation" for item in groups["callers_and_dependents"])
@@ -2740,19 +2744,19 @@ def test_context_query_preserves_ambiguous_exact_symbols_without_graph_expansion
 
     assert main(["graph", "search", "reconcile_settlement", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "ambiguous"
-    assert resolution["code"] == "context_graph_anchor_ambiguous"
+    assert resolution["code"] == "graph_source_anchor_ambiguous"
     assert resolution["anchors"] == []
     assert [item["anchor"]["path"] for item in resolution["candidates"]] == ["alpha.py", "beta.py"]
     assert not any(item["source_ref"]["kind"] == "graph_relation" for item in bundle["evidence"])
 
     assert main(["graph", "search", "reconcile_settlement", "--mode", "code-location", "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert compact["completeness"]["graph_anchor"] == {
         "status": "ambiguous",
-        "code": "context_graph_anchor_ambiguous",
+        "code": "graph_source_anchor_ambiguous",
         "seed_anchors": [],
         "seed_paths": [],
         "candidate_paths": ["alpha.py", "beta.py"],
@@ -2786,7 +2790,7 @@ def test_context_graph_modes_apply_bounded_directional_policies(tmp_path: Path, 
 
     def query_relations(query: str, mode: str) -> set[tuple[str, str, str, int]]:
         assert main(["graph", "search", query, "--mode", mode, "--repo-id", "main", "--full", "--json"]) == 0
-        bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+        bundle = json.loads(capsys.readouterr().out)["data"]["result"]
         assert bundle["selection"]["graph_anchor"]["status"] == "resolved"
         return {
             (
@@ -2863,7 +2867,7 @@ def test_context_graph_preserves_all_lexical_seed_origins_for_shared_relation(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert {item["anchor"]["path"] for item in resolution["anchors"]} == {
@@ -2919,7 +2923,7 @@ def test_context_graph_propagates_each_origin_through_another_seed(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     relation = next(
         relation
         for item in bundle["evidence"]
@@ -2974,7 +2978,7 @@ def test_context_graph_keeps_fresh_lexical_anchor_when_peer_is_stale(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert [item["anchor"]["path"] for item in resolution["anchors"]] == ["fresh_router.py"]
@@ -3024,7 +3028,7 @@ def test_context_graph_prunes_fresh_descendant_behind_stale_bridge(
     ) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    bundle = payload["data"]["bundle"]
+    bundle = payload["data"]["result"]
     assert bundle["completeness"]["graph_freshness"]["stale_paths"] == ["middle.py"]
     change_surface = {
         item["source_ref"]["path"]
@@ -3071,7 +3075,7 @@ def test_context_graph_expands_only_top_ranked_weak_lexical_file(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert len(resolution["anchors"]) == 1
@@ -3100,7 +3104,7 @@ def test_context_graph_preserves_provider_symbol_identity_when_query_support_is_
     _materialize(tmp_path)
 
     assert main(["graph", "search", "reconcile audit", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
-    partial = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    partial = json.loads(capsys.readouterr().out)["data"]["result"]
     partial_resolution = partial["selection"]["graph_anchor"]
     assert partial_resolution["status"] == "resolved"
     partial_anchor = partial_resolution["anchors"][0]["anchor"]
@@ -3120,7 +3124,7 @@ def test_context_graph_preserves_provider_symbol_identity_when_query_support_is_
     )
 
     assert main(["graph", "search", "reconcile ledger", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
-    complete = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    complete = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = complete["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert resolution["anchors"][0]["anchor"]["kind"] == "symbol"
@@ -3173,7 +3177,7 @@ def test_context_graph_corroborates_weak_provider_symbols_between_current_query_
         ]
     ) == 0
 
-    anchors = json.loads(capsys.readouterr().out)["data"]["bundle"]["selection"][
+    anchors = json.loads(capsys.readouterr().out)["data"]["result"]["selection"][
         "graph_anchor"
     ]["anchors"]
     assert {
@@ -3243,11 +3247,11 @@ def test_context_auto_history_does_not_promote_a_prior_changed_path_to_graph_own
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
-    before_full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    before_full = json.loads(capsys.readouterr().out)["data"]["result"]
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--json"]
     ) == 0
-    before = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    before = json.loads(capsys.readouterr().out)["data"]["result"]
     before_sources = [
         item["source_ref"]["path"]
         for item in before["groups"]["likely_change_surface"]
@@ -3304,11 +3308,11 @@ def test_context_auto_history_does_not_promote_a_prior_changed_path_to_graph_own
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--full", "--json"]
     ) == 0
-    after_full = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    after_full = json.loads(capsys.readouterr().out)["data"]["result"]
     assert main(
         ["graph", "search", query, "--repo-id", "main", "--json"]
     ) == 0
-    after = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    after = json.loads(capsys.readouterr().out)["data"]["result"]
 
     final_anchor_paths = [
         item["anchor"]["path"]
@@ -3372,7 +3376,7 @@ def test_context_graph_keeps_symbol_specificity_with_compatible_exact_file_evide
 
     assert main(["graph", "search", "owner.py target_operation", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert resolution["anchors"][0]["anchor"]["kind"] == "symbol"
@@ -3396,7 +3400,7 @@ def test_context_graph_marks_conflicting_exact_file_and_symbol_paths_ambiguous(t
 
     assert main(["graph", "search", "alpha.py target_operation", "--mode", "code-location", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "ambiguous"
     assert {item["anchor"]["path"] for item in resolution["candidates"]} == {"alpha.py", "beta.py"}
@@ -3441,7 +3445,7 @@ def test_context_graph_marks_conflicting_exact_symbol_and_explicit_named_file_pa
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     named_file = next(
         item
         for item in bundle["evidence"]
@@ -3477,7 +3481,7 @@ def test_context_graph_marks_conflicting_exact_symbol_and_explicit_named_file_pa
             "--json",
         ]
     ) == 0
-    stale_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    stale_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert stale_bundle["selection"]["graph_anchor"]["status"] == "ambiguous"
     assert stale_bundle["graph_seed_refs"] == []
     assert not any(
@@ -3520,7 +3524,7 @@ def test_context_graph_does_not_use_exact_symbol_to_hide_duplicate_explicit_name
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "ambiguous"
     assert {item["anchor"]["path"] for item in resolution["candidates"]} == {
@@ -3561,7 +3565,7 @@ def test_context_graph_keeps_exact_symbol_when_explicit_named_file_is_compatible
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     anchor = resolution["anchors"][0]["anchor"]
@@ -3617,7 +3621,7 @@ def test_context_graph_does_not_promote_changed_provider_surface_to_exact_symbol
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     digest_symbol = next(
         item
         for item in bundle["evidence"]
@@ -3672,7 +3676,7 @@ def test_context_graph_accounts_for_anchor_missing_from_snapshot(tmp_path: Path,
 
     assert main(["graph", "search", "owner.py", "--mode", "file-impact", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "unresolved"
     assert resolution["anchors"] == []
@@ -3717,13 +3721,13 @@ def test_context_compact_preserves_direct_anchor_and_expands_one_weak_lexical_ow
 
     assert main(["graph", "search", "auth callback", "--repo-id", "main", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     change_surface = bundle["groups"]["likely_change_surface"]
     assert change_surface[0]["source_ref"]["path"] == "repos/auth_callback.py"
     assert change_surface[0]["evidence_role"] == "change_candidate"
     auth_anchor = bundle["completeness"]["graph_anchor"]
     assert auth_anchor["status"] == "resolved"
-    assert auth_anchor["code"] == "context_graph_anchor_resolved"
+    assert auth_anchor["code"] == "graph_source_anchor_resolved"
     assert auth_anchor["seed_paths"] == ["auth_callback.py"]
     assert auth_anchor["candidate_paths"] == ["auth_callback.py"]
     assert auth_anchor["seed_anchors"][0]["path"] == "auth_callback.py"
@@ -3736,7 +3740,7 @@ def test_context_compact_preserves_direct_anchor_and_expands_one_weak_lexical_ow
 
     assert main(["graph", "search", "oauth handshake", "--repo-id", "main", "--json"]) == 0
 
-    related_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    related_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     related_surface = related_bundle["groups"]["likely_change_surface"]
     related_target = related_surface[0]
     assert related_target["source_ref"]["path"] == "repos/handler.py"
@@ -3744,7 +3748,7 @@ def test_context_compact_preserves_direct_anchor_and_expands_one_weak_lexical_ow
     assert any(item["source_ref"]["path"] == "repos/flow.py" for item in related_surface)
     related_anchor = related_bundle["completeness"]["graph_anchor"]
     assert related_anchor["status"] == "resolved"
-    assert related_anchor["code"] == "context_graph_anchor_resolved"
+    assert related_anchor["code"] == "graph_source_anchor_resolved"
     assert related_anchor["seed_paths"] == ["handler.py"]
     assert related_anchor["candidate_paths"] == ["handler.py"]
     assert related_anchor["seed_anchors"][0] == {
@@ -3772,7 +3776,7 @@ def test_context_query_indexes_semantic_source_without_precise_provider(tmp_path
     assert main(["graph", "search", "refreshSettlementLedger", "--repo-id", "main", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    bundle = payload["data"]["bundle"]
+    bundle = payload["data"]["result"]
     assert any(item["source_ref"]["path"] == "repos/worker.go" for item in bundle["groups"]["likely_change_surface"])
     assert "evidence_problem_count" not in bundle["completeness"]
     assert any(problem["code"] == "context_source_too_large" for problem in payload["problems"])
@@ -3793,28 +3797,28 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     assert main(["graph", "search", "brand_new_overlay_token", "--repo-id", "main", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    freshness = payload["data"]["bundle"]["completeness"]["graph_freshness"]
+    freshness = payload["data"]["result"]["completeness"]["graph_freshness"]
     assert freshness == {
         "status": "stale",
         "root_evidence_changed": True,
     }
     paths = {
         item["source_ref"]["path"]
-        for item in payload["data"]["bundle"]["groups"]["likely_change_surface"]
+        for item in payload["data"]["result"]["groups"]["likely_change_surface"]
     }
     assert "repos/app.py" in paths
-    assert any(item["code"] == "context_graph_stale" for item in payload["data"]["bundle"]["groups"]["warnings_and_completeness"])
+    assert any(item["code"] == "context_graph_stale" for item in payload["data"]["result"]["groups"]["warnings_and_completeness"])
     stale_actions = {action.get("kind"): action for action in payload["next_actions"]}
     assert stale_actions["graph_refresh"]["command"] == "./scripts/repoctl graph build --repo-id main --json"
-    assert stale_actions["context_resume"]["command"] == (
+    assert stale_actions["graph_search_resume"]["command"] == (
         "./scripts/repoctl graph search brand_new_overlay_token --repo-id main --json"
     )
 
     assert main(["graph", "search", "app.py", "--mode", "file-impact", "--repo-id", "main", "--json"]) == 0
-    stale_anchor = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    stale_anchor = json.loads(capsys.readouterr().out)["data"]["result"]
     graph_anchor = stale_anchor["completeness"]["graph_anchor"]
     assert graph_anchor["status"] == "unresolved"
-    assert graph_anchor["code"] == "context_graph_anchor_unresolved"
+    assert graph_anchor["code"] == "graph_source_anchor_unresolved"
     assert graph_anchor["seed_anchors"] == []
     assert graph_anchor["seed_paths"] == []
     assert graph_anchor["candidate_paths"] == ["app.py"]
@@ -3830,7 +3834,7 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
     assert not stale_anchor["groups"]["callers_and_dependents"]
 
     assert main(["graph", "search", "what should I read first", "--mode", "startup-reading", "--repo-id", "main", "--json"]) == 0
-    startup = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    startup = json.loads(capsys.readouterr().out)["data"]["result"]
     board = next(item for item in startup["groups"]["must_read"] if item["source_ref"]["path"] == "docs/BOARD.md")
     current_board = (tmp_path / "docs/BOARD.md").read_text(encoding="utf-8")
     assert board["source_ref"]["content_sha256"] == "sha256:" + hashlib.sha256(current_board.encode("utf-8")).hexdigest()
@@ -3839,24 +3843,24 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
 
     def assert_invalid_graph(payload: dict, dependency_code: str) -> None:
         assert payload["ok"] is False
-        assert payload["data"]["bundle"] is not None
-        assert payload["data"]["bundle"]["completeness"]["graph_available"] is False
+        assert payload["data"]["result"] is not None
+        assert payload["data"]["result"]["completeness"]["graph_available"] is False
         assert any(problem["code"] == dependency_code for problem in payload["problems"])
         assert any(
             item.get("source_ref", {}).get("path") == "repos/app.py"
-            for items in payload["data"]["bundle"]["groups"].values()
+            for items in payload["data"]["result"]["groups"].values()
             for item in items
         )
         actions = {action.get("kind"): action for action in payload["next_actions"]}
         assert actions["graph_rebuild"]["command"] == "./scripts/repoctl graph build --repo-id main --rebuild --json"
-        assert actions["context_resume"]["command"] == (
+        assert actions["graph_search_resume"]["command"] == (
             "./scripts/repoctl graph search brand_new_overlay_token --repo-id main --json"
         )
 
     def assert_degraded_evidence_index(payload: dict, dependency_code: str) -> None:
         assert payload["ok"] is True
-        assert payload["data"]["bundle"] is not None
-        assert payload["data"]["bundle"]["completeness"]["graph_available"] is True
+        assert payload["data"]["result"] is not None
+        assert payload["data"]["result"]["completeness"]["graph_available"] is True
         assert any(
             problem["code"] == "graph_evidence_index_unavailable"
             and problem.get("cause_code") == dependency_code
@@ -3864,7 +3868,7 @@ def test_context_query_uses_materialized_index_with_dirty_path_overlay(tmp_path:
         )
         assert any(
             item.get("source_ref", {}).get("path") == "repos/app.py"
-            for items in payload["data"]["bundle"]["groups"].values()
+            for items in payload["data"]["result"]["groups"].values()
             for item in items
         )
 
@@ -3950,7 +3954,7 @@ def test_context_query_missing_graph_returns_typed_build_and_resume_actions(tmp_
     assert unavailable["cause_code"] == "graph_snapshot_missing"
     actions = {action.get("kind"): action for action in payload["next_actions"]}
     assert actions["graph_build"]["command"] == "./scripts/repoctl graph build --repo-id main --json"
-    assert actions["context_resume"]["command"] == (
+    assert actions["graph_search_resume"]["command"] == (
         "./scripts/repoctl graph search 'initial discovery owner' --repo-id main --json"
     )
 
@@ -3973,11 +3977,11 @@ def test_context_query_is_deterministic(tmp_path: Path, monkeypatch, capsys) -> 
     _setup_context_workspace(tmp_path, monkeypatch)
 
     assert main(["graph", "search", "source authorities", "--json"]) == 0
-    first = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    first = json.loads(capsys.readouterr().out)["data"]["result"]
     assert main(["graph", "search", "source authorities", "--json"]) == 0
-    second = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    second = json.loads(capsys.readouterr().out)["data"]["result"]
 
-    assert first["bundle_digest"] == second["bundle_digest"]
+    assert first["result_digest"] == second["result_digest"]
     assert first == second
 
 
@@ -3991,7 +3995,7 @@ def test_context_query_keeps_all_relevant_evidence_for_full_inspection(tmp_path:
 
     assert main(["graph", "search", "shared-context-anchor", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     matching_paths = {
         item["source_ref"]["path"]
         for item in bundle["evidence"]
@@ -4002,7 +4006,7 @@ def test_context_query_keeps_all_relevant_evidence_for_full_inspection(tmp_path:
     assert bundle["selection"]["evidence_count"] == len(bundle["evidence"])
 
     assert main(["graph", "search", "shared-context-anchor", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     full_item_count = sum(len(items) for items in bundle["groups"].values())
     compact_item_count = sum(len(items) for items in compact["groups"].values())
     compact_projection = bundle["selection"]["compact_projection"]
@@ -4032,7 +4036,7 @@ def test_ordinary_context_never_scans_invalid_raw_completion_receipts(tmp_path: 
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    bundle = payload["data"]["bundle"]
+    bundle = payload["data"]["result"]
     assert bundle["completeness"]["history_loaded"] is False
     assert bundle["completeness"]["explicit_task_history"]["status"] == "disabled"
     assert bundle["groups"]["related_history"] == []
@@ -4053,7 +4057,7 @@ def test_explicit_past_decision_mode_keeps_raw_completion_history_separate(tmp_p
 
     assert main(["graph", "search", "validate_token token validation", "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]) == 0
     unavailable = json.loads(capsys.readouterr().out)
-    history = unavailable["data"]["bundle"]["completeness"]["explicit_task_history"]
+    history = unavailable["data"]["result"]["completeness"]["explicit_task_history"]
     assert history["status"] == "unavailable"
     assert history["reason"] == "completion_catalogue_missing"
     assert any(
@@ -4066,7 +4070,7 @@ def test_explicit_past_decision_mode_keeps_raw_completion_history_separate(tmp_p
 
     assert main(["graph", "search", "validate_token token validation", "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     code_refs = [
         item.get("source_ref", {})
         for group, items in bundle["groups"].items()
@@ -4133,7 +4137,7 @@ def test_explicit_history_mode_corroborates_current_owner_and_uses_typed_test_re
     )
     _materialize(tmp_path)
 
-    baseline, baseline_problems, _meta = context_module.build_context_bundle(
+    baseline, baseline_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=require_repo_target(tmp_path, repo_id="main"),
         query=query,
@@ -4141,7 +4145,7 @@ def test_explicit_history_mode_corroborates_current_owner_and_uses_typed_test_re
     )
     assert baseline is not None
     assert not [problem for problem in baseline_problems if problem.severity == "error"]
-    baseline_compact = compact_context_bundle(baseline)
+    baseline_compact = compact_graph_source_evidence(baseline)
     assert baseline_compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/src/metrics.py"
     )
@@ -4183,7 +4187,7 @@ def test_explicit_history_mode_corroborates_current_owner_and_uses_typed_test_re
     _rebuild_completion_history(tmp_path)
     _materialize(tmp_path)
 
-    bundle, problems, _meta = context_module.build_context_bundle(
+    bundle, problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=require_repo_target(tmp_path, repo_id="main"),
         query=query,
@@ -4191,7 +4195,7 @@ def test_explicit_history_mode_corroborates_current_owner_and_uses_typed_test_re
     )
     assert bundle is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    compact = compact_context_bundle(bundle)
+    compact = compact_graph_source_evidence(bundle)
     assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         baseline_compact["groups"]["likely_change_surface"][0]["source_ref"]["path"]
     )
@@ -4245,7 +4249,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
     _materialize(tmp_path)
     target = require_repo_target(tmp_path, repo_id="main")
 
-    baseline, baseline_problems, _meta = context_module.build_context_bundle(
+    baseline, baseline_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=query,
@@ -4253,7 +4257,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
     )
     assert baseline is not None
     assert not [problem for problem in baseline_problems if problem.severity == "error"]
-    assert compact_context_bundle(baseline)["groups"]["likely_change_surface"][0][
+    assert compact_graph_source_evidence(baseline)["groups"]["likely_change_surface"][0][
         "source_ref"
     ]["path"] == "repos/a_owner.py"
 
@@ -4289,7 +4293,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
         _materialize(tmp_path)
 
     write_history_evidence("alpha beta")
-    weak_bundle, weak_problems, _meta = context_module.build_context_bundle(
+    weak_bundle, weak_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=query,
@@ -4297,7 +4301,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
     )
     assert weak_bundle is not None
     assert not [problem for problem in weak_problems if problem.severity == "error"]
-    assert compact_context_bundle(weak_bundle)["groups"]["likely_change_surface"][0][
+    assert compact_graph_source_evidence(weak_bundle)["groups"]["likely_change_surface"][0][
         "source_ref"
     ]["path"] == "repos/a_owner.py"
     weak_old_path = next(
@@ -4309,7 +4313,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
         kind.value for kind in weak_old_path.evidence_kinds
     }
 
-    exact_bundle, exact_problems, _meta = context_module.build_context_bundle(
+    exact_bundle, exact_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=task_id,
@@ -4321,7 +4325,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
     assert exact_bundle.groups["related_history"][0]["record_id"] == task_id
 
     write_history_evidence(query)
-    strong_bundle, strong_problems, _meta = context_module.build_context_bundle(
+    strong_bundle, strong_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=query,
@@ -4329,7 +4333,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
     )
     assert strong_bundle is not None
     assert not [problem for problem in strong_problems if problem.severity == "error"]
-    assert compact_context_bundle(strong_bundle)["groups"]["likely_change_surface"][0][
+    assert compact_graph_source_evidence(strong_bundle)["groups"]["likely_change_surface"][0][
         "source_ref"
     ]["path"] == "repos/a_owner.py"
     strong_old_path = next(
@@ -4341,7 +4345,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
         kind.value for kind in strong_old_path.evidence_kinds
     }
 
-    pack_bundle, pack_problems, _meta = context_module.build_context_bundle(
+    pack_bundle, pack_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=query,
@@ -4350,7 +4354,7 @@ def test_explicit_history_corroboration_requires_strong_task_match_and_is_disabl
     )
     assert pack_bundle is not None
     assert not [problem for problem in pack_problems if problem.severity == "error"]
-    assert compact_context_bundle(pack_bundle)["groups"]["likely_change_surface"][0][
+    assert compact_graph_source_evidence(pack_bundle)["groups"]["likely_change_surface"][0][
         "source_ref"
     ]["path"] == "repos/a_owner.py"
     assert not any(
@@ -4387,7 +4391,7 @@ def test_explicit_history_corroboration_does_not_replace_dominating_current_owne
     _materialize(tmp_path)
     target = require_repo_target(tmp_path, repo_id="main")
 
-    baseline, baseline_problems, _meta = context_module.build_context_bundle(
+    baseline, baseline_problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=query,
@@ -4395,7 +4399,7 @@ def test_explicit_history_corroboration_does_not_replace_dominating_current_owne
     )
     assert baseline is not None
     assert not [problem for problem in baseline_problems if problem.severity == "error"]
-    assert compact_context_bundle(baseline)["groups"]["likely_change_surface"][0][
+    assert compact_graph_source_evidence(baseline)["groups"]["likely_change_surface"][0][
         "source_ref"
     ]["path"] == "repos/a_true_owner.py"
 
@@ -4426,7 +4430,7 @@ def test_explicit_history_corroboration_does_not_replace_dominating_current_owne
     _rebuild_completion_history(tmp_path)
     _materialize(tmp_path)
 
-    bundle, problems, _meta = context_module.build_context_bundle(
+    bundle, problems, _meta = context_module.build_graph_source_evidence(
         tmp_path,
         target=target,
         query=query,
@@ -4434,7 +4438,7 @@ def test_explicit_history_corroboration_does_not_replace_dominating_current_owne
     )
     assert bundle is not None
     assert not [problem for problem in problems if problem.severity == "error"]
-    compact = compact_context_bundle(bundle)
+    compact = compact_graph_source_evidence(bundle)
     assert compact["groups"]["likely_change_surface"][0]["source_ref"]["path"] == (
         "repos/a_true_owner.py"
     )
@@ -4493,7 +4497,7 @@ def test_explicit_history_mode_reserves_task_history_when_other_lanes_are_satura
 
     assert main(["graph", "search", token, "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["groups"]["related_history"]
     assert bundle["groups"]["related_history"][0]["record_id"] == "T-20260625010101Z"
 
@@ -4513,7 +4517,7 @@ def test_explicit_history_mode_reserves_task_history_when_exact_source_matches_s
 
     assert main(["graph", "search", "index.py", "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["groups"]["related_history"]
     assert any(
         item["source_ref"]["kind"] in {"completion_receipt", "task_artifact"}
@@ -4568,10 +4572,10 @@ def test_context_compact_reserves_authority_and_procedure_under_global_budget(tm
 
     assert main(["graph", "search", token, "--mode", "past-decision", "--repo-id", "main", "--full", "--json"]) == 0
 
-    full_groups = json.loads(capsys.readouterr().out)["data"]["bundle"]["groups"]
+    full_groups = json.loads(capsys.readouterr().out)["data"]["result"]["groups"]
     assert main(["graph", "search", token, "--mode", "past-decision", "--repo-id", "main", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     groups = bundle["groups"]
     displayed = sum(
         len(items)
@@ -4636,8 +4640,13 @@ def test_context_multirepo_field_loop_keeps_context_and_knowledge_namespaced(tmp
     web_record = _add_knowledge_source(capsys, repo_id="web")["data"]["record"]["id"]
     api_record = _add_knowledge_source(capsys, repo_id="api")["data"]["record"]["id"]
 
-    assert main(["graph", "evidence-benchmark", "--fixture", fixture.as_posix(), "--require-fixture-corpus", "--require-no-cross-repo", "--require-no-forbidden", "--min-category-visible-recall", "multi-repo-isolation=1.0", "--json"]) == 0
-    benchmark_payload = json.loads(capsys.readouterr().out)
+    benchmark, benchmark_problems = run_context_benchmark(
+        tmp_path, fixture=fixture, require_fixture_corpus=True,
+        require_no_cross_repo=True, require_no_forbidden=True,
+        min_category_visible_recall={"multi-repo-isolation": 1.0},
+    )
+    assert benchmark_problems == []
+    benchmark_payload = {"data": benchmark}
     assert benchmark_payload["data"]["summary"]["cross_repo_ref_count"] == 0
 
     assert main(["knowledge", "query", "context returns source bundles", "--repo-id", "web", "--json"]) == 0
@@ -4670,7 +4679,7 @@ def test_context_query_bridges_knowledge_records_path_to_code_relations_and_test
     )
     _materialize(tmp_path)
     assert main(["graph", "search", "blue comet routing", "--repo-id", "main", "--full", "--json"]) == 0
-    before = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    before = json.loads(capsys.readouterr().out)["data"]["result"]
     assert before["knowledge_results"] == []
     assert all(
         item["source_ref"]["path"] != "repos/service.py"
@@ -4701,7 +4710,7 @@ def test_context_query_bridges_knowledge_records_path_to_code_relations_and_test
 
     assert main(["graph", "search", "blue comet routing", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     knowledge = bundle["knowledge_results"][0]
     assert knowledge["record"]["id"] == record_id
     assert knowledge["resolved_code_paths"] == ["service.py"]
@@ -4761,7 +4770,7 @@ def test_context_query_bounds_knowledge_records_graph_anchors(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert resolution["status"] == "resolved"
     assert len(resolution["anchors"]) == 3
@@ -4796,7 +4805,7 @@ def test_context_query_bounds_knowledge_records_graph_anchors(
             "--json",
         ]
     ) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     graph_anchor = compact["completeness"]["graph_anchor"]
     assert len(graph_anchor["seed_paths"]) == 3
     assert len(graph_anchor["seed_anchors"]) == 3
@@ -4866,7 +4875,7 @@ def test_context_query_backfills_snapshot_available_knowledge_records_anchors(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     resolution = bundle["selection"]["graph_anchor"]
     assert [item["anchor"]["path"] for item in resolution["candidates"]] == paths
     assert [item["anchor"]["path"] for item in resolution["anchors"]] == paths[3:6]
@@ -4915,7 +4924,7 @@ def test_context_query_uses_product_source_ref_but_not_root_provenance_as_code_a
     )
 
     assert main(["graph", "search", "copper orbit source-link", "--repo-id", "main", "--full", "--json"]) == 0
-    source_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    source_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     source_result = source_bundle["knowledge_results"][0]
     assert source_result["resolved_code_paths"] == ["service.py"]
     assert source_result["code_path_resolutions"][0]["kind"] == "source_ref"
@@ -4923,7 +4932,7 @@ def test_context_query_uses_product_source_ref_but_not_root_provenance_as_code_a
     assert any(item["source_ref"]["path"] == "repos/service.py" for item in source_bundle["evidence"])
 
     assert main(["graph", "search", "ivory orbit document-only", "--repo-id", "main", "--full", "--json"]) == 0
-    provenance_bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    provenance_bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     provenance_result = provenance_bundle["knowledge_results"][0]
     assert provenance_result["resolved_code_paths"] == []
     assert provenance_result["code_path_resolutions"][0]["status"] == "provenance_only"
@@ -4947,7 +4956,7 @@ def test_context_query_keeps_weak_knowledge_match_visible_without_code_anchor(tm
 
     assert main(["graph", "search", "blue comet absent", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     result = bundle["knowledge_results"][0]
     assert result["query_match_strength"] == "weak"
     assert result["code_anchor_status"] == "ineligible_query_match"
@@ -4971,7 +4980,7 @@ def test_context_query_keeps_weak_knowledge_match_visible_without_code_anchor(tm
     } in knowledge_continuations
 
     assert main(["graph", "search", "blue comet absent", "--repo-id", "main", "--json"]) == 0
-    compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert compact["groups"]["likely_change_surface"] == []
     assert {
         "selector": {"kind": "file", "value": "service.py"},
@@ -4980,7 +4989,7 @@ def test_context_query_keeps_weak_knowledge_match_visible_without_code_anchor(tm
 
     (repo / "service.py").unlink()
     assert main(["graph", "search", "blue comet absent", "--repo-id", "main", "--json"]) == 0
-    stale_compact = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    stale_compact = json.loads(capsys.readouterr().out)["data"]["result"]
     assert stale_compact["completeness"]["graph_freshness"]["status"] == "stale"
     assert not any(
         continuation["selector"] == {"kind": "file", "value": "service.py"}
@@ -4998,7 +5007,7 @@ def test_context_query_keeps_weak_knowledge_match_visible_without_code_anchor(tm
         ]
     ) == 0
     missing_payload = json.loads(capsys.readouterr().out)
-    missing_result = missing_payload["data"]["bundle"]["knowledge_results"][0]
+    missing_result = missing_payload["data"]["result"]["knowledge_results"][0]
     assert missing_result["query_match_strength"] == "strong"
     assert missing_result["resolved_code_paths"] == []
     assert missing_result["resolved_applicability_paths"] == []
@@ -5028,7 +5037,7 @@ def test_context_query_fails_closed_on_ambiguous_knowledge_path_identity(tmp_pat
     assert main(["graph", "search", "amber lattice routing", "--repo-id", "main", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    bundle = payload["data"]["bundle"]
+    bundle = payload["data"]["result"]
     resolution = bundle["knowledge_results"][0]["code_path_resolutions"][0]
     assert resolution == {
         "kind": "applies_to_path",
@@ -5075,7 +5084,7 @@ def test_context_query_keeps_workspace_source_and_graph_endpoint_identities_dist
             "--json",
         ]
     ) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     anchors = {
         item["anchor"]["path"]
         for item in bundle["selection"]["graph_anchor"]["anchors"]
@@ -5116,7 +5125,7 @@ def test_context_query_does_not_cross_repository_for_knowledge_paths(tmp_path: P
 
     assert main(["graph", "search", "silver lattice web", "--repo-id", "web", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert bundle["knowledge_results"][0]["resolved_code_paths"] == []
     assert bundle["knowledge_results"][0]["resolved_applicability_paths"] == []
     assert not any(item["source_ref"]["path"] == "repos/api/service.py" for item in bundle["evidence"])
@@ -5158,7 +5167,7 @@ def test_context_query_excludes_superseded_knowledge_paths_from_code_anchors(
         ]
     ) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     assert [
         item["record"]["id"] for item in bundle["knowledge_results"]
     ] == ["K-20260719010109Z--replacement-routing"]
@@ -5183,7 +5192,7 @@ def test_context_query_prefers_direct_exact_code_anchor_over_knowledge_path(tmp_
 
     assert main(["graph", "search", "target_operation", "--repo-id", "main", "--full", "--json"]) == 0
 
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     anchor = bundle["selection"]["graph_anchor"]["anchors"][0]
     assert anchor["anchor"]["kind"] == "symbol"
     assert anchor["anchor"]["path"] == "owner.py"
@@ -5198,7 +5207,7 @@ def test_context_query_includes_knowledge_records_separately(tmp_path: Path, mon
     assert main(["graph", "search", "reviewed knowledge source authority", "--repo-id", "main", "--mode", "authority", "--explain", "--full", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    bundle = payload["data"]["bundle"]
+    bundle = payload["data"]["result"]
     assert bundle["knowledge_results"][0]["record"]["id"] == record_id
     assert bundle["knowledge_results"][0]["record"]["status"] == "current"
     assert bundle["knowledge_results"][0]["explain"]["source_ref_statuses"][0]["digest_matches"] is True
@@ -5215,7 +5224,7 @@ def test_context_query_includes_knowledge_records_separately(tmp_path: Path, mon
 
     assert main(["graph", "search", "reviewed knowledge source authority", "--repo-id", "main", "--mode", "authority", "--full", "--json"]) == 0
     stale_payload = json.loads(capsys.readouterr().out)
-    changed_bundle = stale_payload["data"]["bundle"]
+    changed_bundle = stale_payload["data"]["result"]
     assert changed_bundle["knowledge_results"][0]["record"]["id"] == record_id
     changed_reviewed = changed_bundle["completeness"]["project_knowledge"]["knowledge_records"]
     assert changed_reviewed["available_record_count"] == 1
@@ -5243,11 +5252,11 @@ def test_startup_orientation_survives_lexical_distractors_and_old_index(
     (repo / "AGENTS.md").write_text("# Local rules\n\nPreserve the selected product boundary.\n")
     (repo / "CONTRIBUTING.md").write_text("# Checks\n\nUse pnpm run check on the dev branch.\n")
     assert main(["graph", "search", "project structure applicable rules active PRD current implementation", "--mode", "startup-reading", "--repo-id", "main", "--json"]) == 0
-    bundle = json.loads(capsys.readouterr().out)["data"]["bundle"]
+    bundle = json.loads(capsys.readouterr().out)["data"]["result"]
     paths = [item["source_ref"]["path"] for item in bundle["groups"]["must_read"]]
     assert paths[:5] == ["AGENTS.md", "docs/PRD.md", "repos/AGENTS.md", "repos/README.md", "repos/CONTRIBUTING.md"]
-    assert bundle["guide"]["next_narrow_action"].startswith("Open AGENTS.md,")
-    assert "before choosing an implementation file" in bundle["guide"]["next_narrow_action"]
+    assert "guide" not in bundle
+    assert paths[0] == "AGENTS.md"
     assert next(item for item in bundle["groups"]["must_read"] if item["source_ref"]["path"] == "repos/CONTRIBUTING.md")["document_role"] == "procedure"
 
 
@@ -5301,7 +5310,7 @@ def test_unknown_manager_is_actionable_in_graph_search(tmp_path: Path, monkeypat
 def test_context_reuses_admitted_artifacts_only_within_current_query(
     tmp_path: Path, monkeypatch, mode: str,
 ) -> None:
-    from tools.repoctl.context import build_context_bundle
+    from tools.repoctl.context import build_graph_source_evidence
     from tools.repoctl.graph_store import graph_materialization_freshness
     repo = _setup_context_workspace(tmp_path, monkeypatch)
     target = require_repo_target(tmp_path, repo_id="main")
@@ -5317,13 +5326,13 @@ def test_context_reuses_admitted_artifacts_only_within_current_query(
 
     def query():
         reads.clear()
-        bundle, problems, meta = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode)
+        bundle, problems, meta = build_graph_source_evidence(tmp_path, target=target, query="app.py", mode=mode)
         assert bundle is not None
         assert not [p for p in problems if p.severity == "error"]
         assert reads.count(tmp_path / ".repoctl-state/graph/main/manifest.json") == 1
         for path in (tmp_path / ".repoctl-state/graph/main/providers").glob("*.json"):
             assert reads.count(path) == 1
-        return compact_context_bundle(bundle)
+        return compact_graph_source_evidence(bundle)
 
     fresh = query()
     assert fresh["completeness"]["graph_freshness"]["status"] == "current"
@@ -5335,9 +5344,9 @@ def test_context_reuses_admitted_artifacts_only_within_current_query(
     (repo / "CONTRIBUTING.md").write_text("# Checks\n\nchanged_after_admission requires source review.\n")
     stale = query()
     assert stale["completeness"]["graph_freshness"]["status"] == "stale"
-    bundle, problems, _ = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode, graph_result=observed)
+    bundle, problems, _ = build_graph_source_evidence(tmp_path, target=target, query="app.py", mode=mode, graph_result=observed)
     assert bundle is not None
-    assert compact_context_bundle(bundle) == stale
+    assert compact_graph_source_evidence(bundle) == stale
     legacy = load_materialized_graph(tmp_path, target=target)
     expected, _ = graph_materialization_freshness(tmp_path, target=target, snapshot=legacy[0])
     assert "app.py" in expected["changed_paths"]
@@ -5347,7 +5356,7 @@ def test_context_reuses_admitted_artifacts_only_within_current_query(
     # artifacts and reports the degraded semantic freshness explicitly.
     provider = tmp_path / ".repoctl-state/graph/main/providers/python_ast.json"
     provider.write_text("{}")
-    bundle, problems, _ = build_context_bundle(tmp_path, target=target, query="app.py", mode=mode)
+    bundle, problems, _ = build_graph_source_evidence(tmp_path, target=target, query="app.py", mode=mode)
     assert any(p.code == "graph_provider_artifacts_unavailable" for p in problems)
     assert bundle is not None
     assert bundle.completeness["graph_available"] is True
@@ -5366,13 +5375,13 @@ def test_explicit_resume_query_uses_task_authority_not_retrieval(tmp_path: Path,
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
     def no_retrieval(*args, **kwargs):
         pytest.fail("explicit resume must not run candidate retrieval")
-    monkeypatch.setattr("tools.repoctl.cli.build_context_bundle", no_retrieval)
+    monkeypatch.setattr("tools.repoctl.cli.build_graph_source_evidence", no_retrieval)
     assert main(["task", "handoff", "bind", tid, "--json"]) == 0
     capsys.readouterr()
     assert main(["graph", "search", query, "--json"]) == 0
     data = json.loads(capsys.readouterr().out)["data"]
-    assert data["bundle"] is None
-    assert data["guide"]["next_narrow_action"] == f"./scripts/repoctl task resume {tid} --json"
+    assert data["result"] is None
+    assert "guide" not in data
     assert data["task_resume"]["task"]["id"] == tid
     assert data["task_resume"]["resume_guidance"]["status"] == "current"
     assert isinstance(data["task_resume"]["resume_guidance"]["executable_handoff"], dict)
@@ -5412,7 +5421,7 @@ def test_compact_context_adapts_excerpts_without_losing_source_refs(monkeypatch)
             selection_reason="Relevant documented rule with a direct reason",
         ) for index in range(8)
     ]
-    bundle = ContextBundle(
+    bundle = GraphSourceEvidence(
         repository={"id":"main","path":"repos"},
         query={"text":"inspect source evidence for this decision"},
         source_snapshots={},completeness={},evidence=[],selection={},
@@ -5420,16 +5429,16 @@ def test_compact_context_adapts_excerpts_without_losing_source_refs(monkeypatch)
     ).with_digest()
     encoded=lambda data:len(json.dumps(data,ensure_ascii=False,separators=(",", ":")).encode("utf-8"))
     monkeypatch.setattr(context_module,"MAX_COMPACT_CONTEXT_BYTES",1000000)
-    baseline=compact_context_bundle(bundle)
+    baseline=compact_graph_source_evidence(bundle)
     baseline_bytes=encoded(baseline)
     monkeypatch.setattr(context_module,"MAX_COMPACT_CONTEXT_BYTES",baseline_bytes-85)
-    compact=compact_context_bundle(bundle)
+    compact=compact_graph_source_evidence(bundle)
     assert encoded(compact)<=baseline_bytes-85
     assert [item['source_ref'] for item in compact['groups']['must_read']]==[
         item['source_ref'] for item in baseline['groups']['must_read']
     ]
     assert compact['continuations']==baseline['continuations']
-    assert compact['bundle_digest']==baseline['bundle_digest']
+    assert compact['evidence_digest']==baseline['evidence_digest']
     assert any(
         len(item.get('excerpt','')) < len(original.get('excerpt',''))
         for original,item in zip(baseline['groups']['must_read'],compact['groups']['must_read'])

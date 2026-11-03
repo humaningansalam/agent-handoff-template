@@ -146,6 +146,13 @@ def test_task_log_accepts_short_multiline_decision_and_bounds_huge_line(tmp_path
     payload = json.loads(capsys.readouterr().out)
     assert payload['problems'][0]['code'] == 'task_log_detail_requires_reference'
     assert path.read_text(encoding='utf-8') == rendered
+    authored = "\n".join(
+        f"Decision {index}: preserve original sources and check the real result. "
+        "Reason: independent evidence matters across a handoff, even with multiple lines."
+        for index in range(80)
+    )
+    assert len(authored.encode("utf-8")) > 8192
+    assert main(["task", "log", "append", "T-20260609184046Z", authored, "--json"]) == 0
 
 
 def test_task_migration_rolls_back_written_files_after_write_failure(tmp_path: Path, monkeypatch) -> None:
@@ -172,6 +179,59 @@ def test_task_migration_rolls_back_written_files_after_write_failure(tmp_path: P
     with pytest.raises(OSError, match='simulated mid-batch'):
         cli._task_migrate_slop_payload(tmp_path, apply=True)
     assert [path.read_bytes() for path in original_paths] == originals
+
+
+def test_task_migration_rolls_back_writer_failure_after_replacement(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+    from tools.repoctl import cli
+
+    write_workspace(tmp_path)
+    path = add_board_task(
+        tmp_path, 'T-20260609184046Z--task.md', _slop_task_text('T-20260609184046Z'),
+    )
+    original = path.read_bytes()
+    original_atomic = cli.atomic_write
+
+    def replace_then_fail(target, value):
+        original_atomic(target, value)
+        raise OSError('failure after atomic replacement')
+
+    monkeypatch.setattr(cli, 'atomic_write', replace_then_fail)
+    with pytest.raises(OSError, match='failure after atomic replacement'):
+        cli._task_migrate_slop_payload(tmp_path, apply=True)
+    assert path.read_bytes() == original
+
+
+def test_task_migration_does_not_roll_back_over_external_edit(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+    from tools.repoctl import cli
+    from tools.repoctl.io import RepoctlError
+
+    write_workspace(tmp_path)
+    paths = [
+        add_board_task(tmp_path, f'T-2026060918404{i}Z--task{i}.md',
+                       _slop_task_text(f'T-2026060918404{i}Z'))
+        for i in (6, 7)
+    ]
+    second_original = paths[1].read_bytes()
+    original_atomic = cli.atomic_write
+    calls = 0
+
+    def write_and_race(target, value):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            original_atomic(target, value)
+            target.write_text(target.read_text(encoding='utf-8') + '\n# external edit\n', encoding='utf-8')
+            return
+        raise OSError('second write failed')
+
+    monkeypatch.setattr(cli, 'atomic_write', write_and_race)
+    with pytest.raises(RepoctlError) as error:
+        cli._task_migrate_slop_payload(tmp_path, apply=True)
+    assert error.value.code == 'task_migration_rollback_failed'
+    assert paths[0].read_text(encoding='utf-8').endswith('# external edit\n')
+    assert paths[1].read_bytes() == second_original
 
 
 def test_task_migration_detects_external_change_before_commit(tmp_path: Path, monkeypatch) -> None:

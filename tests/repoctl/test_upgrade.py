@@ -915,7 +915,7 @@ def test_empty_knowledge_is_optional_until_its_projection_is_corrupt(
     assert main(["graph", "search", "product", "--repo-id", "main", "--json"]) == 0
     context = json.loads(capsys.readouterr().out)
     assert not any(problem["code"] == "context_linked_knowledge_unavailable" for problem in context["problems"])
-    assert context["data"]["bundle"]["completeness"]["project_knowledge"]["knowledge_records"]["available_record_count"] == 0
+    assert context["data"]["result"]["completeness"]["project_knowledge"]["knowledge_records"]["available_record_count"] == 0
     assert not any(action.get("kind") == "knowledge_rebuild" for action in context["next_actions"])
 
     projection = knowledge_projection_path(workspace, repo_id="main")

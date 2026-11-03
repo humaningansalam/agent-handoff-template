@@ -20,7 +20,7 @@ from typing import Any
 from .board import append_backlog_item, backlog_warnings, parse_board, read_backlog_items, remove_backlog_item, render_board, resolve_backlog_item, check_board
 from .code_index import build_code_index
 from .completion_catalogue import CompletionCatalogueUnavailable, CompletionCatalogueUnavailableReason, audit_completion_catalogue, completion_catalogue_namespaces, completion_catalogue_status, rebuild_completion_catalogue
-from .context import build_context_bundle, compact_context_bundle, render_context_markdown, render_context_text
+from .context import build_graph_source_evidence, compact_graph_source_evidence, render_graph_source_markdown, render_graph_source_text
 from .context_benchmark import materialize_context_benchmark_corpus, run_context_benchmark
 from .debug import begin_debug, bind_debug_command, debug_capture, debug_summary, finish_debug, observe_context, observe_envelope, observe_problem
 from .git import repo_changed_entries, repo_commit_range_entries, repo_evidence_fingerprint, repo_git_head, repo_is_ancestor
@@ -116,7 +116,7 @@ class NextActionKind(StrEnum):
     GRAPH_REFRESH = "graph_refresh"
     COMPLETION_CATALOGUE_REBUILD = "completion_catalogue_rebuild"
     KNOWLEDGE_REBUILD = "knowledge_rebuild"
-    CONTEXT_RESUME = "context_resume"
+    GRAPH_SEARCH_RESUME = "graph_search_resume"
     TASK_HANDOFF_BIND = "task_handoff_bind"
     DISCOVERY_INPUT = "discovery_input"
     METADATA_INPUT = "metadata_input"
@@ -397,7 +397,7 @@ def _string_list(value: Any) -> list[str]:
 
 def _selected_repo_id(data: dict[str, Any] | None) -> str:
     payload = data or {}
-    for owner in (payload.get("repository"), _mapping_at(payload, "bundle", "repository")):
+    for owner in (payload.get("repository"), _mapping_at(payload, "result", "repository")):
         if isinstance(owner, dict) and owner.get("id") is not None:
             return str(owner["id"])
     return str(payload.get("repo_id") or "")
@@ -499,9 +499,9 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add(_recovery_action(recovery, repo_id=_selected_repo_id(data), source=recovery_source))
         if code == "context_graph_seed_identity_unavailable":
             context_resume_requested = True
-            bundle = _mapping_at(data, "bundle")
+            result = _mapping_at(data, "result")
             repo_id = _selected_repo_id(data)
-            identity_coverage = _mapping_at(bundle, "completeness", "graph_anchor", "identity_coverage")
+            identity_coverage = _mapping_at(result, "completeness", "graph_anchor", "identity_coverage")
             selectors = identity_coverage.get("recovery_selectors") if isinstance(identity_coverage.get("recovery_selectors"), list) else []
             for selector in selectors:
                 if not isinstance(selector, dict):
@@ -521,7 +521,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
                     {
                         "label": "Continue from the unresolved typed Graph seed",
                         "command": command,
-                        "source": "data.bundle.completeness.graph_anchor.identity_coverage.recovery_selectors",
+                        "source": "data.result.completeness.graph_anchor.identity_coverage.recovery_selectors",
                     }
                 )
         if code == "task_not_found":
@@ -590,13 +590,13 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             add({"label": "Review or regenerate the upgrade plan from an existing release checkout", "command": "./scripts/repoctl upgrade plan --help"})
         elif code == "upgrade_plan_has_conflicts":
             add({"label": "Inspect plan conflicts before applying", "path": path})
-        elif code in {"context_benchmark_corpus_file_missing", "context_benchmark_corpus_file_digest_drift"}:
+        elif code in {"graph_retrieval_corpus_file_missing", "graph_retrieval_corpus_file_digest_drift"}:
             add({"label": "Apply the declared benchmark corpus before running this gate", "path": "tests/fixtures/context-benchmark/corpus.json"})
 
-    bundle = _mapping_at(data, "bundle")
-    completeness = _mapping_at(bundle, "completeness")
+    result = _mapping_at(data, "result")
+    completeness = _mapping_at(result, "completeness")
     if str(_mapping_at(completeness, "graph_freshness").get("status") or "") == "stale":
-        add(_recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="data.bundle.completeness.graph_freshness.status"))
+        add(_recovery_action(NextActionKind.GRAPH_REFRESH, repo_id=_selected_repo_id(data), source="data.result.completeness.graph_freshness.status"))
     recovery_kinds = {
         NextActionKind.COMPLETION_CATALOGUE_REBUILD,
         NextActionKind.KNOWLEDGE_REBUILD,
@@ -604,7 +604,7 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
         NextActionKind.GRAPH_REBUILD,
         NextActionKind.GRAPH_REFRESH,
     }
-    query_data = _mapping_at(bundle, "query")
+    query_data = _mapping_at(result, "query")
     query = str(query_data.get("text") or "").strip()
     repo_id = _selected_repo_id(data)
     if query and repo_id and (context_resume_requested or any(action.get("kind") in recovery_kinds for action in actions)):
@@ -617,10 +617,10 @@ def _next_actions_for_problems(problems: list[Any], *, data: dict[str, Any] | No
             command += " --explain"
         add(
             {
-                "label": "Resume the same Context query after recovery",
+                "label": "Repeat the same Graph source search after recovery",
                 "command": f"{command} --json",
-                "kind": NextActionKind.CONTEXT_RESUME,
-                "source": "data.bundle.query",
+                "kind": NextActionKind.GRAPH_SEARCH_RESUME,
+                "source": "data.result.query",
             }
         )
     return actions
@@ -701,28 +701,28 @@ def _repoctl_release_field_gates(root: Path, *, repo_id: str = "main") -> list[d
     )
     if _fixture_has_repository(root / "tests/fixtures/context-benchmark", repo_id):
         add(
-            "context_benchmark_materialize",
-            "Materialize context benchmark corpus",
-            command=f"./scripts/repoctl graph evidence-materialize --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --json",
+            "graph_search_retrieval_fixture",
+            "Materialize Graph search retrieval benchmark corpus",
+            command=f"./scripts/repoctl field-gate run repoctl-release --repo-id {repo_id} --json",
             requires=["tests/fixtures/context-benchmark/corpus.json"],
         )
         add(
-            "context_benchmark",
-            "Run context benchmark gate",
-            command=f"./scripts/repoctl graph evidence-benchmark --fixture tests/fixtures/context-benchmark --repo-id {repo_id} --min-recall-at-5 0.85 --min-precision-at-5 0.50 --min-visible-recall 0.90 --min-category-visible-recall authority=1.0 --min-category-visible-recall contract=1.0 --min-category-visible-recall integrated-owner-test=1.0 --min-category-visible-recall area-isolation=1.0 --min-category-visible-recall multi-owner-impact=1.0 --min-category-visible-recall typed-consumer-closure=1.0 --min-category-visible-recall typed-structured-dependency-closure=1.0 --min-category-visible-recall anchor-coherence=1.0 --min-category-graph-edge-recall multi-owner-impact=1.0 --min-category-graph-edge-recall anchor-coherence=1.0 --max-output-estimated-tokens 3000 --require-source-integrity --require-fixture-corpus --require-no-forbidden --json",
+            "graph_search_retrieval",
+            "Run Graph search retrieval benchmark gate",
+            command=f"./scripts/repoctl field-gate run repoctl-release --repo-id {repo_id} --json",
             requires=["tests/fixtures/context-benchmark/questions.jsonl", "tests/fixtures/context-benchmark/expected-sources.json"],
         )
     if _has_configured_repositories(root, {"web", "api"}) and (root / "tests/fixtures/context-benchmark-multirepo/corpus.json").exists():
         add(
-            "context_benchmark_multirepo_materialize",
-            "Materialize multi-repo context benchmark corpus",
-            command="./scripts/repoctl graph evidence-materialize --fixture tests/fixtures/context-benchmark-multirepo --json",
+            "graph_search_multirepo_fixture",
+            "Materialize multi-repo Graph search retrieval benchmark corpus",
+            command=f"./scripts/repoctl field-gate run repoctl-release --repo-id {repo_id} --json",
             requires=["tests/fixtures/context-benchmark-multirepo/corpus.json"],
         )
         add(
-            "context_benchmark_multirepo_isolation",
+            "graph_search_multirepo_isolation",
             "Run multi-repo isolation benchmark gate",
-            command="./scripts/repoctl graph evidence-benchmark --fixture tests/fixtures/context-benchmark-multirepo --require-fixture-corpus --require-no-cross-repo --require-no-forbidden --min-category-visible-recall multi-repo-isolation=1.0 --json",
+            command=f"./scripts/repoctl field-gate run repoctl-release --repo-id {repo_id} --json",
             requires=["tests/fixtures/context-benchmark-multirepo/questions.jsonl", "tests/fixtures/context-benchmark-multirepo/expected-sources.json"],
         )
     return gates
@@ -1126,7 +1126,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
 
     benchmark_temporary, benchmark_root = _isolated_benchmark_workspace(root)
     context_fixture = benchmark_root / "tests/fixtures/context-benchmark"
-    context_enabled = "context_benchmark" in release_gate_specs
+    context_enabled = "graph_search_retrieval" in release_gate_specs
     benchmark_metadata, benchmark_metadata_entries = _temporary_benchmark_metadata(
         benchmark_root,
         repo_id=repo_id,
@@ -1182,20 +1182,20 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
                 context_materialize_problems.extend(context_cleanup_problems)
             gates.append(
                 _repoctl_release_gate_result(
-                    **gate_identity("context_benchmark_materialize"),
+                    **gate_identity("graph_search_retrieval_fixture"),
                     data=context_materialize,
                     problems=context_materialize_problems,
-                    warnings=[{"code": "context_benchmark_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
+                    warnings=[{"code": "graph_search_retrieval_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
                     summary={**(context_materialize.get("totals", {}) if context_materialize else {}), "auto_cleanup": context_cleanup},
                 )
             )
             if not _has_errors(context_materialize_problems):
                 gates.append(
                     _repoctl_release_gate_result(
-                        **gate_identity("context_benchmark"),
+                        **gate_identity("graph_search_retrieval"),
                         data=context_benchmark,
                         problems=context_benchmark_problems,
-                        warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
+                        warnings=[{"code": "graph_search_retrieval_only", "message": "Graph search retrieval benchmark measures retrieval quality only; it does not validate generated answers"}],
                         summary={
                             "question_count": context_benchmark.get("question_count", 0),
                             **_context_retrieval_field_gate_summary(context_benchmark.get("summary")),
@@ -1210,7 +1210,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
 
     if benchmark_metadata:
         materialize_gate = next(
-            (gate for gate in gates if gate.get("name") in {"context_benchmark_materialize"}),
+            (gate for gate in gates if gate.get("name") in {"graph_search_retrieval_fixture"}),
             None,
         )
         if materialize_gate is not None:
@@ -1225,7 +1225,7 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
                 materialize_gate["ok"] = False
 
     multi_fixture = benchmark_root / "tests/fixtures/context-benchmark-multirepo"
-    if "context_benchmark_multirepo_isolation" in release_gate_specs:
+    if "graph_search_multirepo_isolation" in release_gate_specs:
         multi_materialize, multi_materialize_problems = materialize_context_benchmark_corpus(benchmark_root, fixture=multi_fixture, repo_id="", force=False)
         multi_cleanup_entries = _context_materialize_cleanup_entries(benchmark_root, multi_materialize)
         multi_cleanup: dict[str, Any] = {}
@@ -1246,20 +1246,20 @@ def _run_repoctl_release_field_gates(root: Path, *, repo_id: str) -> dict[str, A
             multi_materialize_problems.extend(multi_cleanup_problems)
         gates.append(
             _repoctl_release_gate_result(
-                **gate_identity("context_benchmark_multirepo_materialize"),
+                **gate_identity("graph_search_multirepo_fixture"),
                 data=multi_materialize,
                 problems=multi_materialize_problems,
-                warnings=[{"code": "context_benchmark_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
+                warnings=[{"code": "graph_search_retrieval_isolated_workspace", "message": "benchmark corpus was materialized only inside an isolated temporary workspace"}],
                 summary={**(multi_materialize.get("totals", {}) if multi_materialize else {}), "auto_cleanup": multi_cleanup},
             )
         )
         if not _has_errors(multi_materialize_problems):
             gates.append(
                 _repoctl_release_gate_result(
-                    **gate_identity("context_benchmark_multirepo_isolation"),
+                    **gate_identity("graph_search_multirepo_isolation"),
                     data=multi_benchmark,
                     problems=multi_benchmark_problems,
-                    warnings=[{"code": "context_benchmark_retrieval_only", "message": "context benchmark measures retrieval quality only; it does not validate generated answers"}],
+                    warnings=[{"code": "graph_search_retrieval_only", "message": "Graph search retrieval benchmark measures retrieval quality only; it does not validate generated answers"}],
                     summary={
                         "question_count": multi_benchmark.get("question_count", 0),
                         **_context_retrieval_field_gate_summary(multi_benchmark.get("summary")),
@@ -2786,7 +2786,8 @@ def _task_migrate_slop_payload(
             backup_parent.mkdir(parents=True, exist_ok=True)
             backup_dir = Path(tempfile.mkdtemp(prefix="task-slop-backup-", dir=backup_parent))
             backups: list[tuple[Path, Path | None]] = []
-            written: list[tuple[Path, Path | None]] = []
+            written: list[tuple[Path, Path | None, bytes | None, bytes]] = []
+            succeeded = False
             try:
                 for index, (path, _after, prior) in enumerate(writes):
                     if prior is None:
@@ -2810,17 +2811,33 @@ def _task_migrate_slop_payload(
                     elif path.read_bytes() != prior:
                         raise RepoctlError("Task changed during migration apply", code="task_migration_concurrent_change",
                                            path=path.relative_to(root).as_posix())
+                    # Journal before the atomic write: even a write that fails
+                    # after replacement must participate in safe rollback.
+                    written.append((path, backup, prior, after))
                     atomic_write(path, after.decode("utf-8"))
-                    written.append((path, backup))
+                succeeded = True
             except Exception:
                 restore_errors: list[str] = []
-                for path, backup in reversed(written):
+                for path, backup, prior, after in reversed(written):
                     try:
+                        if not path.exists() and not path.is_symlink():
+                            if prior is not None:
+                                restore_errors.append(path.relative_to(root).as_posix())
+                            continue
+                        if not path.is_file() or path.is_symlink():
+                            restore_errors.append(path.relative_to(root).as_posix())
+                            continue
+                        current = path.read_bytes()
+                        if prior is not None and current == prior:
+                            continue  # a failed write never replaced the original
+                        if current != after:
+                            restore_errors.append(path.relative_to(root).as_posix())
+                            continue  # never overwrite an external concurrent edit
                         if backup is None:
                             path.unlink()
                         else:
                             os.replace(backup, path)
-                    except OSError:
+                    except (OSError, UnicodeError):
                         restore_errors.append(path.relative_to(root).as_posix())
                 if restore_errors:
                     raise RepoctlError(
@@ -2831,7 +2848,7 @@ def _task_migrate_slop_payload(
             finally:
                 # Only discard originals when every interrupted write was
                 # rolled back or all staged writes succeeded.
-                if all(backup is None or not backup.exists() for _path, backup in written) or len(written) == len(writes):
+                if succeeded or all(backup is None or not backup.exists() for _path, backup, _prior, _after in written):
                     shutil.rmtree(backup_dir)
     warnings = [
         {
@@ -2873,6 +2890,83 @@ def cmd_task_migrate_slop(args: argparse.Namespace) -> int:
             f"applied={data['applied_task_count']} skipped_archived={data['skipped_archived_count']}"
         )
     return 0
+
+
+def cmd_task_migrate_receipts(args: argparse.Namespace) -> int:
+    """One-time receipt transition, outside normal Task reading and finishing."""
+    from .task_history_migration import migrate_completion_receipts
+
+    data = migrate_completion_receipts(
+        find_workspace_root(),
+        task_id=str(args.task_id or ""),
+        apply=bool(args.apply),
+    )
+    unresolved = [item for item in data["records"] if item["status"] == "unresolved"]
+    source_problems = [item for item in data["records"] if item.get("source_problem")]
+    payload = {
+        "ok": not unresolved and not source_problems,
+        "command": "task.migrate-receipts",
+        "data": data,
+        "problems": [
+            {"code": "receipt_transition_unresolved", "path": item["path"],
+             "message": item.get("reason") or "historical receipt needs explicit review"}
+            for item in unresolved
+        ] + [
+            {"code": "receipt_source_integrity_unresolved", "path": item["path"],
+             "message": item["source_problem"]}
+            for item in source_problems
+        ],
+        "warnings": [
+            {"code": "completion_catalogue_rebuild_required",
+             "message": "Completion receipts changed presentation; rebuild the derived history by repository after reviewing unresolved source artifacts"}
+        ] if data["history_rebuild_required"] else [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(
+            f"receipt transition: {data['mode']} ready={data['ready_count']} "
+            f"applied={data['applied_count']} unresolved={data['unresolved_count']} "
+            f"source_problems={data['source_problem_count']}"
+        )
+        for item in unresolved:
+            print(f"unresolved {item['path']}: {item['reason']}")
+        for item in source_problems:
+            print(f"source integrity unresolved {item['path']}: {item['source_problem']}")
+    return 0 if payload["ok"] else 1
+
+
+def cmd_task_migrate_states(args: argparse.Namespace) -> int:
+    """One-time retirement of closed v3 start-baseline state, not a legacy reader."""
+    from .task_history_migration import migrate_legacy_task_states
+
+    data = migrate_legacy_task_states(
+        find_workspace_root(),
+        task_id=str(args.task_id or ""),
+        apply=bool(args.apply),
+    )
+    unresolved = [item for item in data["records"] if item["status"] == "unresolved"]
+    payload = {
+        "ok": not unresolved,
+        "command": "task.migrate-states",
+        "data": data,
+        "problems": [
+            {"code": "state_transition_unresolved", "path": row["path"],
+             "message": row.get("reason") or "historical state needs explicit review"}
+            for row in unresolved
+        ],
+        "warnings": [],
+    }
+    if args.json:
+        _json(payload)
+    else:
+        print(
+            f"state retirement: {data['mode']} ready={data['ready_count']} "
+            f"applied={data['applied_count']} unresolved={data['unresolved_count']}"
+        )
+        for row in unresolved:
+            print(f"unresolved {row['path']}: {row['reason']}")
+    return 0 if payload["ok"] else 1
 
 
 def _task_doctor_payload(
@@ -5500,8 +5594,7 @@ def cmd_graph_search(args: argparse.Namespace) -> int:
         command = "./scripts/repoctl task resume" + (f" {selected['id']}" if selected else "") + " --json"
         payload["command"] = "graph.search"
         payload["data"] = {
-            "guide": {"current_intent": args.query, "next_narrow_action": command},
-            "bundle": None,
+            "result": None,
             "task_resume": payload["data"],
         }
         if args.json:
@@ -5511,28 +5604,28 @@ def cmd_graph_search(args: argparse.Namespace) -> int:
             print(command)
         return 0 if payload["ok"] else 1
     target = require_repo_target(root, repo_id=args.repo_id)
-    bundle, problems, meta = build_context_bundle(
+    bundle, problems, meta = build_graph_source_evidence(
         root,
         target=target,
         query=args.query,
         explain=args.explain,
         mode=args.mode or "",
     )
-    bundle_data = None
-    guide: dict[str, Any] | None = None
+    result_data = None
     if bundle is not None:
         full_bundle_data = bundle.to_dict()
-        compact_bundle_data = compact_context_bundle(bundle)
-        guide = compact_bundle_data.get("guide")
-        bundle_data = full_bundle_data if args.full else compact_bundle_data
+        compact_bundle_data = compact_graph_source_evidence(bundle)
+        result_data = dict(full_bundle_data if args.full else compact_bundle_data)
+        result_data.pop("guide", None)
+        result_data.pop("view", None)
+        result_data["result_digest"] = result_data.pop("evidence_digest")
         observe_context(
             target.id,
-            bundle_data,
+            result_data,
             source_completeness=full_bundle_data.get("completeness"),
         )
     data = {
-        "guide": guide,
-        "bundle": bundle_data,
+        "result": result_data,
         "repository": target.to_dict(),
     }
     if args.full or args.explain:
@@ -5550,7 +5643,7 @@ def cmd_graph_search(args: argparse.Namespace) -> int:
         "problems": [problem.to_dict() for problem in problems if problem not in optional_absence_warnings],
         "warnings": [
             {
-                "code": "context_not_authoritative",
+                "code": "graph_not_authoritative",
                 "message": "Graph source search returns read-only evidence; inspect source before choosing task scope",
             },
             *[problem.to_dict() for problem in optional_absence_warnings],
@@ -5563,130 +5656,15 @@ def cmd_graph_search(args: argparse.Namespace) -> int:
         _json(payload, compact=not args.full and not args.explain)
     elif output_format == "markdown":
         if bundle is not None:
-            print(render_context_markdown(bundle), end="")
+            print(render_graph_source_markdown(bundle), end="")
         for problem in problems:
             print(problem.message)
     else:
         if bundle is not None:
-            print(render_context_text(bundle), end="")
+            print(render_graph_source_text(bundle), end="")
         for problem in problems:
             print(problem.message)
     return 1 if _has_errors(problems) else 0
-
-
-def cmd_graph_evidence_benchmark(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    fixture = Path(args.fixture)
-    if not fixture.is_absolute():
-        fixture = root / fixture
-    category_gates, category_gate_problems = _parse_category_recall_gates(args.min_category_recall_at_5 or [])
-    knowledge_category_gates, knowledge_category_gate_problems = _parse_category_recall_gates(args.min_category_knowledge_recall_at_5 or [])
-    edge_category_gates, edge_category_gate_problems = _parse_category_recall_gates(args.min_category_graph_edge_recall or [])
-    visible_category_gates, visible_category_gate_problems = _parse_category_recall_gates(args.min_category_visible_recall or [])
-    data, problems = run_context_benchmark(
-        root,
-        fixture=fixture,
-        repo_id=args.repo_id or "",
-        min_recall_at_5=args.min_recall_at_5,
-        min_precision_at_5=args.min_precision_at_5,
-        min_visible_recall=args.min_visible_recall,
-        min_knowledge_recall_at_5=args.min_knowledge_recall_at_5,
-        min_category_recall_at_5=category_gates,
-        min_category_knowledge_recall_at_5=knowledge_category_gates,
-        min_category_graph_edge_recall=edge_category_gates,
-        min_category_visible_recall=visible_category_gates,
-        require_source_integrity=args.require_source_integrity,
-        require_knowledge_source_current=args.require_knowledge_source_current,
-        require_no_forbidden=args.require_no_forbidden,
-        require_no_cross_repo=args.require_no_cross_repo,
-        require_fixture_corpus=args.require_fixture_corpus,
-        max_output_estimated_tokens=args.max_output_estimated_tokens,
-    )
-    problems = [*category_gate_problems, *knowledge_category_gate_problems, *edge_category_gate_problems, *visible_category_gate_problems, *problems]
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "graph.evidence-benchmark",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "context_benchmark_retrieval_only",
-                "message": "context benchmark measures retrieval quality only; it does not validate generated answers",
-            }
-        ],
-    }
-    if args.output:
-        output, output_problem = _workspace_output_path(root, args.output, code="context_benchmark_output_outside_workspace")
-        if output_problem is not None:
-            problems.append(output_problem)
-            payload["ok"] = False
-            payload["problems"] = [problem.to_dict() for problem in problems]
-        else:
-            if data:
-                data["artifact"] = {
-                    "path": output.relative_to(root).as_posix(),
-                    "benchmark_digest": data.get("benchmark_digest", ""),
-                }
-            _complete_json_envelope(payload)
-            atomic_write(output, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    if args.json:
-        _json(payload)
-    else:
-        summary = data.get("summary", {}) if data else {}
-        print(f"Graph evidence benchmark questions={data.get('question_count', 0)} recall@5={summary.get('mean_recall_at_5', 0)} precision@5={summary.get('mean_precision_at_5', 0)}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def cmd_graph_evidence_materialize(args: argparse.Namespace) -> int:
-    root = find_workspace_root()
-    fixture = Path(args.fixture)
-    if not fixture.is_absolute():
-        fixture = root / fixture
-    data, problems = materialize_context_benchmark_corpus(root, fixture=fixture, repo_id=args.repo_id or "", force=args.force)
-    payload = {
-        "ok": not _has_errors(problems),
-        "command": "graph.evidence-materialize",
-        "data": data,
-        "problems": [problem.to_dict() for problem in problems],
-        "warnings": [
-            {
-                "code": "context_benchmark_materialize_mutates_workspace",
-                "message": "benchmark materialize writes fixture corpus files into product repositories for controlled retrieval tests",
-            }
-        ],
-    }
-    if args.json:
-        _json(payload)
-    else:
-        totals = data.get("totals", {}) if data else {}
-        print(f"Graph evidence fixture created={totals.get('created', 0)} unchanged={totals.get('unchanged', 0)} overwritten={totals.get('overwritten', 0)} conflicts={totals.get('conflict', 0)}")
-        for problem in problems:
-            print(problem.message)
-    return 1 if _has_errors(problems) else 0
-
-
-def _parse_category_recall_gates(values: list[str]) -> tuple[dict[str, float], list[Problem]]:
-    gates: dict[str, float] = {}
-    problems: list[Problem] = []
-    for value in values:
-        category, separator, raw_threshold = value.partition("=")
-        category = category.strip()
-        raw_threshold = raw_threshold.strip()
-        if not separator or not category or not raw_threshold:
-            problems.append(Problem("error", "context_benchmark_category_gate_invalid", "category recall gate must use category=threshold", value))
-            continue
-        try:
-            threshold = float(raw_threshold)
-        except ValueError:
-            problems.append(Problem("error", "context_benchmark_category_gate_invalid", "category recall gate threshold must be numeric", value))
-            continue
-        if threshold < 0 or threshold > 1:
-            problems.append(Problem("error", "context_benchmark_category_gate_invalid", "category recall gate threshold must be between 0 and 1", value))
-            continue
-        gates[category] = threshold
-    return gates, problems
 
 
 
@@ -5908,14 +5886,22 @@ def cmd_knowledge_check(args: argparse.Namespace) -> int:
 
 def cmd_knowledge_migrate(args: argparse.Namespace) -> int:
     """Explicit one-time v1 to v2 conversion, never a normal read fallback."""
-    from .knowledge_migration import migrate_legacy_knowledge
+    from .knowledge_migration import migrate_legacy_knowledge, finalize_legacy_knowledge
     root = find_workspace_root()
     target = evidence_target(root, repo_id=args.repo_id, workspace=getattr(args, "workspace", False))
-    result = migrate_legacy_knowledge(
-        root, repo_id=target.id, record_id=args.record_id,
-        apply=bool(args.apply), reason_override=args.reason or "",
-        sources_override=list(args.source or []),
-    )
+    if args.finalize:
+        if args.reason or args.source:
+            raise RepoctlError("--finalize cannot change a Knowledge claim, reason or source",
+                               code="knowledge_migration_finalize_override_invalid")
+        result = finalize_legacy_knowledge(
+            root, repo_id=target.id, record_id=args.record_id, apply=bool(args.apply),
+        )
+    else:
+        result = migrate_legacy_knowledge(
+            root, repo_id=target.id, record_id=args.record_id,
+            apply=bool(args.apply), reason_override=args.reason or "",
+            sources_override=list(args.source or []),
+        )
     pending = [item for item in result["records"] if item["status"].startswith("needs_")]
     projection_errors = list(result.get("projection_problems") or [])
     payload = {
@@ -5931,7 +5917,11 @@ def cmd_knowledge_migrate(args: argparse.Namespace) -> int:
             *[{
                 "severity": "error", "code": "knowledge_migration_projection_rebuild_failed",
                 "cause_code": code,
-                "message": "Original Knowledge evidence was preserved, but the derived projection did not rebuild; run knowledge rebuild",
+                "message": (
+                    "Staged v2 still replaces an active historical v1 ID; review and finalize this one-time conversion"
+                    if code == "knowledge_replaces_missing" and args.apply and not args.finalize
+                    else "Original Knowledge evidence was preserved, but the derived projection did not rebuild; investigate before rebuilding"
+                ),
                 "path": "",
             } for code in projection_errors],
         ],
@@ -6629,8 +6619,8 @@ def cmd_debug_summary(args: argparse.Namespace) -> int:
     if args.json:
         _json(payload)
     else:
-        graph = data["context_sources"]["graph"]
-        knowledge = data["context_sources"]["knowledge"]
+        graph = data["evidence_sources"]["graph"]
+        knowledge = data["evidence_sources"]["knowledge"]
         print(
             f"debug summary events={data['capture']['event_count']} failed={data['outcomes']['failed']} "
             f"graph_available={graph['available']} "
@@ -6739,13 +6729,23 @@ def build_parser() -> argparse.ArgumentParser:
     task_audit.add_argument("--include-archived", action="store_true", help="also inspect archived Tasks without modifying them")
     task_audit.add_argument("--json", action="store_true")
     task_audit.set_defaults(func=cmd_task_audit)
-    task_migrate_slop = task_sub.add_parser("migrate-slop", help="Compact recognized legacy repoctl path dumps; dry-run by default.")
+    task_migrate_slop = task_sub.add_parser("migrate-slop", help="Remove recognized generated Task log path dumps in-place; preview by default.")
     task_migrate_slop.add_argument("task_id", nargs="?", help="specific Task id; omit to scan live Tasks")
-    task_migrate_slop.add_argument("--include-archived", action="store_true", help="identify archived candidates; immutable archives are reported, not rewritten")
-    task_migrate_slop.add_argument("--apply", action="store_true", help="apply high-confidence rewrites to live Tasks")
+    task_migrate_slop.add_argument("--include-archived", action="store_true", help="inspect archived candidates; writing one closed Task requires its ID and --closed")
+    task_migrate_slop.add_argument("--apply", action="store_true", help="apply verified in-place rewrites (with --closed for one terminal Task)")
     task_migrate_slop.add_argument("--closed", action="store_true", help="explicitly migrate one done/canceled/archived Task, preserving the original completion witness")
     task_migrate_slop.add_argument("--json", action="store_true")
     task_migrate_slop.set_defaults(func=cmd_task_migrate_slop)
+    task_migrate_receipts = task_sub.add_parser("migrate-receipts", help="One-time v3/v4 to v5 completion receipt transition with original proof preserved; preview by default.")
+    task_migrate_receipts.add_argument("task_id", nargs="?", help="one completed Task id; omit for all verifiable historical receipts")
+    task_migrate_receipts.add_argument("--apply", action="store_true", help="write verified v5 receipts and a byte-identical archived original under a guarded transaction")
+    task_migrate_receipts.add_argument("--json", action="store_true")
+    task_migrate_receipts.set_defaults(func=cmd_task_migrate_receipts)
+    task_migrate_states = task_sub.add_parser("migrate-states", help="One-time retirement of closed v3 Task baselines; live v3 states need owner review.")
+    task_migrate_states.add_argument("task_id", nargs="?", help="one Task ID; omit to inspect all start-baseline state files")
+    task_migrate_states.add_argument("--apply", action="store_true", help="archive exact v3 bytes with proof and retire closed state after guarded checks")
+    task_migrate_states.add_argument("--json", action="store_true")
+    task_migrate_states.set_defaults(func=cmd_task_migrate_states)
     task_doctor = task_sub.add_parser("doctor", help="Inspect task finish readiness, content hygiene, and lifecycle problems.")
     task_doctor.add_argument("task_id")
     task_doctor.add_argument("--use-committed-diff", action="store_true", help="preflight the recorded task-start HEAD through current HEAD")
@@ -6994,32 +6994,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_search.add_argument("--full", action="store_true", help="include full evidence and source diagnostics in JSON output")
     graph_search.add_argument("--json", action="store_true")
     graph_search.set_defaults(func=cmd_graph_search)
-    graph_evidence_benchmark = graph_sub.add_parser("evidence-benchmark", internal=True)
-    graph_evidence_benchmark.add_argument("--fixture", default="tests/fixtures/context-benchmark")
-    graph_evidence_benchmark.add_argument("--repo-id")
-    graph_evidence_benchmark.add_argument("--min-recall-at-5", type=float)
-    graph_evidence_benchmark.add_argument("--min-precision-at-5", type=float)
-    graph_evidence_benchmark.add_argument("--min-visible-recall", type=float)
-    graph_evidence_benchmark.add_argument("--min-knowledge-recall-at-5", type=float)
-    graph_evidence_benchmark.add_argument("--min-category-recall-at-5", action="append", default=[])
-    graph_evidence_benchmark.add_argument("--min-category-knowledge-recall-at-5", action="append", default=[])
-    graph_evidence_benchmark.add_argument("--min-category-graph-edge-recall", action="append", default=[])
-    graph_evidence_benchmark.add_argument("--min-category-visible-recall", action="append", default=[])
-    graph_evidence_benchmark.add_argument("--require-source-integrity", action="store_true")
-    graph_evidence_benchmark.add_argument("--require-knowledge-source-current", action="store_true")
-    graph_evidence_benchmark.add_argument("--require-no-forbidden", action="store_true")
-    graph_evidence_benchmark.add_argument("--require-no-cross-repo", action="store_true")
-    graph_evidence_benchmark.add_argument("--require-fixture-corpus", action="store_true")
-    graph_evidence_benchmark.add_argument("--max-output-estimated-tokens", type=int)
-    graph_evidence_benchmark.add_argument("--output")
-    graph_evidence_benchmark.add_argument("--json", action="store_true")
-    graph_evidence_benchmark.set_defaults(func=cmd_graph_evidence_benchmark)
-    graph_evidence_materialize = graph_sub.add_parser("evidence-materialize", internal=True)
-    graph_evidence_materialize.add_argument("--fixture", default="tests/fixtures/context-benchmark")
-    graph_evidence_materialize.add_argument("--repo-id")
-    graph_evidence_materialize.add_argument("--force", action="store_true")
-    graph_evidence_materialize.add_argument("--json", action="store_true")
-    graph_evidence_materialize.set_defaults(func=cmd_graph_evidence_materialize)
+
     knowledge = sub.add_parser("knowledge")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True, parser_class=RepoctlArgumentParser)
     knowledge_add = knowledge_sub.add_parser("add", help="Save one reusable decision, invariant, or failure mode.")
@@ -7076,7 +7051,8 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_migrate.add_argument("--record-id", default="", help="select one legacy ID for explicit reason/source repair")
     knowledge_migrate.add_argument("--reason", default="", help="user-verified technical reason for the selected record")
     knowledge_migrate.add_argument("--source", action="append", default=[], help="user-verified source path for the selected record; repeatable")
-    knowledge_migrate.add_argument("--apply", action="store_true", help="write validated conversions and ignored original witnesses")
+    knowledge_migrate.add_argument("--finalize", action="store_true", help="one-time move a verified v1 out of active records and retarget exact v2 citations")
+    knowledge_migrate.add_argument("--apply", action="store_true", help="write the reviewed one-time migration or finalization")
     knowledge_migrate.add_argument("--json", action="store_true")
     knowledge_migrate.set_defaults(func=cmd_knowledge_migrate)
     knowledge_rebuild = knowledge_sub.add_parser("rebuild", help="Refresh the derived Knowledge projection from saved records.")

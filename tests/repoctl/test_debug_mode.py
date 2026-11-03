@@ -131,7 +131,7 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     capsys.readouterr()
     assert main(["graph", "search", "blue comet route", "--repo-id", "main", "--full", "--json"]) == 0
     capsys.readouterr()
-    before_graph = _events(tmp_path)[-1]["context_sources"]["graph"]
+    before_graph = _events(tmp_path)[-1]["evidence_sources"]["graph"]
     assert before_graph["available"] is False
     saved = _add_knowledge_source(
         capsys,
@@ -164,7 +164,7 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     assert main(["graph", "search", "blue comet error meaning across language boundaries", "--mode", "contract", "--repo-id", "main", "--full", "--json"]) == 0
     context_result = json.loads(capsys.readouterr().out)
     assert any(item["source_ref"]["path"] == "docs/workflows/route-contract.md"
-               for group in context_result["data"]["bundle"]["groups"].values() for item in group)
+               for group in context_result["data"]["result"]["groups"].values() for item in group)
     assert {"path": "docs/workflows/route-contract.md"} in _events(tmp_path)[-1]["result"]["references"]
 
     history_query = "validate_token token validation"
@@ -172,7 +172,7 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
         ["graph", "search", history_query, "--mode", "past-decision", "--repo-id", "main", "--json"]
     ) == 0
     capsys.readouterr()
-    compact_history = _events(tmp_path)[-1]["context_sources"]["task_history"]
+    compact_history = _events(tmp_path)[-1]["evidence_sources"]["task_history"]
     assert compact_history["consulted"] is True
     assert compact_history["status"] in {"available", "partial"}
     assert main(
@@ -186,9 +186,9 @@ def test_debug_summary_correlates_context_sources_and_later_success(tmp_path: Pa
     assert summary["capture"]["enabled"] is True
     assert summary["commands"]["knowledge.query"]["result_statuses"] == {"found": 1, "not_found": 1}
     assert summary["commands"]["graph.query"]["later_same_shape_success_after_failure"] == 1
-    assert summary["context_sources"]["graph"]["available"] > 0
-    assert summary["context_sources"]["knowledge"]["returned"] > 0
-    assert summary["context_sources"]["task_history"]["returned"] > 0
+    assert summary["evidence_sources"]["graph"]["available"] > 0
+    assert summary["evidence_sources"]["knowledge"]["returned"] > 0
+    assert summary["evidence_sources"]["task_history"]["returned"] > 0
     assert "discovery_selections" not in summary
     assert main(["debug", "summary"]) == 0
     assert capsys.readouterr().out
@@ -201,7 +201,7 @@ def test_debug_journal_stays_valid_and_reports_concurrent_bound(tmp_path: Path, 
     write_workspace(tmp_path)
     event = {
         "schema": "repoctl.debug.event",
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp": "2026-09-04T00:00:00+00:00",
         "duration_ms": 1,
         "command": "task.resume",

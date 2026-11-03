@@ -7,7 +7,7 @@ Root `docs/**` contains the private workspace ledger, repoctl contracts and work
 - `BOARD.md` — live task registry; Task frontmatter remains status authority.
 - `tasks/` — live tasks and canonical creation templates.
 - `archive/tasks/` — completed and canceled standalone task records.
-- `contracts/` — repoctl JSON, Context, Graph, debug, and module contracts.
+- `contracts/` — repoctl JSON, Graph, Task evidence, debug, and module contracts.
 - `workflows/` — reusable operating procedures.
 - `knowledge/records/` — reusable decisions, invariants, and failure modes.
 - `PRD.md` — adopter-owned project context seed.
@@ -24,7 +24,7 @@ For project understanding, follow the entry route in `AGENTS.md`: repository ide
 ```bash
 # Current work
 ./scripts/repoctl task create --start --json "Task title"
-./scripts/repoctl task resume --json
+./scripts/repoctl task resume T-... --json
 ./scripts/repoctl task show T-... --json
 ./scripts/repoctl task discovery add T-... --chosen repos/path --note "why this is in scope" --json
 ./scripts/repoctl task log append T-... "meaningful checkpoint" --json
@@ -57,6 +57,9 @@ For project understanding, follow the entry route in `AGENTS.md`: repository ide
 ./scripts/repoctl check --audit-history --json
 ./scripts/repoctl history rebuild --repo-id main --json
 ./scripts/repoctl upgrade status --json
+# Review one-time old-adopter format conversions separately before applying them:
+./scripts/repoctl task migrate-receipts T-... --json
+./scripts/repoctl task migrate-states T-... --json
 ```
 
 Use `/tmp` for disposable investigation notes. Graph/Knowledge results are read-only evidence and never bind to Task or Handoff state.
@@ -72,7 +75,7 @@ Run any leaf with `--help` for exact inputs.
 | Root | `version`, `check`, `debug summary` |
 | Field gates | `field-gate run`, `field-gate compare` |
 | Repositories | `repo list`, `repo show`, `repo check`, `repo adopt` |
-| Tasks | `task create`, `task list`, `task resume`, `task show`, `task doctor`, `task log append`, `task handoff bind`, `task discovery add`, `task baseline resolve`, `task start`, `task finish`, `task block`, `task cancel` |
+| Tasks | `task create`, `task list`, `task resume`, `task show`, `task doctor`, `task log append`, `task handoff bind`, `task discovery add`, `task baseline resolve`, `task start`, `task finish`, `task block`, `task cancel`; one-time `task migrate-slop`, `task migrate-receipts`, `task migrate-states` |
 | Backlog | `backlog add`, `backlog list`, `backlog show`, `backlog remove` |
 | Metadata | `meta init`, `meta check`, `meta status`, `meta show`, `meta query`, `meta suggest`, `meta set`, `meta remove`, `meta move`, `meta exclude` |
 | Evidence | `index code`, `graph build`, `graph query`, `history rebuild`, `graph search`, `graph workflow` |
@@ -83,8 +86,8 @@ Run any leaf with `--help` for exact inputs.
 
 - `repos/` contains product Git roots and is ignored by root Git.
 - Repoctl owns Board, Backlog, lifecycle/archive, baseline, Handoff binding, completion history, and `.repometa` mutations.
-- Task owns current work; Handoff owns restart instructions; Context owns read-only retrieval; Knowledge owns optional reusable reasoning.
-- Context and Graph output never creates Chosen scope. Repeated queries create no result receipt cache.
+- Task owns current work; Handoff owns four current restart fields; Graph offers read-only code/document evidence and navigation; Knowledge owns optional source-linked reusable reasoning.
+- Graph/Knowledge reads never create Chosen scope or a per-query receipt cache; original documents and product Git roots remain authoritative.
 - Completion receipts record lifecycle and repository history. They do not certify tests.
-- New Knowledge records are complete when saved. Older records and event files remain untouched until an agent migrates the useful conclusion.
+- New Knowledge records are complete when saved. Older v1 records require explicit one-time staging and finalization; unchanged original bytes remain in historical Knowledge archive after conversion.
 - Debug mode is ignored local diagnostic state and never authority.

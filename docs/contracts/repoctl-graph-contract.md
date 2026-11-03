@@ -19,7 +19,7 @@ Direct single-repository layouts may omit `--repo-id`. Configured multi-reposito
 
 The first build analyzes eligible files and writes a canonical snapshot, manifest, persistent SQLite evidence index, and one fixed result per semantic provider under `.repoctl-state/graph/<repo-id>/`. Later builds reuse unchanged provider results and update changed files plus semantic dependents. `--rebuild` discards reusable Graph/provider state. It does not scan or repair completion history.
 
-`history rebuild` is the explicit recovery boundary for validating completion receipts and rebuilding the bounded completion catalogue. Normal Graph and Context commands do not enumerate the cold completion archive.
+`history rebuild` is the explicit recovery boundary for validating completion receipts and rebuilding the bounded completion catalogue. Normal Graph search and query do not enumerate the cold completion archive.
 
 `graph query` reads the last materialized snapshot. It does not run providers, rescan product files, mutate Tasks, or create per-query receipts. Repeating the same query creates no query ledger.
 
@@ -198,9 +198,9 @@ committed_range   / range_observed
 
 `task_working_tree` may emit `TASK_CHANGED_FILE`. `range_observed` emits `TASK_RECORDED_CHANGE` and `CHANGE_AFFECTED_FILE` but never claims Task ownership through `TASK_CHANGED_FILE`.
 
-Receipt filename, `task_id`, artifact identity, and `content_sha256` must agree. Current transition data must cover changed entries exactly when present. A malformed receipt makes Task history partial without removing valid source relations.
+Receipt filename, `task_id`, artifact identity, and `content_sha256` must agree. Schema v5 requires real start/completion event timestamps and a path-transition list covering all changed entries; even no-change completions record an explicit empty transition list. Missing evidence is an error, not a partial current receipt. A malformed receipt makes Task history partial without removing valid source relations.
 
-Legacy receipt schemas 2 through 4 remain read-only inputs. Their old `verification` and schema-4 `discovery_outcome` fields are validated only as part of their published shape. Graph does not copy those fields into current Task scope or create new legacy state.
+Normal Graph/history readers require v5 completion receipts; old v2–v4 records are not query inputs. The explicit, proof-preserving `task migrate-receipts` transition can translate evidenced v3/v4 records to v5 while retaining their byte-identical originals and unresolved source integrity findings. It never promotes old `verification` or `discovery_outcome` claims to current Task authority; incomplete v2 receipts remain unresolved.
 
 The active snapshot includes only the finite hot completion catalogue. Exact `--task` and `--artifact` selectors validate a cold catalogue record and build a query-local projection without changing the snapshot. Historical artifact paths remain evidence; they are not current edit scope.
 
@@ -212,11 +212,11 @@ The active snapshot includes only the finite hot completion catalogue. Exact `--
 
 `KNOWLEDGE_SOURCED_FROM` retains source navigation. A later source change produces a warning but does not remove a saved decision or its explicit applicability from search and Graph. A replacement record supersedes the named older record.
 
-## Context projection
+## Graph source navigation
 
-Context is a separate consumer of the same snapshot. It passes typed file or provider-symbol anchors plus a fixed mode policy; Graph does not receive raw natural-language query text. Every requested anchor is reported as resolved, ambiguous, or unresolved. Exact ambiguity creates no traversal.
+Graph source search uses the same snapshot through typed file or provider-symbol anchors and a bounded mode policy. The relation traversal receives verified anchors, not raw natural-language query text. Every requested anchor is reported as resolved, ambiguous, or unresolved. Exact ambiguity creates no traversal.
 
-Context may form a bounded lexical file hypothesis before calling Graph. Confirmed Graph relations and lexical candidates remain distinct. Traversal direction and depth are fixed by mode, and merged relations retain per-origin distance.
+Graph source search may form a bounded lexical file hypothesis before traversing Graph relations. Confirmed relations and lexical candidates remain distinct. Traversal direction and depth are fixed by mode, and merged relations retain per-origin distance.
 
 
 ## Query result
@@ -270,7 +270,7 @@ Query status and evidence completeness are separate:
 
 Every query reports freshness. `current` means product file identities, root evidence, provider configuration, and Graph input versions match the manifest. `stale` returns `graph_snapshot_stale` and a `graph_refresh` action.
 
-Stale endpoints are excluded from confirmed Graph relations, relationship candidates, component crossings, and Context Graph projections. Context may still show current file text from its live overlay. Rebuild before relying on changed relations.
+Stale endpoints are excluded from confirmed Graph relations, relationship candidates, component crossings, and Graph source-evidence projections. Graph search may still show current file text from its live overlay. Rebuild before relying on changed relations.
 
 Full freshness reports changed product paths, root paths, provider configuration, provider-owned stale paths, semantic dependents, and Graph input-version changes. Freshness checks reuse stored digests when path kind, mode, size, and modification time are unchanged.
 

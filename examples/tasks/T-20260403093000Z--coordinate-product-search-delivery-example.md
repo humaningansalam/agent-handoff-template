@@ -70,11 +70,7 @@ The child's `parent` frontmatter field is the authoritative link.
 
 - Each child records `repo_id: "main"` and its own Discovery, chosen files, and verification
 - The search result schema is the shared interface; implementation details remain owned by each child
-- Current decision: index before API integration; amendment `example-search-order-v2` supersedes the parallel schedule in `example-search-order-v1`, retaining the shared schema and child repository boundaries. Original: `examples/tasks/T-20260403093000Z--coordinate-product-search-delivery-example.md`, heading `Preserved request (illustrative)`; requestRef `example-search-order-v2`.
-
-### Preserved request (illustrative)
-
-requestRef `example-search-order-v2`: Finish the index child before starting API integration. This replaces only the parallel schedule in `example-search-order-v1`; keep the shared result schema and each child's selected repository. This is illustrative source text, not authority for a live Task.
+- Current decision: finish the index child before API integration; keep the shared result schema and each child's repository boundary unchanged.
 
 ## Integration Done When
 
@@ -97,6 +93,6 @@ requestRef `example-search-order-v2`: Finish the index child before starting API
 ## Handoff
 
 - Next exact step: Check each repo-scoped child task's status and integration evidence, then update the coordination summary.
-- First file to open: `examples/tasks/T-20260403093000Z--coordinate-product-search-delivery-example.md`
-- First command to run: `rg -n "^parent:|^repo_id:|T-20260403093" docs/tasks/ examples/tasks/`
+- First file to open: `docs/PRD.md` (shared product contract and read map).
+- First command to run: `./scripts/repoctl task list --json` (review actual live children by their IDs).
 - Done when: The parent reflects current child-task state, each live implementation child has repository scope and verification evidence, and the integrated contract is ready to check.

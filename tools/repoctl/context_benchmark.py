@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
 
-from .context import build_context_bundle, compact_context_bundle
-from .context_model import ContextBundle
+from .context import build_graph_source_evidence, compact_graph_source_evidence
+from .context_model import GraphSourceEvidence
 from .graph_model import GraphSnapshot
 from .graph_model import digest_data
 from .graph_store import materialize_graph
@@ -44,9 +44,9 @@ def run_context_benchmark(
     expected_path = fixture / "expected-sources.json"
     problems: list[Problem] = []
     if not questions_path.is_file():
-        return {}, [Problem("error", "context_benchmark_questions_missing", "context benchmark questions.jsonl is missing", questions_path.as_posix())]
+        return {}, [Problem("error", "graph_retrieval_questions_missing", "Graph retrieval benchmark questions.jsonl is missing", questions_path.as_posix())]
     if not expected_path.is_file():
-        return {}, [Problem("error", "context_benchmark_expected_missing", "context benchmark expected-sources.json is missing", expected_path.as_posix())]
+        return {}, [Problem("error", "graph_retrieval_expected_missing", "Graph retrieval benchmark expected-sources.json is missing", expected_path.as_posix())]
 
     questions = _read_questions(questions_path)
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
@@ -65,7 +65,7 @@ def run_context_benchmark(
             if graph_result is None:
                 graph_result = materialize_graph(root, target=target, rebuild=True, state_root=graph_state_root)
                 graph_cache[target.id] = graph_result
-            bundle, bundle_problems, _meta = build_context_bundle(
+            bundle, bundle_problems, _meta = build_graph_source_evidence(
                 root,
                 target=target,
                 query=str(question.get("question") or ""),
@@ -142,7 +142,7 @@ def _read_questions(path: Path) -> list[dict[str, Any]]:
 def _fixture_corpus_status(root: Path, fixture: Path, *, repo_id: str = "") -> tuple[dict[str, Any], list[Problem]]:
     corpus, load_problems = _load_fixture_corpus(fixture)
     if load_problems:
-        if any(problem.code == "context_benchmark_corpus_missing" for problem in load_problems):
+        if any(problem.code == "graph_retrieval_corpus_missing" for problem in load_problems):
             return {"present": False, "repositories": {}, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, []
         return {"present": True, "invalid": True, "file_count": 0, "missing_count": 0, "digest_drift_count": 0}, load_problems
     repositories = corpus["repositories"]
@@ -173,7 +173,7 @@ def _fixture_corpus_status(root: Path, fixture: Path, *, repo_id: str = "") -> t
             if not path.is_file():
                 missing_count += 1
                 repo_status["missing"].append(rel)
-                problems.append(Problem("error", "context_benchmark_corpus_file_missing", "context benchmark corpus file is missing from workspace", rel))
+                problems.append(Problem("error", "graph_retrieval_corpus_file_missing", "Graph retrieval benchmark corpus file is missing from workspace", rel))
                 continue
             actual = path.read_text(encoding="utf-8")
             expected_digest = _text_digest(expected_content)
@@ -181,7 +181,7 @@ def _fixture_corpus_status(root: Path, fixture: Path, *, repo_id: str = "") -> t
             if actual_digest != expected_digest:
                 digest_drift_count += 1
                 repo_status["digest_drift"].append(rel)
-                problems.append(Problem("error", "context_benchmark_corpus_file_digest_drift", "context benchmark corpus file content differs from fixture", rel))
+                problems.append(Problem("error", "graph_retrieval_corpus_file_digest_drift", "Graph retrieval benchmark corpus file content differs from fixture", rel))
         status_repos[wanted_repo_id] = repo_status
     return {
         "present": True,
@@ -221,7 +221,7 @@ def materialize_context_benchmark_corpus(root: Path, *, fixture: Path, repo_id: 
                 if not force:
                     repo_result["conflicts"].append(rel)
                     totals["conflict"] += 1
-                    problems.append(Problem("error", "context_benchmark_corpus_materialize_conflict", "fixture corpus would overwrite an existing file; pass --force to replace it", rel))
+                    problems.append(Problem("error", "graph_retrieval_corpus_materialize_conflict", "fixture corpus would overwrite an existing file; pass --force to replace it", rel))
                     continue
                 path.write_text(content, encoding="utf-8")
                 repo_result["overwritten"].append(rel)
@@ -237,7 +237,7 @@ def materialize_context_benchmark_corpus(root: Path, *, fixture: Path, repo_id: 
             totals["created"] += 1
         results[wanted_repo_id] = repo_result
     return {
-        "schema": "repoctl.context.benchmark.materialize",
+        "schema": "repoctl.graph.retrieval-fixture",
         "schema_version": 1,
         "fixture": fixture.as_posix(),
         "repo_id": repo_id,
@@ -250,14 +250,14 @@ def materialize_context_benchmark_corpus(root: Path, *, fixture: Path, repo_id: 
 def _load_fixture_corpus(fixture: Path) -> tuple[dict[str, Any], list[Problem]]:
     corpus_path = fixture / "corpus.json"
     if not corpus_path.is_file():
-        return {}, [Problem("error", "context_benchmark_corpus_missing", "context benchmark corpus.json is missing", corpus_path.as_posix())]
+        return {}, [Problem("error", "graph_retrieval_corpus_missing", "Graph retrieval benchmark corpus.json is missing", corpus_path.as_posix())]
     try:
         corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        return {}, [Problem("error", "context_benchmark_corpus_invalid_json", f"context benchmark corpus.json is invalid: {exc}", corpus_path.as_posix())]
+        return {}, [Problem("error", "graph_retrieval_corpus_invalid_json", f"Graph retrieval benchmark corpus.json is invalid: {exc}", corpus_path.as_posix())]
     repositories = corpus.get("repositories") if isinstance(corpus, dict) else {}
     if not isinstance(repositories, dict):
-        return {}, [Problem("error", "context_benchmark_corpus_invalid", "context benchmark corpus repositories must be an object", corpus_path.as_posix())]
+        return {}, [Problem("error", "graph_retrieval_corpus_invalid", "Graph retrieval benchmark corpus repositories must be an object", corpus_path.as_posix())]
     return {"repositories": repositories}, []
 
 
@@ -265,7 +265,7 @@ def _text_digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: ContextBundle | None, problems: list[Problem]) -> dict[str, Any]:
+def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: GraphSourceEvidence | None, problems: list[Problem]) -> dict[str, Any]:
     labels = _source_labels(spec)
     required = labels["must_find"]
     required_knowledge = _refs(spec.get("required_knowledge_source_refs"))
@@ -274,7 +274,7 @@ def _score_question(question: dict[str, Any], spec: dict[str, Any], bundle: Cont
     supporting = labels["supporting"]
     forbidden = labels["noise"]
     evidence_refs = _bundle_refs(bundle)
-    compact_payload = compact_context_bundle(bundle) if bundle is not None else {}
+    compact_payload = compact_graph_source_evidence(bundle) if bundle is not None else {}
     visible_refs = _compact_source_refs(compact_payload)
     knowledge_refs = _knowledge_refs(bundle)
     knowledge_score_results = _knowledge_score_results(bundle)
@@ -451,7 +451,7 @@ def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str,
     return summary
 
 
-def _bundle_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+def _bundle_refs(bundle: GraphSourceEvidence | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
     return [candidate.source_ref.to_dict() for candidate in bundle.evidence]
@@ -503,7 +503,7 @@ def _precision_source_refs(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return actionable or refs(("must_read",))
 
 
-def _knowledge_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+def _knowledge_refs(bundle: GraphSourceEvidence | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
     refs: list[dict[str, Any]] = []
@@ -516,7 +516,7 @@ def _knowledge_refs(bundle: ContextBundle | None) -> list[dict[str, Any]]:
     return refs
 
 
-def _knowledge_score_results(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+def _knowledge_score_results(bundle: GraphSourceEvidence | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
     results: list[dict[str, Any]] = []
@@ -534,7 +534,7 @@ def _knowledge_score_results(bundle: ContextBundle | None) -> list[dict[str, Any
     return results
 
 
-def _knowledge_source_statuses(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+def _knowledge_source_statuses(bundle: GraphSourceEvidence | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
     statuses: list[dict[str, Any]] = []
@@ -650,7 +650,7 @@ def _matches_any_expected(ref: dict[str, Any], expected: list[dict[str, Any]]) -
     return any(_contains_ref([ref], item) for item in expected)
 
 
-def _bundle_graph_edges(bundle: ContextBundle | None) -> list[dict[str, Any]]:
+def _bundle_graph_edges(bundle: GraphSourceEvidence | None) -> list[dict[str, Any]]:
     if bundle is None:
         return []
     edges: list[dict[str, Any]] = []
@@ -752,44 +752,44 @@ def _gate_problems(
 ) -> list[Problem]:
     problems: list[Problem] = []
     if min_recall_at_5 is not None and float(summary.get("mean_recall_at_5") or 0.0) < min_recall_at_5:
-        problems.append(Problem("error", "context_benchmark_recall_gate_failed", "context benchmark mean Recall@5 is below gate"))
+        problems.append(Problem("error", "graph_retrieval_recall_gate_failed", "Graph retrieval benchmark mean Recall@5 is below gate"))
     if min_precision_at_5 is not None and float(summary.get("mean_precision_at_5") or 0.0) < min_precision_at_5:
-        problems.append(Problem("error", "context_benchmark_precision_gate_failed", "context benchmark mean Precision@5 is below gate"))
+        problems.append(Problem("error", "graph_retrieval_precision_gate_failed", "Graph retrieval benchmark mean Precision@5 is below gate"))
     if min_visible_recall is not None and float(summary.get("mean_visible_recall") or 0.0) < min_visible_recall:
-        problems.append(Problem("error", "context_benchmark_visible_recall_gate_failed", "context benchmark mean visible recall is below gate"))
+        problems.append(Problem("error", "graph_retrieval_visible_recall_gate_failed", "Graph retrieval benchmark mean visible recall is below gate"))
     if min_knowledge_recall_at_5 is not None and float(summary.get("mean_knowledge_recall_at_5") or 0.0) < min_knowledge_recall_at_5:
-        problems.append(Problem("error", "context_benchmark_knowledge_gate_failed", "context benchmark mean knowledge Recall@5 is below gate"))
+        problems.append(Problem("error", "graph_retrieval_knowledge_gate_failed", "Graph retrieval benchmark mean knowledge Recall@5 is below gate"))
     by_category = summary.get("by_category") if isinstance(summary.get("by_category"), dict) else {}
     for category, threshold in sorted(min_category_recall_at_5.items()):
         category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
         recall = float(category_summary.get("mean_recall_at_5") or 0.0)
         if recall < threshold:
-            problems.append(Problem("error", "context_benchmark_category_recall_gate_failed", f"context benchmark {category} Recall@5 is below gate", category))
+            problems.append(Problem("error", "graph_retrieval_category_recall_gate_failed", f"Graph retrieval benchmark {category} Recall@5 is below gate", category))
     for category, threshold in sorted(min_category_knowledge_recall_at_5.items()):
         category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
         recall = float(category_summary.get("mean_knowledge_recall_at_5") or 0.0)
         if recall < threshold:
-            problems.append(Problem("error", "context_benchmark_category_knowledge_gate_failed", f"context benchmark {category} knowledge Recall@5 is below gate", category))
+            problems.append(Problem("error", "graph_retrieval_category_knowledge_gate_failed", f"Graph retrieval benchmark {category} knowledge Recall@5 is below gate", category))
     for category, threshold in sorted(min_category_graph_edge_recall.items()):
         category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
         recall = float(category_summary.get("mean_graph_edge_recall") or 0.0)
         if recall < threshold:
-            problems.append(Problem("error", "context_benchmark_category_graph_edge_gate_failed", f"context benchmark {category} graph edge recall is below gate", category))
+            problems.append(Problem("error", "graph_retrieval_category_graph_edge_gate_failed", f"Graph retrieval benchmark {category} graph edge recall is below gate", category))
     for category, threshold in sorted(min_category_visible_recall.items()):
         category_summary = by_category.get(category) if isinstance(by_category.get(category), dict) else {}
         recall = float(category_summary.get("mean_visible_recall") or 0.0)
         if recall < threshold:
-            problems.append(Problem("error", "context_benchmark_category_visible_recall_gate_failed", f"context benchmark {category} visible recall is below gate", category))
+            problems.append(Problem("error", "graph_retrieval_category_visible_recall_gate_failed", f"Graph retrieval benchmark {category} visible recall is below gate", category))
     if require_source_integrity and not bool(summary.get("source_ref_integrity")):
-        problems.append(Problem("error", "context_benchmark_source_integrity_failed", "context benchmark source ref integrity failed"))
+        problems.append(Problem("error", "graph_retrieval_source_integrity_failed", "Graph retrieval benchmark source ref integrity failed"))
     if require_source_integrity and not bool(summary.get("knowledge_source_ref_integrity")):
-        problems.append(Problem("error", "context_benchmark_knowledge_integrity_failed", "context benchmark knowledge source ref integrity failed"))
+        problems.append(Problem("error", "graph_retrieval_knowledge_integrity_failed", "Graph retrieval benchmark knowledge source ref integrity failed"))
     if require_knowledge_source_current and not bool(summary.get("knowledge_source_status_current")):
-        problems.append(Problem("error", "context_benchmark_knowledge_source_stale", "context benchmark knowledge source status is not current"))
+        problems.append(Problem("error", "graph_retrieval_knowledge_source_stale", "Graph retrieval benchmark knowledge source status is not current"))
     if require_no_forbidden and int(summary.get("forbidden_selected") or 0) > 0:
-        problems.append(Problem("error", "context_benchmark_forbidden_selected", "context benchmark selected forbidden source refs"))
+        problems.append(Problem("error", "graph_retrieval_forbidden_selected", "Graph retrieval benchmark selected forbidden source refs"))
     if require_no_cross_repo and int(summary.get("cross_repo_ref_count") or 0) > 0:
-        problems.append(Problem("error", "context_benchmark_cross_repo_leakage", "context benchmark selected source refs from another repository"))
+        problems.append(Problem("error", "graph_retrieval_cross_repo_leakage", "Graph retrieval benchmark selected source refs from another repository"))
     if max_output_estimated_tokens is not None and int(summary.get("max_output_estimated_tokens") or 0) > max_output_estimated_tokens:
-        problems.append(Problem("error", "context_benchmark_token_ceiling_exceeded", "context benchmark output token ceiling exceeded"))
+        problems.append(Problem("error", "graph_retrieval_token_ceiling_exceeded", "Graph retrieval benchmark output token ceiling exceeded"))
     return problems

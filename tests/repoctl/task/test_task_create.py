@@ -340,7 +340,7 @@ def test_task_create_follow_up_keeps_completed_task_immutable(tmp_path: Path, mo
 
 
 @pytest.mark.parametrize("damage", ["", "hash_mismatch", "ambiguous", "symlink", "invalid_locator"])
-def test_legacy_live_path_receipt_resolves_archived_predecessor_without_backfill(
+def test_noncanonical_archive_without_locator_never_resolves_as_current(
     tmp_path: Path, monkeypatch, capsys, damage: str,
 ) -> None:
     write_workspace(tmp_path)
@@ -369,33 +369,20 @@ def test_legacy_live_path_receipt_resolves_archived_predecessor_without_backfill
     protected = {path: path.read_bytes() for path in [previous, receipt, tmp_path / "docs/BOARD.md"]}
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
 
-    assert main(["task", "show", previous_id, "--json"]) == (2 if damage else 0)
+    assert main(["task", "show", previous_id, "--json"]) == 2
     shown = json.loads(capsys.readouterr().out)
-    if damage:
-        assert shown["problems"][0]["code"] == "task_not_found"
-    else:
-        assert shown["data"]["task"]["path"] == previous.relative_to(tmp_path).as_posix()
-        assert shown["data"]["task"]["status"] == "done"
-        artifact, problems = completion_receipt_artifact_for_task(tmp_path, task_id=previous_id)
-        assert problems == []
-        assert artifact is not None
-        assert artifact.declared_path == f"docs/tasks/{filename}"
-        assert artifact.resolved_path == previous.relative_to(tmp_path).as_posix()
+    assert shown["problems"][0]["code"] == "task_not_found"
     assert all(path.read_bytes() == raw for path, raw in protected.items())
     assert locator.exists() == (damage == "invalid_locator")
 
     assert main([
         "task", "create", "--follow-up-of", previous_id, "--area", "docs",
-        "--slug", "legacy-follow-up", "Legacy follow-up", "--json",
-    ]) == (2 if damage else 0)
+        "--slug", "follow-up", "Follow-up", "--json",
+    ]) == 2
     created = json.loads(capsys.readouterr().out)
-    if damage:
-        assert created["problems"][0]["code"] == "task_not_found"
-        assert (tmp_path / "docs/BOARD.md").read_bytes() == protected[tmp_path / "docs/BOARD.md"]
-        assert not list((tmp_path / "docs/tasks").glob("T-*.md"))
-    else:
-        assert f'follow_up_of: "{previous_id}"' in (tmp_path / created["data"]["path"]).read_text(encoding="utf-8")
-        assert previous_id in {task.id for task in load_tasks(tmp_path)}
+    assert created["problems"][0]["code"] == "task_not_found"
+    assert (tmp_path / "docs/BOARD.md").read_bytes() == protected[tmp_path / "docs/BOARD.md"]
+    assert not list((tmp_path / "docs/tasks").glob("T-*.md"))
     assert previous.read_bytes() == protected[previous]
     assert receipt.read_bytes() == protected[receipt]
     assert locator.exists() == (damage == "invalid_locator")

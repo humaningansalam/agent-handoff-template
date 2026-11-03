@@ -126,7 +126,7 @@ def test_release_manifest_manages_every_public_example() -> None:
     assert example_files <= managed
 
 
-def test_release_archive_excludes_python_tests_and_keeps_field_gate_fixtures(tmp_path: Path) -> None:
+def test_release_archive_excludes_python_tests_and_keeps_only_graph_fixture(tmp_path: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
     archive_path = build_release_archive(source_root, tmp_path / "dist")
@@ -140,22 +140,15 @@ def test_release_archive_excludes_python_tests_and_keeps_field_gate_fixtures(tmp
 
     assert any((source_root / "tests/repoctl").rglob("*.py"))
     assert not any(name.startswith("tests/") and name.endswith(".py") for name in relative_names)
-    assert fixtures == {
-        "tests/fixtures/context-benchmark-multirepo/corpus.json",
-        "tests/fixtures/context-benchmark-multirepo/expected-sources.json",
-        "tests/fixtures/context-benchmark-multirepo/questions.jsonl",
-        "tests/fixtures/context-benchmark/corpus.json",
-        "tests/fixtures/context-benchmark/expected-sources.json",
-        "tests/fixtures/context-benchmark/questions.jsonl",
-        "tests/fixtures/graph-workflow-benchmark/cases.json",
-    }
+    # Retrieval benchmarks are internal Graph quality gates, not adopter assets.
+    assert fixtures == {"tests/fixtures/graph-workflow-benchmark/cases.json"}
 
 
 def test_release_archive_runs_public_commands(tmp_path: Path) -> None:
     source_root = next(parent for parent in Path(__file__).resolve().parents if (parent / "scripts/repoctl").is_file())
     manifest = json.loads((source_root / "repoctl-upgrade-manifest.json").read_text(encoding="utf-8"))
     archive_path = build_release_archive(source_root, tmp_path / "dist")
-    extract_dir = tmp_path / "extract-context"
+    extract_dir = tmp_path / "extract-current"
     with tarfile.open(archive_path, "r:gz") as archive:
         archive.extractall(extract_dir)
     package_root = extract_dir / f"{manifest['package']}-{manifest['version']}"
@@ -166,7 +159,8 @@ def test_release_archive_runs_public_commands(tmp_path: Path) -> None:
     assert (package_root / "docs/archive/tasks/.gitkeep").is_file()
     assert not (package_root / "docs/knowledge/events").exists()
     assert (package_root / "docs/knowledge/records/.gitkeep").is_file()
-    assert (package_root / "tests/fixtures/context-benchmark/corpus.json").is_file()
+    assert (package_root / "tests/fixtures/graph-workflow-benchmark/cases.json").is_file()
+    assert not (package_root / "tests/fixtures/context-benchmark/corpus.json").exists()
     (package_root / "docs/tasks").mkdir(parents=True, exist_ok=True)
     (package_root / "docs/BOARD.md").write_text("# BOARD\n\n## Board\n\n## Backlog\n", encoding="utf-8")
     repository_list = subprocess.run(

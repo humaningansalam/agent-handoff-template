@@ -77,7 +77,13 @@ def test_equivalent_legacy_record_does_not_repeat_migration_warning(tmp_path: Pa
     payload(capsys)
     assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
     migrated = payload(capsys)
-    assert migrated["data"]["legacy_record_count"] == 0
+    assert migrated["data"]["legacy_record_count"] == 1
+    assert main(["knowledge", "migrate", "--repo-id", "main", "--record-id", legacy_id,
+                 "--finalize", "--apply", "--json"]) == 0
+    payload(capsys)
+    assert main(["knowledge", "check", "--repo-id", "main", "--json"]) == 0
+    finalized = payload(capsys)
+    assert finalized["data"]["legacy_record_count"] == 0
 
 
 def test_same_claim_with_different_reason_is_not_silently_deduplicated(tmp_path: Path, monkeypatch, capsys) -> None:

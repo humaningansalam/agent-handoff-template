@@ -128,3 +128,455 @@ def prepare_history_witness(
         "kind": "completed" if status == "done" else "canceled",
     }
     return [(original_path, original), (manifest_path, (json.dumps(manifest,ensure_ascii=False,sort_keys=True,indent=2)+'\n').encode('utf-8'))]
+
+def _receipt_transition_paths(root: Path, task_id: str) -> tuple[Path, Path, Path]:
+    if TASK_ID.fullmatch(task_id) is None:
+        raise ValueError("invalid Task ID for receipt transition")
+    receipt = root / "docs/tasks/.repoctl-state/completions" / f"{task_id}.json"
+    archive_dir = root / "docs/archive/task-evidence/receipts"
+    return receipt, archive_dir / f"{task_id}.json", archive_dir / f"{task_id}.migration.json"
+
+
+def _safe_transition_path(root: Path, path: Path, *, must_exist: bool) -> bool:
+    """Reject symlink ancestors, escaped paths, and special files."""
+    try:
+        root_resolved = root.resolve(strict=True)
+        if root_resolved not in path.resolve(strict=False).parents:
+            return False
+        node = root
+        for part in path.relative_to(root).parts:
+            node /= part
+            if node.is_symlink():
+                return False
+        if must_exist:
+            return path.is_file()
+        return not path.exists()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _receipt_knowledge_citations(root: Path) -> dict[str, list[str]]:
+    """Never rewrite current Knowledge records behind their recorded digests."""
+    refs: dict[str, list[str]] = {}
+    directory = root / "docs/knowledge/records"
+    if not directory.is_dir():
+        return refs
+    for path in sorted(directory.glob("K-*.json")):
+        if not _safe_transition_path(root, path, must_exist=True):
+            raise ValueError(f"unsafe Knowledge source: {path}")
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError(f"unreadable Knowledge source: {path}") from exc
+        if not isinstance(record, dict):
+            raise ValueError(f"invalid Knowledge source: {path}")
+        for ref in record.get("source_refs", []):
+            if isinstance(ref, dict) and isinstance(ref.get("path"), str):
+                refs.setdefault(ref["path"], []).append(path.relative_to(root).as_posix())
+    return refs
+
+
+def migrate_completion_receipts(
+    root: Path, *, task_id: str = "", apply: bool = False,
+) -> dict[str, Any]:
+    """Explicit, one-time v3/v4 -> v5 conversion, never a normal legacy reader.
+
+    Validates the old and new schemas without inferring changed Task bytes,
+    saves its byte-identical historical receipt once, and changes only its
+    presentation. Existing artifact drift is separately reported, never fixed
+    by rewriting the recorded completion hash. Verification and Discovery outcome remain in the old source, not
+    copied as current completion authority. Incomplete v2 evidence is reported
+    without fabricating a start event or path transition.
+    """
+    from contextlib import nullcontext
+
+    from .io import RepoctlError, atomic_write, repoctl_lock
+    from .tasks import _validate_completion_receipt
+
+    if task_id and TASK_ID.fullmatch(task_id) is None:
+        raise RepoctlError("receipt transition requires a valid Task ID",
+                           code="receipt_transition_invalid_id")
+    root = root.resolve()
+    directory = root / "docs/tasks/.repoctl-state/completions"
+    if not _safe_transition_path(root, directory, must_exist=False) and (
+        not directory.is_dir() or directory.is_symlink()
+    ):
+        raise RepoctlError("completion authority directory is unsafe",
+                           code="receipt_transition_unsafe", path="docs/tasks/.repoctl-state/completions")
+    if task_id:
+        paths = [directory / f"{task_id}.json"]
+        if not paths[0].is_file():
+            raise RepoctlError("completion receipt is missing", code="receipt_transition_missing",
+                               path=paths[0].relative_to(root).as_posix())
+    else:
+        paths = sorted(directory.glob("T-*.json")) if directory.is_dir() else []
+
+    records: list[dict[str, Any]] = []
+    prepared: list[tuple[Path, bytes, str, Path, Path, str, str]] = []
+    with repoctl_lock(root) if apply else nullcontext():
+        cited = _receipt_knowledge_citations(root)
+        for path in paths:
+            rel = path.relative_to(root).as_posix()
+            row: dict[str, Any] = {"task_id": path.stem, "path": rel}
+            records.append(row)
+            if not _safe_transition_path(root, path, must_exist=True):
+                row.update(status="unresolved", reason="completion receipt path is not a safe regular file")
+                continue
+            raw = path.read_bytes()
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeError):
+                row.update(status="unresolved", reason="completion receipt is not valid UTF-8 JSON")
+                continue
+            if not isinstance(data, dict) or data.get("task_id") != path.stem:
+                row.update(status="unresolved", reason="receipt identity does not match filename")
+                continue
+            version = data.get("schema_version")
+            row["schema_version"] = version
+            row["repo_id"] = data.get("repo_id", "")
+            _original, archive, proof = _receipt_transition_paths(root, path.stem)
+            if version == 5:
+                if proof.exists() or proof.is_symlink() or archive.exists() or archive.is_symlink():
+                    okay = False
+                    if (_safe_transition_path(root, archive, must_exist=True)
+                            and _safe_transition_path(root, proof, must_exist=True)):
+                        try:
+                            manifest = json.loads(proof.read_text(encoding="utf-8"))
+                            okay = (
+                                isinstance(manifest, dict)
+                                and manifest.get("schema") == "repoctl.task.receipt-transition"
+                                and manifest.get("schema_version") == 1
+                                and manifest.get("task_id") == path.stem
+                                and manifest.get("kind") == "presentation_only"
+                                and manifest.get("original_schema_version") in {2, 3, 4}
+                                and manifest.get("current_sha256") == digest_bytes(raw)
+                                and manifest.get("original_sha256") == digest_bytes(archive.read_bytes())
+                                and manifest.get("original_path") == archive.relative_to(root).as_posix()
+                                and manifest.get("receipt_path") == rel
+                                and manifest.get("task_content_sha256") == data.get("content_sha256")
+                            )
+                        except (OSError, ValueError, TypeError):
+                            okay = False
+                    row.update(status="already_converted" if okay else "unresolved",
+                               reason="" if okay else "original completion proof is missing or changed")
+                else:
+                    row.update(status="already_current")
+                if row["status"] != "unresolved":
+                    try:
+                        _validate_completion_receipt(path, root, data, receipt_text=raw.decode("utf-8"))
+                    except (RepoctlError, UnicodeError) as exc:
+                        row["source_problem"] = f"{getattr(exc, 'code', 'invalid_receipt_encoding')}: {exc}"
+                continue
+            if type(version) is not int or version not in {2, 3, 4}:
+                row.update(status="unresolved", reason="unsupported receipt schema")
+                continue
+            if (
+                not isinstance(data.get("started_at"), str)
+                or not isinstance(data.get("completed_event_at"), str)
+                or not isinstance(data.get("repo_evidence"), dict)
+                or not isinstance(data["repo_evidence"].get("path_transitions"), list)
+            ):
+                row.update(status="unresolved", reason="original start/completion event or path transitions are absent; cannot reconstruct historical proof")
+                continue
+            if cited.get(rel):
+                row.update(status="unresolved", reason="current Knowledge cites the original receipt digest",
+                           cited_by=sorted(cited[rel]))
+                continue
+            if receipt_witness(root, path.stem, rel).status != "absent":
+                row.update(status="unresolved", reason="Task presentation witness binds the original receipt; review before conversion")
+                continue
+            if not _safe_transition_path(root, archive, must_exist=False) or not _safe_transition_path(root, proof, must_exist=False):
+                row.update(status="unresolved", reason="historical proof destination exists or is unsafe",
+                           archive_path=archive.relative_to(root).as_posix())
+                continue
+            try:
+                _validate_completion_receipt(path, root, data, receipt_text=raw.decode("utf-8"),
+                                             validate_artifact=False, migration_only=True)
+                converted = dict(data)
+                converted["schema_version"] = 5
+                converted.pop("verification", None)
+                converted.pop("discovery_outcome", None)
+                replacement = json.dumps(converted, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+                _validate_completion_receipt(path, root, converted, receipt_text=replacement, validate_artifact=False)
+            except RepoctlError as exc:
+                row.update(status="unresolved", reason=f"{exc.code}: {exc}")
+                continue
+            try:
+                _validate_completion_receipt(path, root, data, receipt_text=raw.decode("utf-8"),
+                                             migration_only=True)
+            except RepoctlError as exc:
+                row["source_problem"] = f"{exc.code}: {exc}"
+            manifest = {
+                "schema": "repoctl.task.receipt-transition", "schema_version": 1,
+                "task_id": path.stem, "receipt_path": rel,
+                "original_path": archive.relative_to(root).as_posix(),
+                "original_schema_version": version, "original_sha256": digest_bytes(raw),
+                "current_sha256": digest_bytes(replacement.encode("utf-8")),
+                "task_content_sha256": converted["content_sha256"],
+                "kind": "presentation_only",
+                "source_integrity_at_conversion": "unverified" if row.get("source_problem") else "verified",
+            }
+            manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            prepared.append((path, raw, replacement, archive, proof, manifest_text, rel))
+            row.update(status="ready", archive_path=manifest["original_path"],
+                       original_sha256=manifest["original_sha256"],
+                       current_sha256=manifest["current_sha256"])
+        if apply and prepared:
+            written: list[tuple[Path, bytes | None, bytes]] = []
+            try:
+                for path, original, replacement, archive, proof, manifest_text, rel in prepared:
+                    if path.read_bytes() != original:
+                        raise RepoctlError("receipt changed during explicit conversion",
+                                           code="receipt_transition_concurrent_edit", path=rel)
+                    if not _safe_transition_path(root, archive, must_exist=False) or not _safe_transition_path(root, proof, must_exist=False):
+                        raise RepoctlError("historical destination changed during conversion",
+                                           code="receipt_transition_concurrent_edit", path=rel)
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    written.append((archive, None, original))
+                    atomic_write(archive, original.decode("utf-8"))
+                    if path.read_bytes() != original:
+                        raise RepoctlError("receipt changed after archiving the original",
+                                           code="receipt_transition_concurrent_edit", path=rel)
+                    written.append((path, original, replacement.encode("utf-8")))
+                    atomic_write(path, replacement)
+                    if not _safe_transition_path(root, proof, must_exist=False):
+                        raise RepoctlError("receipt proof destination changed during conversion",
+                                           code="receipt_transition_concurrent_edit", path=rel)
+                    written.append((proof, None, manifest_text.encode("utf-8")))
+                    atomic_write(proof, manifest_text)
+                    for row in records:
+                        if row["path"] == rel:
+                            row["status"] = "applied"
+                            break
+            except Exception:
+                rollback_errors: list[str] = []
+                for item, original_bytes, expected_current in reversed(written):
+                    try:
+                        if not item.exists() and original_bytes is None:
+                            continue
+                        if not item.is_file() or item.is_symlink():
+                            rollback_errors.append(item.relative_to(root).as_posix())
+                            continue
+                        present = item.read_bytes()
+                        if original_bytes is not None and present == original_bytes:
+                            continue  # failed write never replaced the prior source
+                        if present != expected_current:
+                            rollback_errors.append(item.relative_to(root).as_posix())
+                            continue
+                        if original_bytes is None:
+                            item.unlink()
+                        else:
+                            atomic_write(item, original_bytes.decode("utf-8"))
+                    except (OSError, UnicodeError):
+                        rollback_errors.append(item.relative_to(root).as_posix())
+                if rollback_errors:
+                    raise RepoctlError("conversion failed and concurrent writes blocked safe rollback",
+                                       code="receipt_transition_rollback_incomplete",
+                                       path=", ".join(rollback_errors))
+                raise
+    unresolved = [row for row in records if row["status"] == "unresolved"]
+    applied = [row for row in records if row["status"] == "applied"]
+    repo_ids = sorted({row["repo_id"] for row in applied if isinstance(row.get("repo_id"), str)})
+    rebuild_commands = [
+        "./scripts/repoctl history rebuild "
+        + (f"--repo-id {repo_id}" if repo_id else "--workspace") + " --json"
+        for repo_id in repo_ids
+    ]
+    return {
+        "mode": "apply" if apply else "dry_run",
+        "record_count": len(records),
+        "ready_count": sum(row["status"] == "ready" for row in records),
+        "applied_count": len(applied),
+        "unresolved_count": len(unresolved),
+        "source_problem_count": sum(bool(row.get("source_problem")) for row in records),
+        "records": records,
+        "history_rebuild_required": bool(applied),
+        "history_rebuild_commands": rebuild_commands,
+    }
+
+
+def migrate_legacy_task_states(
+    root: Path, *, task_id: str = "", apply: bool = False,
+) -> dict[str, Any]:
+    """Retire closed v3 baseline files without inventing a v4 start snapshot.
+
+    A live v3 Task cannot be resumed safely using a guessed started_at or
+    dirty_path_states: it must be reviewed separately. Original bytes of
+    terminal states are preserved under docs/archive/task-evidence/.
+    """
+    from contextlib import nullcontext
+
+    from .io import RepoctlError, atomic_write, repoctl_lock
+    from .tasks import _read_repo_baseline, resolve_task
+
+    root = root.resolve()
+    if task_id and TASK_ID.fullmatch(task_id) is None:
+        raise RepoctlError("state migration requires a valid Task ID", code="state_transition_invalid_id")
+    state_dir = root / "docs/tasks/.repoctl-state"
+    paths = (
+        [state_dir / f"{task_id}.json"]
+        if task_id else sorted(state_dir.glob("T-*.json"))
+    )
+    records: list[dict[str, Any]] = []
+    prepared: list[tuple[Path, bytes, Path, Path, str]] = []
+    with repoctl_lock(root) if apply else nullcontext():
+        citations = _receipt_knowledge_citations(root)
+        for path in paths:
+            tid = path.stem
+            rel = path.relative_to(root).as_posix()
+            archive_dir = root / "docs/archive/task-evidence/start-baselines"
+            archived = archive_dir / f"{tid}.json"
+            proof = archive_dir / f"{tid}.migration.json"
+            row: dict[str, Any] = {"task_id": tid, "path": rel}
+            records.append(row)
+            if not path.exists() and not path.is_symlink():
+                okay = False
+                if (_safe_transition_path(root, archived, must_exist=True)
+                        and _safe_transition_path(root, proof, must_exist=True)):
+                    try:
+                        original = archived.read_bytes()
+                        meta = json.loads(proof.read_text(encoding="utf-8"))
+                        okay = (
+                            isinstance(meta, dict)
+                            and meta.get("schema") == "repoctl.task.state-retirement"
+                            and meta.get("schema_version") == 1
+                            and meta.get("task_id") == tid
+                            and meta.get("original_path") == rel
+                            and meta.get("archived_path") == archived.relative_to(root).as_posix()
+                            and meta.get("original_sha256") == digest_bytes(original)
+                            and meta.get("kind") == "closed_state_retirement"
+                        )
+                    except (OSError, ValueError, UnicodeError):
+                        okay = False
+                row.update(status="already_retired" if okay else "unresolved",
+                           reason="" if okay else "start-baseline state and proof are missing or changed")
+                continue
+            if not _safe_transition_path(root, path, must_exist=True):
+                row.update(status="unresolved", reason="unsafe start-baseline state path")
+                continue
+            original = path.read_bytes()
+            try:
+                state = json.loads(original.decode("utf-8"))
+            except (UnicodeError, ValueError):
+                row.update(status="unresolved", reason="invalid UTF-8 state JSON")
+                continue
+            if not isinstance(state, dict) or state.get("task_id") != tid or state.get("schema") != "repoctl.task.state":
+                row.update(status="unresolved", reason="state identity or schema is invalid")
+                continue
+            version = state.get("schema_version")
+            row["schema_version"] = version
+            if version == 4:
+                try:
+                    _read_repo_baseline(root, tid)
+                except RepoctlError as exc:
+                    row.update(status="unresolved", reason=f"{exc.code}: {exc}")
+                    continue
+                row.update(status="already_current")
+                continue
+            if version != 3:
+                row.update(status="unresolved", reason="unsupported start-baseline schema")
+                continue
+            try:
+                _read_repo_baseline(root, tid, migration_only=True)
+                task = resolve_task(root, tid)
+            except RepoctlError as exc:
+                row.update(status="unresolved", reason=f"{exc.code}: {exc}")
+                continue
+            if task.status not in {"done", "canceled"}:
+                row.update(status="unresolved", reason="live v3 baseline has no provable v4 started_at/stable dirty states; review owner-owned Task without resetting dirty")
+                continue
+            if task.status == "done":
+                receipt = root / "docs/tasks/.repoctl-state/completions" / f"{tid}.json"
+                if not _safe_transition_path(root, receipt, must_exist=True):
+                    row.update(status="unresolved", reason="closed Task completion authority is missing")
+                    continue
+                try:
+                    completion = json.loads(receipt.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, ValueError):
+                    row.update(status="unresolved", reason="closed Task completion authority is unreadable")
+                    continue
+                if not isinstance(completion, dict) or completion.get("task_id") != tid or completion.get("schema_version") != 5:
+                    row.update(status="unresolved", reason="convert the original completion receipt to v5 before retiring its state")
+                    continue
+            if citations.get(rel):
+                row.update(status="unresolved", reason="current Knowledge source cites the original Task state", cited_by=citations[rel])
+                continue
+            if not (_safe_transition_path(root, archived, must_exist=False)
+                    and _safe_transition_path(root, proof, must_exist=False)):
+                row.update(status="unresolved", reason="state archive destination is occupied or unsafe")
+                continue
+            meta = {
+                "schema": "repoctl.task.state-retirement",
+                "schema_version": 1,
+                "task_id": tid,
+                "original_path": rel,
+                "archived_path": archived.relative_to(root).as_posix(),
+                "original_sha256": digest_bytes(original),
+                "task_path": task.rel_path,
+                "terminal_status": task.status,
+                "kind": "closed_state_retirement",
+            }
+            proof_text = json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            prepared.append((path, original, archived, proof, proof_text))
+            row.update(status="ready", archived_path=meta["archived_path"],
+                       original_sha256=meta["original_sha256"])
+        if apply and prepared:
+            written: list[tuple[str, Path, bytes | None, bytes | None]] = []
+            try:
+                for path, original, archived, proof, proof_text in prepared:
+                    rel = path.relative_to(root).as_posix()
+                    if path.read_bytes() != original:
+                        raise RepoctlError("Task state changed during migration",
+                                           code="state_transition_concurrent_edit", path=rel)
+                    if not (_safe_transition_path(root, archived, must_exist=False)
+                            and _safe_transition_path(root, proof, must_exist=False)):
+                        raise RepoctlError("Task state history destination changed",
+                                           code="state_transition_concurrent_edit", path=rel)
+                    archived.parent.mkdir(parents=True, exist_ok=True)
+                    written.append(("create", archived, None, original))
+                    atomic_write(archived, original.decode("utf-8"))
+                    if path.read_bytes() != original or not _safe_transition_path(root, proof, must_exist=False):
+                        raise RepoctlError("Task state changed while archiving",
+                                           code="state_transition_concurrent_edit", path=rel)
+                    written.append(("create", proof, None, proof_text.encode("utf-8")))
+                    atomic_write(proof, proof_text)
+                    if path.read_bytes() != original:
+                        raise RepoctlError("Task state changed before retirement",
+                                           code="state_transition_concurrent_edit", path=rel)
+                    written.append(("retire", path, original, None))
+                    path.unlink()
+                    for row in records:
+                        if row["path"] == rel:
+                            row["status"] = "applied"
+                            break
+            except Exception:
+                failures: list[str] = []
+                for kind, path, before, after in reversed(written):
+                    try:
+                        if kind == "retire":
+                            if not path.exists() and not path.is_symlink():
+                                atomic_write(path, before.decode("utf-8"))
+                            elif not path.is_file() or path.is_symlink() or path.read_bytes() != before:
+                                failures.append(path.relative_to(root).as_posix())
+                        else:
+                            if not path.exists() and not path.is_symlink():
+                                continue
+                            if not path.is_file() or path.is_symlink() or path.read_bytes() != after:
+                                failures.append(path.relative_to(root).as_posix())
+                            else:
+                                path.unlink()
+                    except (OSError, UnicodeError):
+                        failures.append(path.relative_to(root).as_posix())
+                if failures:
+                    raise RepoctlError("state retirement failure and unsafe rollback",
+                                       code="state_transition_rollback_incomplete", path=", ".join(failures))
+                raise
+    unresolved = [row for row in records if row["status"] == "unresolved"]
+    return {
+        "mode": "apply" if apply else "dry_run",
+        "record_count": len(records),
+        "ready_count": sum(row["status"] == "ready" for row in records),
+        "applied_count": sum(row["status"] == "applied" for row in records),
+        "unresolved_count": len(unresolved),
+        "records": records,
+    }

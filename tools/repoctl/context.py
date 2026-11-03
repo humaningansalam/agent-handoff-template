@@ -16,7 +16,7 @@ from .context_model import (
     ContextAnchorResolutionCode,
     ContextAnchorStatus,
     ContextAnchorStrength,
-    ContextBundle,
+    GraphSourceEvidence,
     ContextCandidate,
     ContextEvidenceKind,
     ContextGraphAnchorCandidate,
@@ -209,7 +209,7 @@ class _FinalContextProjection:
     stats: dict[str, Any]
 
 
-def build_context_bundle(
+def build_graph_source_evidence(
     root: Path,
     *,
     target: RepoTarget,
@@ -219,7 +219,7 @@ def build_context_bundle(
     graph_result: tuple[Any, list[Problem], dict[str, Any]] | None = None,
     graph_state_root: Path | None = None,
     include_linked_records: bool = True,
-) -> tuple[ContextBundle | None, list[Problem], dict[str, Any]]:
+) -> tuple[GraphSourceEvidence | None, list[Problem], dict[str, Any]]:
     query_mode = normalize_context_mode(mode)
     snapshot, graph_problems, graph_meta = graph_result if graph_result is not None else load_materialized_graph(root, target=target, state_root=graph_state_root, with_freshness=True)
     graph_meta = dict(graph_meta)
@@ -875,7 +875,7 @@ def build_context_bundle(
         knowledge_records=knowledge_data,
         knowledge_records_queried=knowledge_queried,
     )
-    bundle = ContextBundle(
+    bundle = GraphSourceEvidence(
         repository=target.to_dict(),
         query={
             "text": query,
@@ -1420,7 +1420,7 @@ def _markdown_coverage_lines(label: str, coverage: dict[str, Any]) -> list[str]:
     return lines
 
 
-def render_context_markdown(bundle: ContextBundle) -> str:
+def render_graph_source_markdown(bundle: GraphSourceEvidence) -> str:
     data = bundle.to_dict()
     query = data["query"]
     projection = _bundle_final_projection(
@@ -1434,7 +1434,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     )
     graph_anchor = compact_completeness.get("graph_anchor") if isinstance(compact_completeness.get("graph_anchor"), dict) else {}
     working_set_coverage = compact_completeness.get("working_set_coverage") if isinstance(compact_completeness.get("working_set_coverage"), dict) else {}
-    guide = compact_context_bundle(bundle).get("guide", {})
+    guide = compact_graph_source_evidence(bundle).get("guide", {})
     implementation = guide.get("first_implementation_file", {})
     test = guide.get("test", {})
     rule = guide.get("relevant_rule", {})
@@ -1450,7 +1450,7 @@ def render_context_markdown(bundle: ContextBundle) -> str:
         f"- Next narrow action: {guide.get('next_narrow_action', '')}",
         f"- Mode: `{query.get('mode', '')}`",
         f"- Repository: `{bundle.repository.get('id', '')}`",
-        f"- Bundle digest: `{bundle.bundle_digest}`",
+        f"- Graph evidence digest: `{bundle.evidence_digest}`",
         "",
     ]
     if graph_anchor:
@@ -1525,8 +1525,8 @@ def render_context_markdown(bundle: ContextBundle) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_context_text(bundle: ContextBundle) -> str:
-    data = compact_context_bundle(bundle)
+def render_graph_source_text(bundle: GraphSourceEvidence) -> str:
+    data = compact_graph_source_evidence(bundle)
     guide = data.get("guide") if isinstance(data.get("guide"), dict) else {}
     implementation = guide.get("first_implementation_file") if isinstance(guide.get("first_implementation_file"), dict) else {}
     test = guide.get("test") if isinstance(guide.get("test"), dict) else {}
@@ -1537,7 +1537,7 @@ def render_context_text(bundle: ContextBundle) -> str:
         f"rule {(guide.get('relevant_rule') or {}).get('path', '')}",
         f"prior_reason {(guide.get('prior_reason') or {}).get('path', '')}",
         f"next {guide.get('next_narrow_action', '')}",
-        f"context repository={bundle.repository.get('id', '')} mode={bundle.query.get('mode', '')}",
+        f"graph sources repository={bundle.repository.get('id', '')} mode={bundle.query.get('mode', '')}",
     ]
     graph_anchor = (
         data.get("completeness", {}).get("graph_anchor", {})
@@ -1632,7 +1632,7 @@ def render_context_text(bundle: ContextBundle) -> str:
 MAX_COMPACT_CONTEXT_BYTES = 11920
 
 
-def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, excerpt_chars: int = 58) -> dict[str, Any]:
+def compact_graph_source_evidence(bundle: GraphSourceEvidence, *, max_group_items: int = 8, excerpt_chars: int = 58) -> dict[str, Any]:
     """Return a bounded agent-facing view without full evidence diagnostics."""
     projection = _bundle_final_projection(
         bundle,
@@ -1664,7 +1664,7 @@ def compact_context_bundle(bundle: ContextBundle, *, max_group_items: int = 8, e
         "component_crossings_truncated": False,
         "graph_seed_refs": [seed.to_dict() for seed in bundle.graph_seed_refs],
         "continuations": projection.continuations,
-        "bundle_digest": bundle.bundle_digest,
+        "evidence_digest": bundle.evidence_digest,
     }
     # One uncommon high-fanout query can exceed the compact-view budget even
     # though paths, typed provenance and graph evidence are relevant. Shrink
@@ -1741,7 +1741,7 @@ def _context_query_guide(
 
 
 def _bundle_final_projection(
-    bundle: ContextBundle,
+    bundle: GraphSourceEvidence,
     *,
     max_group_items: int,
 ) -> _FinalContextProjection:
@@ -3215,14 +3215,14 @@ def _compact_bundle_projection(
         "context_task_history_stale",
         "context_graph_freshness_unavailable",
         ContextAnchorResolutionCode.AMBIGUOUS.value,
-        "context_graph_anchor_snapshot_unresolved",
+        "graph_source_anchor_snapshot_unresolved",
     }
     warning_priority = {
         "context_graph_stale": 0,
         "context_graph_unavailable": 1,
         "context_graph_freshness_unavailable": 2,
         "context_task_history_stale": 3,
-        "context_graph_anchor_snapshot_unresolved": 4,
+        "graph_source_anchor_snapshot_unresolved": 4,
         ContextAnchorResolutionCode.AMBIGUOUS.value: 5,
     }
     displayed_groups["warnings_and_completeness"] = sorted(
@@ -3930,7 +3930,7 @@ def _graph_context_candidates(
     if projection.get("unresolved_anchors"):
         warnings.append(
             {
-                "code": "context_graph_anchor_snapshot_unresolved",
+                "code": "graph_source_anchor_snapshot_unresolved",
                 "message": "A typed symbol anchor no longer resolved in the materialized Graph; its relations were omitted",
             }
         )

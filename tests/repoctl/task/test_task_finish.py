@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tools.repoctl.cli import main
+from tools.repoctl.tasks import collect_completion_receipt_collection
 from tools.repoctl.meta import shard_for_path
 from tests.repoctl.task_lifecycle_helpers import (
     add_board_task,
@@ -380,11 +381,52 @@ def test_task_finish_archives_without_verification_proof(tmp_path: Path, monkeyp
 
 
 
+def test_task_finish_refuses_partial_v5_without_start_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    task_path = add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="doing"))
+    original = task_path.read_bytes()
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+
+    assert main(["task", "finish", task_id, "--json"]) == 2
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["problems"][0]["code"] == "transition_evidence_incomplete"
+    assert task_path.read_bytes() == original
+    assert not (tmp_path / f"docs/tasks/.repoctl-state/completions/{task_id}.json").exists()
+
+
+@pytest.mark.parametrize("missing", ["started_at", "completed_event_at", "path_transitions"])
+def test_v5_completion_receipt_rejects_missing_transition_evidence(
+    tmp_path: Path, monkeypatch, capsys, missing: str,
+) -> None:
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id))
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    capsys.readouterr()
+    receipt_path = tmp_path / f"docs/tasks/.repoctl-state/completions/{task_id}.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if missing == "path_transitions":
+        receipt["repo_evidence"].pop(missing)
+    else:
+        receipt.pop(missing)
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    collected = collect_completion_receipt_collection(tmp_path)
+    assert not collected.artifacts
+    assert any(problem.code == "invalid_completion_receipt" for problem in collected.problems)
+
+
 def test_task_finish_preserves_optional_verification_notes(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    text = task_text("T-20260609184046Z", status="doing").replace("- pending", "- Command: pytest\n- Result: pass")
+    text = task_text("T-20260609184046Z", status="todo").replace("- pending", "- Command: pytest\n- Result: pass")
     add_board_task(tmp_path, "T-20260609184046Z--alpha.md", text)
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -537,7 +579,7 @@ def test_task_finish_allows_no_repo_changes_only_when_repo_git_available(tmp_pat
 
 def test_task_finish_rolls_back_archive_when_board_write_fails(tmp_path: Path, monkeypatch, capsys) -> None:
     write_workspace(tmp_path)
-    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="doing"))
+    add_board_task(tmp_path, "T-20260609184046Z--alpha.md", task_text("T-20260609184046Z", status="todo"))
     real_atomic_write = __import__("tools.repoctl.cli", fromlist=["atomic_write"]).atomic_write
 
     def fail_board_write(path: Path, text: str) -> None:
@@ -546,6 +588,8 @@ def test_task_finish_rolls_back_archive_when_board_write_fails(tmp_path: Path, m
         real_atomic_write(path, text)
 
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", "T-20260609184046Z", "--json"]) == 0
+    capsys.readouterr()
     monkeypatch.setattr("tools.repoctl.cli.atomic_write", fail_board_write)
 
     assert main(["task", "finish", "T-20260609184046Z", "--json"]) == 2
@@ -562,7 +606,7 @@ def test_task_finish_rejects_conflicting_archive_locator(tmp_path: Path, monkeyp
     task_id = "T-20260609184046Z"
     task_path = f"docs/tasks/{task_id}--alpha.md"
     write_workspace(tmp_path)
-    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="doing"))
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo"))
     locator_path = tmp_path / f"docs/tasks/.repoctl-state/archive/{task_id}.json"
     locator_path.parent.mkdir(parents=True, exist_ok=True)
     conflicting_locator = {
@@ -576,7 +620,8 @@ def test_task_finish_rejects_conflicting_archive_locator(tmp_path: Path, monkeyp
         encoding="utf-8",
     )
     monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
-
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
     assert main(["task", "finish", task_id, "--json"]) == 2
 
     payload = json.loads(capsys.readouterr().out)
@@ -1282,3 +1327,253 @@ def test_external_resolution_stays_pinned_for_finish_and_committed_finish(tmp_pa
         for flags in ([], ["--use-committed-diff"]):
             assert main(["task", command, task_id, *flags, "--json"]) != 0
             assert json.loads(capsys.readouterr().out)["problems"][0]["code"] == "baseline_conflict"
+
+
+def _receipt_transition_fixture(tmp_path: Path, monkeypatch, capsys, *, version: int = 4):
+    """Build a real, finished v5 Task and downgrade only its receipt presentation."""
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    add_board_task(
+        tmp_path, f"{task_id}--alpha.md",
+        task_text(task_id, status="todo").replace('area: ""', 'area: "ops"'),
+    )
+    repo = tmp_path / "repos"
+    init_product_repo(repo)
+    commit_all(repo)
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "finish", task_id, "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    receipt_path = tmp_path / output["data"]["completion_receipt"]
+    data = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert data["schema_version"] == 5
+    data["schema_version"] = version
+    data["verification"] = {
+        "source": "task_section",
+        "source_sha256": "sha256:" + "0" * 64,
+        "normalized_sha256": "sha256:" + "0" * 64,
+        "stored_sha256": "sha256:" + "0" * 64,
+        "truncated": False,
+    }
+    if version == 4:
+        data["discovery_outcome"] = {}
+    if version == 2:
+        data.pop("started_at", None)
+        data.pop("completed_event_at", None)
+        data["repo_evidence"].pop("path_transitions", None)
+    receipt_path.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return task_id, receipt_path, data
+
+
+@pytest.mark.parametrize("version", [3, 4])
+def test_completion_receipt_one_time_transition_preserves_old_proof(
+    tmp_path: Path, monkeypatch, capsys, version: int,
+) -> None:
+    from tools.repoctl.task_history_migration import digest_bytes
+    from tools.repoctl.tasks import _validate_completion_receipt
+
+    task_id, receipt_path, original = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=version)
+    old_bytes = receipt_path.read_bytes()
+    args = ["task", "migrate-receipts", task_id, "--json"]
+    assert main(args) == 0
+    preview = json.loads(capsys.readouterr().out)["data"]
+    assert preview["records"][0]["status"] == "ready"
+    assert preview["source_problem_count"] == 0
+    assert receipt_path.read_bytes() == old_bytes
+    assert main([*args, "--apply"]) == 0
+    applied = json.loads(capsys.readouterr().out)["data"]
+    assert applied["applied_count"] == 1
+    assert applied["history_rebuild_commands"] == ["./scripts/repoctl history rebuild --workspace --json"]
+    receipt = json.loads(receipt_path.read_bytes())
+    assert receipt["schema_version"] == 5
+    assert "verification" not in receipt and "discovery_outcome" not in receipt
+    for key in ("started_at", "completed_at", "completed_event_at", "repo_evidence", "content_sha256"):
+        assert receipt[key] == original[key]
+    _validate_completion_receipt(receipt_path, tmp_path, receipt)
+    archive = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    assert archive.read_bytes() == old_bytes
+    manifest = json.loads(proof.read_bytes())
+    assert manifest["original_sha256"] == digest_bytes(old_bytes)
+    assert manifest["current_sha256"] == digest_bytes(receipt_path.read_bytes())
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["records"][0]["status"] == "already_converted"
+
+
+def test_completion_receipt_transition_reports_existing_artifact_drift_without_rewriting_proof(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    task_id, receipt_path, original = _receipt_transition_fixture(tmp_path, monkeypatch, capsys)
+    task_artifact = next((tmp_path / "docs/archive/tasks").glob(f"{task_id}--*.md"))
+    task_artifact.write_text(task_artifact.read_text(encoding="utf-8") + "\nowner edit after finish\n", encoding="utf-8")
+    original_hash = original["content_sha256"]
+    assert main(["task", "migrate-receipts", task_id, "--json"]) == 1
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["data"]["records"][0]["status"] == "ready"
+    assert preview["data"]["source_problem_count"] == 1
+    assert preview["problems"][0]["code"] == "receipt_source_integrity_unresolved"
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 1
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["data"]["applied_count"] == 1
+    assert json.loads(receipt_path.read_bytes())["content_sha256"] == original_hash
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    assert json.loads(proof.read_bytes())["source_integrity_at_conversion"] == "unverified"
+
+
+def test_completion_receipt_transition_does_not_fabricate_missing_v2_events(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    task_id, receipt_path, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys, version=2)
+    before = receipt_path.read_bytes()
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 1
+    response = json.loads(capsys.readouterr().out)
+    assert response["data"]["records"][0]["status"] == "unresolved"
+    assert response["data"]["applied_count"] == 0
+    assert receipt_path.read_bytes() == before
+    assert not (tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json").exists()
+
+
+@pytest.mark.parametrize("fault", ["proof_write", "concurrent_edit"])
+def test_completion_receipt_transition_rolls_back_or_preserves_concurrent_owner_edit(
+    tmp_path: Path, monkeypatch, capsys, fault: str,
+) -> None:
+    import tools.repoctl.io as task_io
+
+    task_id, receipt_path, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys)
+    before = receipt_path.read_bytes()
+    archive = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    real_write = task_io.atomic_write
+    writes = 0
+
+    def modified_write(path, content):
+        nonlocal writes
+        writes += 1
+        if fault == "proof_write" and writes == 3:
+            raise OSError("simulated proof write failure")
+        real_write(path, content)
+        if fault == "concurrent_edit" and writes == 1:
+            receipt_path.write_bytes(before + b" ")
+
+    monkeypatch.setattr(task_io, "atomic_write", modified_write)
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) != 0
+    capsys.readouterr()
+    assert receipt_path.read_bytes() == (before if fault == "proof_write" else before + b" ")
+    assert not archive.exists()
+    assert not proof.exists()
+
+
+def test_completion_receipt_transition_rejects_partial_history_proof(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    task_id, receipt_path, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys)
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 0
+    capsys.readouterr()
+    proof = tmp_path / f"docs/archive/task-evidence/receipts/{task_id}.migration.json"
+    proof.unlink()
+    assert main(["task", "migrate-receipts", task_id, "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["records"][0]["status"] == "unresolved"
+
+
+def _downgrade_finished_state_to_v3(tmp_path: Path, task_id: str) -> Path:
+    state_path = tmp_path / f"docs/tasks/.repoctl-state/{task_id}.json"
+    state = json.loads(state_path.read_bytes())
+    assert state["schema_version"] == 4
+    state["schema_version"] = 3
+    state["initial"].pop("started_at")
+    for record in state["initial"]["repositories"]:
+        record.pop("dirty_path_states")
+        record.pop("identity_source")
+    state_path.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    return state_path
+
+
+def test_closed_v3_task_state_retirement_preserves_original_bytes(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from tools.repoctl.task_history_migration import digest_bytes
+    from tools.repoctl.tasks import _read_task_state
+    from tools.repoctl.io import RepoctlError
+
+    task_id, _, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys)
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 0
+    capsys.readouterr()
+    state_path = _downgrade_finished_state_to_v3(tmp_path, task_id)
+    old = state_path.read_bytes()
+    with pytest.raises(RepoctlError, match="schema is unsupported"):
+        _read_task_state(tmp_path, task_id)
+    args = ["task", "migrate-states", task_id, "--json"]
+    assert main(args) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["records"][0]["status"] == "ready"
+    assert state_path.read_bytes() == old
+    assert main([*args, "--apply"]) == 0
+    applied = json.loads(capsys.readouterr().out)["data"]
+    assert applied["applied_count"] == 1
+    assert not state_path.exists()
+    archive = tmp_path / f"docs/archive/task-evidence/start-baselines/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/start-baselines/{task_id}.migration.json"
+    assert archive.read_bytes() == old
+    assert json.loads(proof.read_bytes())["original_sha256"] == digest_bytes(old)
+    assert _read_task_state(tmp_path, task_id) is None
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["records"][0]["status"] == "already_retired"
+
+
+def test_live_v3_state_is_not_restarted_or_assigned_fabricated_baseline(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from tools.repoctl.tasks import _read_task_state
+    from tools.repoctl.io import RepoctlError
+
+    write_workspace(tmp_path)
+    task_id = "T-20260609184046Z"
+    add_board_task(tmp_path, f"{task_id}--alpha.md", task_text(task_id, status="todo").replace('area: ""', 'area: "ops"'))
+    init_product_repo(tmp_path / "repos")
+    commit_all(tmp_path / "repos")
+    monkeypatch.setattr("tools.repoctl.cli.find_workspace_root", lambda: tmp_path)
+    assert main(["task", "start", task_id, "--json"]) == 0
+    capsys.readouterr()
+    state_path = _downgrade_finished_state_to_v3(tmp_path, task_id)
+    old = state_path.read_bytes()
+    assert main(["task", "migrate-states", task_id, "--apply", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert "live v3 baseline" in payload["data"]["records"][0]["reason"]
+    assert payload["data"]["applied_count"] == 0
+    assert state_path.read_bytes() == old
+    with pytest.raises(RepoctlError, match="schema is unsupported"):
+        _read_task_state(tmp_path, task_id)
+
+
+@pytest.mark.parametrize("fault", ["proof_write", "concurrent_edit"])
+def test_closed_state_retirement_handles_fault_and_concurrent_edit(
+    tmp_path: Path, monkeypatch, capsys, fault: str,
+) -> None:
+    import tools.repoctl.io as task_io
+
+    task_id, _, _ = _receipt_transition_fixture(tmp_path, monkeypatch, capsys)
+    assert main(["task", "migrate-receipts", task_id, "--apply", "--json"]) == 0
+    capsys.readouterr()
+    state_path = _downgrade_finished_state_to_v3(tmp_path, task_id)
+    old = state_path.read_bytes()
+    archive = tmp_path / f"docs/archive/task-evidence/start-baselines/{task_id}.json"
+    proof = tmp_path / f"docs/archive/task-evidence/start-baselines/{task_id}.migration.json"
+    real_write = task_io.atomic_write
+    writes = 0
+
+    def modified_write(path, content):
+        nonlocal writes
+        writes += 1
+        if fault == "proof_write" and writes == 2:
+            raise OSError("failed during proof write")
+        real_write(path, content)
+        if fault == "concurrent_edit" and writes == 1:
+            state_path.write_bytes(old + b" ")
+
+    monkeypatch.setattr(task_io, "atomic_write", modified_write)
+    assert main(["task", "migrate-states", task_id, "--apply", "--json"]) != 0
+    capsys.readouterr()
+    assert state_path.read_bytes() == (old if fault == "proof_write" else old + b" ")
+    assert not archive.exists() and not proof.exists()
