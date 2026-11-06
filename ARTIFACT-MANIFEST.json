@@ -1,0 +1,97 @@
+{
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "93709c6b584e158bbfcbcee68b59d8ffc8700905516debebc80a47b88f7a6b60",
+      "size": 1225
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "0a5af618ecaee7a1eed1987c782fd9b8c8cb194b72c8ff839f612db91cf9e193",
+      "size": 1068
+    },
+    {
+      "path": "README.md",
+      "sha256": "f9057197e430c23832095c41719dcefc87704b1e03000c66e1d1f3b2bc353194",
+      "size": 647
+    },
+    {
+      "path": "docs/BOARD.md",
+      "sha256": "41d294dd16bac9c15b9febf29ed2a8112aa926b1f7b812447b1fea2d8d068453",
+      "size": 105
+    },
+    {
+      "path": "docs/PRD.md",
+      "sha256": "ae33099b8adc89e4f0c6df891264ff4ea5227753c6f65557da069dd2081ed6b5",
+      "size": 178
+    },
+    {
+      "path": "docs/REPOS.md",
+      "sha256": "5bf8457a1e65c5fbfec686f344cc6a76e654515caa2669bae778306fd75e9ebd",
+      "size": 169
+    },
+    {
+      "path": "docs/tasks/PARENT_TEMPLATE.md",
+      "sha256": "c2706313d412429181fc7e574025a1811051276bf39ce6a73604efdbc8d4a3cd",
+      "size": 1768
+    },
+    {
+      "path": "docs/tasks/TEMPLATE.md",
+      "sha256": "a213eb5526f4155aea7df6c75ecf4718cd2af1fa6cd8c7083557d557e6d4a085",
+      "size": 1284
+    },
+    {
+      "path": "docs/template-contract.json",
+      "sha256": "d6d8e3120769ec8479d326a8e25476fd0bdc8ae4a2239b8cf14bd6e1cd1cf32a",
+      "size": 402
+    },
+    {
+      "path": "fixtures/conformance/board.md",
+      "sha256": "e7fc015724323a67270f60b952ee63c1d065b4da6f60d3e2f3369fd78f43f3af",
+      "size": 78
+    },
+    {
+      "path": "fixtures/conformance/cases.json",
+      "sha256": "57fc2234c2dae04beac33cc5c1e89e7b675af74a1b313c9a77c2c328b1bda49e",
+      "size": 703
+    },
+    {
+      "path": "fixtures/conformance/context-doc.md",
+      "sha256": "a887bea48c9f4a5f9e5f3569a2cf18030fedf671a8d323ad7eb81adc89ff2e5a",
+      "size": 112
+    },
+    {
+      "path": "fixtures/conformance/duplicate-handoff-task.md",
+      "sha256": "6e7961f7510001f484188667b880bf76f3972ebe1e0a2cd34da8666518d06f7f",
+      "size": 1082
+    },
+    {
+      "path": "fixtures/conformance/malformed-first-file-task.md",
+      "sha256": "3c003ef7d7ff29fc8d82d467912f97bea954b3eddedffecac65dc3e13b8cf085",
+      "size": 1009
+    },
+    {
+      "path": "fixtures/conformance/missing-handoff-task.md",
+      "sha256": "a01b64e1e802c3a970983d99f3c23711a1f00834b45f0eac68f1d0fbc78c4f61",
+      "size": 730
+    },
+    {
+      "path": "fixtures/conformance/parent-task.md",
+      "sha256": "7c6f13541e0dceb97f96f380d1c01cd4f8784f4ebf545926169ff90de7d00570",
+      "size": 1001
+    },
+    {
+      "path": "fixtures/conformance/valid-task.md",
+      "sha256": "a8ce3c06c79b5005a88feef52878a3cd5623627c7dad89c8a5daf56d3fea9844",
+      "size": 1018
+    }
+  ],
+  "license_sha256": "0a5af618ecaee7a1eed1987c782fd9b8c8cb194b72c8ff839f612db91cf9e193",
+  "package": "agent-handoff-template",
+  "package_version": "1.0.0",
+  "schema": "repoctl.separation.release-artifact",
+  "schema_version": 1,
+  "source_version": "0.15.3",
+  "status": "final",
+  "template_contract_version": "1.0.0"
+}

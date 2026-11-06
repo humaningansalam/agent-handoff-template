@@ -1,0 +1,32 @@
+{
+  "schema": "agent-handoff-template.conformance-fixtures",
+  "schema_version": 1,
+  "contract_version": "1.0.0",
+  "cases": [
+    {
+      "id": "valid-natural-task",
+      "path": "valid-task.md",
+      "expected": "unbound_handoff"
+    },
+    {
+      "id": "missing-handoff",
+      "path": "missing-handoff-task.md",
+      "expected": "invalid_handoff"
+    },
+    {
+      "id": "duplicate-handoff",
+      "path": "duplicate-handoff-task.md",
+      "expected": "invalid_handoff"
+    },
+    {
+      "id": "invalid-first-file",
+      "path": "malformed-first-file-task.md",
+      "expected": "invalid_handoff"
+    }
+  ],
+  "documents": [
+    "parent-task.md",
+    "board.md",
+    "context-doc.md"
+  ]
+}

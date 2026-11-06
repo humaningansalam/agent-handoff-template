@@ -1,0 +1,78 @@
+---
+id: T-YYYYMMDDHHMMSSZ
+title: "Replace with parent task title"
+# canonical values: todo | doing | blocked | done | canceled
+status: todo
+owner: "unassigned"
+# root-only parent tasks must leave this empty
+repo_ref: ""
+# root-only parent tasks must leave this empty; child tasks own repository identity
+repo_id: ""
+created: YYYYMMDDTHHMMSSZ
+# optional root-only area: docs | ops; leave empty when neither applies
+area: ""
+# parent tasks should leave this empty
+parent: ""
+# optional: advisory prerequisite task IDs (not enforced)
+depends_on: []
+---
+
+# T-YYYYMMDDHHMMSSZ - Parent Title
+
+## Goal
+
+State the cross-cutting outcome in one clear sentence.
+
+## Handoff
+
+
+
+- Next exact step: Check child task statuses and update the coordination summary.
+- First file to open: `docs/tasks/T-YYYYMMDDHHMMSSZ--parent-title.md`
+- First command to run: `rg "^parent:" docs/tasks/`
+- Done when: The parent task reflects the latest child state (including non-live tasks) and the next agent can continue without guessing.
+
+## Context Docs
+
+<!-- List only the minimum context docs needed for this task.
+This section may be empty.
+
+Example:
+- `docs/PRD.md`
+- `docs/workflows/repo-metadata.md`
+-->
+
+## Work Area
+
+- Task record: `docs/tasks/T-YYYYMMDDHHMMSSZ--slug.md`
+- Primary surface: Coordinate independently verifiable repo-scoped child tasks; product edits stay in those child tasks.
+- Area hint: none provided
+
+## In Scope
+
+- List concrete deliverables
+- Keep items testable
+
+## Live Child Tasks
+
+- `docs/tasks/T-YYYYMMDDHHMMSSZ--child-task.md`
+
+## Non-Live Child Tasks
+
+- `docs/tasks/T-YYYYMMDDHHMMSSZ--non-live-child-task.md`
+
+## Shared Interfaces / Decisions
+
+- Decision 1
+
+## Integration Done When
+
+- Condition 1
+
+## Execution Log
+
+
+
+## Verification
+
+- Optional notes: none.

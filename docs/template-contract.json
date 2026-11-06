@@ -1,0 +1,23 @@
+{
+  "schema": "agent-handoff-template.document-contract",
+  "version": "1.0.0",
+  "task_sections": [
+    "Goal",
+    "Handoff",
+    "Context Docs",
+    "Work Area",
+    "Discovery",
+    "Execution Log",
+    "Verification"
+  ],
+  "handoff_fields": [
+    "Next exact step",
+    "First file to open",
+    "First command to run",
+    "Done when"
+  ],
+  "board_sections": [
+    "Board",
+    "Backlog"
+  ]
+}

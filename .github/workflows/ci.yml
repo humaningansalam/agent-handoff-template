@@ -1,0 +1,29 @@
+name: agent-handoff-template CI
+on:
+  push:
+    branches: [main]
+    tags: [v1.0.0]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate document contract and ownership
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          assert json.loads(Path("docs/template-contract.json").read_text())["version"] == "1.0.0"
+          assert json.loads(Path("fixtures/conformance/cases.json").read_text())["contract_version"] == "1.0.0"
+          for path in ("AGENTS.md", "docs/BOARD.md", "docs/PRD.md", "docs/REPOS.md",
+                       "docs/tasks/TEMPLATE.md", "docs/tasks/PARENT_TEMPLATE.md", "LICENSE"):
+              assert Path(path).is_file(), path
+          for path in ("scripts/repoctl", "tools/repoctl", "pyproject.toml", "uv.lock"):
+              assert not Path(path).exists(), path
+          PY
+      - name: Rebuild byte-identical release asset
+        run: python3 .github/scripts/build_release_archive.py
