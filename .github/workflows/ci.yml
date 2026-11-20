@@ -1,14 +1,9 @@
-name: repoctl CI
+name: Template CI
 
 on:
-  push:
-    branches:
-      - main
-      - dev
   pull_request:
-    branches:
-      - main
-      - dev
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -17,18 +12,14 @@ jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run tests
-        run: uv run --extra structural pytest -q
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Verify document-only starter files
+        run: |
+          test -f AGENTS.md
+          test -f README.md
+          test -f docs/PRD.md
+          test -f docs/REPOS.md
+          test -f docs/BOARD.md
+          test -f docs/tasks/TEMPLATE.md
+          test ! -e tools/repoctl
+          test ! -e scripts/repoctl
