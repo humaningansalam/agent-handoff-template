@@ -1,5 +1,0 @@
-blank_issues_enabled: true
-contact_links:
-  - name: repoctl 실행·탐색·종료 검사 문제
-    url: https://github.com/humaningansalam/repoctl/issues/new/choose
-    about: CLI, Graph·Knowledge 결과, Task 종료 검사는 별도 repoctl 저장소에서 다룹니다.
