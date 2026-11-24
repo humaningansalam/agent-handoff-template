@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: repoctl commands
+    url: https://github.com/humaningansalam/repoctl/issues
+    about: Task operations, source navigation and command behavior belong to repoctl.

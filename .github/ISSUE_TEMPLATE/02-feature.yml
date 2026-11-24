@@ -1,0 +1,16 @@
+name: Improvement
+description: Describe a project authoring problem and the result you need.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and desired result
+      description: Give a concrete example of the guidance or document that should improve.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Relevant constraints, alternatives, or examples.
