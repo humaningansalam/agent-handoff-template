@@ -1,7 +1,9 @@
 # Working in this project
 
-Read the project requirements and relevant source before making changes. Follow the project's contribution, build and delivery instructions.
+Read the requirements and source relevant to the current change. Follow the project's contribution, build and delivery instructions.
 
-A Task is the editable record of a piece of work. Keep its intended outcome, current findings and next action in the document. Record the result when the work is complete, and link detailed requirements or source material where useful.
+Keep each behavior with the code that owns it. Name functions for the operation they perform and variables for the data they hold. Share an implementation when callers need the same behavior.
 
-The optional `parent` field links related Tasks. Each Task has its own status. `docs/BOARD.md` provides an optional overview.
+Verify the behavior affected by a change and record the commands and results needed to assess it.
+
+Use a Task when work needs to continue across sessions or be handed off. Keep its goal, current findings, next action and final result in one editable document. Link detailed evidence instead of copying command transcripts. Each Task has its own status; optional parent and dependency links describe relationships. `docs/BOARD.md` provides an optional overview.

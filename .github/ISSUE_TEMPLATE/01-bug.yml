@@ -1,0 +1,21 @@
+name: Document problem
+description: A starting document or example is unclear or incorrect.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Problem and expected result
+      description: Identify the document or example, what it says, and what needs to change.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Example
+      description: Show the relevant passage or how the guidance affected a project.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Related issues or project details that help explain the problem.
